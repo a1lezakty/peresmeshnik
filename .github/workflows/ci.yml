@@ -31,5 +31,42 @@ jobs:
       - name: Lint
         if: runner.os == 'Linux'
         run: uv run ruff check .
+      - name: PipeWire (sound server for the device tests)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq pipewire pipewire-pulse wireplumber pulseaudio-utils
+          echo "XDG_RUNTIME_DIR=$RUNNER_TEMP/pw" >> "$GITHUB_ENV"
+          export XDG_RUNTIME_DIR=$RUNNER_TEMP/pw
+          mkdir -m 700 -p "$XDG_RUNTIME_DIR"
+          (dbus-run-session -- sh -c 'pipewire & sleep 0.5; wireplumber & sleep 0.5; pipewire-pulse & wait' &)
+          sleep 3
+          pactl info
       # includes the idle-CPU watchdog: 60 s idle, fails above 0.13 s of CPU
       - run: uv run pytest -q -s
+
+  # working-mode CPU gate: the local pipeline on a 30 s recording (RTF, CPU s per audio s)
+  work-gate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+          enable-cache: true
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/models
+          key: models-${{ runner.os }}-1
+      - run: uv sync --locked --group dev
+      - name: Working-mode CPU gate
+        env:
+          PERESMESHNIK_WORK_GATE: '1'
+          HF_HOME: ${{ runner.temp }}/models/hf
+          PERESMESHNIK_MODELS: ${{ runner.temp }}/models
+        run: uv run pytest -q -s tests/test_pipeline_cpu.py

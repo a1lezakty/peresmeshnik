@@ -32,7 +32,7 @@ Checked 2026-11-07 from the model cards and license files linked below.
 
 | Model | Role | Code | Weights / data | Notes |
 |---|---|---|---|---|
-| [Piper](https://github.com/OHF-Voice/piper1-gpl) (`piper-tts` 1.x) | fast TTS without cloning | **GPL-3.0** (and espeak-ng, GPL-3.0) | per voice (dataset license): chosen en `john` public domain, ru `dmitri` CC0, en `joe` CC0; ru `denis` CC0 (worse intelligibility); `irina` unknown; en `lessac` Blizzard research license; `ryan`, ru `ruslan` CC-BY-NC-SA | GPL code cannot be linked into a PolyForm app: Piper runs as a **separate process** (a small GPL-3.0 runner package, stdin/stdout), never imported; the bench uses the upstream CLI the same way |
+| [Piper](https://github.com/OHF-Voice/piper1-gpl) (`piper-tts` 1.x) | fast TTS without cloning | **GPL-3.0** (and espeak-ng, GPL-3.0) | per voice (dataset license): chosen en `john` public domain, ru `dmitri` CC0, en `joe` CC0; ru `denis` CC0 (worse intelligibility); `irina` unknown; en `lessac` Blizzard research license; `ryan`, ru `ruslan` CC-BY-NC-SA | GPL code cannot be linked into a PolyForm app: Piper runs as a **separate process**, never imported. [`piper-runner/`](../piper-runner) is that process: a separate program under GPL-3.0 (its own LICENSE) that the app starts with `uv run --no-project --with piper-tts==1.8.0` and talks to over stdin/stdout; the bench uses the upstream CLI the same way |
 | [Silero TTS](https://github.com/snakers4/silero-models) v5 ru, v3 en | TTS without cloning | — | **CC-BY-NC-SA-4.0** | noncommercial, share-alike; torch |
 | [XTTS-v2](https://huggingface.co/coqui/XTTS-v2) via [coqui-tts](https://github.com/idiap/coqui-ai-TTS) | voice cloning, 17 languages incl. ru | MPL-2.0 | **Coqui Public Model License 1.0** (noncommercial) | |
 | [Chatterbox Multilingual](https://github.com/resemble-ai/chatterbox) (Resemble AI) | voice cloning, 23 languages | MIT | MIT | adds an inaudible watermark |
@@ -58,5 +58,6 @@ Checked 2026-11-07 from the model cards and license files linked below.
 | Data | Use | License |
 |---|---|---|
 | [FLEURS](https://huggingface.co/datasets/google/fleurs) en_us, ru_ru dev | ASR WER, MT references (parallel sentences) | CC-BY-4.0 |
+| FLEURS, 3 + 3 sentences in [`tests/data/`](../tests/data) | 30 s test recordings for the pipeline and the working-mode CPU gate | CC-BY-4.0, attribution in its README |
 | [LibriSpeech](https://www.openslr.org/12) test-clean | English voice reference for cloning | CC-BY-4.0 |
 | [Russian LibriSpeech](https://huggingface.co/datasets/bond005/rulibrispeech) test (LibriVox) | Russian voice reference for cloning | public domain recordings |

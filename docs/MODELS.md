@@ -23,7 +23,7 @@ Checked 2026-11-07 from the model cards and license files linked below.
 
 | Model | Role | Code | Weights | Notes |
 |---|---|---|---|---|
-| [OPUS-MT](https://huggingface.co/Helsinki-NLP/opus-mt-en-ru) en-ru, ru-en (Helsinki-NLP) | MT | MIT (Marian), [CTranslate2](https://github.com/OpenNMT/CTranslate2) MIT | CC-BY-4.0 | one model per direction |
+| [OPUS-MT](https://github.com/Helsinki-NLP/OPUS-MT-train) en-ru, ru-en (Helsinki-NLP, `opus-2020-02-11`) | MT | MIT (Marian), [CTranslate2](https://github.com/OpenNMT/CTranslate2) MIT | CC-BY-4.0 | one model per direction; our CTranslate2 int8 conversion with the original LICENSE/README: release [`models-1`](https://github.com/a1lezakty/peresmeshnik/releases/tag/models-1) |
 | [NLLB-200 distilled 600M](https://huggingface.co/facebook/nllb-200-distilled-600M) (Meta) | MT, 200 languages | MIT | **CC-BY-NC-4.0** | noncommercial |
 | [HY-MT1.5 1.8B / 7B](https://huggingface.co/tencent/HY-MT1.5-1.8B-GGUF) (Tencent) | LLM MT, 33 languages | — | **Tencent HY Community License** | not licensed in the EU, UK and South Korea; acceptable-use policy; must be shown to the user and be opt-in |
 | [llama.cpp](https://github.com/ggml-org/llama.cpp) | GGUF runtime | MIT | — | |

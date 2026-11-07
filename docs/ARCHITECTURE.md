@@ -214,16 +214,22 @@ translation and translate it back).
 
 ## 8. Model download and cache
 
-- Registry: a TOML file in the package lists every model: id, Hugging Face repo, pinned
-  revision, files, SHA-256, size, license, languages, tier.
+- Registry: [`peresmeshnik/models.toml`](../peresmeshnik/models.toml) lists every model: id, role,
+  languages, license, a URL prefix pinned to a revision (Hugging Face `resolve/<sha>/` or a release
+  of this project), files with SHA-256 and size. The tier is picked by the setup wizard (stage 2).
 - Cache: `platformdirs.user_cache_dir("Peresmeshnik")/models` (`~/Library/Caches/Peresmeshnik`,
   `%LOCALAPPDATA%\Peresmeshnik\Cache`, `~/.cache/Peresmeshnik`); overridable in settings.
-- Download with `huggingface_hub` (resume, revision pin), then SHA-256 check; nothing is fetched
-  at run time after setup — the app works offline in local mode.
+- Download over plain HTTPS with `urllib` (HTTP Range resume, no credentials sent), then SHA-256
+  check and a "verified" marker with a fingerprint of the pins; engines only call
+  `models.path(id)`, nothing is fetched at run time after setup — the app works offline in local
+  mode. CLI: `peresmeshnik models list | fetch <id>...`.
 - First download shows each license; noncommercial and territory-limited ones (CPML, CC-BY-NC,
-  Tencent HY) need an explicit tick.
-- Conversions we need (OPUS-MT → CTranslate2 int8) are made once by us and published to a
-  Hugging Face repo of the project with the original license, so users never need torch for it.
+  Tencent HY; `consent = true` in the registry) need an explicit "yes" (`--accept-licenses` without
+  a terminal).
+- Conversions we need (OPUS-MT → CTranslate2 int8, made from the original Marian models without
+  torch) are published once as assets of the project's GitHub release
+  [`models-1`](https://github.com/a1lezakty/peresmeshnik/releases/tag/models-1) with the original
+  license, README and attribution.
 - Voice profiles: `platformdirs.user_data_dir`, never uploaded.
 
 ## 9. Hardware tiers

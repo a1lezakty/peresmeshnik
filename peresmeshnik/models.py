@@ -185,8 +185,8 @@ def cli(argv: list[str]) -> int:
     if not todo:
         print('all present')
         return 0
-    print(f'Downloading into {base}:')
-    if not license_screen(todo, a.accept_licenses):
+    print(f'Downloading into {base}:', flush=True)  # before the progress lines on stderr
+    if not license_screen(todo, a.accept_licenses, out=lambda t: print(t, flush=True)):
         print('not accepted, nothing downloaded', file=sys.stderr)
         return 1
     for m in todo:

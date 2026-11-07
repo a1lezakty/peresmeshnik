@@ -14,6 +14,8 @@ COLS = {
     'tts': ['host', 'model', 'lang', 'voice', 'ttfa_ms_median', 'rtf', 'cpu_cores', 'peak_rss_mb', 'cer', 'load_s'],
     'cloud': ['model', 'direction', 'mode', 'n', 'setup_s', 'first_out_from_start_s', 'done_after_end_s', 'wer', 'cer',
               'chrf_out_transcript', 'chrf_back_whisper', 'voice_f0_in_out_corr'],
+    'tts_clone': ['host', 'model', 'case', 'ref_lang', 'out_lang', 'device', 'stream', 'ttfa_s', 'ttfa_max_s', 'rtf', 'peak_rss_mb',
+                  'gpu_peak_mb', 'spk_sim', 'spk_sim_min', 'cer', 'load_s'],
     'idle_loaded': ['host', 'model', 'threads', 'no_spin', 'omp_wait_policy', 'busy_cpu_s', 'busy_wall_s', 'idle_s', 'idle_cpu_s'],
 }
 SKIP = {'family', 'time', 'samples', 'sample', 'n'}

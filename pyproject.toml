@@ -7,7 +7,7 @@ license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
 license-files = ["LICENSE"]
 authors = [{ name = "Akty" }]
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["numpy>=2"]
 
 [project.scripts]
 peresmeshnik = "peresmeshnik.__main__:main"
@@ -23,11 +23,12 @@ build-backend = "uv_build"
 module-root = ""
 
 [tool.ruff]
-line-length = 130
+line-length = 140
 target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["B007", "B905"]
 
 [tool.ruff.lint.isort]
 known-local-folder = ["common"]  # bench/ scripts import their helper module directly

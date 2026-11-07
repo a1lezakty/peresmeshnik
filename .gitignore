@@ -1,0 +1,39 @@
+# Python / uv
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.uv-cache/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# Models, caches, data
+models/
+*.onnx
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.gguf
+*.ckpt
+bench-data/
+recordings/
+*.wav
+*.flac
+*.mp3
+*.ogg
+
+# Secrets
+*.key
+*-key
+.env
+.env.*
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

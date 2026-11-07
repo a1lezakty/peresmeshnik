@@ -194,7 +194,7 @@ instead of the raw coqui API: `XTTS_DIR` = the XTTS-v2 folder (config.json, mode
 per setting). Rows carry `cpu_per_audio_s` (process CPU per second of speech). Results: docs/BENCH.md, "Stage 1".
 
 ```sh
-XTTS_DIR=... BENCH_HOST=vast-b-3060l venvs/xtts/bin/python bench/tts_clone.py synth --model xtts-engine --device cuda --n 15 --label xtts-engine
+XTTS_DIR=... BENCH_HOST=rtx3060-laptop venvs/xtts/bin/python bench/tts_clone.py synth --model xtts-engine --device cuda --n 15 --label xtts-engine
 venvs/tts-eval/bin/python bench/tts_clone.py eval --model xtts-engine --label xtts-engine
 ```
 

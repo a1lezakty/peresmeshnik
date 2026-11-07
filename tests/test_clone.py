@@ -1,12 +1,17 @@
 """Enrollment checks and the clone engine's text/length guards (no torch, no model needed)."""
+import json
 import os
+import pickle
+import sys
+import types
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from peresmeshnik import voice
-from peresmeshnik.local.clone import SR, budget_samples, cap_pauses, guard, split_text
+from peresmeshnik.local.clone import SR, XttsClone, budget_samples, cap_pauses, guard, split_text
 
 REF_RU = Path(os.environ.get('BENCH_DATA', 'bench-data')) / 'set' / 'ref_ru.wav'  # LibriVox reader (bench/data.py), if present
 
@@ -43,10 +48,11 @@ def test_too_long_is_trimmed_with_warning(tmp_path):
     x = speech_like(75)
     r = voice.check(x, 16_000)
     assert r.ok and r.warnings
-    v = voice.save(x, 16_000, 'me', 'ru', 'text', tmp_path, r)
+    v = voice.save(x, 16_000, 'me', 'ru', 'text', tmp_path)
     import soundfile as sf
     y, sr = sf.read(v.path / 'reference.wav')
     assert len(y) / sr == pytest.approx(60, abs=0.01)
+    assert json.loads((v.path / 'voice.json').read_text())['quality']['seconds'] == pytest.approx(60)  # of what is kept
 
 
 def test_save_normalises_and_loads(tmp_path):
@@ -78,6 +84,40 @@ def test_cli_import_and_list(tmp_path, capsys):
     assert voice.main(['list', '--voices', str(tmp_path / 'v')]) == 0
     out = capsys.readouterr().out
     assert 'saved voice profile' in out and 'Not saved' in out and out.strip().splitlines()[-1].startswith('me\tru')
+
+
+def test_record_needs_a_prompt_in_that_language(monkeypatch, capsys):
+    import peresmeshnik.audio.mic as mic
+    monkeypatch.setattr(mic, 'record', lambda *a, **k: pytest.fail('must not record'))
+    with pytest.raises(SystemExit):
+        voice.main(['enroll', '--record', '30', '--lang', 'de'])
+    assert '--transcript' in capsys.readouterr().err
+
+
+@dataclass(frozen=True)
+class FakeLatent:
+    n: int
+
+    def to(self, device):
+        return self
+
+
+def test_reenroll_replaces_the_voice(tmp_path, monkeypatch):
+    """A second recording of the same profile in the same process must not keep the old conditioning."""
+    fake_torch = types.SimpleNamespace(save=lambda obj, f: Path(f).write_bytes(pickle.dumps(obj)),
+                                       load=lambda f, map_location=None: pickle.loads(Path(f).read_bytes()))
+    monkeypatch.setitem(sys.modules, 'torch', fake_torch)
+    eng = XttsClone.__new__(XttsClone)  # no model: conditioning stubbed
+    eng.device, eng._latents, calls = 'cpu', {}, []
+
+    def condition(pcm, sr):
+        calls.append(sr)
+        return {'gpt': FakeLatent(len(calls)), 'spk': FakeLatent(len(calls))}
+    eng._condition = condition
+    first = eng.latents(eng.enroll(speech_like(35), 16_000, root=tmp_path))
+    v = eng.enroll(speech_like(35, seed=1), 16_000, root=tmp_path)
+    assert len(calls) == 2 and eng.latents(v) != first == (FakeLatent(1), FakeLatent(1))
+    assert pickle.loads((v.path / 'xtts.pt').read_bytes())['gpt'] == FakeLatent(2)
 
 
 def test_split_text():

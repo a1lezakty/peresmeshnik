@@ -4,9 +4,9 @@
     remap source  peresmeshnik_mic  ("Peresmeshnik Mic") on the sink's monitor -> the call app's mic
 
 Call apps hide monitor sources, hence the remap source. The device lives while the app runs
-(`remove()` on exit; a stale one left by a crash is replaced on the next start). Playback runs
-only between the first play() and stop(): one `pacat` process fed by a writer thread, so
-play() never blocks and an idle direction has no open stream.
+(`remove()` on exit; a stale one left by a crash is replaced on the next start). There is no
+playback stream until the first play(); from then until stop()/drain() one `pacat` process,
+fed by a writer thread, so play() never blocks.
 """
 from __future__ import annotations
 
@@ -56,11 +56,11 @@ class VirtualMic:
         self._proc: subprocess.Popen | None = None
         self._sr = 0
         self._end = 0.0  # monotonic time when the audio written so far finishes playing
+        self._lock = threading.Lock()  # play / flush / drain from different threads (barge-in, mode switch)
         self._writer = threading.Thread(target=self._write, name='virtual-mic', daemon=True)
         self._writer.start()
 
     def _open(self, sample_rate: int) -> None:
-        self._close_proc()
         self._proc = subprocess.Popen(
             ['pacat', '--playback', f'--device={SINK}', '--format=float32le', f'--rate={sample_rate}', '--channels=1',
              '--raw', f'--latency-msec={self.latency_ms}', '--client-name=Peresmeshnik', f'--stream-name={NAME}'],
@@ -71,9 +71,10 @@ class VirtualMic:
         while (item := self._q.get()) is not None:
             proc, data, seconds = item
             try:
-                if data is None:  # drain(). pacat spins a core if EOF comes while it still holds audio,
-                    time.sleep(max(0.0, self._end - time.monotonic()))  # so close only when it is played
+                if data is None:  # end of this stream. pacat spins a core if EOF comes while it still
+                    time.sleep(max(0.0, self._end - time.monotonic()))  # holds audio: close once played
                     proc.stdin.close()
+                    proc.wait()
                 else:
                     self._end = max(self._end, time.monotonic()) + seconds
                     proc.stdin.write(data)
@@ -82,31 +83,37 @@ class VirtualMic:
                 pass
 
     def play(self, pcm: np.ndarray, sample_rate: int) -> None:
-        if self._proc is None or sample_rate != self._sr:
-            self._open(sample_rate)
-        self._q.put((self._proc, np.ascontiguousarray(pcm, dtype='<f4').tobytes(), len(pcm) / sample_rate))
+        data = np.ascontiguousarray(pcm, dtype='<f4').tobytes()
+        with self._lock:
+            if self._proc is not None and sample_rate != self._sr:  # new rate: the old stream plays out first
+                self._q.put((self._proc, None, 0.0))
+                self._proc = None
+            if self._proc is None:
+                self._open(sample_rate)
+            self._q.put((self._proc, data, len(pcm) / sample_rate))
 
     def flush(self) -> None:
         """Drop queued audio, including what pacat already buffered."""
-        try:
-            while True:
-                self._q.get_nowait()
-        except queue.Empty:
-            pass
-        self._close_proc()
-        self._end = 0.0
-
-    def _close_proc(self) -> None:
-        if self._proc is not None:
-            self._proc.kill()
-            self._proc.wait()
-            self._proc = None
+        with self._lock:
+            procs = [self._proc] if self._proc else []
+            try:
+                while True:
+                    if item := self._q.get_nowait():
+                        procs.append(item[0])
+            except queue.Empty:
+                pass
+            for p in {id(p): p for p in procs}.values():  # the current stream and any still queued
+                p.kill()
+                p.wait()
+            self._proc, self._end = None, 0.0
 
     def drain(self) -> None:
         """Block until everything queued so far has been played (end of a file run)."""
-        proc, self._proc = self._proc, None
+        with self._lock:
+            proc, self._proc = self._proc, None
+            if proc is not None:
+                self._q.put((proc, None, 0.0))
         if proc is not None:
-            self._q.put((proc, None, 0.0))
             proc.wait()
 
     def stop(self) -> None:

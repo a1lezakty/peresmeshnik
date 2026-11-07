@@ -110,12 +110,12 @@ def voices_dir() -> Path:
 
 
 def save(pcm: np.ndarray, sr: int, name: str, lang: str, transcript: str | None = None,
-         root: Path | None = None, report: Report | None = None) -> Voice:
+         root: Path | None = None) -> Voice:
     """Write `<root>/<name>/reference.wav` + `voice.json`; returns the profile (engine 'reference')."""
     import soundfile as sf
     x = np.asarray(pcm, dtype=np.float32)
     x = (x.mean(axis=1) if x.ndim > 1 else x)[:int(MAX_S * sr)]
-    report = report or check(x, sr)
+    report = check(x, sr)  # of what is kept: at most MAX_S
     peak = float(np.max(np.abs(x))) or 1.0
     gain = min(10 ** ((TARGET_DB - report.level_db) / 20), 10 ** (-1 / 20) / peak)
     path = (root or voices_dir()) / name
@@ -192,7 +192,9 @@ def main(argv=None) -> int:
         pcm, sr = read_audio(a.file)
     else:
         from peresmeshnik.audio.mic import record
-        transcript = transcript or PROMPTS.get(a.lang, PROMPTS['en'])
+        if not transcript and a.lang not in PROMPTS:
+            ap.error(f'no prompt text in {a.lang!r} ({", ".join(PROMPTS)}): pass --transcript with what you will read')
+        transcript = transcript or PROMPTS[a.lang]
         print(f'Read this aloud at your normal pace, in a quiet room ({a.record:.0f} s):\n\n{transcript}\n')
         for i in (3, 2, 1):
             print(f'{i}...', end=' ', flush=True)
@@ -206,7 +208,7 @@ def main(argv=None) -> int:
     if not r.ok and not a.force:
         print('Not saved. Fix the problems above and try again (or --force).')
         return 1
-    v = save(pcm, sr, a.name, a.lang, transcript, a.voices, r)
+    v = save(pcm, sr, a.name, a.lang, transcript, a.voices)
     print(f'saved voice profile {v.name!r}: {v.path}')
     if a.engine == 'xtts':
         from peresmeshnik.local.clone import XttsClone

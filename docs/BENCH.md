@@ -246,11 +246,12 @@ Details: [`bench/notes/tts_clone.md`](../bench/notes/tts_clone.md).
 
 ### Stage 1: the clone engine and the "me → them" path
 
-Measured 2026-11-07 for stage 1. Hosts: `vast-b-3060l` = NVIDIA RTX 3060 Laptop 12 GB on a shared
-Vast server (CUDA memory cap 0.6, 2 CPU threads); `vast-b-cpu8` / `vast-b-cpu2` = its AMD Ryzen 9
-7950X3D with 8 / 2 threads, CUDA hidden; `linux-x86_64-4c` = the 4-core dev server (PipeWire,
-pipeline, virtual mic), which was also running other heavy work, so its pipeline times are
-pessimistic. Same references, sentences and judge as the table above.
+Measured 2026-11-07 for stage 1. Hosts: `rtx3060-laptop` = a GPU host with an NVIDIA RTX 3060
+Laptop 12 GB (shared with other work: CUDA memory cap 0.6, 2 CPU threads); `ryzen-7950x3d-8t` /
+`ryzen-7950x3d-2t` = the same host's AMD Ryzen 9 7950X3D with 8 / 2 threads, CUDA hidden;
+`linux-x86_64-4c` = the 4-core dev server (PipeWire, pipeline, virtual mic), which was also
+running other heavy work, so its pipeline times are pessimistic. Same references, sentences and
+judge as the table above.
 
 **The engine as the app runs it** (`peresmeshnik.local.clone.XttsClone`: profile from
 `peresmeshnik.voice`, streaming, text split, pause cap, length guard; `bench/tts_clone.py --model
@@ -259,14 +260,14 @@ four ref → out cases; `cpu s / audio s` = process CPU per second of speech mad
 
 | host | sentences / lang | TTFA s (max) | RTF | CPU s / audio s | peak RSS MB | GPU MB | load s | conditioning s | spk-sim | CER |
 |---|---|---|---|---|---|---|---|---|---|---|
-| vast-b-3060l (final: with the pause cap) | 15 | 0.18 (0.20) | 0.23–0.25 | 0.23–0.25 | 4539 | 2133 | 7.9 | 0.05–0.17 | 0.541 | 0.029 |
-| vast-b-cpu8 | 6 | 1.10 (1.14) | 1.35–1.51 | 10.8–11.9 | 4366 | — | 7.6 | 0.2–0.35 | 0.517 | 0.088 |
-| vast-b-cpu2 | 2 | 1.44 (1.48) | 1.87–1.97 | 3.7–3.9 | 4502 | — | 7.6 | 0.53–0.56 | 0.503 | 0.051 |
+| rtx3060-laptop (final: with the pause cap) | 15 | 0.18 (0.20) | 0.23–0.25 | 0.23–0.25 | 4539 | 2133 | 7.9 | 0.05–0.17 | 0.541 | 0.029 |
+| ryzen-7950x3d-8t | 6 | 1.10 (1.14) | 1.35–1.51 | 10.8–11.9 | 4366 | — | 7.6 | 0.2–0.35 | 0.517 | 0.088 |
+| ryzen-7950x3d-2t | 2 | 1.44 (1.48) | 1.87–1.97 | 3.7–3.9 | 4502 | — | 7.6 | 0.53–0.56 | 0.503 | 0.051 |
 
 - On the GPU one CPU core stays busy while it speaks (CPU s / audio s ≈ RTF): the autoregressive
   GPT step is bound by kernel launches. Load 8–10 s, GPU memory 2.0–2.2 GB.
 - On CPU it is **slower than real time** even on 8 threads of a desktop Ryzen (RTF 1.35–1.5); with
-  the app's default 2 threads RTF 1.9. Per-case values are in `bench/results/vast-b-*.jsonl`.
+  the app's default 2 threads RTF 1.9. Per-case values are in `bench/results/{rtx3060-laptop,ryzen-7950x3d-*}.jsonl`.
 - Same-language similarity 0.69–0.71 (ru), 0.64–0.65 (en); cross-lingual 0.37–0.44: as on the A4000.
 
 **Sampling vs the babble tail** (GPU, 15 sentences per output language, before the pause cap):
@@ -317,10 +318,10 @@ then 10–37 ms); CPU of the output path 0.01–0.017 s per second of audio (our
 tail), so the writer closes it only after the written audio has played.
 
 **End to end** (`bench/me_them.py run --remote`): 33 s of the "me" reader in Russian (other lines
-than the enrollment) → S1's `LocalDirection` (Silero VAD, Parakeet v3, OPUS-MT ru-en, here on the
-dev server) with the clone TTS on server B behind a pipe (`me_them.py serve`) → `Peresmeshnik Mic`
-→ recorded back from the source → Whisper-small. Per clause: `caption` = clause end → translated
-caption (ASR + MT, S1), `after caption` = caption → translated audio at the virtual mic (clone
+than the enrollment) → the local pipeline's `LocalDirection` (Silero VAD, Parakeet v3, OPUS-MT
+ru-en, on the dev server) with the clone TTS on the GPU host behind a pipe (`me_them.py serve`)
+→ `Peresmeshnik Mic` → recorded back from the source → Whisper-small. Per clause: `caption` = clause end → translated
+caption (ASR + MT), `after caption` = caption → translated audio at the virtual mic (clone
 first audio incl. ~45 ms network + queue behind the previous clause + virtual mic).
 
 | clone on | clauses | caption lag s | after caption s, median (range) | clone first audio s (server) | clone RTF | WER of the recording vs MT text | spk-sim, recording vs "me" (vs another speaker) |
@@ -333,8 +334,9 @@ first audio incl. ~45 ms network + queue behind the previous clause + virtual mi
   XTTS; another speaker −0.05..−0.07; the real Russian input 0.88).
 - With the GPU clone, translated audio is at the call app's mic **0.26–0.33 s after the caption**
   when it does not queue; it queues (up to 2.9 s) when clauses come in bursts and the previous
-  translation is still playing. The caption lag itself (2.2–5.1 s) is S1's ASR on the busy dev
-  server: Parakeet partials ran at RTF 1.0 there under `nice 19`, see S1's rows for a free machine.
+  translation is still playing. The caption lag itself (2.2–5.1 s) is the pipeline's ASR on the busy
+  dev server: Parakeet partials ran at RTF 1.0 there under `nice 19`; see the pipeline rows for a
+  machine without other load.
 - With the CPU clone (RTF 1.35) the TTS holds the speak worker, so the lag grows through the run
   (caption 2.4 s → 16 s, the voice ~1.2 s behind it): not live, as expected; the queue policy
   (speed-up, then drop past 3 clauses) has to handle it, and captions should not wait for the TTS.

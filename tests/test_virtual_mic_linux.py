@@ -57,6 +57,32 @@ def test_round_trip():
     assert cpu / 3 < CPU_PER_AUDIO_S
 
 
+def test_rate_switch_plays_both_in_order():
+    """A new sample rate (TTS 24 kHz -> live mic 16 kHz) must not cut the queued audio or leave a pacat behind."""
+    from peresmeshnik.audio import virtual_mic_linux as vm
+    mic = vm.VirtualMic()
+    try:
+        rec = subprocess.Popen(['parec', f'--device={vm.SOURCE}', '--format=float32le', f'--rate={SR_OUT}',
+                                '--channels=1', '--raw', '--latency-msec=20'], stdout=subprocess.PIPE)
+        time.sleep(0.3)
+        tone = lambda sr, hz: (0.3 * np.sin(2 * np.pi * hz * np.arange(sr) / sr)).astype(np.float32)  # noqa: E731
+        mic.play(tone(24_000, 440), 24_000)
+        first = mic._proc
+        mic.play(tone(16_000, 880), 16_000)
+        mic.drain()
+        assert first.poll() is not None, 'old pacat still running'
+        time.sleep(0.3)
+        rec.terminate()
+        x = np.frombuffer(rec.communicate()[0], dtype=np.float32)
+    finally:
+        mic.remove()
+    on = np.nonzero(np.abs(x) > 0.1)[0]
+    assert (on[-1] - on[0]) / SR_OUT == pytest.approx(2.0, abs=0.1)  # 1 s + 1 s, nothing dropped
+    peak = lambda seg: np.argmax(np.abs(np.fft.rfft(seg))) * SR_OUT / len(seg)  # noqa: E731
+    assert peak(x[on[0] + 1600:on[0] + 14400]) == pytest.approx(440, abs=5)
+    assert peak(x[on[-1] - 14400:on[-1] - 1600]) == pytest.approx(880, abs=5)
+
+
 def test_flush_drops_queued_audio():
     from peresmeshnik.audio import virtual_mic_linux as vm
     mic = vm.VirtualMic()

@@ -135,6 +135,7 @@ class XttsClone:
     def enroll(self, pcm: np.ndarray, sample_rate: int, transcript: str | None = None, name: str = 'me',
                lang: str = 'ru', root: Path | None = None) -> Voice:
         v = profiles.save(pcm, sample_rate, name, lang, transcript, root)
+        self._latents.pop(str(v.path), None)  # a new recording of the same profile: condition again
         self.latents(v)
         return Voice(name=v.name, engine='xtts', path=v.path, meta=v.meta)
 

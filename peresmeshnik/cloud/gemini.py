@@ -81,7 +81,7 @@ class _Conn:
     def __init__(self, gen, cm, session):
         self.gen, self.cm, self.session, self.started = gen, cm, session, time.monotonic()
         self.task: asyncio.Task | None = None
-        self.last_voiced = 0.0  # end of the last voiced audio chunk (arrival + length)
+        self.last_voiced = 0.0  # end of the last output: voiced audio chunk (arrival + length) or subtitle text
         self.waiting = 0.0  # first speech block sent since the last server message
         self.unanswered = 0  # speech blocks sent since the last server message
         self.failed = False  # a send failed: treat as dropped
@@ -90,6 +90,8 @@ class _Conn:
 class _Link:
     """One Live model (translate or transcribe) over successive connections."""
     stall_s = {'translate': 10.0, 'transcribe': 6.0}  # speech sent, no server message since: the session is dead
+    stall_max_s = 120.0  # music or steady noise passes the gate and gets no answer: back off up to this
+    retry_pause_s = 1.0  # connect retries wait 1, 2, 4, 8, 16 s
 
     def __init__(self, d: GeminiDirection, kind: str):
         self.d, self.kind = d, kind
@@ -104,6 +106,8 @@ class _Link:
         self.closed: set[int] = set()
         self.handle: str | None = None
         self.go_away = False
+        self.stalls = 0  # reconnects for silence in a row; the wait doubles with each
+        self.dropped = 0  # blocks dropped from a full backlog since the last connection
         self.src_text = ''  # translate: source transcript since the last translated piece
 
     def config(self):
@@ -132,7 +136,7 @@ class _Link:
                     raise
                 warn('%s: connect failed (%s), retry', self.kind, str(e)[:200])
                 self.handle = None if attempt else self.handle
-                await asyncio.sleep(min(30, 2 ** attempt))
+                await asyncio.sleep(min(30, self.retry_pause_s * 2 ** attempt))
         self.gen += 1
         c = _Conn(self.gen, cm, session)
         self.d.mark(f'cloud.{self.kind}.connect', time.monotonic() - t0)
@@ -149,8 +153,10 @@ class _Link:
             return False
         if c.task.done() or c.failed or self.go_away:
             return True
-        if c.unanswered >= 20 and now - c.waiting > self.stall_s[self.kind]:  # >= 2 s of speech: not just a noise burst
+        wait = min(self.stall_s[self.kind] * 2 ** self.stalls, self.stall_max_s)
+        if c.unanswered >= 20 and now - c.waiting > wait:  # >= 2 s of speech: not just a noise burst
             warn('%s: no answer %.0f s after speech, reconnecting', self.kind, now - c.waiting)
+            self.stalls += 1
             return True  # seen live: a transcribe session went silent for 84 s, then closed with 1011
         age = now - c.started
         calm = quiet and now - c.last_voiced > 1.0
@@ -175,7 +181,11 @@ class _Link:
         c = self.conn
         self.backlog.append(blk)
         if c.task.done() or c.failed:  # dropped: keep the audio (up to 30 s) for the next connection
-            del self.backlog[:-BACKLOG]
+            if len(self.backlog) > BACKLOG:
+                if not self.dropped:
+                    warn('%s: still no connection after %d s, dropping the oldest audio', self.kind, BACKLOG // 10)
+                self.dropped += len(self.backlog) - BACKLOG
+                del self.backlog[:-BACKLOG]
             await asyncio.sleep(0)  # let the new connection finish even when blocks come in a burst
             return
         while self.backlog:  # what waited for this connection goes first, in order
@@ -186,6 +196,9 @@ class _Link:
                 c.failed = True
                 return
             self.backlog.pop(0)
+        if self.dropped:
+            warn('%s: %d blocks (%.1f s) of audio were dropped while disconnected', self.kind, self.dropped, self.dropped / 10)
+            self.dropped = 0
         if voiced:
             c.unanswered += 1
             c.waiting = c.waiting or time.monotonic()
@@ -200,6 +213,11 @@ class _Link:
     async def retire(self, c: _Conn, drain_max: float = 8.0):
         """Keep listening to a replaced connection until its output is quiet, then close it."""
         t0 = time.monotonic()
+        if self.kind == 'transcribe' and not (c.task.done() or c.failed):
+            try:  # its current segment gets no more audio: ask for the final text now
+                await c.session.send_realtime_input(audio_stream_end=True)
+            except Exception:
+                pass
         while not c.task.done() and time.monotonic() - t0 < drain_max and time.monotonic() - max(c.last_voiced, t0) < 1.5:
             await asyncio.sleep(0.25)  # bounded: a few seconds once per reconnect
         await self.close_conn(c)
@@ -248,8 +266,10 @@ class _Link:
 
     def on_message(self, c: _Conn, m, now: float):
         c.waiting, c.unanswered = 0.0, 0
+        if c is self.conn:
+            self.stalls = 0
         u = m.session_resumption_update
-        if u and u.resumable and u.new_handle:
+        if u and u.resumable and u.new_handle and c is self.conn:  # a draining old connection must not win
             self.handle = u.new_handle
         if m.go_away and c is self.conn:
             self.go_away = True
@@ -276,9 +296,11 @@ class _Link:
                 self.src_text = ''
             return
         if sc.interim_input_transcription and sc.interim_input_transcription.text:
+            c.last_voiced = now
             self.d.on_text(now, final=False)
             self.out(c, Caption(sc.interim_input_transcription.text.strip()))
         if sc.input_transcription and sc.input_transcription.text:
+            c.last_voiced = now
             self.d.on_text(now, final=True)
             self.out(c, Caption(sc.input_transcription.text.strip(), final=True))
 
@@ -312,8 +334,10 @@ class GeminiDirection:
     # Direction ------------------------------------------------------------------------------------
     def feed(self, pcm: np.ndarray) -> None:
         """16 kHz mono float32 (or int16), any length; returns at once."""
-        if self._thread.is_alive():
+        try:
             self._loop.call_soon_threadsafe(self._in.put_nowait, (time.monotonic(), pcm))
+        except RuntimeError:  # closed (after close() or a fatal error): nothing to feed
+            pass
 
     def events(self):
         while (e := self._events.get()) is not None:
@@ -322,9 +346,11 @@ class GeminiDirection:
             yield e
 
     def close(self) -> None:
-        if self._thread.is_alive():
+        try:
             self._loop.call_soon_threadsafe(self._in.put_nowait, None)
-            self._thread.join(15)
+        except RuntimeError:  # already closed
+            pass
+        self._thread.join(15)
 
     # loop thread ----------------------------------------------------------------------------------
     def emit(self, e):
@@ -365,7 +391,14 @@ class GeminiDirection:
     async def _main(self):
         links = [_Link(self, 'translate')] + ([_Link(self, 'transcribe')] if self.cfg.subtitles else [])
         try:
-            await asyncio.gather(*(lk.start() for lk in links))
+            starts = [asyncio.create_task(lk.start()) for lk in links]
+            try:
+                await asyncio.gather(*starts)
+            except BaseException:  # one failed: stop the other before closing, no socket left open
+                for t in starts:
+                    t.cancel()
+                await asyncio.gather(*starts, return_exceptions=True)
+                raise
             gate, buf = _Gate(), np.zeros(0, np.int16)
             while (item := await self._in.get()) is not None:
                 t, pcm = item

@@ -3,11 +3,13 @@ reconnects, translated audio keeps its order and loses nothing, the translator n
 audio_stream_end, resumption handles are passed on."""
 import asyncio
 import queue
+import time
+from types import SimpleNamespace
 
 import numpy as np
 from google.genai import types
 
-from peresmeshnik.cloud.gemini import BLOCK, GeminiDirection
+from peresmeshnik.cloud.gemini import BLOCK, GeminiDirection, _Conn, _Link
 from peresmeshnik.config import Cloud
 from peresmeshnik.engines import Caption, Speech
 
@@ -23,6 +25,9 @@ class FakeSession:
             raise ConnectionError('socket closed')
         if audio_stream_end:
             self.live.stream_ends.append(self.model)
+            if self.model == 'transcribe':  # the segment is final now
+                await self.q.put(types.LiveServerMessage(server_content=types.LiveServerContent(
+                    input_transcription=types.Transcription(text=f'final {self.n}'))))
             return
         blk = np.frombuffer(audio.data, '<i2')
         self.live.sent.append((self.model, self.n, int(blk[0])))
@@ -49,12 +54,22 @@ class FakeSession:
 class FakeLive:
     def __init__(self):
         self.sent, self.stream_ends, self.handles, self.n, self.mute, self.broken = [], [], [], 0, set(), set()
+        self.fail, self.slow, self.opened, self.closed = set(), set(), 0, 0  # connect fails / is slow; sockets
 
     def connect(self, model, config):
         live = self
 
         class Cm:
             async def __aenter__(self):
+                if model in live.fail:
+                    raise ConnectionError('quota exceeded')
+                live.opened += 1  # the socket is open, the setup handshake follows
+                try:
+                    if model in live.slow:
+                        await asyncio.sleep(0.2)
+                except asyncio.CancelledError:
+                    live.closed += 1  # a cancelled connect closes its socket; a forgotten one never does
+                    raise
                 live.n += 1
                 if config.session_resumption:
                     live.handles.append(config.session_resumption.handle)
@@ -62,6 +77,7 @@ class FakeLive:
                 return self.s
 
             async def __aexit__(self, *a):
+                live.closed += 1
                 await self.s.q.put(None)
         return Cm()
 
@@ -130,7 +146,6 @@ def test_silent_session_is_replaced(monkeypatch):
     c.live.mute = {1}  # the first connection never answers
     d = GeminiDirection('en', 'ru', cfg=Cloud(translate_model='translate'), client=c)
     loud = (np.sin(np.arange(BLOCK) / 3) * 8000).astype(np.int16)
-    import time
     for i in range(30):
         loud[0] = i
         d.feed(loud.copy())
@@ -139,3 +154,59 @@ def test_silent_session_is_replaced(monkeypatch):
     d.close()
     assert c.live.n >= 2 and {k for _, k, _ in c.live.sent} >= {1, 2}
     assert all(isinstance(e, Speech) for e in got if not isinstance(e, Caption))
+
+
+def test_handle_only_from_current_connection():
+    lk = _Link(SimpleNamespace(cfg=Cloud()), 'translate')
+    old, new = _Conn(1, None, None), _Conn(2, None, None)
+    lk.conn = new
+    msg = lambda h: types.LiveServerMessage(session_resumption_update=types.LiveServerSessionResumptionUpdate(  # noqa: E731
+        new_handle=h, resumable=True))
+    lk.on_message(new, msg('fresh'), 0.0)
+    lk.on_message(old, msg('stale'), 0.0)  # the replaced connection, still draining, answers later
+    assert lk.handle == 'fresh'
+
+
+def test_stall_wait_grows_and_resets():
+    lk = _Link(SimpleNamespace(cfg=Cloud()), 'transcribe')
+    c = lk.conn = _Conn(1, None, None)
+    c.task = SimpleNamespace(done=lambda: False)
+    c.unanswered = 20
+
+    def due_after(s):
+        c.waiting = time.monotonic() - s
+        return lk.due(quiet=False)
+    assert due_after(7) and lk.stalls == 1  # 6 s
+    assert not due_after(11) and due_after(13) and lk.stalls == 2  # then 12 s
+    lk.stalls = 10
+    assert not due_after(110) and due_after(121)  # capped at 120 s
+    lk.on_message(c, types.LiveServerMessage(), 0.0)  # an answer: back to 6 s
+    assert lk.stalls == 0 and c.unanswered == 0
+
+
+def test_failed_start_leaves_no_socket(monkeypatch):
+    monkeypatch.setattr(_Link, 'retry_pause_s', 0.0)
+    c = FakeClient()
+    c.live.fail, c.live.slow = {'transcribe'}, {'translate'}  # transcribe fails while translate still connects
+    d = GeminiDirection('en', 'ru', cfg=Cloud(translate_model='translate', transcribe_model='transcribe', subtitles=True), client=c)
+    e = d._events.get(timeout=5)
+    assert isinstance(e, ConnectionError)
+    d.close()
+    d.feed(np.zeros(BLOCK, np.int16))  # after close: ignored, no error
+    assert c.live.opened == c.live.closed
+
+
+def test_replaced_transcriber_gives_its_final():
+    c = FakeClient()
+    d = GeminiDirection('en', 'ru', cfg=Cloud(translate_model='translate', transcribe_model='transcribe', subtitles=True,
+                                               reconnect_s=0.5), client=c)
+    for i in range(30):  # quiet input: a reconnect is due every 0.5 s
+        d.feed(np.ones(BLOCK, np.int16))
+        time.sleep(0.1)
+    got = collect(d, 30)
+    time.sleep(2)
+    d.close()
+    while (e := d._events.get(timeout=5)) is not None:
+        got.append(e)
+    finals = [e.original for e in got if isinstance(e, Caption) and e.final]
+    assert len(finals) >= 3 and finals == sorted(finals, key=lambda t: int(t.split()[1]))

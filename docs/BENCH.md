@@ -333,7 +333,13 @@ done after end 2.9–3.7 s).
 | no timer (×2 runs) | 2 per model, at 540.3–549.4 s | sent by the server at 540 s of each connection, `time_left` 50 s; the hand-over took 0.35–0.45 s | 3.40 (54) | 0.59 (64) | at the 540 s hand-over 8 connections were open at once (2 runs × 2 models × old + new): transcribe got `1011 quota exceeded` 3 times, retried and connected after 8 s while the old connection kept working — no audio lost |
 | no timer, final code | 2 per model, at 540.4 s | GoAway at 540 s of each connection, `time_left` 50 s | 3.36 / 4.56 (79) | 0.59 (99) | translation to the last sentence; 36.2 CPU s for 1125 s of audio = 0.032 per audio second; peak RSS 200 MB, most of it the CLI keeping 872 s of output audio for the wav |
 
+Hand-over stress (the same 10 English sentences, `--reconnect-s 12`): 9 transcribe and 5 translate
+hand-overs in 160 s; 42 final subtitle lines as without hand-overs, translated speech 98.9 s vs
+97.1 s, final after pause 0.58 / 0.64 s, done after end 3.26 / 4.89 s — nothing lost at the switches
+(the replaced transcriber gets `audio_stream_end`, so its last segment is finalised before it closes).
+
 Seen in the 10-sentence runs: a transcribe session went silent on the server for 84 s and then
 closed with `1011 internal error`; the direction now replaces a session that leaves ≥ 2 s of
 speech unanswered for 6 s (translate: 10 s). The audio sent to the dead session in that window
-is lost for subtitles.
+is lost for subtitles. Music or steady noise that passes the gate gets no answer either, so the wait
+before such a reconnect doubles each time (6 s → 120 s) until the session answers again.

@@ -1,9 +1,7 @@
 """Registry pins, download with resume and SHA-256 check, license screen, settings round trip."""
 import hashlib
 import http.server
-import io
 import threading
-from functools import partial
 
 import pytest
 
@@ -22,31 +20,36 @@ def test_registry_pins():
     assert reg['xtts-v2'].consent and not reg['opus-mt-en-ru'].consent
 
 
-class Range(http.server.SimpleHTTPRequestHandler):
-    """Static files with HTTP Range, like Hugging Face and GitHub release downloads."""
-    def send_head(self):
+class Range(http.server.BaseHTTPRequestHandler):
+    """Static files with HTTP Range, like Hugging Face and GitHub release downloads. Records every
+    request's Range header; a path in `cut` gets half of its body once, then the connection closes."""
+    def do_GET(self):
+        srv = self.server
+        body = (srv.root / self.path.lstrip('/')).read_bytes()
         rng = self.headers.get('Range')
-        if not rng:
-            return super().send_head()
-        with open(self.directory + self.path, 'rb') as f:
-            body = f.read()
-        start = int(rng.split('=')[1].rstrip('-'))
-        self.send_response(206)
+        srv.ranges.append((self.path, rng))
+        start = int(rng.split('=')[1].rstrip('-')) if rng else 0
+        self.send_response(206 if rng else 200)
         self.send_header('Content-Length', str(len(body) - start))
         self.end_headers()
-        return io.BytesIO(body[start:])
+        out = body[start:]
+        if self.path in srv.cut:
+            srv.cut.discard(self.path)
+            out = out[:len(out) // 2]  # HTTP/1.0: the socket closes after this, short of Content-Length
+        self.wfile.write(out)
 
     def log_message(self, *a):
         pass
 
 
 @pytest.fixture
-def server(tmp_path):
-    src = tmp_path / 'srv'
-    src.mkdir()
-    httpd = http.server.ThreadingHTTPServer(('127.0.0.1', 0), partial(Range, directory=str(src)))
+def server(tmp_path, monkeypatch):
+    monkeypatch.setattr(models, 'RETRY_PAUSE_S', 0.0)
+    httpd = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Range)
+    httpd.root, httpd.ranges, httpd.cut = tmp_path / 'srv', [], set()
+    httpd.root.mkdir()
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    yield src, f'http://127.0.0.1:{httpd.server_port}/'
+    yield httpd, f'http://127.0.0.1:{httpd.server_port}/'
     httpd.shutdown()
 
 
@@ -58,10 +61,10 @@ def fake(monkeypatch, url, files):
 
 
 def test_fetch_resume_and_verify(server, tmp_path, monkeypatch):
-    src, url = server
+    srv, url = server
     blob = bytes(range(256)) * 4000
-    (src / 'm-model.bin').write_bytes(blob)
-    (src / 'm-config.json').write_bytes(b'{}')
+    (srv.root / 'm-model.bin').write_bytes(blob)
+    (srv.root / 'm-config.json').write_bytes(b'{}')
     fake(monkeypatch, url + 'm-', {'model.bin': blob, 'config.json': b'{}'})
     cache = tmp_path / 'cache'
     with pytest.raises(models.ModelMissing):
@@ -72,12 +75,24 @@ def test_fetch_resume_and_verify(server, tmp_path, monkeypatch):
     folder = models.fetch('fake', cache, got.append)
     assert (folder / 'model.bin').read_bytes() == blob and not (folder / 'model.bin.part').exists()
     assert sum(got) == len(blob) + 2  # resumed part counted once, the rest downloaded
+    assert ('/m-model.bin', 'bytes=1000-') in srv.ranges and ('/m-model.bin', None) not in srv.ranges
     assert models.path('fake', cache) == folder
 
 
+def test_fetch_resumes_after_cut(server, tmp_path, monkeypatch):
+    srv, url = server
+    blob = bytes(range(256)) * 4000
+    (srv.root / 'model.bin').write_bytes(blob)
+    srv.cut.add('/model.bin')  # the server closes in the middle of the body
+    fake(monkeypatch, url, {'model.bin': blob})
+    folder = models.fetch('fake', tmp_path)
+    assert (folder / 'model.bin').read_bytes() == blob
+    assert srv.ranges == [('/model.bin', None), ('/model.bin', f'bytes={len(blob) // 2}-')]  # resumed, not restarted
+
+
 def test_fetch_rejects_bad_hash(server, tmp_path, monkeypatch):
-    src, url = server
-    (src / 'model.bin').write_bytes(b'tampered')
+    srv, url = server
+    (srv.root / 'model.bin').write_bytes(b'tampered')
     m = fake(monkeypatch, url, {'model.bin': b'original'})
     with pytest.raises(RuntimeError, match='mismatch'):
         models.fetch('fake', tmp_path)

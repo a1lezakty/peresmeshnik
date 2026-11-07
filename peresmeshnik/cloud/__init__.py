@@ -30,12 +30,16 @@ FRAME = SAMPLE_RATE // 50  # 20 ms, like a capture callback
 
 
 def api_key(cfg: config.Cloud) -> str:
+    """$GEMINI_API_KEY, else `cloud.key_file`, else `gemini-key` in the config folder
+    (~/.config/Peresmeshnik on Linux; the lowercase ~/.config/peresmeshnik is read too)."""
     key = os.environ.get('GEMINI_API_KEY', '').strip()
-    path = Path(cfg.key_file) if cfg.key_file else config.config_dir() / 'gemini-key'
-    if not key and path.exists():
-        key = path.read_text().strip()
+    d = config.config_dir()
+    paths = [Path(cfg.key_file)] if cfg.key_file else [d / 'gemini-key', d.with_name(d.name.lower()) / 'gemini-key']
+    for path in paths:
+        if not key and path.is_file():
+            key = path.read_text().strip()
     if not key:
-        raise SystemExit(f'no Gemini API key: set GEMINI_API_KEY or put the key into {path}')
+        raise SystemExit(f'no Gemini API key: set GEMINI_API_KEY or put the key into {paths[0]}')
     return key
 
 

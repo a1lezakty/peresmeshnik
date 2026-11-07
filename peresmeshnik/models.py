@@ -16,11 +16,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import os
 import sys
 import time
 import tomllib
-import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from functools import cache
@@ -30,6 +30,7 @@ from pathlib import Path
 from peresmeshnik import __version__, config
 
 MARKER = '.verified'
+RETRY_PAUSE_S = 2.0
 
 
 class ModelMissing(RuntimeError):
@@ -95,19 +96,23 @@ def sha256(file: Path) -> str:
     return h.hexdigest()
 
 
+def _size(file: Path) -> int:
+    return file.stat().st_size if file.exists() else 0
+
+
 def _download(url: str, part: Path, size: int, progress):
-    """Append to `part` from where it stopped (HTTP Range); restart when the server ignores the range."""
-    have = part.stat().st_size if part.exists() else 0
+    """Append to `part` from where it stopped (HTTP Range); restart when the server ignores the range.
+    A connection closed mid-body just ends the read (no exception): the caller sees a short part."""
+    have = _size(part)
     if have >= size:
-        progress(have)
         return
     headers = {'User-Agent': f'peresmeshnik/{__version__}'}
     if have:
         headers['Range'] = f'bytes={have}-'
     with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=60) as r:
-        if r.status != 206:
+        if r.status != 206 and have:
+            progress(-have)  # the server sent the whole file again
             have = 0
-        progress(have)
         with open(part, 'ab' if have else 'wb') as f:
             while b := r.read(1 << 20):
                 f.write(b)
@@ -129,16 +134,21 @@ def fetch(model_id: str, base: Path | None = None, progress=lambda n: None, retr
             progress(f['size'])
             continue
         part = dest.with_name(dest.name + '.part')
+        progress(min(_size(part), f['size']))
         for attempt in range(retries):
             try:
                 _download(m.url + name, part, f['size'], progress)
+                err = 'connection closed early'
+            except (OSError, http.client.HTTPException) as e:  # URLError, timeouts, resets, IncompleteRead
+                err = str(e)
+            if _size(part) >= f['size']:
                 break
-            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
-                if attempt == retries - 1:
-                    raise
-                print(f'{m.id}/{name}: {e}, resuming', file=sys.stderr)
-                time.sleep(2 * (attempt + 1))
-        if part.stat().st_size != f['size'] or sha256(part) != f['sha256']:
+            if attempt == retries - 1:  # the .part stays: the next fetch resumes it
+                raise RuntimeError(f'{m.id}/{name}: download incomplete ({_size(part)} of {f["size"]} bytes, {err}); '
+                                   'run fetch again to resume')
+            print(f'{m.id}/{name}: {err}, resuming at {_size(part)} bytes', file=sys.stderr)
+            time.sleep(RETRY_PAUSE_S * (attempt + 1))
+        if _size(part) != f['size'] or sha256(part) != f['sha256']:  # too long or wrong at full size: start over
             part.unlink()
             raise RuntimeError(f'{m.id}/{name}: size or SHA-256 mismatch, download discarded')
         part.replace(dest)

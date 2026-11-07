@@ -60,7 +60,9 @@ def judge(engine, lang, threads):
     m = WhisperModel('small', device='cpu', compute_type='int8', cpu_threads=threads)
     refs, hyps = [], []
     for i, text in enumerate(sentences(lang)):
-        segs, _ = m.transcribe(str(OUT / f'{engine}-{lang}' / f'{i}.wav'), language=lang, beam_size=1)
+        x, sr = sf.read(OUT / f'{engine}-{lang}' / f'{i}.wav', dtype='float32')
+        x = np.interp(np.arange(0, len(x), sr / 16000), np.arange(len(x)), x).astype(np.float32)  # to 16 kHz
+        segs, _ = m.transcribe(x, language=lang, beam_size=1)
         refs.append(norm(text))
         hyps.append(norm(' '.join(s.text for s in segs)))
     record('tts_cer', engine, lang=lang, judge='fw:small', cer=round(jiwer.cer(refs, hyps), 4), wer=round(jiwer.wer(refs, hyps), 4))

@@ -5,6 +5,9 @@
 cd "$(dirname "$0")"
 PY=${PY:-python}
 suite=$1; shift
+# numpy/BLAS/OpenMP pools default to all cores: pin them to --threads too
+T=4; prev=; for x in "$@"; do [ "$prev" = --threads ] && T=$x; prev=$x; done
+export OMP_NUM_THREADS=$T OPENBLAS_NUM_THREADS=$T MKL_NUM_THREADS=$T VECLIB_MAXIMUM_THREADS=$T
 run() { echo "== $*"; ${LOCK:+flock "$LOCK"} nice -n 10 "$PY" "$@" || echo "FAILED: $*"; }
 case $suite in
   asr)

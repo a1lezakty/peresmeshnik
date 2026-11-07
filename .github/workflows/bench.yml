@@ -1,0 +1,110 @@
+name: bench
+
+# Manual only: Actions → bench → Run workflow, or add a label to a PR: "bench" runs every suite,
+# "bench-<suite>" (e.g. bench-clone) one suite. workflow_dispatch needs this file on the default
+# branch; the label also works before the merge.
+on:
+  workflow_dispatch:
+    inputs:
+      suites:
+        description: 'JSON list of suites: asr, mt, tts, clone'
+        default: '["asr", "mt", "tts", "clone"]'
+      os:
+        description: 'Runner'
+        default: macos-15
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.label.name, 'bench')
+    runs-on: ubuntu-latest
+    outputs:
+      suites: ${{ steps.s.outputs.suites }}
+    steps:
+      - id: s
+        env:
+          INPUT: ${{ github.event.inputs.suites }}
+          LABEL: ${{ github.event.label.name }}
+        run: |
+          python3 - >> "$GITHUB_OUTPUT" <<'EOF'
+          import json, os
+          allowed = ['asr', 'mt', 'tts', 'clone']
+          inp, label = os.environ['INPUT'], os.environ['LABEL']
+          suites = json.loads(inp) if inp else allowed if label == 'bench' else [label.removeprefix('bench-')]
+          if not isinstance(suites, list) or not suites or any(s not in allowed for s in suites):
+              raise SystemExit(f'unknown suite in {suites!r}; allowed: {allowed}')
+          print('suites=' + json.dumps(suites))
+          EOF
+
+  bench:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: ${{ fromJSON(needs.plan.outputs.suites) }}
+    runs-on: ${{ github.event.inputs.os || 'macos-15' }}
+    timeout-minutes: 150
+    env:
+      BENCH_DATA: ${{ github.workspace }}/bench-data
+      BENCH_HOST: ${{ github.event.inputs.os || 'macos-15' }}
+      HF_HOME: ${{ github.workspace }}/models/hf
+      TORCH_HOME: ${{ github.workspace }}/models/torch
+      PERESMESHNIK_MODELS: ${{ github.workspace }}/models
+      COQUI_TOS_AGREED: '1'
+      HF_HUB_DISABLE_PROGRESS_BARS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+      - name: Machine
+        run: |
+          uname -a; sysctl -n machdep.cpu.brand_string hw.memsize hw.ncpu 2>/dev/null || nproc; df -h .
+      - uses: actions/cache@v4
+        with:
+          path: bench-data
+          key: bench-data-${{ hashFiles('bench/data.py') }}
+      - uses: actions/cache@v4
+        with:
+          path: models
+          key: models-${{ matrix.suite }}-${{ runner.os }}-${{ hashFiles('bench/*.py', 'bench/requirements*.txt') }}
+          restore-keys: models-${{ matrix.suite }}-${{ runner.os }}-
+      - name: Bench venv
+        if: matrix.suite != 'clone'
+        run: |
+          uv venv .bench
+          if [ "$RUNNER_OS" = Linux ]; then CPU="--extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match"; fi
+          uv pip install -p .bench -r bench/requirements.txt ${CPU:-}
+          .bench/bin/python bench/data.py
+          .bench/bin/python -c "import torch, onnxruntime as o; print('mps', torch.backends.mps.is_available(), 'ort', o.get_available_providers())"
+      - name: llama.cpp + HY-MT1.5 GGUF
+        if: matrix.suite == 'mt' && runner.os == 'macOS'
+        run: |
+          curl -sL https://github.com/ggml-org/llama.cpp/releases/download/b12189/llama-b12189-bin-macos-arm64.tar.gz | tar xz
+          echo "LLAMA_SERVER=$(find $PWD -name llama-server -type f | head -1)" >> $GITHUB_ENV
+          mkdir -p models/gguf
+          for m in 1.8B 7B; do
+            f=models/gguf/HY-MT1.5-$m-Q4_K_M.gguf
+            [ -f $f ] || curl -sL -o $f https://huggingface.co/tencent/HY-MT1.5-$m-GGUF/resolve/main/HY-MT1.5-$m-Q4_K_M.gguf
+          done
+          echo "GGUF=$PWD/models/gguf/HY-MT1.5-1.8B-Q4_K_M.gguf $PWD/models/gguf/HY-MT1.5-7B-Q4_K_M.gguf" >> $GITHUB_ENV
+      - name: Run ${{ matrix.suite }}
+        if: matrix.suite != 'clone'
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: |
+          if [ "$RUNNER_OS" = macOS ] && [ "$SUITE" = mt ]; then export LLAMA_DEVICE=metal; fi
+          PY=$PWD/.bench/bin/python bench/suite.sh "$SUITE" --threads 3
+      - name: Voice clone
+        if: matrix.suite == 'clone'
+        run: bench/clone_ci.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-${{ matrix.suite }}-${{ github.event.inputs.os || 'macos-15' }}
+          path: bench/results/
+          if-no-files-found: warn

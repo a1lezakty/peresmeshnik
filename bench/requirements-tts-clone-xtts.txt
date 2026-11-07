@@ -1,0 +1,8 @@
+# XTTS-v2 via coqui-tts (idiap fork). Python 3.11. Linux CPU: torch/torchaudio from https://download.pytorch.org/whl/cpu
+# Weights download on first run to $TTS_HOME (needs COQUI_TOS_AGREED=1; CPML, non-commercial).
+torch==2.8.0
+torchaudio==2.8.0
+coqui-tts==0.28.0
+transformers==5.22.2
+six==1.17.0  # imported by TTS.tts.utils.text.punctuation but not declared by coqui-tts 0.28.0
+soundfile==0.14.0

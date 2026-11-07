@@ -84,6 +84,7 @@ class _Conn:
         self.last_voiced = 0.0  # end of the last voiced audio chunk (arrival + length)
         self.waiting = 0.0  # first speech block sent since the last server message
         self.unanswered = 0  # speech blocks sent since the last server message
+        self.failed = False  # a send failed: treat as dropped
 
 
 class _Link:
@@ -146,7 +147,7 @@ class _Link:
         c, now = self.conn, time.monotonic()
         if self.next:
             return False
-        if c.task.done() or self.go_away:
+        if c.task.done() or c.failed or self.go_away:
             return True
         if c.unanswered >= 20 and now - c.waiting > self.stall_s[self.kind]:  # >= 2 s of speech: not just a noise burst
             warn('%s: no answer %.0f s after speech, reconnecting', self.kind, now - c.waiting)
@@ -164,26 +165,33 @@ class _Link:
             self.go_away = False
             self.next = asyncio.create_task(self.connect())
         if self.next and self.next.done():
-            old, self.conn, self.next = self.conn, self.next.result(), None  # switch between two blocks
-            self.d.mark(f'cloud.{self.kind}.reconnect_after', time.monotonic() - old.started)
-            self.retiring.append((asyncio.create_task(self.retire(old)), old))
-            for b in self.backlog:
-                await self._send(b)
-            self.backlog.clear()
-        if self.conn.task.done():  # dropped: keep the audio for the next connection
-            self.backlog = (self.backlog + [blk])[-BACKLOG:]
+            if self.next.exception() is not None:  # still no connection: the next block tries again
+                warn('%s: reconnect failed (%s)', self.kind, str(self.next.exception())[:200])
+                self.next = None
+            else:
+                old, self.conn, self.next = self.conn, self.next.result(), None  # switch between two blocks
+                self.d.mark(f'cloud.{self.kind}.reconnect_after', time.monotonic() - old.started)
+                self.retiring.append((asyncio.create_task(self.retire(old)), old))
+        c = self.conn
+        self.backlog.append(blk)
+        if c.task.done() or c.failed:  # dropped: keep the audio (up to 30 s) for the next connection
+            del self.backlog[:-BACKLOG]
+            await asyncio.sleep(0)  # let the new connection finish even when blocks come in a burst
             return
-        try:
-            await self._send(blk)
-            if voiced:
-                self.conn.unanswered += 1
-                self.conn.waiting = self.conn.waiting or time.monotonic()
-        except Exception as e:
-            warn('%s: send failed (%s)', self.kind, str(e)[:200])
-            self.backlog.append(blk)
+        while self.backlog:  # what waited for this connection goes first, in order
+            try:
+                await self._send(self.backlog[0])
+            except Exception as e:
+                warn('%s: send failed (%s)', self.kind, str(e)[:200])
+                c.failed = True
+                return
+            self.backlog.pop(0)
+        if voiced:
+            c.unanswered += 1
+            c.waiting = c.waiting or time.monotonic()
 
     async def stream_end(self):
-        if self.kind == 'transcribe' and not self.conn.task.done():  # never to the translator
+        if self.kind == 'transcribe' and not (self.conn.task.done() or self.conn.failed):  # never to the translator
             try:
                 await self.conn.session.send_realtime_input(audio_stream_end=True)
             except Exception as e:
@@ -218,6 +226,8 @@ class _Link:
         if self.next:
             self.next.cancel()
             await asyncio.gather(self.next, return_exceptions=True)
+            if not self.next.cancelled() and self.next.exception() is None:  # it connected just now
+                await self.close_conn(self.next.result())
         if self.conn:
             await self.close_conn(self.conn)
 

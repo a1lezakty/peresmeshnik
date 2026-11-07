@@ -19,6 +19,8 @@ class FakeSession:
 
     async def send_realtime_input(self, audio=None, audio_stream_end=None):
         await asyncio.sleep(0)  # a real socket send yields to the loop
+        if self.n in self.live.broken:
+            raise ConnectionError('socket closed')
         if audio_stream_end:
             self.live.stream_ends.append(self.model)
             return
@@ -46,7 +48,7 @@ class FakeSession:
 
 class FakeLive:
     def __init__(self):
-        self.sent, self.stream_ends, self.handles, self.n, self.mute = [], [], [], 0, set()
+        self.sent, self.stream_ends, self.handles, self.n, self.mute, self.broken = [], [], [], 0, set(), set()
 
     def connect(self, model, config):
         live = self
@@ -79,23 +81,25 @@ def collect(d, n_speech, timeout=10):
 
 def test_reconnects_keep_order_and_lose_nothing():
     c = FakeClient()
+    c.live.broken = {3, 7}  # these connections fail on the first send: their blocks go to the next one
     d = GeminiDirection('en', 'ru', cfg=Cloud(translate_model='translate', reconnect_s=0.0), client=c)
     n = 40
-    for i in range(n):  # quiet input (the gate stays off), so a reconnect is due at every block
+    for i in range(n + 10):  # quiet input (the gate stays off), so a reconnect is due at every block
         blk = np.ones(BLOCK, np.int16)
-        blk[0] = i
+        blk[0] = i  # blocks after n: the stream goes on, as a capture device does
         d.feed(blk[:700])  # odd frame sizes: the direction re-blocks to 100 ms
         d.feed(blk[700:])
     got = collect(d, n)
     d.close()
     sent = [i for model, _, i in c.live.sent]
-    assert sent == list(range(n))  # each block once, in order
+    assert sent[:n] == list(range(n)) and len(set(sent)) == len(sent)  # each block once, in order
     conns = {k for _, k, _ in c.live.sent}
     assert len(conns) > 5  # it really reconnected
     heard = [round(e.pcm[0] * 32768) for e in got if isinstance(e, Speech)]
-    assert heard == list(range(n))  # old connections drained first, nothing lost
-    hs = c.live.handles  # each connection resumes with the newest handle of the one before it
-    assert hs[0] is None and len(hs) > 5 and all(h and h.startswith(f'h{k}.') for k, h in enumerate(hs[2:], 2))
+    assert heard[:n] == list(range(n))  # old connections drained first, nothing lost
+    hs = c.live.handles  # each connection resumes with the newest handle the server gave (broken ones gave none)
+    gens = [int(h[1:].split('.')[0]) for h in hs[2:]]
+    assert hs[0] is None and len(hs) > 5 and all(hs[2:]) and gens == sorted(gens) and not set(gens) & c.live.broken
     assert not c.live.stream_ends  # never audio_stream_end to the translator
 
 

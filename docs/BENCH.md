@@ -285,3 +285,55 @@ spin briefly after each call; with the flags they sleep at once.
 | vast-a-cpu4 | torch | 4 | False |  | 0.48 | 0.12 | 20 | 0.0187 |
 | vast-a-cpu4 | torch | 4 | False | PASSIVE | 0.314 | 0.122 | 20 | 0.0 |
 
+
+## Stage 1: cloud direction (`GeminiDirection`)
+
+The app's own cloud path (`peresmeshnik cloud`, `peresmeshnik/cloud/gemini.py`), measured on
+`linux-x86_64-4c` (Europe), Saturday 2026-11-07 22:36–23:30 UTC, free-tier key. Input: FLEURS dev
+sentences glued with pauses and streamed at real-time pace in 20 ms frames (the direction re-blocks
+to 100 ms); `--subtitles` on, so every direction holds two sessions (translate + transcribe).
+Times are seconds from the per-link latency log (`peresmeshnik.latency`), `median / p90 (n)`.
+Speech start / pause / end come from the direction's own energy gate (end = 1 s of silence, pause =
+300 ms), so a start can sit up to ~0.3 s before the first word (FLEURS lead-in noise); this
+inflates the p90 of `first_partial_after_start`.
+
+| Link (log name) | en → ru | ru → en | stage 0 bench |
+|---|---|---|---|
+| connect, translate / transcribe (`*.connect`) | 0.61 / 0.27 | 0.44 / 0.40 | 0.22–0.27 |
+| subtitles: first word after speech start (`transcribe.first_partial_after_start`) | 1.24 / 2.70 (12) | 1.54 / 3.60 (12) | 1.0 / 1.3 |
+| subtitles: final text after a 300 ms pause, client `audio_stream_end` (`transcribe.final_after_pause`) | 0.58 / 0.62 (12) | 0.64 / 0.71 (12) | 0.65–0.68 / 0.77–0.93 |
+| voice: first translated audio after the start of a turn (`translate.first_audio_after_start`) | 3.08 / 3.88 (7) | 3.86 / 4.61 (10) | 3.1–3.2 / 3.3–3.4 |
+| voice: translated speech done after the speaker stops (`translate.done_after_end`) | 3.55 / 4.98 (10) | 2.93 / 3.26 (10) | 3.1–3.7 / 4.0–4.7 |
+
+Set: 10 sentences per language (the 11th–20th of the 30-sentence bench set), 3 s pauses, 160 s (en) /
+171 s (ru) of audio. `first_audio_after_start` is counted only for turns that start while the
+translator is quiet (≥ 1 s): with 3 s pauses the Russian translation of an English sentence often
+still plays when the next sentence starts, hence n = 7.
+
+**CPU and memory** (`/usr/bin/time`, both sessions of one direction in one process):
+5.7 / 6.2 CPU s for 160 / 171 s of audio including 0.8 s of process start and imports →
+**0.03 CPU s per audio second** (3 % of one core), peak RSS 92 MB. Idle cost is zero: no
+`GeminiDirection` exists while translation is off.
+
+**Through PipeWire devices** (own PipeWire session, null sink `peresmeshnik_call` → its monitor →
+`parec --latency-msec=20` → `peresmeshnik cloud --in - --out -` → `pacat` → null sink `s3_out` →
+its monitor recorded): 3 sentences per language with 2 s pauses. Voiced output on the recording
+21.0 s (en → ru) / 29.8 s (ru → en), the same as the direct wav output (20.9 / 30.0 s); local
+back-transcription of the recording with Parakeet v3 gives the full translation, e.g. "Вскоре
+офицеры с защитным снаряжением вошли во двор и загнали заключенных в угол слезоточивым газом." /
+"The new environment has other resources and other competitors, therefore the new population
+will need other characteristics…". Latency the same as from the file (final after pause 0.59–0.60 s,
+done after end 2.9–3.7 s).
+
+**Long sessions** (all 30 English sentences ×3 with 2 s pauses, 1125 s = 18.8 min, en → ru):
+
+| run | reconnects | GoAway | done_after_end | final_after_pause | notes |
+|---|---|---|---|---|---|
+| `--reconnect-s 540` | 2 per model, at 540.3–541.4 s | — | 3.46 (54) | 0.59 (64) | translation continues past 15 min (resumption handle + context compression) |
+| no timer (×2 runs) | 2 per model, at 540.3–549.4 s | sent by the server at 540 s of each connection, `time_left` 50 s; the hand-over took 0.35–0.45 s | 3.40 (54) | 0.59 (64) | at the 540 s hand-over 8 connections were open at once (2 runs × 2 models × old + new): transcribe got `1011 quota exceeded` 3 times, retried and connected after 8 s while the old connection kept working — no audio lost |
+| no timer, final code | 2 per model, at 540.4 s | GoAway at 540 s of each connection, `time_left` 50 s | 3.36 / 4.56 (79) | 0.59 (99) | translation to the last sentence; 36.2 CPU s for 1125 s of audio = 0.032 per audio second; peak RSS 200 MB, most of it the CLI keeping 872 s of output audio for the wav |
+
+Seen in the 10-sentence runs: a transcribe session went silent on the server for 84 s and then
+closed with `1011 internal error`; the direction now replaces a session that leaves ≥ 2 s of
+speech unanswered for 6 s (translate: 10 s). The audio sent to the dead session in that window
+is lost for subtitles.

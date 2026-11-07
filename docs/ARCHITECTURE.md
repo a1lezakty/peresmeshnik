@@ -152,7 +152,7 @@ RAM = peak RSS of the model's own process):
 | TTS Piper (own process, §10) | 2 | RTF 0.03–0.06 | 0.3–0.5 GB | |
 | Clone XTTS-v2 | GPU (+1 CPU) | CPU RTF 1.8 → not live | 3.6–4.5 GB RAM, 2.1 GB VRAM | |
 | Clone Chatterbox | GPU | CPU RTF 3.3–3.5 → not live | 5–7 GB RAM, 3.7 GB VRAM | |
-| Gemini Live session | — | ~0 (network, 56–66 MB process) | — | |
+| Gemini Live direction (translate + transcribe) | 1 asyncio thread | 0.03 (x86, measured in stage 1) | ~90 MB process | network only; nothing exists while translation is off |
 
 Concurrently busy threads stay ≤ the number of performance cores (4 on M1): ASR, MT and TTS of
 one direction mostly alternate, and the two directions rarely talk at the same time.
@@ -277,8 +277,10 @@ RTF; the user can override it in settings.
    energy guard; cross-lingual similarity is modest (0.35–0.44); CosyVoice3 truncates Russian.
 3. **Gemini Live.** Preview models; the voice lags ~3.2 s and up to 6 s in long en → ru speech;
    `audio_stream_end` cuts the end of a translation (never send it to translate); connections
-   last ~10 min, sessions 15 min → resumption handles; paid tier bills open time incl. silence
-   (~$0.037/min translate); on the free tier Google uses the data — the app says so and suggests
+   last ~10 min (server GoAway at ~540 s), sessions 15 min → handled in stage 1: hand-over at a
+   quiet moment with the resumption handle and context compression, dead sessions replaced (BENCH,
+   stage 1); the free tier refuses connections beyond a few at once (seen at 8); paid tier bills
+   open time incl. silence (~$0.037/min translate); on the free tier Google uses the data — the app says so and suggests
    a paid key for real calls.
 4. **Real calls ≠ FLEURS.** Read speech here; calls bring codecs, noise, overlap and accents —
    WER will be higher. Stage 2 adds consented recordings of real calls to the bench.

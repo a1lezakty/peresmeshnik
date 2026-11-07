@@ -30,12 +30,15 @@ mic ─▶ capture ─▶ queue ─▶ VAD ─▶ ASR ─clause end─▶ MT ─
 ```
 
 - **Frames.** Capture delivers 16 kHz mono float32 in 20–32 ms frames. The device callback only
-  copies the frame into a queue; everything else runs on worker threads (one per direction for
-  VAD+ASR, one per direction for MT+TTS, one playback thread per output device).
-- **VAD first.** Silero VAD (32 ms frames; vendor figure < 1 ms CPU per frame, stage 1 measures it)
+  copies the frame into a queue; everything else runs on worker threads (per direction one for
+  VAD+ASR, one for MT, one for TTS, so captions never wait for speech; one playback thread per
+  output device).
+- **VAD first.** Silero VAD (32 ms frames, 0.1–0.3 ms per frame measured in stage 1: 0.3–1 % of a core)
   gates everything: on silence ASR, MT and TTS do not run at all.
 - **Clauses, not sentences.** A segment ends at a VAD pause ≥ 300 ms, at punctuation from the
-  ASR (GigaAM e2e and Parakeet emit it), or after 5 s of continuous speech. MT translates each
+  ASR (GigaAM e2e and Parakeet emit it), or after 5 s of continuous speech (then at a comma in
+  the clause's second half or between words; the next window keeps 1 s of the previous clause in
+  front, since Parakeet loses words on a window that starts mid-speech). MT translates each
   clause on its own (OPUS-MT has no context input; a context-aware LLM MT is a stage-5 option);
   TTS starts on the first clause while the speaker is still talking.
 - **Subtitles** show ASR partials of the current clause immediately and replace them with the
@@ -125,8 +128,9 @@ Requirement from day one (Zagon 0.1.2 burned 104 % CPU on a redraw loop):
 **Idle (app open, translation off):** ~0 CPU. No timers, no polling, no redraws. Audio streams
 are closed, `Direction.close()` has unloaded the engines or left them without busy threads. CI
 gate: `tests/test_idle_cpu.py` starts the app, waits 60 s and fails above **0.13 s CPU** (Linux,
-macOS, Windows on pushes to main and on PRs). Stage 1 adds the same gate in working mode on a recording
-(RTF and CPU per audio second; numbers in BENCH.md).
+macOS, Windows on pushes to main and on PRs). The working-mode gate (`tests/test_pipeline_cpu.py`,
+CI job `work-gate`, three OSes) runs `peresmeshnik run` on a 30 s recording and fails at RTF ≥ 1.0 or ≥ 2.0 CPU s per audio s (now
+0.54–0.67 and 0.96–1.32 on the runners; BENCH.md, stage 1).
 
 **Working:**
 - device callbacks only enqueue; heavy work on worker threads;
@@ -144,7 +148,7 @@ RAM = peak RSS of the model's own process):
 
 | Link | Threads | CPU s / audio s, M1 / x86 | RAM | Notes |
 |---|---|---|---|---|
-| Silero VAD | 1 | ~0.03 (vendor figure, stage 1 measures) | ~50 MB | runs on every frame while a direction is on |
+| Silero VAD | 1 | 0.003–0.01 (stage 1, BENCH `pipeline` vad_rtf) | ~50 MB | runs on every frame while a direction is on |
 | ASR Parakeet v3 int8 | 2 | 0.10 / 0.18 | 1.4–1.8 GB | partials: re-running every 300 ms on a window growing to 3 s costs ~0.5 (M1) – 0.9 (x86) core while someone speaks; a 500 ms refresh halves it for +100 ms subtitle latency |
 | ASR GigaAM v3 e2e (RU, ≥ 16 GB) | 2 | 0.16 / 0.15 | 1.7–1.8 GB | fp32; int8 to try in stage 1 |
 | ASR T-one (RU partials, ≥ 16 GB) | 1 | 0.21 / 0.19 | 0.7 GB | 12–19 ms per 300 ms chunk |

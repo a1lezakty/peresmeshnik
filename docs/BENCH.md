@@ -1,4 +1,4 @@
-# Benchmarks (stage 0)
+# Benchmarks (stages 0–1)
 
 Scripts: [`bench/`](../bench). Raw rows: `bench/results/<host>.jsonl`; the tables below are made
 by `python bench/report.py`. Measured 2026-11-07.
@@ -11,7 +11,9 @@ by `python bench/report.py`. Measured 2026-11-07.
 | `vast-a-cpu4` | AMD Ryzen 5 5600X, **4 threads**, CUDA hidden (shared Vast server) | **x86 CPU** laptop stand-in |
 | `vast-a-rtx3060` | same server, NVIDIA RTX 3060 12 GB | the **NVIDIA** tier |
 | `vast-c-cpu8`, `vast-c-a4000` | Intel i7-13700, 8 threads / NVIDIA RTX A4000 16 GB (shared Vast server) | voice-clone TTS (too big for the other hosts) |
-| `linux-x86_64-4c` | the dev server, AMD EPYC-Genoa, 4 cores, 7.6 GB (shared, at times swapping) | Gemini Live runs (network only); Piper voices; one early XTTS run (pessimistic) |
+| `linux-x86_64-4c` | the dev server, AMD EPYC-Genoa, 4 cores, 7.6 GB (shared, at times swapping) | Gemini Live runs (network only); Piper voices; one early XTTS run (pessimistic); stage 1 PipeWire runs |
+| `vast-b-pipeline` | AMD Ryzen 9 7950X3D (shared Vast server), the app's 2 threads per engine | stage 1 pipeline: cost, quality, real-time lags |
+| `ubuntu-latest`, `windows-latest` | GitHub Actions runners, 4 vCPU | stage 1 working-mode gate (with `macos-15`) |
 
 All CPU runs pin every thread pool (`--threads`, `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`) and
 run under `nice`; the Vast servers host other services, so absolute times can be a few percent
@@ -343,3 +345,98 @@ closed with `1011 internal error`; the direction now replaces a session that lea
 speech unanswered for 6 s (translate: 10 s). The audio sent to the dead session in that window
 is lost for subtitles. Music or steady noise that passes the gate gets no answer either, so the wait
 before such a reconnect doubles each time (6 s → 120 s) until the session answers again.
+
+## Stage 1: the local pipeline (them → me)
+
+What runs is `peresmeshnik run` / `LocalDirection` as in the app: Silero VAD (1 thread), Parakeet
+TDT 0.6B v3 int8 with partials every 300 ms on the growing clause, OPUS-MT CTranslate2 int8, Piper
+(`john` / `dmitri`) in its own process; 2 threads per engine, BLAS pinned to one thread. A clause
+ends at a VAD pause ≥ 300 ms, at sentence punctuation with a capitalised word after it, or past
+`max_clause_s` (then at a comma in the second half or between words, at least 0.8 s before the
+window end); after a cut the window keeps `context_s` of the previous clause in front. Scripts:
+[`bench/pipeline.py`](../bench/pipeline.py), gate: [`tests/test_pipeline_cpu.py`](../tests/test_pipeline_cpu.py).
+Measured 2026-11-07.
+
+### Cost on a 30 s recording
+
+`tests/data/call-{en,ru}.ogg` (FLEURS, −26 dBFS) fed as fast as the pipeline takes it. `rtf` =
+wall time / audio; `cpu_s_per_audio_s` = CPU of the app process plus the Piper process tree per
+second of audio; `*_rtf` = busy time of one link per second of audio (`vad` every frame, ASR
+`partial` re-runs, ASR `final` runs, MT, TTS). Defaults: `max_clause_s` 5, `context_s` 1.
+
+| host | model | lang | mode | clauses | rtf | cpu_s_per_audio_s | vad_rtf | asr_partial_rtf | asr_final_rtf | mt_rtf | tts_rtf | peak_rss_mb |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| vast-b-pipeline | nemo-parakeet-tdt-0.6b-v3+opus-mt+piper | en | work | 7 | 0.296 | 0.605 | 0.0025 | 0.2914 | 0.0 | 0.0078 | 0.0234 | 1503 |
+| vast-b-pipeline | nemo-parakeet-tdt-0.6b-v3+opus-mt+piper | ru | work | 7 | 0.293 | 0.588 | 0.0026 | 0.2861 | 0.0 | 0.0073 | 0.0197 | 1476 |
+
+The working-mode gate in CI (`work-gate` job, run 42425353588, English recording; limits RTF < 1.0
+and < 2.0 CPU s per audio s) and the dev box:
+
+| host | rtf | cpu_s_per_audio_s | vad_rtf | asr_partial_rtf | asr_final_rtf | mt_rtf | tts_rtf | word recall |
+|---|---|---|---|---|---|---|---|---|
+| ubuntu-latest | 0.572 | 1.137 | 0.0051 | 0.5607 | 0.0 | 0.0206 | 0.051 | 0.84 |
+| windows-latest | 0.674 | 1.317 | 0.008 | 0.659 | 0.0 | 0.0337 | 0.0734 | 0.84 |
+| macos-15 (M1, 3 cores) | 0.538 | 0.962 | 0.0076 | 0.5215 | 0.0 | 0.0282 | 0.0671 | 0.84 |
+| linux-x86_64-4c (shared) | 0.621 | 1.188 | 0.0048 | 0.6093 | 0.0 | 0.0285 | 0.0516 | 0.84 |
+
+In the same CI runs the idle gate stayed at 0.000 s CPU in 60 s on all three OSes.
+
+- ASR partials are ~90 % of the work: re-running Parakeet every 300 ms on a window of up to 6 s
+  (5 s clause + 1 s context) keeps 0.6–1.3 cores busy while someone speaks (0.6 on the 7950X3D).
+  Everything else together is < 0.1 of real time; VAD costs 0.3–1 % of a core.
+- `asr_final_rtf` ≈ 0: at a pause the last partial already saw the whole clause and is reused;
+  a cut clause takes its text from the partial's token timestamps.
+- Peak RSS of the app process 1.5–1.7 GB (Parakeet); Piper's process adds 0.3–0.4 GB (TTS table).
+- When the pipeline falls more than 150 ms behind real time (a busy machine), partials are
+  skipped until it catches up; clause ends are always recognised.
+
+### Quality: streamed vs offline
+
+The 30 FLEURS utterances per language of the ASR / MT tables, each fed alone (scaled to −26 dBFS,
+TTS off). `wer` = the joined clause texts vs the reference; `wer_offline` = the same audio as one
+window; `chrf` = the joined clause translations vs the FLEURS reference translation. For
+comparison, MT from the gold source text: chrF 59.5 en-ru, 59.9 ru-en (MT table).
+`max_clause_s` 1000 = clauses end at pauses and punctuation only.
+
+| host | model | lang | mode | max_clause_s | context_s | clauses | wer | wer_offline | chrf | peak_rss_mb |
+|---|---|---|---|---|---|---|---|---|---|---|
+| vast-b-pipeline | nemo-parakeet-tdt-0.6b-v3+opus-mt | en | quality | 5.0 | 1.0 | 85 | 0.1119 | 0.0537 | 52.5 | 1685 |
+| vast-b-pipeline | nemo-parakeet-tdt-0.6b-v3+opus-mt | en | quality | 8.0 | 1.0 | 66 | 0.1 | 0.0537 | 53.9 | 1729 |
+| vast-b-pipeline | nemo-parakeet-tdt-0.6b-v3+opus-mt | en | quality | 5.0 | 0.0 | 83 | 0.1567 | 0.0537 | 50.4 | 1730 |
+| vast-b-pipeline | nemo-parakeet-tdt-0.6b-v3+opus-mt | en | quality | 5.0 | 2.0 | 84 | 0.109 | 0.0537 | 52.6 | 1721 |
+| vast-b-pipeline | nemo-parakeet-tdt-0.6b-v3+opus-mt | en | quality | 1000.0 | 1.0 | 57 | 0.0761 | 0.0537 | 55.6 | 1740 |
+| vast-b-pipeline | nemo-parakeet-tdt-0.6b-v3+opus-mt | ru | quality | 5.0 | 1.0 | 93 | 0.1076 | 0.0844 | 53.1 | 1727 |
+| vast-b-pipeline | nemo-parakeet-tdt-0.6b-v3+opus-mt | ru | quality | 8.0 | 1.0 | 63 | 0.096 | 0.0844 | 55.0 | 1746 |
+| vast-b-pipeline | nemo-parakeet-tdt-0.6b-v3+opus-mt | ru | quality | 1000.0 | 1.0 | 48 | 0.0944 | 0.0844 | 58.1 | 1760 |
+
+- FLEURS is read speech: ~10 s sentences with no 300 ms pause, so a 5 s limit cuts every sentence
+  once or twice. Against the offline window that costs 2–6 WER points, against pause-only
+  clauses 3–5 chrF points (MT translates fragments).
+- Left context after a cut halves the WER cost of the cuts in English (15.7 % → 11.2 %), at no
+  extra CPU; 2 s gives nothing more.
+- Without the hard limit chrF is 55.6–58.1, within 2–4 points of MT on the gold text, but a long
+  sentence is only translated after it ends. Conversation pauses more often than read news;
+  stage 2 tunes the limit on real call recordings.
+- Short windows write numbers as words ("one thousand four hundred" for "1,400"): part of the
+  English WER.
+
+### Latency per link
+
+From the per-clause log (`peresmeshnik run --log`), the 30 s recordings in real time. Times from
+the end of the clause's speech: `caption_lag_s` → translated caption on the event queue,
+`voice_lag_s` → first translated audio; both include the 300 ms VAD pause for clauses that end at
+a pause. A cut clause is decided ≥ 0.8 s after its end (the tail of the window is not trusted).
+Medians over both recordings:
+
+| host | input | clause ends at | n | asr_final_ms | mt_ms | caption_lag_s | tts_first_ms | voice_lag_s | voice_lag_s max |
+|---|---|---|---|---|---|---|---|---|---|
+| vast-b-pipeline | file in real time | pause | 9 | 0 | 24 | 0.32 | 59 | 0.39 | 0.48 |
+| vast-b-pipeline | file in real time | 5 s cut / punctuation | 5 | 0 | 43 | 1.14 | 114 | 1.24 | 1.67 |
+| linux-x86_64-4c (shared) | file → `Peresmeshnik Call` sink → monitor | pause | 8 | 0 | 81 | 0.57 | 114 | 0.72 | 1.41 |
+| linux-x86_64-4c (shared) | file → `Peresmeshnik Call` sink → monitor | 5 s cut / punctuation | 7 | 0 | 129 | 1.75 | 296 | 1.88 | 2.37 |
+
+- Clause end → voice at a pause is 0.4–0.7 s, below the 0.65–0.95 s estimate of ARCHITECTURE §4,
+  because the final ASR run is skipped.
+- Original subtitles (partials) are not logged per update; from the cost above a partial takes
+  0.08 s (7950X3D) – 0.2 s (CI runners) every 300 ms of audio, i.e. ≈ 0.25–0.35 s from a word to
+  the screen.

@@ -1,0 +1,6 @@
+# Judge for tts_clone.py eval/baseline: SpeechBrain ECAPA (speaker similarity) + faster-whisper small int8 (CER).
+torch==2.8.0
+torchaudio==2.8.0
+speechbrain==1.1.2
+faster-whisper==1.2.1
+soundfile==0.14.0

@@ -12,6 +12,8 @@ COLS = {
     'mt': ['host', 'model', 'direction', 'chrf', 'bleu', 'latency_ms_median', 'latency_ms_p90', 'cpu_cores', 'peak_rss_mb',
            'server_peak_rss_mb', 'load_s'],
     'tts': ['host', 'model', 'lang', 'voice', 'ttfa_ms_median', 'rtf', 'cpu_cores', 'peak_rss_mb', 'cer', 'load_s'],
+    'cloud': ['model', 'direction', 'mode', 'n', 'setup_s', 'first_out_from_start_s', 'done_after_end_s', 'wer', 'cer',
+              'chrf_out_transcript', 'chrf_back_whisper', 'voice_f0_in_out_corr'],
     'idle_loaded': ['host', 'model', 'threads', 'no_spin', 'omp_wait_policy', 'busy_cpu_s', 'busy_wall_s', 'idle_s', 'idle_cpu_s'],
 }
 SKIP = {'family', 'time', 'samples', 'sample', 'n'}
@@ -24,13 +26,23 @@ def rows():
     latest = {}  # a rerun of the same case replaces the older row
     for r in out:
         key = tuple(r.get(k) for k in ('family', 'host', 'model', 'lang', 'direction', 'device', 'ref_lang', 'out_lang',
-                                         'case', 'no_spin', 'omp_wait_policy'))
+                                         'case', 'no_spin', 'omp_wait_policy', 'mode'))
         latest[key] = r
     return list(latest.values())
 
 
+def flat_cloud(r):
+    """Cloud rows keep latencies as {name: {med, p90}}; show 'med / p90' seconds."""
+    lat = r.get('lat', {})
+    pick = lambda *ks: next((f"{lat[k]['med']} / {lat[k]['p90']}" for k in ks if k in lat), None)  # noqa: E731
+    return {**r, 'setup_s': pick('setup'), 'first_out_from_start_s': pick('audio_from_start', 'text_from_start'),
+            'done_after_end_s': pick('audio_done_after_end', 'final_after_end')}
+
+
 def table(family, rs):
-    if family == 'tts':  # attach intelligibility from the judge pass
+    if family == 'cloud':
+        rs = [flat_cloud(r) for r in rs if r['family'] == 'cloud']
+    elif family == 'tts':  # attach intelligibility from the judge pass
         cer = {(r['host'], r['model'], r['lang']): r['cer'] for r in rs if r['family'] == 'tts_cer'}
         rs = [{**r, 'cer': cer.get((r['host'], r['model'], r['lang']))} for r in rs if r['family'] == 'tts']
     else:

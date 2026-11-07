@@ -244,6 +244,101 @@ Details: [`bench/notes/tts_clone.md`](../bench/notes/tts_clone.md).
 | vast-c-cpu8 | xtts | — | ru | en | cpu | — | 1.169 | 1.522 | 1.747 | 4406 | — | 0.44 | 0.338 | 0.006 | 9.79 |
 | vast-c-cpu8 | xtts | — | ru | ru | cpu | — | 1.407 | 1.648 | 1.806 | 4406 | — | 0.677 | 0.618 | 0.0701 | 9.79 |
 
+### Stage 1: the clone engine and the "me → them" path
+
+Measured 2026-11-07 for stage 1. Hosts: `vast-b-3060l` = NVIDIA RTX 3060 Laptop 12 GB on a shared
+Vast server (CUDA memory cap 0.6, 2 CPU threads); `vast-b-cpu8` / `vast-b-cpu2` = its AMD Ryzen 9
+7950X3D with 8 / 2 threads, CUDA hidden; `linux-x86_64-4c` = the 4-core dev server (PipeWire,
+pipeline, virtual mic), which was also running other heavy work, so its pipeline times are
+pessimistic. Same references, sentences and judge as the table above.
+
+**The engine as the app runs it** (`peresmeshnik.local.clone.XttsClone`: profile from
+`peresmeshnik.voice`, streaming, text split, pause cap, length guard; `bench/tts_clone.py --model
+xtts-engine`; the CPU rows ran before the pause cap, which does not change speed). Mean of the
+four ref → out cases; `cpu s / audio s` = process CPU per second of speech made.
+
+| host | sentences / lang | TTFA s (max) | RTF | CPU s / audio s | peak RSS MB | GPU MB | load s | conditioning s | spk-sim | CER |
+|---|---|---|---|---|---|---|---|---|---|---|
+| vast-b-3060l (final: with the pause cap) | 15 | 0.18 (0.20) | 0.23–0.25 | 0.23–0.25 | 4539 | 2133 | 7.9 | 0.05–0.17 | 0.541 | 0.029 |
+| vast-b-cpu8 | 6 | 1.10 (1.14) | 1.35–1.51 | 10.8–11.9 | 4366 | — | 7.6 | 0.2–0.35 | 0.517 | 0.088 |
+| vast-b-cpu2 | 2 | 1.44 (1.48) | 1.87–1.97 | 3.7–3.9 | 4502 | — | 7.6 | 0.53–0.56 | 0.503 | 0.051 |
+
+- On the GPU one CPU core stays busy while it speaks (CPU s / audio s ≈ RTF): the autoregressive
+  GPT step is bound by kernel launches. Load 8–10 s, GPU memory 2.0–2.2 GB.
+- On CPU it is **slower than real time** even on 8 threads of a desktop Ryzen (RTF 1.35–1.5); with
+  the app's default 2 threads RTF 1.9. Per-case values are in `bench/results/vast-b-*.jsonl`.
+- Same-language similarity 0.69–0.71 (ru), 0.64–0.65 (en); cross-lingual 0.37–0.44: as on the A4000.
+
+**Sampling vs the babble tail** (GPU, 15 sentences per output language, before the pause cap):
+temperature and top_p do not remove the tail; the differences are within the noise of one
+babbling sentence. Upstream defaults kept (0.75 / 0.85).
+
+| temperature / top_p | CER, English out | CER, Russian out | spk-sim |
+|---|---|---|---|
+| 0.75 / 0.85 | 0.006 | 0.059 | 0.540 |
+| 0.6 / 0.85 | 0.031 | 0.043 | 0.547 |
+| 0.6 / 0.7 | 0.069 | 0.035 | 0.537 |
+| 0.45 / 0.85 | 0.021 | 0.036 | 0.532 |
+
+**Pause cap and length guard.** In two runs of 60 sentences XTTS left 26 and 36 pauses ≥ 0.5 s
+inside a sentence (up to 2.5 s; 5–7 % of all audio). The engine cuts silences (20 ms frames below
+−40 dBFS) to 0.4 s while streaming. The length guard stops a sentence past `1 s + spoken chars / 8`
+(digits count as 5 chars, abbreviations letter by letter; real speech runs 12–20 chars/s): a
+safety net against runaway generation (XTTS may go on for up to ~26 s), it did not fire on any of
+the 344 outputs here. It cannot catch the usual babble: those 3–4 s of invented words after the
+text are no longer than a slow sentence with a pause. A simulation over the 344 outputs showed
+that a budget tight enough to cut 6 of them (`/ 11` before the pause cap) also cuts the end of
+slow sentences, and after the pause cap it cut only one sentence, wrongly. One-word tails after
+the last word (5–8 of 60 sentences, mostly Russian output) stay as well; stage 5 can try an
+attention-based stop.
+
+| same sentences | audio s | CER, English out | CER, Russian out | mean CER | spk-sim |
+|---|---|---|---|---|---|
+| raw XTTS (t0.75), 60 wavs | 418.3 | 0.006 | 0.059 | 0.033 | 0.540 |
+| the same 60 wavs, pause cap applied offline | 405.3 | 0.013 | 0.044 | 0.028 | 0.541 |
+| fresh streaming run with the pause cap | 406.9 | 0.012 | 0.045 | 0.029 | 0.541 |
+
+The CER changes are judge effects more than speech: with less trailing silence Whisper stops
+inventing its known Russian end-of-video credit line on one sentence (−), and on one English
+sentence starts transcribing a babble that the cap moved closer to the speech (+).
+
+**Enrollment checks** (`python -m peresmeshnik.voice check`): LibriSpeech reader 44.5 s, speech
+34.4 s, −22.8 dBFS, 45.6 dB above the background → OK. LibriVox reader (the "me" voice) 42.4 s,
+speech 20.3 s, −25.6 dBFS, 14.4 dB above the background → OK with a noise warning (fail below
+12 dB). The profile from it gives the same-language similarity above, so the thresholds do not
+reject a usable home recording. Recording through PortAudio → PipeWire (`enroll --record 35`)
+works on the dev server.
+
+**Virtual microphone** (`peresmeshnik.audio.virtual_mic_linux`, PipeWire 1.0.5 + pipewire-pulse):
+a tone round trip keeps frequency, level and length; play → audio at the `Peresmeshnik Mic`
+source as a call app records it: **10–61 ms** (the first chunk after the stream opens 38–61 ms,
+then 10–37 ms); CPU of the output path 0.01–0.017 s per second of audio (our process + pacat).
+`pacat` itself spins a core if its stdin closes while it still holds audio (0.64 s CPU for a 0.7 s
+tail), so the writer closes it only after the written audio has played.
+
+**End to end** (`bench/me_them.py run --remote`): 33 s of the "me" reader in Russian (other lines
+than the enrollment) → S1's `LocalDirection` (Silero VAD, Parakeet v3, OPUS-MT ru-en, here on the
+dev server) with the clone TTS on server B behind a pipe (`me_them.py serve`) → `Peresmeshnik Mic`
+→ recorded back from the source → Whisper-small. Per clause: `caption` = clause end → translated
+caption (ASR + MT, S1), `after caption` = caption → translated audio at the virtual mic (clone
+first audio incl. ~45 ms network + queue behind the previous clause + virtual mic).
+
+| clone on | clauses | caption lag s | after caption s, median (range) | clone first audio s (server) | clone RTF | WER of the recording vs MT text | spk-sim, recording vs "me" (vs another speaker) |
+|---|---|---|---|---|---|---|---|
+| RTX 3060 Laptop | 9 | 2.2–5.1 | 0.33 (0.26–2.87) | 0.22–0.28 (0.17–0.23) | 0.22 | 0.036 (direct TTS output: 0.036) | 0.44 (−0.07) |
+| 8 CPU threads | 9 | 2.4 → 16.1 | 1.17 (1.14–1.18) | 1.10–1.15 (1.05–1.11) | 1.35 | 0.024 (0.024) | 0.46 (−0.05) |
+
+- The path is lossless: the recording from the virtual mic transcribes exactly like the TTS output
+  itself; the voice in it is the clone (0.44–0.46 vs the profile, the cross-lingual level of
+  XTTS; another speaker −0.05..−0.07; the real Russian input 0.88).
+- With the GPU clone, translated audio is at the call app's mic **0.26–0.33 s after the caption**
+  when it does not queue; it queues (up to 2.9 s) when clauses come in bursts and the previous
+  translation is still playing. The caption lag itself (2.2–5.1 s) is S1's ASR on the busy dev
+  server: Parakeet partials ran at RTF 1.0 there under `nice 19`, see S1's rows for a free machine.
+- With the CPU clone (RTF 1.35) the TTS holds the speak worker, so the lag grows through the run
+  (caption 2.4 s → 16 s, the voice ~1.2 s behind it): not live, as expected; the queue policy
+  (speed-up, then drop past 3 clauses) has to handle it, and captions should not wait for the TTS.
+
 ### Cloud: Gemini Live
 
 Measured from the dev server (Europe), Saturday 20:14–20:45 UTC, three runs per cell for

@@ -25,7 +25,7 @@ from peresmeshnik.engines import Voice
 SR = 24_000
 COND_SR, REF_S = 22_050, 30  # XTTS conditions on at most 30 s at 22.05 kHz
 PAUSE_S, QUIET_DB = 0.4, -40.0  # XTTS sometimes stops for 1-2.5 s mid-sentence; longer pauses are cut to this
-SLOW_CPS = 11.0  # spoken chars per second: real XTTS speech is 12-20 (BENCH); beyond the budget it babbles
+SLOW_CPS = 8.0  # spoken chars per second; real XTTS speech is 12-20 (BENCH): a safety net for runaway generation
 FADE = SR // 100
 
 

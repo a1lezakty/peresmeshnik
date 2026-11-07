@@ -103,7 +103,23 @@ def load_cosyvoice(device, stream):
     return clone, synth, m.sample_rate
 
 
-MODELS = {'xtts': load_xtts, 'chatterbox': load_chatterbox, 'cosyvoice': load_cosyvoice}
+def load_engine(device, stream):
+    """The app's clone engine (peresmeshnik.local.clone): enrollment profile, text split, length guard."""
+    from peresmeshnik import voice
+    from peresmeshnik.local.clone import XttsClone
+    e = XttsClone(os.environ['XTTS_DIR'], device=device, threads=THREADS,
+                  temperature=float(os.environ.get('XTTS_TEMPERATURE', 0.75)), top_p=float(os.environ.get('XTTS_TOP_P', 0.85)))
+
+    def clone(lang):
+        x, sr = voice.read_audio(ref(lang)[0])
+        return e.enroll(x, sr, ref(lang)[1], name=f'ref_{lang}', lang=lang, root=OUT / 'voices')
+
+    def synth(text, lang, cond, ref_lang):
+        yield from e.synth(text, lang, cond)
+    return clone, synth, e.sample_rate
+
+
+MODELS = {'xtts': load_xtts, 'chatterbox': load_chatterbox, 'cosyvoice': load_cosyvoice, 'xtts-engine': load_engine}
 
 
 def synth_main(a):
@@ -111,13 +127,15 @@ def synth_main(a):
     torch.set_num_threads(THREADS)
     if a.device == 'cuda':
         torch.cuda.set_per_process_memory_fraction(a.gpu_mem_frac)  # shared GPU: stay inside the cap
-    out = OUT / a.model
+    out = OUT / (a.label or a.model)
     out.mkdir(parents=True, exist_ok=True)
     with Timer() as tl:
         clone, synth, sr = MODELS[a.model](a.device, not a.no_stream)
-    run = {'model': a.model, 'device': a.device, 'stream': not a.no_stream and a.model != 'chatterbox',
+    run = {'model': a.label or a.model, 'device': a.device, 'stream': not a.no_stream and a.model != 'chatterbox',
            'threads': THREADS, 'torch': torch.__version__, 'load_s': round(tl.s, 2),
-           'rss_after_load_mb': peak_rss_mb(), 'cases': []}
+           'rss_after_load_mb': peak_rss_mb(), 'cases': [],
+           'temperature': float(os.environ.get('XTTS_TEMPERATURE', 0.75)) if a.model == 'xtts-engine' else None,
+           'top_p': float(os.environ.get('XTTS_TOP_P', 0.85)) if a.model == 'xtts-engine' else None}
     sents = sentences(a.n)
     for ref_lang in LANGS:
         with Timer() as tc:
@@ -128,7 +146,7 @@ def synth_main(a):
                     pass
             items = []
             for s in sents[out_lang]:
-                text, chunks = s[out_lang]['text'], []
+                text, chunks, cpu0 = s[out_lang]['text'], [], time.process_time()
                 with Timer() as ts:
                     for c in synth(text, out_lang, cond, ref_lang):
                         if not chunks:
@@ -138,7 +156,8 @@ def synth_main(a):
                 path = out / f'{ref_lang}2{out_lang}_{s["id"]}.wav'
                 sf.write(path, wav, sr)
                 items.append({'id': s['id'], 'text': text, 'wav': str(path), 'ttfa_s': round(ttfa, 3),
-                              'synth_s': round(ts.s, 3), 'audio_s': round(len(wav) / sr, 3)})
+                              'synth_s': round(ts.s, 3), 'audio_s': round(len(wav) / sr, 3),
+                              'cpu_s': round(time.process_time() - cpu0, 3)})
                 print(ref_lang, out_lang, items[-1], flush=True)
             run['cases'].append({'ref_lang': ref_lang, 'out_lang': out_lang, 'clone_s': round(tc.s, 2), 'items': items})
     run['peak_rss_mb'] = peak_rss_mb()
@@ -193,14 +212,15 @@ class Judge:
 
 
 def eval_main(a):
-    run = json.loads((OUT / a.model / 'run.json').read_text(encoding='utf-8'))
+    name = a.label or a.model
+    run = json.loads((OUT / name / 'run.json').read_text(encoding='utf-8'))
     j = Judge()
     refs = {lang: j.emb(ref(lang)[0]) for lang in LANGS}
     for c in run['cases']:
         it, e, n, sims = c['items'], 0, 0, []
         for x in it:
             if not Path(x['wav']).exists():  # wavs copied from another host
-                x['wav'] = str(OUT / a.model / Path(x['wav']).name)
+                x['wav'] = str(OUT / name / Path(x['wav']).name)
             sims.append(float(j.emb(x['wav']) @ refs[c['ref_lang']]))
             de, dn, x['hyp'] = j.cer(x['wav'], x['text'], c['out_lang'])
             e, n = e + de, n + dn
@@ -211,9 +231,10 @@ def eval_main(a):
                ttfa_s=round(np.mean([x['ttfa_s'] for x in it]), 3), ttfa_max_s=max(x['ttfa_s'] for x in it),
                synth_s=round(synth / len(it), 3), audio_s=round(audio, 2), rtf=round(synth / audio, 3),
                peak_rss_mb=run['peak_rss_mb'], rss_after_load_mb=run['rss_after_load_mb'], gpu_peak_mb=run.get('gpu_peak_mb'),
-               torch=run.get('torch'), stream=run.get('stream'),
+               torch=run.get('torch'), stream=run.get('stream'), temperature=run.get('temperature'), top_p=run.get('top_p'),
+               cpu_per_audio_s=round(sum(x['cpu_s'] for x in it) / audio, 3) if 'cpu_s' in it[0] else None,
                spk_sim=round(np.mean(sims), 3), spk_sim_min=round(min(sims), 3), cer=round(e / n, 4))
-    (OUT / a.model / 'eval.json').write_text(json.dumps(run, ensure_ascii=False, indent=1), encoding='utf-8')
+    (OUT / name / 'eval.json').write_text(json.dumps(run, ensure_ascii=False, indent=1), encoding='utf-8')
 
 
 def baseline_main(a):
@@ -245,6 +266,7 @@ def main():
     ap.add_argument('--device', default='cpu', choices=['cpu', 'mps', 'cuda'])
     ap.add_argument('--n', type=int, default=6, help='sentences per language')
     ap.add_argument('--no-stream', action='store_true', help='full utterances (CosyVoice streaming on CPU is ~3x slower)')
+    ap.add_argument('--label', help='results name (default: --model), e.g. one per setting')
     ap.add_argument('--gpu-mem-frac', type=float, default=0.6, help='CUDA memory cap for this process')
     a = ap.parse_args()
     {'synth': synth_main, 'eval': eval_main, 'baseline': baseline_main}[a.step](a)

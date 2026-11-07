@@ -28,7 +28,7 @@ def rows():
     latest = {}  # a rerun of the same case replaces the older row
     for r in out:
         key = tuple(r.get(k) for k in ('family', 'host', 'model', 'lang', 'direction', 'device', 'ref_lang', 'out_lang',
-                                         'case', 'no_spin', 'omp_wait_policy', 'mode'))
+                                         'case', 'no_spin', 'omp_wait_policy', 'mode', 'voice'))
         latest[key] = r
     return list(latest.values())
 
@@ -45,8 +45,9 @@ def table(family, rs):
     if family == 'cloud':
         rs = [flat_cloud(r) for r in rs if r['family'] == 'cloud']
     elif family == 'tts':  # attach intelligibility from the judge pass
-        cer = {(r['host'], r['model'], r['lang']): r['cer'] for r in rs if r['family'] == 'tts_cer'}
-        rs = [{**r, 'cer': cer.get((r['host'], r['model'], r['lang']))} for r in rs if r['family'] == 'tts']
+        cer = {(r['host'], r['model'], r['lang'], r.get('voice')): r['cer'] for r in rs if r['family'] == 'tts_cer'}
+        key = lambda r, v: (r['host'], r['model'], r['lang'], v)  # noqa: E731  (older judge rows carry no voice)
+        rs = [{**r, 'cer': cer.get(key(r, r.get('voice')), cer.get(key(r, None)))} for r in rs if r['family'] == 'tts']
     else:
         rs = [r for r in rs if r['family'] == family]
     if not rs:

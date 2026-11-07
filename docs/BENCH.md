@@ -11,7 +11,7 @@ by `python bench/report.py`. Measured 2026-11-07.
 | `vast-a-cpu4` | AMD Ryzen 5 5600X, **4 threads**, CUDA hidden (shared Vast server) | **x86 CPU** laptop stand-in |
 | `vast-a-rtx3060` | same server, NVIDIA RTX 3060 12 GB | the **NVIDIA** tier |
 | `vast-c-cpu8`, `vast-c-a4000` | Intel i7-13700, 8 threads / NVIDIA RTX A4000 16 GB (shared Vast server) | voice-clone TTS (too big for the other hosts) |
-| `linux-x86_64-4c` | the dev server, 4 cores, 7.6 GB (busy, swapping) | Gemini Live runs (network only); one early XTTS run (pessimistic) |
+| `linux-x86_64-4c` | the dev server, AMD EPYC-Genoa, 4 cores, 7.6 GB (shared, at times swapping) | Gemini Live runs (network only); Piper voices; one early XTTS run (pessimistic) |
 
 All CPU runs pin every thread pool (`--threads`, `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`) and
 run under `nice`; the Vast servers host other services, so absolute times can be a few percent
@@ -164,9 +164,23 @@ reference: *This new environment has different resources and different competito
 ### TTS without cloning
 
 10 shortest sentences per language. `cer` = Whisper-small back-transcription vs the input text.
+Piper (GPL) runs as its own process through the upstream CLI, never imported; that CLI has no
+thread option and its onnxruntime pool takes one thread per physical core (`taskset` does not
+bound it), so `threads` for Piper rows is the host's core count. The chosen voices (`john`,
+`joe`, `dmitri`; `denis` rejected for intelligibility) were measured on the dev server
+(`linux-x86_64-4c`, 4 cores, shared): one run there under load gave 380–470 ms for
+`irina`/`dmitri`, the rerun 231–267 ms is kept. On that host the chosen voices are within ~30 % of
+`lessac`/`irina`, which are the Piper voices measured on `macos-15` and `vast-a-cpu4` (those rows
+come from an earlier in-process version of the script).
 
 | host | model | lang | voice | ttfa_ms_median | rtf | cpu_cores | peak_rss_mb | cer | load_s |
 |---|---|---|---|---|---|---|---|---|---|
+| linux-x86_64-4c | piper | en | en_US-joe-medium | 208 | 0.045 | 3.72 | 295 | 0.0303 | 1.9 |
+| linux-x86_64-4c | piper | en | en_US-john-medium | 269 | 0.051 | 3.36 | 370 | 0.0182 | 4.3 |
+| linux-x86_64-4c | piper | en | en_US-lessac-medium | 211 | 0.048 | 3.58 | 293 | 0.0145 | 4.1 |
+| linux-x86_64-4c | piper | ru | ru_RU-denis-medium | 212 | 0.06 | 3.26 | 324 | 0.1029 | 3.9 |
+| linux-x86_64-4c | piper | ru | ru_RU-dmitri-medium | 231 | 0.061 | 3.24 | 317 | 0.0593 | 1.9 |
+| linux-x86_64-4c | piper | ru | ru_RU-irina-medium | 267 | 0.04 | 3.79 | 356 | 0.047 | 1.9 |
 | macos-15 | piper | en | en_US-lessac-medium | 232 | 0.057 | 2.95 | 476 | 0.0097 | 5.8 |
 | macos-15 | piper | ru | ru_RU-irina-medium | 265 | 0.043 | 2.95 | 487 | 0.0526 | 5.3 |
 | macos-15 | silero | en | v3_en/en_0 | 410 | 0.102 | 1.85 | 1322 | 0.0218 | 7.7 |

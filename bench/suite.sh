@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run a benchmark suite one model at a time:  bench/suite.sh asr|mt|tts [extra args for every run]
 # Each run is a separate process (clean peak RSS). LOCK=<file> serialises heavy runs with other jobs.
+# Exit code: 0 all runs passed, 1 some run failed, 2 unknown suite.
 
 cd "$(dirname "$0")"
 PY=${PY:-python}
@@ -8,7 +9,8 @@ suite=$1; shift
 # numpy/BLAS/OpenMP pools default to all cores: pin them to --threads too
 T=4; prev=; for x in "$@"; do [ "$prev" = --threads ] && T=$x; prev=$x; done
 export OMP_NUM_THREADS=$T OPENBLAS_NUM_THREADS=$T MKL_NUM_THREADS=$T VECLIB_MAXIMUM_THREADS=$T
-run() { echo "== $*"; ${LOCK:+flock "$LOCK"} nice -n 10 "$PY" "$@" || echo "FAILED: $*"; }
+failed=0
+run() { echo "== $*"; ${LOCK:+flock "$LOCK"} nice -n 10 "$PY" "$@" || { echo "FAILED: $*"; failed=$((failed + 1)); }; }
 case $suite in
   asr)
     for lang in en ru; do
@@ -22,7 +24,8 @@ case $suite in
       for g in ${GGUF:-}; do run mt.py llama $d --gguf "$g" "$@" --device "${LLAMA_DEVICE:-cpu}"; done
     done ;;
   tts)
-    for lang in en ru; do
-      for e in piper silero; do run tts.py $e $lang "$@"; run tts.py judge $e $lang; done
-    done ;;
+    for v in ${VOICES:-joe john denis dmitri silero-en silero-ru}; do run tts.py run $v "$@"; run tts.py judge $v "$@"; done ;;
+  *)
+    echo "unknown suite: $suite"; exit 2 ;;
 esac
+[ $failed = 0 ] || { echo "$failed run(s) failed"; exit 1; }

@@ -89,9 +89,9 @@ RTX 3060 / A4000. Row names refer to BENCH.md tables.
 | final ASR on a ~3 s clause | ~0.12 s | ~0.13 s | asr `utt_latency_ms` scaled from 10 s |
 | MT, OPUS-MT | 112–226 ms | 57–67 ms | mt |
 | **subtitle, translation (after clause end)** | **≈ 0.55–0.65 s** | **≈ 0.5 s** | |
-| TTS first audio, Piper | 232–265 ms | 125–172 ms | tts `ttfa_ms_median` |
+| TTS first audio, Piper (`lessac`/`irina`; the chosen `john`/`dmitri` are within ~30 % of them on one host, §6) | 232–265 ms | 125–172 ms | tts `ttfa_ms_median` |
 | output buffer | 40 ms | 40 ms | design |
-| **clause end → voice** | **≈ 0.8–0.95 s** | **≈ 0.65 s** | |
+| **clause end → voice** | **≈ 0.8–0.95 s** | **≈ 0.65–0.71 s** | |
 | **voice, ear–voice span** (clauses of 2–3 s: a word is on average 1–1.5 s before the clause end) | **≈ 1.8–2.5 s** | **≈ 1.7–2.2 s** | target 1.5–2.5 s ✓ |
 
 Clause length drives the voice latency: the segmenter cuts at pauses ≥ 300 ms, at ASR
@@ -102,7 +102,7 @@ punctuation and hard at 5 s, so the worst case (first word of a 5 s clause) is �
 | Clone TTS first audio / RTF | M1 | x86 CPU | NVIDIA |
 |---|---|---|---|
 | XTTS-v2 streaming | not live: M1 runner CPU TTFA 4.5–5.3 s, RTF 6.5–8.2 | TTFA 1.2–1.4 s, RTF 1.8 (8 threads) → falls behind | **TTFA 0.14 s, RTF 0.17** → voice ≈ 1.6–2.1 s ✓ |
-| Chatterbox Multilingual | — (7 GB on CPU) | RTF 3.3 | RTF 0.4, ~2.5 s per sentence (no streaming) → ≈ 3.5–4 s |
+| Chatterbox Multilingual | — (7 GB on CPU) | RTF 3.3–3.5 | RTF 0.4, ~2.5 s per sentence (no streaming) → ≈ 3.5–4 s |
 
 **Cloud (Gemini Live), measured from the dev server in Europe, Saturday evening**
 
@@ -114,8 +114,9 @@ punctuation and hard at 5 s, so the worst case (first word of a 5 s clause) is �
 | transcribe-live: first word after speech start | 1.0 s | 1.3 s |
 | transcribe-live: final text after speech end, local VAD sends `audio_stream_end` | 0.65–0.68 s | 0.77–0.93 s |
 
-Gemini's voice runs ~1 s behind the local estimate and its subtitles miss 0.3–0.5 s, so even
-in cloud mode the subtitles come from the local ASR (Parakeet costs ~0.1 CPU s per audio s).
+Gemini's voice runs ~1 s behind the local estimate and its subtitles miss the 0.3–0.5 s target,
+so even in cloud mode the subtitles come from the local ASR (Parakeet costs ~0.1 CPU s per audio s
+on M1, 0.17–0.18 on x86).
 
 ## 5. CPU and memory
 
@@ -124,7 +125,7 @@ Requirement from day one (Zagon 0.1.2 burned 104 % CPU on a redraw loop):
 **Idle (app open, translation off):** ~0 CPU. No timers, no polling, no redraws. Audio streams
 are closed, `Direction.close()` has unloaded the engines or left them without busy threads. CI
 gate: `tests/test_idle_cpu.py` starts the app, waits 60 s and fails above **0.13 s CPU** (Linux,
-macOS, Windows on every push and PR). Stage 1 adds the same gate in working mode on a recording
+macOS, Windows on pushes to main and on PRs). Stage 1 adds the same gate in working mode on a recording
 (RTF and CPU per audio second; numbers in BENCH.md).
 
 **Working:**
@@ -148,9 +149,9 @@ RAM = peak RSS of the model's own process):
 | ASR GigaAM v3 e2e (RU, ≥ 16 GB) | 2 | 0.16 / 0.15 | 1.7–1.8 GB | fp32; int8 to try in stage 1 |
 | ASR T-one (RU partials, ≥ 16 GB) | 1 | 0.21 / 0.19 | 0.7 GB | 12–19 ms per 300 ms chunk |
 | MT OPUS-MT (per direction) | 2 | a burst of ~60 ms per clause | 0.17 GB | load 0.3 s |
-| TTS Piper (separate process) | 2 | RTF 0.03–0.06 | 0.4–0.5 GB | |
-| Clone XTTS-v2 | GPU (+1 CPU) | CPU RTF 1.8 → not live | 3.8–4.5 GB RAM, 2.1 GB VRAM | |
-| Clone Chatterbox | GPU | CPU RTF 3.3 → not live | 5–7 GB RAM, 3.7 GB VRAM | |
+| TTS Piper (own process, §10) | 2 | RTF 0.03–0.06 | 0.3–0.5 GB | |
+| Clone XTTS-v2 | GPU (+1 CPU) | CPU RTF 1.8 → not live | 3.6–4.5 GB RAM, 2.1 GB VRAM | |
+| Clone Chatterbox | GPU | CPU RTF 3.3–3.5 → not live | 5–7 GB RAM, 3.7 GB VRAM | |
 | Gemini Live session | — | ~0 (network, 56–66 MB process) | — | |
 
 Concurrently busy threads stay ≤ the number of performance cores (4 on M1): ASR, MT and TTS of
@@ -175,8 +176,8 @@ so the first switch-on shows "warming up".
 | ASR, English | **Parakeet TDT 0.6B v3**, int8, via onnx-asr | WER 4.6–4.8 %, the same as Whisper large-v3-turbo, at 106–169 ms per 2 s window vs turbo's 5.4–10.4 s; RTF 0.04; also does Russian | Whisper: pads every window to 30 s, so a 2 s refresh costs 1.1 s (small) to 10 s (turbo) on CPU; on M1 CPU turbo is slower than real time (RTF 1.2). Whisper turbo stays for other languages on GPU (0.3 s per utterance). |
 | ASR, Russian | 8 GB: **Parakeet v3** (one model for both languages, WER 7.6–8.3 %). ≥ 16 GB: **GigaAM v3 e2e CTC** for final text (WER 5.6 %, punctuation) + **T-one** for partials (12–19 ms per 300 ms chunk) | memory vs accuracy | T-one alone: WER 13 % on FLEURS (it is an 8 kHz telephony model; real call audio may favour it — re-check in stage 2); Whisper medium/turbo: 3–10 s per window on CPU |
 | MT | **OPUS-MT** en-ru / ru-en, CTranslate2 int8 | chrF 59.5 / 59.9 at 57–67 ms per sentence, 0.17 GB, CC-BY | NLLB-600M: chrF 57.7 / 63.6 but 0.6–0.75 s and noncommercial. HY-MT1.5-1.8B: 54.8 / 62.2, 1.5–2 s on CPU. HY-MT1.5-7B: best ru-en (65.7) but 6–10 s on CPU, 0.5–1.1 s on GPU, 4.7 GB — optional "quality" MT on the NVIDIA tier for ru → en only. Gemini translate: 58–62. |
-| TTS, stock voice (them → me) | **Piper**, separate process; voices `en_US-joe`/`john` (CC0 / public domain), `ru_RU-denis`/`dmitri` (CC0) | TTFA 0.13–0.27 s, RTF 0.03–0.06, back-transcription CER 1–5 %, 0.4–0.5 GB | Silero: TTFA 0.2–0.4 s, 1–1.3 GB with torch, CC-BY-NC-SA |
-| Clone TTS (me → them) | NVIDIA: **XTTS-v2** streaming with a length/tail guard (TTFA 0.14 s, RTF 0.17); **Chatterbox** as the "better likeness" option (speaker similarity 0.52–0.78 vs XTTS 0.35–0.68, cross-lingual ru → en 0.68–0.70 vs 0.40–0.44, but RTF 0.4 without streaming). CPU / M1: no live local clone — Gemini translate (keeps pitch and gender, F0 correlation 0.92–0.95, not a true clone) until stage 3 measures MPS on the user's M1 Pro | similarity baseline: two different speakers 0.085, same speaker 0.90–0.93 | CosyVoice3: 8.4–8.8 GB RAM, RTF 1.2–2 even on the A4000, truncates Russian |
+| TTS, stock voice (them → me) | **Piper** in its own process (§10); voices **`en_US-john`** (public domain) and **`ru_RU-dmitri`** (CC0), `en_US-joe` (CC0) as a second English voice | chosen voices on the dev server (4 cores): TTFA 0.21–0.27 s, RTF 0.05–0.06, back-transcription CER 1.8 % (john), 3.0 % (joe), 5.9 % (dmitri), 0.3–0.37 GB; on that host they are within ~30 % of `lessac`/`irina`, the voices measured on M1 (0.23–0.27 s) and on the x86 host (0.13–0.17 s) | `ru_RU-denis` (CC0): CER 10.3 %; `lessac`/`irina`: research-only or unknown data licenses; Silero: TTFA 0.2–0.4 s, 1–1.3 GB with torch, CC-BY-NC-SA |
+| Clone TTS (me → them) | NVIDIA: **XTTS-v2** streaming with a length/tail guard (TTFA 0.14 s, RTF 0.17); **Chatterbox** as the "better likeness" option (speaker similarity 0.52–0.78 vs XTTS 0.35–0.68, cross-lingual ru → en 0.68–0.70 vs 0.40–0.44, but RTF 0.4 without streaming). CPU / M1: no live local clone — Gemini translate (keeps pitch and gender, F0 correlation 0.92–0.95, not a true clone) until stage 3 measures MPS on a real M1 Pro | similarity baseline: two different speakers 0.085, same speaker 0.90–0.93 | CosyVoice3: 8.4–8.8 GB RAM, RTF 1.2–2 even on the A4000, truncates Russian |
 | Cloud | **Gemini Live**: `gemini-3.5-live-translate-preview` per direction for voice; subtitles local (or `gemini-3.5-transcribe-live` when the machine is too weak) | see §4 | |
 
 Recommended default on M1 8 GB: **them → me local, me → them cloud**.
@@ -253,14 +254,18 @@ RTF; the user can override it in settings.
 - GPU: macOS uses CoreML/Metal where it pays (llama.cpp Metal, onnxruntime CoreML EP);
   NVIDIA builds use the CUDA variants of onnxruntime/CTranslate2/llama.cpp from the same voice-
   pack mechanism.
-- GPL tools (Piper, espeak-ng) are never imported; if used, they run as separate processes.
+- Piper (GPL, with espeak-ng) is never imported: it runs as its own process. Its upstream CLI has
+  no thread option and onnxruntime pins its default pool to every physical core (`taskset` does
+  not bound it — found in the bench), so the app ships a tiny Piper runner as a separate GPL-3.0
+  package that sets `intra_op_num_threads` and `allow_spinning=0`; the app talks to it over
+  stdin/stdout.
 - CI builds artifacts only on tags (`release.yml`), tests on push/PR as now.
 
 ## 11. Open questions and risks
 
 1. **Voice clone on M1.** No local clone model is live on CPU (XTTS RTF 1.8 on 8 i7 threads,
    ~4 GB RAM; Chatterbox 7 GB). GitHub's M1 runner has no Metal for torch, so MPS is unmeasured:
-   stage 3 measures XTTS/Chatterbox on the user's M1 Pro. Fallback: cloud for me → them.
+   stage 3 measures XTTS/Chatterbox on a real M1 Pro. Fallback: cloud for me → them.
    Research (stage 5): fast TTS + our own timbre converter on FocalCodec.
 2. **Clone quality.** XTTS adds garbage tails after the sentence (most of its CER) → length and
    energy guard; cross-lingual similarity is modest (0.35–0.44); CosyVoice3 truncates Russian.
@@ -270,7 +275,7 @@ RTF; the user can override it in settings.
    (~$0.037/min translate); on the free tier Google uses the data — the app says so and suggests
    a paid key for real calls.
 4. **Real calls ≠ FLEURS.** Read speech here; calls bring codecs, noise, overlap and accents —
-   WER will be higher. Stage 2 adds consented recordings of the user's own calls to the bench.
+   WER will be higher. Stage 2 adds consented recordings of real calls to the bench.
 5. **Capture APIs.** macOS process taps from Python (PyObjC coverage) and muting the original
    on Windows with process loopback are unproven → spikes in stages 3 and 4, with virtual-cable
    fallbacks.

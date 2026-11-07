@@ -1,7 +1,7 @@
 # Plan: stages 1–6
 
 Engines and numbers: [ARCHITECTURE.md](ARCHITECTURE.md) §6 and [BENCH.md](BENCH.md). Every stage
-is one branch (`stage-N`) with a few large commits, reviewed and merged by the lead.
+is one branch (`stage-N`) with a few large commits, reviewed before merge.
 
 ## Three parallel streams
 
@@ -22,7 +22,7 @@ segmentation and threading generic over `Tts`, S2 plugs in the clone TTS and the
 
 ## Stage 1 — first end-to-end probe on Linux (files and PipeWire) — ≈ 40 h
 
-Goal: as early as possible, a full round trip on this Linux machine without a real call.
+Goal: as early as possible, a full round trip on a Linux dev box without a real call.
 
 | Stream | Work | Hours |
 |---|---|---|
@@ -52,7 +52,7 @@ Exit: a real Meet/Telegram call on Linux works in both directions; idle and work
 | S2 | BlackHole 2ch routing, wizard pages, clone engine on M1 (MPS/CPU per BENCH), memory fit on 8 GB | 12 |
 | S3 | hotkey (`RegisterEventHotKey`), menu-bar icon (template image), `.app` + `.dmg` ad-hoc signed, `release.yml` on tags, CPU gates on macos-15 | 12 |
 
-Exit: **0.1.0** for macOS; the user's live check on M1 Pro (subtitles, voice both ways, hotkey,
+Exit: **0.1.0** for macOS; a live check on a real M1 Pro (subtitles, voice both ways, hotkey,
 CPU in Activity Monitor).
 
 ## Stage 4 — Windows and NVIDIA — ≈ 32 h
@@ -63,7 +63,7 @@ CPU in Activity Monitor).
 | S2 | VB-Cable routing and wizard pages; CUDA voice pack (onnxruntime-gpu / CTranslate2 CUDA / torch CUDA) | 12 |
 | S3 | hotkey (`RegisterHotKey`), tray, installer (Inno Setup) + zip, release on `windows-latest` | 10 |
 
-Exit: **0.2.0**; Windows and the NVIDIA path checked by the user's tester.
+Exit: **0.2.0**; Windows and the NVIDIA path checked by a tester on Windows/NVIDIA.
 
 ## Stage 5 — quality and latency — ≈ 30 h
 
@@ -78,5 +78,5 @@ Registry by language pair: ASR (Parakeet v3 covers 25 European languages, Whispe
 (HY-MT1.5 33 languages / OPUS-MT per pair / NLLB-200), TTS and clone per language (XTTS 17,
 Chatterbox 23); language picker; one BENCH row set per added language; **0.3.0**.
 
-Total ≈ 206 h of agent work; S1/S2/S3 run in parallel inside each stage, so wall time is about
+Total ≈ 206 h of work; S1/S2/S3 run in parallel inside each stage, so wall time is about
 a third of that plus reviews.

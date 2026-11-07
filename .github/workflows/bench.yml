@@ -15,6 +15,9 @@ on:
   pull_request:
     types: [labeled]
 
+permissions:
+  contents: read
+
 jobs:
   plan:
     if: github.event_name == 'workflow_dispatch' || startsWith(github.event.label.name, 'bench')
@@ -27,10 +30,15 @@ jobs:
           INPUT: ${{ github.event.inputs.suites }}
           LABEL: ${{ github.event.label.name }}
         run: |
-          if [ -n "$INPUT" ]; then s=$INPUT
-          elif [ "$LABEL" = bench ]; then s='["asr", "mt", "tts", "clone"]'
-          else s="[\"${LABEL#bench-}\"]"; fi
-          echo "suites=$s" >> "$GITHUB_OUTPUT"
+          python3 - >> "$GITHUB_OUTPUT" <<'EOF'
+          import json, os
+          allowed = ['asr', 'mt', 'tts', 'clone']
+          inp, label = os.environ['INPUT'], os.environ['LABEL']
+          suites = json.loads(inp) if inp else allowed if label == 'bench' else [label.removeprefix('bench-')]
+          if not isinstance(suites, list) or not suites or any(s not in allowed for s in suites):
+              raise SystemExit(f'unknown suite in {suites!r}; allowed: {allowed}')
+          print('suites=' + json.dumps(suites))
+          EOF
 
   bench:
     needs: plan
@@ -86,9 +94,11 @@ jobs:
           echo "GGUF=$PWD/models/gguf/HY-MT1.5-1.8B-Q4_K_M.gguf $PWD/models/gguf/HY-MT1.5-7B-Q4_K_M.gguf" >> $GITHUB_ENV
       - name: Run ${{ matrix.suite }}
         if: matrix.suite != 'clone'
+        env:
+          SUITE: ${{ matrix.suite }}
         run: |
-          [ "$RUNNER_OS" = macOS ] && [ ${{ matrix.suite }} = mt ] && export LLAMA_DEVICE=metal
-          PY=$PWD/.bench/bin/python bench/suite.sh ${{ matrix.suite }} --threads 3
+          if [ "$RUNNER_OS" = macOS ] && [ "$SUITE" = mt ]; then export LLAMA_DEVICE=metal; fi
+          PY=$PWD/.bench/bin/python bench/suite.sh "$SUITE" --threads 3
       - name: Voice clone
         if: matrix.suite == 'clone'
         run: bench/clone_ci.sh

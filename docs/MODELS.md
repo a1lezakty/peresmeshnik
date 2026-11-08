@@ -53,11 +53,20 @@ Checked 2026-11-07 from the model cards and license files linked below.
 | [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) | Windows virtual microphone | donationware, no redistribution |
 | PipeWire / PulseAudio | Linux, devices created by the app at run time | MIT / LGPL |
 
+## Libraries the app ships with (UI)
+
+| Library | Role | License |
+|---|---|---|
+| [Qt 6](https://www.qt.io/) via [PySide6-Essentials](https://pypi.org/project/PySide6-Essentials/) | tray, subtitle overlay, settings, setup wizard | LGPL-3.0 (Qt and PySide6 as shared libraries, unmodified; the user may swap them) |
+| [jeepney](https://gitlab.com/takluyver/jeepney) | Linux: D-Bus for the XDG GlobalShortcuts portal (hotkey on Wayland) | MIT |
+| libX11 (system) | Linux: hotkey on X11 (`XGrabKey` through ctypes) | MIT/X11 |
+
 ## Benchmark data (not shipped)
 
 | Data | Use | License |
 |---|---|---|
 | [FLEURS](https://huggingface.co/datasets/google/fleurs) en_us, ru_ru dev | ASR WER, MT references (parallel sentences) | CC-BY-4.0 |
 | FLEURS, 3 + 3 sentences in [`tests/data/`](../tests/data) | 30 s test recordings for the pipeline and the working-mode CPU gate | CC-BY-4.0, attribution in its README |
+| FLEURS, 1 + 1 sentences in [`peresmeshnik/ui/samples/`](../peresmeshnik/ui/samples) (shipped) | the setup wizard's test phrase | CC-BY-4.0, attribution in its README |
 | [LibriSpeech](https://www.openslr.org/12) test-clean | English voice reference for cloning | CC-BY-4.0 |
 | [Russian LibriSpeech](https://huggingface.co/datasets/bond005/rulibrispeech) test (LibriVox) | Russian voice reference for cloning | public domain recordings |

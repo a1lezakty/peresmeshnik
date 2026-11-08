@@ -1,0 +1,280 @@
+"""Tray icon and its menu, and the settings window over `config.py`.
+
+Without a system tray (GNOME without the AppIndicator extension, a bare X server) the same menu
+sits on a button in a small window. Nothing here repaints or polls: the menu changes only when
+the state does.
+"""
+from __future__ import annotations
+
+import logging
+import sys
+from pathlib import Path
+
+from PySide6.QtCore import QObject
+from PySide6.QtGui import QActionGroup, QIcon, QKeySequence
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QKeySequenceEdit,
+    QLabel,
+    QLineEdit,
+    QMenu,
+    QPushButton,
+    QSpinBox,
+    QSystemTrayIcon,
+    QVBoxLayout,
+    QWidget,
+)
+
+from peresmeshnik import config
+
+log = logging.getLogger('peresmeshnik.ui')
+ICONS = Path(__file__).resolve().parents[2] / 'assets' / 'icons'  # ponytail: repo path; packaging (stage 3) bundles them
+LANGS = {'en': 'English', 'ru': 'Русский'}
+MIC_LABEL = 'Microphone (self-test;\ntranslation: system default for now)'  # S2's Mic takes a PipeWire source in stage 2
+SIDES = {'them_to_me': 'Them → me', 'me_to_them': 'Me → them'}
+
+
+def tray_icon() -> QIcon:
+    icon = QIcon()
+    light = sys.platform.startswith('linux') or sys.platform == 'win32'  # dark panels; macOS takes a template image (stage 3)
+    for px in (16, 22, 24, 32, 44, 48, 64):
+        f = ICONS / f'tray{"-light" if light else ""}-{px}.png'
+        if f.exists():
+            icon.addFile(str(f))
+    return icon
+
+
+class Tray(QObject):
+    def __init__(self, ctl):
+        super().__init__()
+        self.ctl = ctl
+        self.toggle_live = lambda: None  # set by the app once the hotkey is known
+        self.reload_hotkey = lambda combo: ''
+        self.windows: list[QWidget] = []
+        m = self.menu = QMenu()
+        self.status = m.addAction('idle, translation off')
+        self.status.setEnabled(False)
+        m.addSeparator()
+        self.translation = m.addAction('Translation')
+        self.translation.setCheckable(True)
+        self.translation.toggled.connect(self.set_translation)
+        self.live = m.addAction('Live voice')
+        self.live.setCheckable(True)
+        self.live.triggered.connect(lambda: self.toggle_live())
+        self.engines: dict[str, QActionGroup] = {}
+        for key, title in SIDES.items():
+            sub = m.addMenu(title)
+            group = self.engines[key] = QActionGroup(sub)
+            for engine in config.ENGINES:
+                a = sub.addAction(engine)
+                a.setCheckable(True)
+                a.setData((key, engine))
+                group.addAction(a)
+            group.triggered.connect(self._engine_chosen)
+        m.addSeparator()
+        m.addAction('Settings…', self.open_settings)
+        m.addAction('Setup wizard…', self.open_wizard)
+        m.addSeparator()
+        m.addAction('Quit', self._quit)
+        self.sync()
+        self.icon = QSystemTrayIcon(tray_icon())
+        self.icon.setContextMenu(m)
+        self.icon.setToolTip('Peresmeshnik')
+        self.fallback = None
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            self.icon.show()
+        else:  # no tray on this desktop: the menu on a button in a small window
+            log.warning('no system tray: the menu is in the Peresmeshnik window')
+            w = self.fallback = QWidget()
+            w.setWindowTitle('Peresmeshnik')
+            w.setWindowIcon(tray_icon())
+            lay = QVBoxLayout(w)
+            self.fallback_status = QLabel(self.status.text())
+            b = QPushButton('Peresmeshnik ▾')
+            b.setMenu(m)
+            lay.addWidget(self.fallback_status)
+            lay.addWidget(b)
+            w.show()
+
+    def sync(self) -> None:
+        """Menu checks from the settings and the controller (after a change elsewhere)."""
+        s = config.load()
+        for key, group in self.engines.items():
+            for a in group.actions():
+                a.setChecked(a.data()[1] == getattr(s, key))
+        self.live.setChecked(self.ctl.live)
+
+    def hotkey_note(self, combo: str, why: str) -> None:
+        self.live.setText(f'Live voice ({QKeySequence(combo).toString(QKeySequence.NativeText)})' if combo else 'Live voice')
+        self.live.setToolTip(why)  # no balloon: macOS posts a notification for it (stderr has the reason too)
+
+    def message(self, text: str) -> None:
+        if self.icon.isVisible():
+            self.icon.showMessage('Peresmeshnik', text, QSystemTrayIcon.Warning, 8000)
+
+    def set_state(self, state: str) -> None:
+        self.status.setText(state[:120])
+        self.icon.setToolTip(f'Peresmeshnik: {state}')
+        if self.fallback:
+            self.fallback_status.setText(state)
+        on = state.startswith(('warming up', 'translating'))
+        if not state.startswith('error'):
+            self.translation.blockSignals(True)
+            self.translation.setChecked(on)
+            self.translation.blockSignals(False)
+        else:
+            self.translation.blockSignals(True)
+            self.translation.setChecked(self.ctl.on)
+            self.translation.blockSignals(False)
+            self.message(state)
+
+    def set_translation(self, on: bool) -> None:
+        self.translation.blockSignals(True)
+        self.translation.setChecked(on)
+        self.translation.blockSignals(False)
+        self.ctl.set_translation(on)
+
+    def _engine_chosen(self, action) -> None:
+        key, engine = action.data()
+        s = config.load()
+        setattr(s, key, engine)
+        config.save(s)
+        self.restart()
+
+    def restart(self) -> None:
+        """New settings take effect: a running translation is turned off and on again."""
+        if self.ctl.on:
+            self.ctl.set_translation(False)
+            self.ctl.set_translation(True)
+
+    def _show(self, w: QWidget) -> None:
+        self.windows = [x for x in self.windows if x.isVisible()] + [w]  # keep a reference while it is open
+        w.show()
+        w.raise_()
+        w.activateWindow()
+
+    def open_settings(self) -> None:
+        self._show(SettingsDialog(self))
+
+    def open_wizard(self) -> None:
+        from peresmeshnik.ui.wizard import SetupWizard
+        self._show(SetupWizard(self))
+
+    def _quit(self) -> None:
+        from PySide6.QtWidgets import QApplication
+        QApplication.quit()
+
+
+def key_file(cfg: config.Cloud | None = None) -> Path:
+    """Where the app reads the key from (cloud/__init__.py `api_key`): `cloud.key_file`, else the config folder."""
+    return Path(cfg.key_file) if cfg and cfg.key_file else config.config_dir() / 'gemini-key'
+
+
+def save_key(key: str, cfg: config.Cloud | None = None) -> None:
+    """The Gemini key goes into its own file, readable only by the user (never into settings.toml)."""
+    f = key_file(cfg)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.touch(0o600)
+    f.chmod(0o600)
+    f.write_text(key.strip() + '\n')
+
+
+def device_combo(kind: str, current: str) -> QComboBox:
+    """PipeWire / PulseAudio sinks or sources; '' = the system default."""
+    c = QComboBox()
+    c.addItem('System default', '')
+    try:
+        from peresmeshnik.ui.selftest import devices
+        for name, desc in devices(kind):
+            if not name.startswith('peresmeshnik_'):  # our own devices are no choice here
+                c.addItem(desc, name)
+    except Exception as e:  # no sound server: only the default
+        c.setToolTip(f'cannot list devices: {e}')
+    if current and c.findData(current) < 0:
+        c.addItem(current, current)
+    c.setCurrentIndex(max(0, c.findData(current)))
+    return c
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, tray: Tray):
+        super().__init__()
+        self.tray, self.s = tray, config.load()
+        s = self.s
+        self.setWindowTitle('Peresmeshnik settings')
+        f = QFormLayout(self)
+        self.my_lang, self.their_lang = QComboBox(), QComboBox()
+        for c, v in ((self.my_lang, s.my_lang), (self.their_lang, s.their_lang)):
+            for code, name in LANGS.items():
+                c.addItem(name, code)
+            c.setCurrentIndex(c.findData(v))
+        f.addRow('I speak', self.my_lang)
+        f.addRow('They speak', self.their_lang)
+        self.engine = {}
+        for key, title in SIDES.items():
+            c = self.engine[key] = QComboBox()
+            c.addItems(config.ENGINES)
+            c.setCurrentText(getattr(s, key))
+            f.addRow(title, c)
+        self.subtitles = QCheckBox('Subtitles from the cloud too (else from the local ASR: faster)')
+        self.subtitles.setChecked(s.cloud.subtitles)
+        f.addRow('Cloud', self.subtitles)
+        self.key = QLineEdit()
+        self.key.setEchoMode(QLineEdit.Password)
+        self.key.setPlaceholderText('saved' if key_file(s.cloud).exists() else 'Gemini API key (aistudio.google.com)')
+        f.addRow('Gemini key', self.key)
+        self.threads = QSpinBox()
+        self.threads.setRange(1, 8)
+        self.threads.setValue(s.local.threads)
+        f.addRow('Threads per engine', self.threads)
+        self.voice = QComboBox()
+        self.voice.addItem('none', '')
+        from peresmeshnik import voice
+        for p in sorted(voice.voices_dir().glob('*/voice.json')):
+            self.voice.addItem(p.parent.name, p.parent.name)
+        self.voice.setCurrentIndex(max(0, self.voice.findData(s.local.voice)))
+        f.addRow('My voice (local clone)', self.voice)
+        self.hotkey = QKeySequenceEdit(QKeySequence(s.ui.hotkey))
+        f.addRow('Hotkey: translation ⇄ live', self.hotkey)
+        if sys.platform.startswith('linux'):
+            self.headphones = device_combo('sinks', s.ui.headphones)
+            self.mic = device_combo('sources', s.ui.mic)
+            f.addRow('Headphones', self.headphones)
+            f.addRow(MIC_LABEL, self.mic)
+        self.note = QLabel()
+        self.note.setWordWrap(True)
+        f.addRow(self.note)
+        b = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        b.accepted.connect(self.save)
+        b.rejected.connect(self.reject)
+        f.addRow(b)
+
+    def save(self) -> None:
+        s = self.s
+        s.my_lang, s.their_lang = self.my_lang.currentData(), self.their_lang.currentData()
+        if s.my_lang == s.their_lang:
+            self.note.setText('Choose two different languages.')
+            return
+        for key, c in self.engine.items():
+            setattr(s, key, c.currentText())
+        s.cloud.subtitles = self.subtitles.isChecked()
+        s.local.threads = self.threads.value()
+        s.local.voice = self.voice.currentData()
+        combo = self.hotkey.keySequence().toString(QKeySequence.PortableText)
+        if combo and combo != s.ui.hotkey:
+            if why := self.tray.reload_hotkey(combo):
+                self.note.setText(f'Hotkey not changed: {why}')
+                return
+            s.ui.hotkey = combo
+        if hasattr(self, 'headphones'):
+            s.ui.headphones, s.ui.mic = self.headphones.currentData(), self.mic.currentData()
+        if self.key.text().strip():
+            save_key(self.key.text(), s.cloud)
+        config.save(s)
+        self.tray.sync()
+        self.tray.restart()
+        self.accept()

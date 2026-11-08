@@ -18,6 +18,8 @@ dependencies = [
     "soundfile>=0.13",
     "sounddevice>=0.5",
     "psutil>=6",
+    "PySide6-Essentials>=6.8",
+    "jeepney>=0.8; sys_platform == 'linux'",
 ]
 
 [project.scripts]

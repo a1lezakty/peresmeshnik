@@ -60,9 +60,9 @@ mic ─▶ capture ─▶ queue ─▶ VAD ─▶ ASR ─clause end─▶ MT ─
 | `Translator` | `translate(text, src, tgt, context)` | see §6 |
 | `Tts` | `synth(text, lang, voice) → chunks` | see §6 |
 | `VoiceCloner` | `enroll(pcm, sr, transcript) → Voice` | see §6 |
-| `Direction` | `feed(pcm)`, `events()`, `close()` | `LocalDirection` (VAD+ASR+MT+TTS), `GeminiDirection` (one Live session) |
-| `Overlay` | `show(caption)`, `hide()` | Qt frameless, click-through, always-on-top window |
-| `Hotkey` | `register(combo, cb)`, `unregister(combo)` | macOS `RegisterEventHotKey`, Windows `RegisterHotKey`, Linux X11 grab / XDG GlobalShortcuts portal |
+| `Direction` | `feed(pcm)`, `events()`, `close()`; `set_live(on)` where `supports_live` | `LocalDirection` (VAD+ASR+MT+TTS), `GeminiDirection` (one Live session) |
+| `Overlay` | `show(caption)`, `hide()` | Qt (PySide6) frameless, click-through, always-on-top window (`ui/overlay.py`) |
+| `Hotkey` | `register(combo, cb)`, `unregister(combo)` | macOS `RegisterEventHotKey`, Windows `RegisterHotKey`, Linux X11 `XGrabKey` (ctypes) / XDG GlobalShortcuts portal (D-Bus, jeepney) (`ui/hotkey.py`) |
 
 **Local and cloud behind one interface.** The UI and audio layers only see `Direction`: it eats
 16 kHz PCM and yields `Caption` and `Speech` events. `LocalDirection` composes the engines above;
@@ -127,8 +127,10 @@ Requirement from day one (Zagon 0.1.2 burned 104 % CPU on a redraw loop):
 
 **Idle (app open, translation off):** ~0 CPU. No timers, no polling, no redraws. Audio streams
 are closed, `Direction.close()` has unloaded the engines or left them without busy threads. CI
-gate: `tests/test_idle_cpu.py` starts the app, waits 60 s and fails above **0.13 s CPU** (Linux,
-macOS, Windows on pushes to main and on PRs). The working-mode gate (`tests/test_pipeline_cpu.py`,
+gate: `tests/test_idle_cpu.py` starts the app (tray, hidden overlay, virtual mic, and the setup
+wizard, since CI is a first run; Linux under Xvfb with a tray host), waits 60 s and fails above
+**0.13 s CPU** (Linux, macOS, Windows on pushes to main and on PRs); `tests/test_ui.py` repeats it
+with the overlay on screen. The working-mode gate (`tests/test_pipeline_cpu.py`,
 CI job `work-gate`, three OSes) runs `peresmeshnik run` on a 30 s recording and fails at RTF ≥ 1.0
 or ≥ 2.0 CPU s per audio s (0.27–0.54 and 0.55–1.09 on the runners, which vary up to 2× between runs; BENCH.md, stage 1).
 
@@ -215,6 +217,28 @@ translation and translate it back).
 5. Voice enrollment: read a prompted text for 30–60 s; the app checks level, clipping and noise
    and makes the voice profile (only the user's own voice; the profile stays local).
 6. Hotkey choice and a test phrase in both directions.
+
+**Stage 2 on Linux** (`ui/wizard.py`): pages 1 (languages, local / cloud per direction with the
+recommendation from RAM and GPU, Gemini key, then the models the choice needs with size, license
+and a consent box for restricted ones; download resumes), 2 (headphones and microphone from
+PipeWire; "Peresmeshnik Mic" is made by the app at start and removed at exit; a warning when the
+output looks like loudspeakers), 3 (`ui/selftest.py`: a 0.4 s chirp through the call capture sink,
+the virtual mic and the headphones sink, each recorded back and found by cross-correlation; the
+microphone's level while the user speaks), 6 (hotkey; a recorded phrase played through each
+direction into the headphones, subtitles in the overlay) and a last page for step 4 in words.
+Voice enrollment (5) gets its page with S2's enrollment hooks.
+
+**App shell** (`app.py`, `ui/`). The tray menu: translation on/off, live voice (the hotkey's
+fallback), local / cloud per direction, settings, wizard, quit; without a system tray (GNOME without
+the AppIndicator extension) the same menu sits on a button in a small window. Translation on loads
+the engines on one control thread ("warming up"), then opens capture; off closes every stream and
+engine again. A cloud direction speaks with Gemini and takes its subtitles from the local ASR + MT
+(`cloud.subtitles = false`, faster, §4) or from Gemini. The hotkey calls `Direction.set_live` where a
+direction supports it (S2's crossfade); otherwise the app sends the input straight to the output and
+skips the direction (a hard switch). The overlay keeps the last two clauses (rows keyed by clause
+number; cloud captions without one attach to the side's open row) and repaints only when the visible
+text changes. Hotkey: X11 grab on X11; on Wayland the GlobalShortcuts portal, whose desktop dialog
+may change the key; with neither, a tray message and the menu item.
 
 ## 8. Model download and cache
 

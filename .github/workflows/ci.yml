@@ -20,7 +20,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-15, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -35,14 +35,27 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq pipewire pipewire-pulse wireplumber pulseaudio-utils
+          sudo apt-get install -y -qq pipewire pipewire-pulse wireplumber pulseaudio-utils \
+            xvfb xdotool stalonetray libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcb-xfixes0 libxcb-xkb1 libxkbcommon-x11-0 \
+            libx11-xcb1 libegl1 libgl1 libfontconfig1 libdbus-1-3
           echo "XDG_RUNTIME_DIR=$RUNNER_TEMP/pw" >> "$GITHUB_ENV"
           export XDG_RUNTIME_DIR=$RUNNER_TEMP/pw
           mkdir -m 700 -p "$XDG_RUNTIME_DIR"
           (dbus-run-session -- sh -c 'pipewire & sleep 0.5; wireplumber & sleep 0.5; pipewire-pulse & wait' &)
           sleep 3
           pactl info
-      # includes the idle-CPU watchdog: 60 s idle, fails above 0.13 s of CPU
+      - name: X server with a system tray (the app's tray and overlay, the hotkey)
+        if: runner.os == 'Linux'
+        run: |
+          (Xvfb :99 -screen 0 1280x800x24 -nolisten tcp &)
+          sleep 1
+          (DISPLAY=:99 stalonetray --geometry 4x1+0+0 &)
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+          ldd .venv/lib/python3.12/site-packages/PySide6/Qt/plugins/platforms/libqxcb.so | grep 'not found' || true
+          DISPLAY=:99 xdotool getwindowfocus || true
+      # includes the idle-CPU watchdogs: the app (tray, overlay, first-run wizard) 60 s idle, and again with
+      # the overlay on screen; each fails above 0.13 s of CPU. Linux: Xvfb; macOS, Windows: the runner's desktop
       - run: uv run pytest -q -s
 
   # working-mode CPU gate: the local pipeline on a 30 s recording (RTF, CPU s per audio s)

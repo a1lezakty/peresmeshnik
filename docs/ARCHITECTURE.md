@@ -301,9 +301,17 @@ its sound is one stream for all tabs (Chrome names every stream "Playback"), so 
 tab would be translated too — the menu, the wizard and a tray message say so. WirePlumber
 remembers every move per application name (`restore-stream`): a stream left in our sink would go
 there again next time, so streams go back by a move as well (a move to the default device makes
-it forget the target), and at start the app sends other apps' streams out of its sink. After a
+it forget the target). It also keeps the target after the stream ends: for a moved stream that is
+gone at switch-off (the call ended while translating) a silent probe stream under the same
+restore key (the first of `media.role`, `application.id`, `application.name`, …) is started in our
+sink and moved to the default output, so the app's next stream (the next call, its ringtone) plays
+where it did. While translating, another app's stream that WirePlumber puts into our sink under a
+shared name (an Electron call app and the Chromium browser are both "Chromium") is told apart by
+its program and sent back. At start the app sends other apps' streams out of its sink. After a
 SIGKILL the remembered target stays: a new stream of the call app then lands in our sink while
-translation is off (silence) until translation goes on and off once.
+translation is off (silence) until it is moved and given back once (translation on and off while
+it plays). Every `pactl` whose output is read runs with `LC_ALL=C`: pactl translates its event
+lines.
 Output and capture report their end: `PulseOut` waits on pacat's exit and calls `on_end` (the
 headphones' wrapper reopens on the next chunk), `PipeWireCapture` on parec's (a tray error).
 

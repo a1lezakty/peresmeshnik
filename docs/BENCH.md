@@ -846,6 +846,9 @@ unchanged. WirePlumber links ~5 % of new streams to the default output again rig
 moves it again (2 of 30 stayed on the speakers before, 0 of 40 after). The call sink, like the
 virtual mic, now has `priority.session=-10`: with the 0 it had, it became the default output in
 place of a device without a priority (measured: the system's sound would have gone silent into it).
+A call that ends while translating left the app bound to our sink (WirePlumber keeps the move after the stream
+is gone): its next stream went there while translation was off. Now cleared at switch-off by a probe stream
+(the test plays the app again after off: on the speakers, 10 of 10 runs).
 
 Headphones' flush (barge-in): a 3 s chunk flushed 1.0 s after it started played 0.98–1.00 s (5
 runs); before the fix (pacat left alone, stdin drained) the stream kept its last part below the

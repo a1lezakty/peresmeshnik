@@ -141,6 +141,45 @@ def test_call_router_moves_the_call_app_and_gives_it_back(speakers, procs):
     wait_sinks('chrome', [spk])
 
 
+def test_call_router_forgets_the_move_when_the_call_ended_while_on(speakers, procs):
+    """The call ends while translating (its stream is gone), then translation goes off: WirePlumber must not keep the
+    app on our sink, its next stream (the next call, the ringtone) plays where the app played before."""
+    from peresmeshnik.audio.capture_pipewire import CallRouter
+    spk, mods = speakers
+    call = call_sink(mods)
+    first = player('TelegramDesktop (ended)', 'Telegram', procs)
+    r = CallRouter('Telegram', call)
+    r.start()
+    try:
+        wait_sinks('Telegram', [call])
+        first.kill()  # the call ended
+        first.wait()
+        time.sleep(0.3)
+    finally:
+        r.stop()
+    player('TelegramDesktop (ended)', 'Telegram', procs)
+    assert sinks_of('Telegram') == [spk]
+    time.sleep(0.5)  # not moved there later either
+    assert sinks_of('Telegram') == [spk]
+
+def test_call_router_leaves_the_browser_under_the_same_name(speakers, procs):
+    """An Electron call app and the Chromium browser both say "Chromium": WirePlumber's remembered move of the call
+    app puts the browser's new stream into our sink too; told apart by the program, the browser goes back."""
+    from peresmeshnik.audio.capture_pipewire import CallRouter
+    spk, mods = speakers
+    call = call_sink(mods)
+    player('Chromium', 'electron-call', procs)
+    r = CallRouter('electron-call', call)
+    r.start()
+    try:
+        wait_sinks('electron-call', [call])
+        player('Chromium', 'chromium', procs)
+        wait_sinks('chromium', [spk])
+        assert sinks_of('electron-call') == [call]
+    finally:
+        r.stop()
+    wait_sinks('electron-call', [spk])
+
 def test_call_router_back_to_the_default_when_its_device_is_gone(speakers, procs):
     from peresmeshnik.audio.capture_pipewire import CallRouter, pactl, players
     spk, mods = speakers
@@ -311,3 +350,32 @@ def test_call_sink_never_the_default():
             cap.stop()
     finally:
         pactl('unload-module', real)
+
+
+def test_pactl_output_is_read_in_english(speakers, monkeypatch):
+    """pactl translates its event lines (a Russian desktop: "Событие «появление» в отношении входа аудиоприёмника
+    №5"): every pactl whose output is parsed runs with LC_ALL=C, whatever the user's locale."""
+    from peresmeshnik import app
+    from peresmeshnik.audio.capture_pipewire import CallRouter
+    from peresmeshnik.audio.out import PulseOut
+    monkeypatch.setenv('LC_ALL', 'ru_RU.UTF-8')
+    monkeypatch.setenv('LANGUAGE', 'ru')
+    seen = []
+
+    class Recorded(subprocess.Popen):
+        def __init__(self, args, *a, **k):
+            if args[0] == 'pactl':
+                seen.append((args[1], (k.get('env') or os.environ).get('LC_ALL')))
+            super().__init__(args, *a, **k)
+    monkeypatch.setattr(subprocess, 'Popen', Recorded)
+    spk, mods = speakers
+    r = CallRouter('nobody', call_sink(mods))
+    r.start()
+    r.stop()
+    PulseOut(SAMPLE_RATE, spk).stop()
+    app.pactl('get-default-sink')
+    sub = app.Microphone._subscribe()
+    sub.kill()
+    sub.wait()
+    assert [cmd for cmd, _ in seen].count('subscribe') == 3  # the router, the headphones, the microphone
+    assert {cmd for cmd, lc in seen if lc != 'C'} <= {'move-sink-input', 'unload-module'}, seen  # output not read

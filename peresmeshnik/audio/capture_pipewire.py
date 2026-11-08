@@ -15,6 +15,7 @@ from collections.abc import Callable
 
 import numpy as np
 
+from peresmeshnik.audio import c_locale
 from peresmeshnik.engines import SAMPLE_RATE
 
 log = logging.getLogger('peresmeshnik.call')
@@ -27,12 +28,14 @@ SETTLE_S = 1.0  # WirePlumber may still link a new stream to its default this lo
 # found by themselves when no call app is chosen yet (matched in application.process.binary / application.name)
 CALL_APPS = ('telegram', 'zoom', 'discord', 'skype', 'teams', 'slack', 'webex', 'signal', 'element', 'jitsi', 'whatsapp', 'viber')
 # one playback stream carries every tab: moving it moves YouTube in the next tab too, so never picked by itself
+# WirePlumber's restore-stream remembers a stream's target under the first of these the stream has
+RESTORE_KEYS = ('media.role', 'application.id', 'application.name', 'media.name', 'node.name')
 BROWSERS = ('chrome', 'chromium', 'firefox', 'brave', 'opera', 'vivaldi', 'edge', 'yandex', 'epiphany', 'librewolf', 'floorp',
             'zen', 'falkon', 'midori', 'qutebrowser')
 
 
 def pactl(*args: str) -> str:
-    return subprocess.run(['pactl', *args], check=True, capture_output=True, text=True, timeout=10).stdout
+    return subprocess.run(['pactl', *args], check=True, capture_output=True, text=True, timeout=10, env=c_locale()).stdout
 
 
 class PipeWireCapture:
@@ -99,7 +102,7 @@ def is_browser(key: str) -> bool:
 
 def players() -> list[dict]:
     """Playback streams of other apps, ours (the headphones, the virtual mic, loopbacks) left out:
-    [{'index', 'key', 'name', 'sink' (name), 'corked'}]."""
+    [{'index', 'key', 'name', 'sink' (name), 'corked', 'restore' (WirePlumber's key for it, {property: value})}]."""
     sinks = {str(s['index']): s['name'] for s in json.loads(pactl('-f', 'json', 'list', 'sinks') or '[]')}
     out = []
     for si in json.loads(pactl('-f', 'json', 'list', 'sink-inputs') or '[]'):
@@ -107,7 +110,8 @@ def players() -> list[dict]:
         if si.get('owner_module') is not None or p.get('application.name') == CLIENT or not app_key(p):
             continue
         out.append({'index': str(si['index']), 'key': app_key(p), 'name': p.get('application.name') or app_key(p),
-                    'sink': sinks.get(str(si['sink']), ''), 'corked': bool(si.get('corked'))})
+                    'sink': sinks.get(str(si['sink']), ''), 'corked': bool(si.get('corked')),
+                    'restore': next(({k: p[k]} for k in RESTORE_KEYS if p.get(k)), {})})
     return out
 
 
@@ -152,6 +156,33 @@ def return_strays(sink: str = CALL_SINK) -> list[str]:
     return moved
 
 
+def forget(restore: dict, sink: str = CALL_SINK) -> None:
+    """WirePlumber keeps a moved stream's target after the stream ends (restore-stream, per `restore` key): the app's
+    next stream (the next call, its ringtone) would go into our sink while translation is off. A silent stream under
+    the same key, started in our sink and moved to the default output, makes it forget, as a stream given back does."""
+    args = [f'--property={k}={v}' for k, v in restore.items()]
+    probe = subprocess.Popen(['pacat', '--playback', '--raw', '--format=s16le', '--rate=8000', '--channels=1', f'--device={sink}',
+                              '--stream-name=Peresmeshnik probe', '--property=peresmeshnik.probe=1', *args],
+                             stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(40):  # ponytail: a bounded wait (2 s) for it to be listed, once per off; no event stream for one stream
+            index = next((str(si['index']) for si in json.loads(pactl('-f', 'json', 'list', 'sink-inputs') or '[]')
+                          if si.get('properties', {}).get('peresmeshnik.probe') == '1'), None)
+            if index is not None:
+                break
+            time.sleep(0.05)
+        else:
+            raise RuntimeError(f'cannot clear the remembered move of {restore}: the probe stream never appeared')
+        target = default_sink()
+        if target.startswith('peresmeshnik_'):
+            raise RuntimeError(f'the default output is our own {target}')
+        pactl('move-sink-input', index, target)
+        time.sleep(0.3)  # WirePlumber saves the new target from the move while the stream is still there
+    finally:
+        probe.kill()
+        probe.wait()
+
+
 class CallRouter:
     """While translation is on: the call app's playback streams (`app` = `app_key`) go into the call sink, the ones
     playing now and every new one (the call reconnects, a second call); stop() sends each back where it was,
@@ -162,12 +193,14 @@ class CallRouter:
         self.app, self.sink, self.on_move = app, sink, on_move
         self.moved: dict[str, str] = {}  # stream index -> the sink it came from ('' = unknown: the default)
         self._at: dict[str, float] = {}  # when it was moved
+        self._keys: dict[str, dict] = {}  # its restore key: forgotten at stop() when the stream is gone
         self._lock = threading.Lock()  # the event thread and stop()
         self._proc = self._thread = None
 
     def start(self) -> None:
         # subscribe first, then move what plays now: a stream that appears in between is still seen
-        self._proc = subprocess.Popen(['pactl', 'subscribe'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        self._proc = subprocess.Popen(['pactl', 'subscribe'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                                      env=c_locale())
         self._thread = threading.Thread(target=self._events, args=(self._proc,), name='call-router', daemon=True)
         self._thread.start()
         self._move()
@@ -176,7 +209,8 @@ class CallRouter:
         for line in proc.stdout:  # "Event 'new' on sink-input #123"; 'change' too: at 'new' the stream may not
             if line.startswith(("Event 'new' on sink-input #", "Event 'change' on sink-input #")):  # be listed yet
                 index = line.rsplit('#', 1)[1].strip()
-                if index in self.moved and time.monotonic() - self._at[index] > SETTLE_S:  # ours; later moves are the user's
+                at = self._at.get(index)  # set by _move under the lock; a read is atomic
+                if at is not None and time.monotonic() - at > SETTLE_S:  # ours; later moves are the user's
                     continue
                 try:
                     self._move(index)
@@ -188,7 +222,12 @@ class CallRouter:
             if self._proc is None:  # stopped meanwhile
                 return
             for p in players():
-                if p['key'] != self.app or (index is not None and p['index'] != index):
+                if index is not None and p['index'] != index:
+                    continue
+                if p['key'] != self.app:
+                    if p['sink'] == self.sink:  # WirePlumber restored our move under a shared name (Electron apps and the
+                        send_back(p['index'], '')  # Chromium browser are all "Chromium"): not the call app, back it goes
+                        log.info('call sound: %s stream %s is not %s: back to the default output', p['name'], p['index'], self.app)
                     continue
                 again = p['index'] in self.moved
                 if again and p['sink'] == self.sink:
@@ -199,20 +238,45 @@ class CallRouter:
                                                              capture_output=True, timeout=10).returncode:
                     continue  # gone meanwhile
                 if not again:
-                    self.moved[p['index']] = '' if p['sink'] == self.sink else p['sink']  # already there: a restored old move
                     self._at[p['index']] = time.monotonic()
+                    self._keys[p['index']] = p['restore']
+                    self.moved[p['index']] = '' if p['sink'] == self.sink else p['sink']  # already there: a restored old move
                     self.on_move(p['name'])
                 log.info('call sound: %s stream %s %s -> %s%s', p['name'], p['index'], p['sink'], self.sink, ' (again)' if again else '')
 
     def stop(self) -> None:
+        """Every moved stream still in our sink goes back; for those gone (the call ended while translating) WirePlumber
+        forgets the move. Each step on its own: one that fails does not keep the others; the errors are raised after."""
         with self._lock:
             proc, self._proc = self._proc, None
             moved, self.moved = self.moved, {}
+            keys, self._keys = self._keys, {}
         if proc:
             proc.terminate()
-            proc.wait(5)
-            self._thread.join(5)
-        here = {p['index'] for p in players() if p['sink'] == self.sink}  # gone streams and ones the user moved stay
-        for index, sink in moved.items():
-            if index in here:
-                send_back(index, sink)
+        errors = []
+        try:
+            now = {p['index']: p for p in players()}
+            back = set()
+            for index, sink in moved.items():
+                if index in now and now[index]['sink'] == self.sink:  # the ones the user moved elsewhere stay
+                    try:
+                        send_back(index, sink)
+                        back.add(tuple(keys[index].items()))
+                    except Exception as e:
+                        errors.append(str(e))
+            gone = {tuple(keys[i].items()) for i in moved if i not in now and keys.get(i)}
+            for key in gone - back:  # a stream given back has already reset it (to where it came from)
+                try:
+                    forget(dict(key), self.sink)
+                except Exception as e:
+                    errors.append(str(e))
+        finally:
+            if proc:
+                try:
+                    proc.wait(5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                self._thread.join(5)
+        if errors:
+            raise RuntimeError('; '.join(errors))

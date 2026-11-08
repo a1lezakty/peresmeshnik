@@ -18,6 +18,8 @@ from collections.abc import Callable
 
 import numpy as np
 
+from peresmeshnik.audio import c_locale
+
 PIPE_BYTES = 16384  # pacat's stdin: ~0.19 s at 22.05 kHz float32 (the Linux default 64 KB holds 0.74 s)
 
 
@@ -48,7 +50,11 @@ class PulseOut:
         self._q: queue.Queue[tuple[int, np.ndarray] | None] = queue.Queue()
         self._end = 0.0  # monotonic time when the audio written so far has played
         self._events = self._subscribe(device) if device else None  # before pacat: a removal right after is seen
-        self._proc = self._open()  # at once: a missing device shows now, not at the first word
+        try:
+            self._proc = self._open()  # at once: a missing device shows now, not at the first word
+        except BaseException:
+            self._end_events()
+            raise
         self._thread = threading.Thread(target=self._run, name='playback', daemon=True)
         self._thread.start()
 
@@ -63,8 +69,14 @@ class PulseOut:
         return p
 
     def _subscribe(self, device: str) -> subprocess.Popen:
-        sub = subprocess.Popen(['pactl', 'subscribe'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-        sinks = subprocess.run(['pactl', 'list', 'short', 'sinks'], capture_output=True, text=True, timeout=10).stdout
+        sub = subprocess.Popen(['pactl', 'subscribe'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=c_locale())
+        try:
+            sinks = subprocess.run(['pactl', 'list', 'short', 'sinks'], capture_output=True, text=True, timeout=10,
+                                   env=c_locale()).stdout
+        except BaseException:
+            sub.kill()
+            sub.wait()
+            raise
         index = next((line.split('\t')[0] for line in sinks.splitlines() if line.split('\t')[1:2] == [device]), None)
 
         def watch():
@@ -106,9 +118,7 @@ class PulseOut:
     def stop(self) -> None:
         """Play what is queued, then close the device."""
         self._stopping = True
-        if self._events is not None:
-            self._events.kill()
-            self._events.wait()
+        self._end_events()
         self._q.put(None)
         self._thread.join()
         with self._lock:
@@ -118,6 +128,11 @@ class PulseOut:
                 proc.wait(5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+
+    def _end_events(self) -> None:
+        if self._events is not None:
+            self._events.kill()
+            self._events.wait()
 
     def _run(self):
         step = max(1, int(self.slice_s * self.sample_rate))

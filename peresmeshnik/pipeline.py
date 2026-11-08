@@ -72,6 +72,7 @@ side has no subtitles of what was dropped; them -> me takes MAX_LAG_S."""
         self._fed, self._fed_wall = 0, 0.0  # samples fed so far and when the last chunk arrived
         self._start = 0  # where the current clause starts, samples
         self._play_end = 0.0  # when the speech put out so far has played, if played back to back
+        self._play_lock = threading.Lock()  # _play_end: the speech thread adds to it, interrupt() resets it
         self._stop = threading.Event()  # close(): drop what is queued instead of saying it
         self._error: BaseException | None = None  # the first worker that died
         self._threads = [threading.Thread(target=self._run, args=(work, out), name=work.__name__[1:], daemon=True)
@@ -91,7 +92,8 @@ side has no subtitles of what was dropped; them -> me takes MAX_LAG_S."""
     def interrupt(self) -> None:
         """Barge-in (the user talks over the voice): speech not heard yet is dropped, captions stay; the app
         flushes its output too. Clauses that end from now on are spoken as usual."""
-        self._cut = self._play_end = time.perf_counter()
+        with self._play_lock:  # not lost under the speech thread's update of _play_end
+            self._cut = self._play_end = time.perf_counter()
 
     def warm_up(self) -> None:
         """Run every engine once before audio comes (first calls allocate); the app shows "warming up"."""
@@ -230,7 +232,10 @@ side has no subtitles of what was dropped; them -> me takes MAX_LAG_S."""
                     if self.realtime:
                         c |= {'synth_lag_s': round(now - end_wall, 3), 'voice_lag_s': round(start - end_wall, 3),
                               'play_queue_s': round(start - now, 3)}
-                self._play_end = max(self._play_end, now) + len(chunk) / sr
+                with self._play_lock:
+                    if self._cut != cut:  # interrupted since this chunk came: it is not played
+                        break
+                    self._play_end = max(self._play_end, now) + len(chunk) / sr
                 samples += len(chunk)
                 self._events.put(Speech(chunk, sr))
             st['tts_s'] += (dt := time.perf_counter() - t)

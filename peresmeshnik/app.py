@@ -32,6 +32,7 @@ from pathlib import Path
 import numpy as np
 
 from peresmeshnik import __version__, config
+from peresmeshnik.audio import c_locale
 from peresmeshnik.audio.resample import Resampler
 from peresmeshnik.engines import SAMPLE_RATE, Caption, Speech
 
@@ -42,7 +43,7 @@ BARGE_IN_WORDS = 3  # my clause has this many words: I talk over their voice (fe
 
 
 def pactl(*args: str) -> str:
-    return subprocess.run(['pactl', *args], check=True, capture_output=True, text=True, timeout=10).stdout
+    return subprocess.run(['pactl', *args], check=True, capture_output=True, text=True, timeout=10, env=c_locale()).stdout
 
 
 def not_ours(name: str, what: str) -> str:
@@ -218,7 +219,8 @@ class Microphone:
 
     @staticmethod
     def _subscribe():
-        return subprocess.Popen(['pactl', 'subscribe'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        return subprocess.Popen(  # c_locale: the events are parsed, in English whatever the desktop's language
+            ['pactl', 'subscribe'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=c_locale())
 
     def _index_of(self, name: str) -> str | None:
         return next((line.split('\t')[0] for line in pactl('list', 'short', 'sources').splitlines()

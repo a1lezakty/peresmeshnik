@@ -383,6 +383,33 @@ def test_tray_menu_and_settings_window(tmp_path, monkeypatch):
         assert (tmp_path / 'gemini-key').stat().st_mode & 0o077 == 0  # only the user reads it
 
 
+
+@pytest.mark.skipif(not sys.platform.startswith('linux'), reason='the Call app menu is Linux only')
+def test_tray_call_menu_lists_the_apps_off_the_gui_thread(tmp_path, monkeypatch):
+    """Opening "Call app" lists the playing apps on a thread (pactl may take seconds): the GUI thread does not wait."""
+    from peresmeshnik.audio import capture_pipewire
+    from peresmeshnik.ui import tray as tray_mod
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    release, threads = threading.Event(), []
+
+    def slow_apps():
+        threads.append(threading.current_thread())
+        release.wait(10)
+        return [('Telegram', 'Telegram')]
+    monkeypatch.setattr(capture_pipewire, 'apps', slow_apps)
+
+    class Ctl:
+        live, on = False, False
+    t = tray_mod.Tray(Ctl())
+    t._fill_call_menu()  # returns while apps() still waits
+    assert [a.text() for a in t.call_menu.actions()] == ['Looking for the apps playing now…']
+    release.set()
+    end = time.monotonic() + 5
+    while 'Telegram' not in [a.text() for a in t.call_menu.actions()] and time.monotonic() < end:
+        settle()
+    assert 'Telegram' in [a.text() for a in t.call_menu.actions()]
+    assert threads and threads[0] is not threading.main_thread()
+
 def test_hotkey_state_ignores_locks_buttons_and_layout_group():
     from peresmeshnik.ui.hotkey import ALT, CTRL, SHIFT, X11Hotkey
     mask = CTRL | SHIFT

@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QActionGroup, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -51,6 +52,8 @@ def tray_icon() -> QIcon:
 
 
 class Tray(QObject):
+    call_apps = Signal(object)  # (apps playing, error): listed on a thread of its own
+
     def __init__(self, ctl):
         super().__init__()
         self.ctl = ctl
@@ -83,6 +86,7 @@ class Tray(QObject):
         if sys.platform.startswith('linux'):  # macOS / Windows take the call app's sound another way (stages 3-4)
             self.call_menu = m.addMenu('Call app')
             self.call_menu.aboutToShow.connect(self._fill_call_menu)
+            self.call_apps.connect(self._show_call_apps)
         m.addSeparator()
         m.addAction('Settings…', self.open_settings)
         m.addAction('Setup wizard…', self.open_wizard)
@@ -156,17 +160,27 @@ class Tray(QObject):
         self.ctl.set_translation(on)
 
     def _fill_call_menu(self) -> None:
-        """The apps playing now, read when the menu opens (never polled); the chosen one stays listed."""
-        from peresmeshnik.audio.capture_pipewire import apps
+        """The apps playing now, read when the menu opens (never polled) on a thread: pactl may take seconds."""
+        self.call_menu.clear()
+        self.call_menu.addAction('Looking for the apps playing now…').setEnabled(False)
+
+        def work():
+            from peresmeshnik.audio.capture_pipewire import apps
+            try:
+                self.call_apps.emit((apps(), ''))
+            except Exception as e:  # no sound server
+                self.call_apps.emit(([], str(e)))
+        threading.Thread(target=work, name='call-apps', daemon=True).start()
+
+    def _show_call_apps(self, result) -> None:
+        """In the GUI thread: the menu of apps; the chosen one stays listed."""
+        items, error = result
         m, cur = self.call_menu, config.load().ui.call_app
         m.clear()
         if self._call_group:
             self._call_group.deleteLater()
-        try:
-            items = apps()
-        except Exception as e:  # no sound server
-            items = []
-            m.addAction(f'Cannot list the playing apps: {e}').setEnabled(False)
+        if error:
+            m.addAction(f'Cannot list the playing apps: {error}').setEnabled(False)
         if cur and cur not in dict(items):
             items.append((cur, f'{cur} (not playing now)'))
         if not items:

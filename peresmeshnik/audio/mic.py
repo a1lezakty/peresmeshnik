@@ -21,6 +21,7 @@ from collections.abc import Callable
 
 import numpy as np
 
+from peresmeshnik.audio.resample import Resampler
 from peresmeshnik.engines import SAMPLE_RATE, Caption, Speech
 
 OURS = 'peresmeshnik_'  # every PipeWire device the app makes starts with this
@@ -150,12 +151,10 @@ class LiveSwitch:
     STALL_S = 0.5
 
     def __init__(self, inner, sample_rate: int = 24_000, fade_ms: float = FADE_MS, lead_ms: float = LEAD_MS):
-        from peresmeshnik.app import Resampler
         self.inner, self.sample_rate = inner, sample_rate
         self.fade = max(1, round(sample_rate * fade_ms / 1000))
         self.lead = round(sample_rate * lead_ms / 1000)
         self.live = False
-        self._resampler = Resampler
         self._up = Resampler(SAMPLE_RATE, sample_rate)  # the microphone, 16 kHz
         self._rs: dict = {}  # the inner direction's speech at another rate
         self._q: queue.Queue = queue.Queue()
@@ -203,7 +202,7 @@ class LiveSwitch:
                 yield x
             elif kind == 'speech':
                 if self._to == 0:  # translation that comes while live (or going live) is not said
-                    rs = self._rs.get(x.sample_rate) or self._rs.setdefault(x.sample_rate, self._resampler(x.sample_rate, self.sample_rate))
+                    rs = self._rs.get(x.sample_rate) or self._rs.setdefault(x.sample_rate, Resampler(x.sample_rate, self.sample_rate))
                     self._buf = np.concatenate([self._buf, rs(x.pcm)])
                     self._quiet = False
             elif kind == 'live':

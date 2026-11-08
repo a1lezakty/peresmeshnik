@@ -59,11 +59,32 @@ def test_imported_voice_good_and_bad(page, tmp_path):
     sf.write(good, speech_like(45), 24_000)
     page.import_file(str(good))
     pump(lambda: not page.running)
-    assert page.out.text().startswith('<b>Good: ') and 'Saved as your voice "me"' in page.out.text()
-    assert page.isComplete() and page.w.s.local.voice == 'me' and (tmp_path / 'voices' / 'me' / 'reference.wav').exists()
-    page.import_file(str(bad))  # a worse take later does not replace the saved voice
+    assert page.out.text().startswith('<b>Good: ') and 'saved when you finish the wizard' in page.out.text()
+    assert page.isComplete() and page.w.s.local.voice == 'me.new'  # the test phrase already speaks with it
+    page.import_file(str(bad))  # a worse take later does not replace the good one
     pump(lambda: not page.running)
-    assert page.voice.name == 'me' and page.isComplete()
+    assert page.voice.name == 'me.new' and page.isComplete()
+    page.commit()  # Finish
+    v = tmp_path / 'voices'
+    assert page.w.s.local.voice == 'me' and (v / 'me' / 'reference.wav').exists() and not (v / 'me.new').exists()
+    assert voice.load('me', v).meta['name'] == 'me'
+
+
+def test_cancelled_wizard_keeps_the_old_voice(page, tmp_path):
+    v = tmp_path / 'voices'
+    voice.save(speech_like(40, seed=1), 24_000, 'me', 'ru', root=v)
+    page.w.s.local.voice = 'me'
+    old = (v / 'me' / 'reference.wav').read_bytes()
+    page.voice = None
+    page.initializePage()
+    assert page.voice.name == 'me' and page.isComplete()  # the saved one is there
+    f = tmp_path / 'new.wav'
+    sf.write(f, speech_like(45, seed=2), 24_000)
+    page.import_file(str(f))
+    pump(lambda: not page.running)
+    assert (v / 'me.new').exists() and (v / 'me' / 'reference.wav').read_bytes() == old
+    page.rollback()  # Cancel
+    assert not (v / 'me.new').exists() and (v / 'me' / 'reference.wav').read_bytes() == old
 
 
 def test_cloud_needs_no_voice(page):
@@ -112,6 +133,20 @@ def test_clone_check(page, tmp_path, monkeypatch, hears, sim, verdict):
     page.check_clone()
     pump(lambda: not page.running)
     assert page.clone_out.text().startswith(verdict), page.clone_out.text()
+
+
+def test_no_clone_check_while_translating(page, tmp_path):
+    """A local me -> them already holds the clone: a second one for the check would not fit on 8 GB."""
+    good = tmp_path / 'me.wav'
+    sf.write(good, speech_like(45), 24_000)
+    page.import_file(str(good))
+    pump(lambda: not page.running)
+    assert page.check_button.isEnabled()
+    page.w.tray = type('T', (), {'ctl': type('C', (), {'on': True})()})()
+    page._buttons()
+    assert not page.check_button.isEnabled() and 'Turn translation off' in page.check_button.toolTip()
+    page.check_clone()
+    assert page.clone_out.text().startswith('Turn translation off first') and not page.running
 
 
 @pytest.mark.skipif(not SOUND, reason='needs PipeWire / PulseAudio')

@@ -137,6 +137,34 @@ def test_stalled_input_says_the_rest():
     sw.close()
 
 
+def test_live_voice_feeds_only_the_switch(monkeypatch):
+    """me -> them in the cloud with local subtitles: while live, the subtitles' direction gets no input (nothing is
+    translated, no CPU), only a pause that closes its open clause; back to translation, both are fed again."""
+    from peresmeshnik import config, pipeline
+    from peresmeshnik.app import Side
+    s = config.Settings()
+    s.me_to_them, s.cloud.subtitles = 'cloud', False
+    voice_dir, captions = FakeDirection(), FakeDirection()
+    captions.warm_up = lambda: None
+    monkeypatch.setattr(Side, '_cloud', lambda self, s: voice_dir)
+    monkeypatch.setattr(pipeline, 'make_local', lambda *a, **k: captions)
+    out = type('O', (), {'play': lambda *a: None, 'flush': lambda *a: None, 'stop': lambda *a: None})()
+    inp = type('I', (), {'start': lambda self, cb: setattr(self, 'cb', cb), 'stop': lambda self: None})()
+    side = Side('me', s, inp, out, type('V', (), {'show': lambda self, c: None})())
+    assert isinstance(side.directions[0][0], LiveSwitch) and side.directions[1][0] is captions
+    side.start()
+    frame = np.zeros(512, np.float32)
+    inp.cb(frame)
+    assert voice_dir.fed == [512] and captions.fed == [512]
+    side.set_live(True)
+    inp.cb(frame)
+    assert voice_dir.fed == [512, 8000] and captions.fed == [512, 8000]  # the pause each, then no input
+    side.set_live(False)
+    inp.cb(frame)
+    assert voice_dir.fed == [512, 8000, 512] and captions.fed == [512, 8000, 512]
+    side.stop()
+
+
 def test_dead_inner_direction_raises():
     inner = FakeDirection()
     sw = LiveSwitch(inner, SR)

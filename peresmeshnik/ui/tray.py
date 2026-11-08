@@ -255,7 +255,8 @@ class SettingsDialog(QDialog):
         self.voice.addItem('none', '')
         from peresmeshnik import voice
         for p in sorted(voice.voices_dir().glob('*/voice.json')):
-            self.voice.addItem(p.parent.name, p.parent.name)
+            if p.parent.suffix not in ('.new', '.old'):  # the wizard's draft of a new take, left by a crash
+                self.voice.addItem(p.parent.name, p.parent.name)
         self.voice.setCurrentIndex(max(0, self.voice.findData(s.local.voice)))
         f.addRow('My voice (local clone)', self.voice)
         self.hotkey = QKeySequenceEdit(QKeySequence(s.ui.hotkey))

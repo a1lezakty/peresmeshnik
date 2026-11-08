@@ -195,6 +195,60 @@ def test_mic_by_name_and_never_ours():
     assert not ended  # stop() is no outage
 
 
+@pytest.mark.parametrize('mic_dies', [False, True])
+def test_microphone_survives_a_sound_server_restart(monkeypatch, mic_dies):
+    """pipewire-pulse restarts mid-call: the event stream ends. The tray hears it once, the app subscribes again after
+    a pause (one repeat, not polling), and the new subscription still catches an unplug. `mic_dies`: the microphone's
+    stream went down with the server, which stays away until the second subscription; then the microphone reopens."""
+    from peresmeshnik import app
+    from peresmeshnik.app import Microphone
+    from peresmeshnik.audio import mic as mic_mod
+    monkeypatch.setattr(Microphone, 'RESUBSCRIBE_S', 0.3)
+    start = mic_mod.Mic.start
+
+    def silent(self, on_frames):  # only the removal event tells (WirePlumber 0.5)
+        start(self, on_frames)
+        self.on_end = None
+    monkeypatch.setattr(mic_mod.Mic, 'start', silent)
+    a, b = Source('test_mic_a', 400), Source('test_mic_b', 700)
+    frames, states = [], []
+    mic = Microphone('test_mic_a', states.append)
+    try:
+        mic.start(frames.append)
+        wait(lambda: len(frames) > 40)
+        first = mic._watch
+        if mic_dies:
+            source = app.mic_source
+
+            def down(*a):  # the server is away while the first subscription is current
+                if mic._watch is first:
+                    raise app.NoMicrophone('no sound server')
+                return source(*a)
+            monkeypatch.setattr(app, 'mic_source', down)
+            mic._mic._proc.kill()
+        first.kill()
+        wait(lambda: len(states) == 2, show=lambda: states)
+        assert states[0] == 'error: lost the sound server; reconnecting the microphone in 0.3 s'
+        if mic_dies:
+            assert states[1] == 'error: the microphone went away (test_mic_a ended with the sound server); reopening'
+            wait(lambda: len(states) == 3, show=lambda: states)
+            assert states[2] == 'translating (the microphone is back: test_mic_a)'
+        else:
+            assert states[1] == 'translating (the sound server is back)'
+        assert mic._watch is not first and mic._watch.poll() is None
+        n = len(frames)
+        wait(lambda: len(frames) > n + 40)
+        assert hz(frames) == pytest.approx(400, abs=10)
+        k = len(states)
+        a.remove()  # seen by the new subscription
+        wait(lambda: len(states) == k + 2, show=lambda: states)
+        assert states[k + 1] == 'translating (the microphone is back: test_mic_b)'
+    finally:
+        mic.stop()
+        a.remove()
+        b.remove()
+
+
 @pytest.mark.parametrize('end_reported', [True, False])
 def test_microphone_reopens_when_the_source_goes(monkeypatch, end_reported):
     """The saved microphone is unplugged: the default one takes over, once in the tray; with none left the app waits

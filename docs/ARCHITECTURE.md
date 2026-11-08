@@ -231,7 +231,9 @@ direction into the headphones, subtitles in the overlay) and a last page for ste
 Voice enrollment (5, `VoicePage`): record from the chosen microphone or import 30–60 s; the verdict of
 `voice.check` (length, speech time, level, clipping, background, a telephone band) and, for a local
 me → them, of `voice.check_clone` (the clone says two test phrases: the app's ASR must understand them,
-and XTTS's speaker encoder must find the recorded voice; thresholds in BENCH). A bad take is not saved.
+and XTTS's speaker encoder must find the recorded voice; thresholds in BENCH; not while a local
+me → them runs, a second clone would not fit). A bad take is not kept; a good one replaces the saved voice
+on Finish only (a draft `voices/<name>.new` until then, Cancel drops it).
 
 **App shell** (`app.py`, `ui/`). The tray menu: translation on/off, live voice (the hotkey's
 fallback), local / cloud per direction, settings, wizard, quit; without a system tray (GNOME without
@@ -241,7 +243,9 @@ engine again. A cloud direction speaks with Gemini and takes its subtitles from 
 (`cloud.subtitles = false`, faster, §4) or from Gemini. The hotkey calls `Direction.set_live` where a
 direction supports it; the me → them direction, local or cloud, is wrapped in `LiveSwitch`
 (`audio/mic.py`): its output is clocked by the microphone's frames, so the queued translation stays in
-the process, and each switch is a 30 ms equal-power crossfade, no click (BENCH). For any other direction
+the process, and each switch is a 30 ms equal-power crossfade, no click (BENCH). While live, the side's
+other directions (the local subtitles of a cloud me → them) get no input, only a pause that closes their
+open clause: nothing is translated. For any other direction
 (them → me for now) the app sends the input straight to the output and skips it (a hard switch). The overlay keeps the last two clauses (rows keyed by clause
 number; cloud captions without one attach to the side's open row) and repaints only when the visible
 text changes. On Wayland the windows go through XWayland (`QT_QPA_PLATFORM=xcb` unless it is set):
@@ -260,7 +264,8 @@ refused as microphone or headphones, the system defaults included (the app would
 Headphones that go away (a Bluetooth profile switch, unplugging) are reopened on the saved device
 or the default one, with one tray message per outage; so is the microphone (`app.Microphone`: a
 `pactl subscribe` sees its source go, since with WirePlumber 0.5 the recording may not end by itself; with
-no microphone at all it takes the next new source). `Mic` records the PipeWire source by its name, the same
+no microphone at all it takes the next new source; when the event stream ends, as on a pipewire-pulse restart,
+it subscribes again after a pause and reopens). `Mic` records the PipeWire source by its name, the same
 one for the translation and for the loopback (`s.ui.mic`, else the default input; never ours, never a
 sink's monitor). The virtual mic's sink and source have `priority.session=-10`, below any real device and
 below a device without a priority (WirePlumber counts that as −1), so they never become the default. One instance per user (`QLockFile` in

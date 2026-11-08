@@ -252,6 +252,29 @@ def save(pcm: np.ndarray, sr: int, name: str, lang: str, transcript: str | None 
     return Voice(name=name, engine='reference', path=path, meta=meta)
 
 
+def promote(draft: str, name: str, root: Path | None = None) -> Voice:
+    """Make the profile `draft` the profile `name`, replacing it (the wizard keeps a new take aside until Finish)."""
+    import shutil
+    base = root or voices_dir()
+    old = base / f'{name}.old'
+    if old.exists():
+        shutil.rmtree(old)
+    if (base / name).exists():
+        (base / name).rename(old)
+    (base / draft).rename(base / name)
+    if old.exists():
+        shutil.rmtree(old)
+    meta = json.loads((base / name / 'voice.json').read_text(encoding='utf-8')) | {'name': name}
+    (base / name / 'voice.json').write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding='utf-8')
+    return load(name, base)
+
+
+def discard(name: str, root: Path | None = None) -> None:
+    import shutil
+    if (path := (root or voices_dir()) / name).exists():
+        shutil.rmtree(path)
+
+
 def load(name: str, root: Path | None = None) -> Voice:
     path = (root or voices_dir()) / name
     meta = json.loads((path / 'voice.json').read_text(encoding='utf-8'))

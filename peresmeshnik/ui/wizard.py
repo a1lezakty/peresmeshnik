@@ -295,7 +295,9 @@ class SelfTestPage(QWizardPage):
 
 class VoicePage(QWizardPage):
     """Voice enrollment (ARCHITECTURE §7, step 5): record or import 30-60 s of the user's own voice, the quality report
-    with its verdict; with the local clone also the clone check (voice.check_clone). Optional for a cloud me -> them."""
+    with its verdict; with the local clone also the clone check (voice.check_clone). Optional for a cloud me -> them.
+    A new take is kept as the profile "<name>.new" (the test phrase already speaks with it) and replaces "<name>" only
+    when the wizard finishes; cancelled, it is dropped."""
     progress = Signal(float)
     result = Signal(object)  # (Report, Voice | None), or an error text
     checked = Signal(str)
@@ -332,6 +334,7 @@ class VoicePage(QWizardPage):
         self.checked.connect(self._checked)
         self.voice = None
         self.running = False
+        self.draft = f'{self.name}.new'
 
     def local(self) -> bool:
         return self.w.s.me_to_them == 'local'
@@ -356,10 +359,16 @@ class VoicePage(QWizardPage):
     def isComplete(self) -> bool:  # noqa: N802
         return not self.running and (not self.local() or self.voice is not None)
 
+    def translating(self) -> bool:
+        """Translation on: a local me -> them already holds the clone; the check would load a second one (~3 GB)."""
+        return bool(getattr(getattr(getattr(self.w, 'tray', None), 'ctl', None), 'on', False))
+
     def _buttons(self) -> None:
         for b in (self.record_button, self.import_button):
             b.setEnabled(not self.running)
-        self.check_button.setEnabled(not self.running and self.voice is not None)
+        self.check_button.setEnabled(not self.running and self.voice is not None and not self.translating())
+        self.check_button.setToolTip('Turn translation off first: the check loads a second clone (~3 GB)'
+                                     if self.translating() else '')
         self.completeChanged.emit()
 
     def _run(self, work) -> None:
@@ -383,7 +392,7 @@ class VoicePage(QWizardPage):
         self.bar.setValue(0)
         self.bar.setVisible(True)
         self._run(lambda: self.result.emit(voice.enroll(record(self.seconds, s.ui.mic or None, sr, self.progress.emit), sr,
-                                                        self.name, s.my_lang, voice.PROMPTS.get(s.my_lang))))
+                                                        self.draft, s.my_lang, voice.PROMPTS.get(s.my_lang))))
 
     def import_file(self, path: str | None = None) -> None:
         from peresmeshnik import voice
@@ -391,7 +400,7 @@ class VoicePage(QWizardPage):
                                                    'Audio (*.wav *.flac *.ogg *.mp3)')[0]
         if path:
             self.clone_out.setText('')
-            self._run(lambda: self.result.emit(voice.enroll(*voice.read_audio(Path(path)), self.name, self.w.s.my_lang)))
+            self._run(lambda: self.result.emit(voice.enroll(*voice.read_audio(Path(path)), self.draft, self.w.s.my_lang)))
 
     def _result(self, res) -> None:
         from peresmeshnik import voice
@@ -401,7 +410,7 @@ class VoicePage(QWizardPage):
             self.out.setText(res)
         else:
             r, v = res
-            saved = f' Saved as your voice "{v.name}".' if v else ' Not saved.'
+            saved = ' Kept as your new voice: it is saved when you finish the wizard.' if v else ' Not saved.'
             self.out.setText(f'<b>{voice.verdict(r)}</b>{saved}<br>{voice.summary(r)}')
             if v:
                 self.voice, self.w.s.local.voice = v, v.name
@@ -411,6 +420,9 @@ class VoicePage(QWizardPage):
         """The clone says the test phrases in their language; the app's ASR must understand them (voice.check_clone)."""
         from peresmeshnik import models, voice
         s, v = self.w.s, self.voice
+        if self.translating():
+            self.clone_out.setText('Turn translation off first: the check loads a second clone (~3 GB).')
+            return
         self.clone_out.setText('Checking the clone: it says two test phrases… (first time: loading the voice pack)')
 
         def work():
@@ -434,6 +446,18 @@ class VoicePage(QWizardPage):
         self.running = False
         self.clone_out.setText(text)
         self._buttons()
+
+    def commit(self) -> None:
+        """The wizard finished: a new take becomes the profile."""
+        from peresmeshnik import voice
+        if self.voice is not None and self.voice.name == self.draft:
+            self.voice = voice.promote(self.draft, self.name)
+            self.w.s.local.voice = self.name
+
+    def rollback(self) -> None:
+        """The wizard was cancelled: the saved profile stays as it was."""
+        from peresmeshnik import voice
+        voice.discard(self.draft)
 
 
 class HotkeyPage(QWizardPage):
@@ -535,6 +559,7 @@ class SetupWizard(QWizard):
         self.setWindowTitle('Peresmeshnik setup')
         self.pages = [LanguagesPage(self)] + ([DevicesPage(self)] if LINUX else []) + [ModelsPage(self)] \
             + ([SelfTestPage(self)] if LINUX else []) + [VoicePage(self), HotkeyPage(self), DonePage()]
+        self.voice_page = next(p for p in self.pages if isinstance(p, VoicePage))
         for p in self.pages:
             self.addPage(p)
         self.accepted.connect(self.finish)
@@ -548,8 +573,10 @@ class SetupWizard(QWizard):
     def cancel(self) -> None:
         if (saved := config.load().ui.hotkey) != self.s.ui.hotkey:  # the hotkey page already bound the new one
             self.tray.reload_hotkey(saved)
+        self.voice_page.rollback()
 
     def finish(self) -> None:
+        self.voice_page.commit()  # before saving: the settings name the profile, not the draft
         config.save(self.s)
         self.tray.sync()
         self.tray.restart()

@@ -32,6 +32,7 @@ from pathlib import Path
 import numpy as np
 
 from peresmeshnik import __version__, config
+from peresmeshnik.audio.resample import Resampler
 from peresmeshnik.engines import SAMPLE_RATE, Caption, Speech
 
 log = logging.getLogger('peresmeshnik.app')
@@ -48,24 +49,6 @@ def not_ours(name: str, what: str) -> str:
     if name.startswith(OURS):
         raise RuntimeError(f'the {what} is our own device {name}: choose your real device in the settings or the system')
     return name
-
-
-class Resampler:
-    """Linear resampling of a stream in chunks, keeping the fractional position and the last sample between
-    chunks: per-chunk rounding would add ~34 ms per minute at 16 -> 22.05 kHz.
-    ponytail: linear interpolation, fine for speech and the live pass-through; soxr if quality matters."""
-
-    def __init__(self, sr: int, to: int):
-        self.step, self.pos, self.prev = sr / to, 1.0, 0.0  # pos counts from the previous chunk's last sample
-
-    def __call__(self, pcm: np.ndarray) -> np.ndarray:
-        if self.step == 1.0:
-            return pcm
-        x = np.concatenate([[self.prev], pcm])
-        t = np.arange(self.pos, len(x) - 1, self.step)
-        self.pos = (t[-1] + self.step if len(t) else self.pos) - (len(x) - 1)
-        self.prev = x[-1]
-        return np.interp(t, np.arange(len(x)), x).astype(np.float32)
 
 
 class NoTts:
@@ -196,19 +179,23 @@ class Microphone:
     polling): when its source is removed (a headset unplugged, a Bluetooth profile switch) or the stream ends by
     itself, it is reopened on the saved source if it is back, else on the default, with one tray message per outage;
     with no microphone at all the next new source is taken. The removal event matters: since WirePlumber 0.5 a
-    `node.dont-reconnect` stream may outlive its device without an end."""
+    `node.dont-reconnect` stream may outlive its device without an end. When the event stream itself ends (the sound
+    server restarted) it subscribes again after a pause, longer while the server stays away, then reopens."""
+    RESUBSCRIBE_S, RESUBSCRIBE_MAX_S = 2.0, 30.0
 
     def __init__(self, saved: str, on_state=lambda text: None, fallback: str = ''):
         self.saved, self.on_state, self.fallback = saved, on_state, fallback
         self._mic = self._index = self._watch = self._on_frames = None
         self._stopped = False
+        self._wake = threading.Event()  # stop() ends a pause before resubscribing
         self._lock = threading.Lock()  # the current stream: control thread (stop), events thread, a dead stream's reader
-        self._opening = threading.Lock()  # one reopen at a time
+        self._opening = threading.RLock()  # one reopen at a time (a source gone while opening retries from inside)
 
     def start(self, on_frames) -> None:
         self._on_frames, self._stopped = on_frames, False
+        self._wake.clear()
         # subscribed before opening: a removal right after the start is still seen
-        self._watch = watch = subprocess.Popen(['pactl', 'subscribe'], stdout=subprocess.PIPE, text=True)
+        self._watch = watch = self._subscribe()
         try:
             self._open()
         except BaseException:
@@ -217,18 +204,29 @@ class Microphone:
             raise
         threading.Thread(target=self._events, args=(watch,), name='mic-events', daemon=True).start()
 
+    @staticmethod
+    def _subscribe():
+        return subprocess.Popen(['pactl', 'subscribe'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+
+    def _index_of(self, name: str) -> str | None:
+        return next((line.split('\t')[0] for line in pactl('list', 'short', 'sources').splitlines()
+                     if line.split('\t')[1:2] == [name]), None)
+
     def _open(self) -> str:
         from peresmeshnik.audio.mic import Mic
-        m = Mic(mic_source(self.saved, self.fallback))
+        name = mic_source(self.saved, self.fallback)
+        index = self._index_of(name)  # before the start: its removal event can come any time after
+        m = Mic(name)
         m.on_end = lambda why: self._lost(m, why)
         m.start(self._on_frames)
-        index = next((line.split('\t')[0] for line in pactl('list', 'short', 'sources').splitlines()
-                      if line.split('\t')[1:2] == [m.source]), None)
         with self._lock:
             if self._stopped:
                 m.stop()
                 return ''
             self._mic, self._index = m, index
+        if self._index_of(name) != index:  # gone (or replaced) while opening: its event may have come before us
+            self._lost(m, f'{name} went away while opening')
+            return ''
         return m.source
 
     def _lost(self, m, why: str) -> None:
@@ -254,23 +252,50 @@ class Microphone:
             self.on_state(f'translating (the microphone is back: {name})')
 
     def _events(self, watch) -> None:
-        for line in watch.stdout:
-            ev = re.match(r"Event '(\w+)' on (\w+) #(\d+)", line)
+        pause = self.RESUBSCRIBE_S
+        while True:
+            t0 = time.monotonic()
+            for line in watch.stdout:
+                ev = re.match(r"Event '(\w+)' on (\w+) #(\d+)", line)
+                if self._stopped:
+                    return
+                if not ev:
+                    continue
+                what, kind, index = ev.groups()
+                m = self._mic
+                if m is not None and kind == 'source' and what == 'remove' and index == self._index:
+                    self._lost(m, f'{m.source} was removed')
+                elif m is None and (kind == 'server' or (kind == 'source' and what == 'new')):
+                    self._retry()
+            watch.wait()
             if self._stopped:
                 return
-            if not ev:
-                continue
-            what, kind, index = ev.groups()
+            # the event stream ended: the sound server restarted or is gone. A repeat after a pause, not polling;
+            # the pause grows while the server stays away
+            pause = self.RESUBSCRIBE_S if time.monotonic() - t0 > self.RESUBSCRIBE_MAX_S else pause
+            log.warning('microphone: PipeWire events ended (pactl exit %s); subscribing again in %g s', watch.returncode, pause)
+            if pause == self.RESUBSCRIBE_S:  # once per outage
+                self.on_state(f'error: lost the sound server; reconnecting the microphone in {pause:g} s')
+            if self._wake.wait(pause):
+                return
+            with self._lock:
+                if self._stopped:
+                    return
+                self._watch = watch = self._subscribe()
+            pause = min(pause * 2, self.RESUBSCRIBE_MAX_S)
             m = self._mic
-            if m is not None and kind == 'source' and what == 'remove' and index == self._index:
-                self._lost(m, f'{m.source} was removed')
-            elif m is None and (kind == 'server' or (kind == 'source' and what == 'new')):
+            if m is None:
                 self._retry()
+            elif m._proc is None or m._proc.poll() is not None:  # went down with the server, its end not reported
+                self._lost(m, f'{m.source} ended with the sound server')
+            else:  # only the events were gone
+                self.on_state('translating (the sound server is back)')
 
     def stop(self) -> None:
         with self._lock:
             self._stopped = True
             mic, self._mic = self._mic, None
+        self._wake.set()
         if self._watch:
             self._watch.kill()
             self._watch.wait()
@@ -404,7 +429,7 @@ class Side:
         if self.live and not self._supports_live:
             self._live_q.put(pcm)  # ponytail: a hard switch, no crossfade; S2's set_live crossfades
             return
-        for d, _, _ in self.directions:
+        for d, _, _ in self.directions[:1] if self.live else self.directions:  # live: only the switch, nothing translates
             d.feed(pcm)
 
     def _pass_through(self) -> None:
@@ -430,6 +455,9 @@ class Side:
     def set_live(self, on: bool) -> None:
         if self._supports_live:
             self.directions[0][0].set_live(on)
+            if on and not self.live:  # the local subtitles get no input while live: a pause closes their open clause
+                for d, _, _ in self.directions[1:]:
+                    d.feed(np.zeros(SAMPLE_RATE // 2, np.float32))
         elif on != self.live:
             self.out.flush()  # drop translated speech still queued (going live) or the live tail (back)
         self.live = on

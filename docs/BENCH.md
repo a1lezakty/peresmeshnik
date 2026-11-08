@@ -738,7 +738,10 @@ app reopen on the saved source if it is back, else on the default input: 0.06–
 new stream, one tray message; with no microphone at all the next new source is taken, no polling. The
 event is needed: here (PipeWire 1.0.5, WirePlumber 0.4.17) a `node.dont-reconnect` recording ends with
 "Entity killed" when its source goes, on `ubuntu-latest` (PipeWire 1.6.2, WirePlumber 0.5.13) it did not
-end, and the first version of the test, which waited for that end, failed there.
+end, and the first version of the test, which waited for that end, failed there. If the event stream itself
+ends (pipewire-pulse restarted), the tray says so once and the app subscribes again after 2 s (doubling up to
+30 s while the server stays away: a repeat, not polling), then reopens the microphone if its stream went down
+too (`test_microphone_survives_a_sound_server_restart`).
 
 "Peresmeshnik Mic" now has `priority.session=-10` on its sink and source: WirePlumber 0.4.17 counts a
 device without a priority as −1, so the 0 asked for first won the default over such devices (measured
@@ -815,6 +818,8 @@ the windows are first shown, seen by the stage-2 shell too), so it flaked; that 
 
 **Wizard** (`ui/wizard.py` `VoicePage`, `tests/test_clone_wizard.py` under Xvfb): record from the chosen
 PipeWire source or import a file; the verdict ("Good …" / "Good enough: …" / "Record again: …") with the
-numbers; a bad take is not saved and does not replace a saved one (a 3 s take of a steady tone: "Record
-again: 3 s recorded, need 30-60 s; only 0 s of speech …"); "Check the clone" runs `check_clone` (the voice
-pack and the clone model are needed: on this server without the voice pack the button says so).
+numbers; a bad take is not kept and does not replace a good one (a 3 s take of a steady tone: "Record
+again: 3 s recorded, need 30-60 s; only 0 s of speech …"); a good take is a draft (`voices/<name>.new`) that
+replaces the saved voice only on Finish, Cancel keeps the old one; "Check the clone" runs `check_clone` (the
+voice pack and the clone model are needed: on this server without the voice pack the button says so; while a
+local me → them translates the button is off: a second clone would not fit next to it in 8 GB).

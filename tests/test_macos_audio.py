@@ -794,42 +794,38 @@ def test_a_stream_stopped_during_a_refresh_stays_closed():
 
 
 @needs_blackhole
-def test_the_microphone_is_kept_by_a_refresh(afplay):
-    """M1: the wizard's voice enrollment records through mic.Mic (PortAudio on macOS): registered, a refresh suspends
-    and resumes it; stopped during one, it stays closed."""
+def test_the_microphone_is_kept_by_a_refresh(tmp_path):
+    """M1: the wizard's voice enrollment records through mic.Mic; on macOS that is the Core Audio helper (S2),
+    no PortAudio stream: not registered, and a refresh does not interrupt it."""
+    import soundfile as sf
+
     from peresmeshnik.audio import coreaudio as ca
     from peresmeshnik.audio.mic import Mic
     from peresmeshnik.engines import SAMPLE_RATE
+    t = tone(60)  # stereo: a mono file lands in the centre channel (3) of BlackHole 16ch, the helper reads the first
+    sf.write(tmp_path / 'tone.wav', np.stack([t, t], axis=1), SR)
+    before = set_default_output('BlackHole 16ch')  # BlackHole 2ch is the app's own: the microphone refuses it
+    p = subprocess.Popen(['afplay', str(tmp_path / 'tone.wav')])
     frames = Frames()
-    mic = Mic(SPEAKERS)  # afplay plays into BlackHole 2ch: its input side
-    mic.start(frames)
+    mic = Mic('BlackHole16ch_UID')
     try:
+        time.sleep(1.0)
+        mic.start(frames)
         time.sleep(0.5)
         held = mic in set(ca._holders)
-        r = ca.refresh_portaudio()
         n = len(frames.pcm())
+        r = ca.refresh_portaudio()
         time.sleep(1.0)
         got = frames.pcm()[n:]
-
-        class Stopper:
-            def suspend(self):
-                threading.Thread(target=mic.stop).start()
-                time.sleep(0.3)
-
-            def resume(self):
-                pass
-        stopper = Stopper()
-        ca.hold(stopper)
-        r2 = ca.refresh_portaudio()
-        ca.release(stopper)
-        time.sleep(0.5)
     finally:
         mic.stop()
-    print(f'microphone: held {held}, refresh {r}, then {len(got) / SAMPLE_RATE:.2f} s rms {rms(got):.3f}; stopped during '
-          f'one: {r2}, stream {mic._stream}')
-    assert held and r['streams'] >= 1 and not r['failed']
-    assert len(got) > SAMPLE_RATE // 2 and rms(got) > 0.1, 'the microphone did not come back after the refresh'
-    assert mic._stream is None and mic not in set(ca._holders)
+        p.kill()
+        p.wait()
+        if before:
+            set_default_output(before)
+    print(f'microphone: held {held}, refresh {r}, then {len(got) / SAMPLE_RATE:.2f} s rms {rms(got):.3f}')
+    assert not held and not r['failed']
+    assert len(got) > SAMPLE_RATE // 2 and rms(got) > 0.1, 'the microphone stopped at the refresh'
 
 
 @needs_blackhole

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>org.peresmeshnik.audio</string>
+  <key>CFBundleName</key><string>peresmeshnik-audio</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Peresmeshnik translates what you say and passes your voice to the call app.</string>
+</dict>
+</plist>

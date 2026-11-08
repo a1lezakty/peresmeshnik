@@ -42,20 +42,8 @@ class VirtualMic:
     """AudioOut into "Peresmeshnik Mic"."""
 
     def __init__(self, latency_ms: int = 40):
-        if not shutil.which('pactl') or not shutil.which('pacat'):
-            raise RuntimeError('pactl/pacat not found: install pulseaudio-utils (PipeWire: pipewire-pulse)')
         self.latency_ms = latency_ms
-        _remove_stale()
-        # never the default output or input in place of another device (the system's sound would go into the call,
-        # other apps would record our translation). Negative, not 0: WirePlumber 0.4 counts a device without a
-        # priority as -1, so 0 would win over it (measured); real ALSA / Bluetooth devices have ~1000-2000
-        low = 'priority.session=-10'
-        self._modules = [
-            _pactl('load-module', 'module-null-sink', f'sink_name={SINK}', 'channels=1',
-                   f"sink_properties='device.description=\"{NAME} (feed)\" {low}'").strip(),
-            _pactl('load-module', 'module-remap-source', f'master={SINK}.monitor', f'source_name={SOURCE}', 'channels=1',
-                   f"source_properties='device.description=\"{NAME}\" {low}'").strip(),
-        ]
+        self._modules = self._make()
         self._q: queue.Queue = queue.Queue()
         self._proc: subprocess.Popen | None = None
         self._sr = 0
@@ -63,6 +51,21 @@ class VirtualMic:
         self._lock = threading.Lock()  # play / flush / drain from different threads (barge-in, mode switch)
         self._writer = threading.Thread(target=self._write, name='virtual-mic', daemon=True)
         self._writer.start()
+
+    def _make(self) -> list[str]:
+        if not shutil.which('pactl') or not shutil.which('pacat'):
+            raise RuntimeError('pactl/pacat not found: install pulseaudio-utils (PipeWire: pipewire-pulse)')
+        _remove_stale()
+        # never the default output or input in place of another device (the system's sound would go into the call,
+        # other apps would record our translation). Negative, not 0: WirePlumber 0.4 counts a device without a
+        # priority as -1, so 0 would win over it (measured); real ALSA / Bluetooth devices have ~1000-2000
+        low = 'priority.session=-10'
+        return [
+            _pactl('load-module', 'module-null-sink', f'sink_name={SINK}', 'channels=1',
+                   f"sink_properties='device.description=\"{NAME} (feed)\" {low}'").strip(),
+            _pactl('load-module', 'module-remap-source', f'master={SINK}.monitor', f'source_name={SOURCE}', 'channels=1',
+                   f"source_properties='device.description=\"{NAME}\" {low}'").strip(),
+        ]
 
     def _open(self, sample_rate: int) -> None:
         self._proc = subprocess.Popen(
@@ -108,9 +111,13 @@ class VirtualMic:
             except queue.Empty:
                 pass
             for p in {id(p): p for p in procs}.values():  # the current stream and any still queued
-                p.kill()
-                p.wait()
+                self._stop_proc(p)
             self._proc, self._end = None, 0.0
+
+    @staticmethod
+    def _stop_proc(p: subprocess.Popen) -> None:
+        p.kill()
+        p.wait()
 
     def drain(self) -> None:
         """Block until everything queued so far has been played (end of a file run)."""

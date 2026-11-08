@@ -1,5 +1,5 @@
-"""End to end "me -> them" on Linux: my recording -> LocalDirection (VAD, ASR, MT, clone TTS)
--> "Peresmeshnik Mic" -> recorded back from the source the way a call app records it -> ASR check.
+"""End to end "me -> them": my recording -> LocalDirection (VAD, ASR, MT, clone TTS) -> the virtual mic
+("Peresmeshnik Mic" on Linux, BlackHole 2ch on macOS) -> recorded back the way a call app records it -> ASR check.
 
     python bench/me_them.py input                       # 30 s of the enrolled reader, other lines than the reference
     python bench/me_them.py run --voice DIR --model-dir DIR    # clone in this process (GPU box; on CPU it falls behind)
@@ -7,6 +7,9 @@
     CLONE_SERVER='<command>' python bench/me_them.py run --remote --mic test_me_mic   # the recording goes into a test
                                                         # PipeWire microphone, taken from there by name like the app
     python bench/me_them.py serve --voice DIR --model-dir DIR  # what $CLONE_SERVER starts on the GPU box
+    python bench/me_them.py run --voice DIR --model-dir DIR --mic BlackHole16ch_UID [--with-them call-en.ogg]
+                    # macOS: the recording plays into BlackHole 16ch, the app's microphone path takes it from there;
+                    # --with-them: them -> me translates a file at the same time in this process (memory of both)
 
 `$CLONE_SERVER` is any command that starts `me_them.py serve` elsewhere (for example through ssh);
 requests go to its stdin as JSON lines, audio comes back on its stdout. Results: one `e2e_me_them`
@@ -102,23 +105,32 @@ class Marked:
     def __getattr__(self, name):  # close() and the rest: the wrapped engine's
         return getattr(self.tts, name)
 
+    synth_s = audio_s = 0.0
+
     def synth(self, text, lang, voice=None):
         self.firsts.append(None)
+        t = time.perf_counter()
         for c in self.tts.synth(text, lang, voice):
+            self.synth_s += time.perf_counter() - t
+            self.audio_s += len(c) / self.tts.sample_rate
             if self.firsts[-1] is None:
                 self.firsts[-1] = c
             yield c
+            t = time.perf_counter()
 
 
 # --- the call app's side
 
 class Recorder:
-    """Records a PulseAudio/PipeWire source; remembers when each piece arrived."""
+    """Records a PulseAudio/PipeWire source (macOS: a Core Audio device); remembers when each piece arrived."""
 
     def __init__(self, source: str):
-        self.p = subprocess.Popen(['parec', f'--device={source}', '--format=float32le', f'--rate={SR_REC}',
-                                   '--channels=1', '--raw', '--latency-msec=20', '--property=node.dont-reconnect=true'],
-                                  stdout=subprocess.PIPE)
+        if sys.platform == 'darwin':
+            from peresmeshnik.audio import macos
+            self.p = macos.spawn('record', '--from', source, '--rate', str(SR_REC))
+        else:
+            self.p = subprocess.Popen(['parec', f'--device={source}', '--format=float32le', f'--rate={SR_REC}', '--channels=1',
+                                       '--raw', '--latency-msec=20', '--property=node.dont-reconnect=true'], stdout=subprocess.PIPE)
         self.chunks, self.marks, self.n = [], [(0, time.perf_counter())], 0
         self.t = threading.Thread(target=self._run, daemon=True)
         self.t.start()
@@ -147,6 +159,34 @@ class Recorder:
         self.p.terminate()
         self.t.join()
         return np.concatenate(self.chunks) if self.chunks else np.zeros(0, np.float32)
+
+
+class Memory:
+    """Peaks while the run goes: this process's RSS, the system's used memory and swap (psutil, once a second)."""
+
+    def __init__(self):
+        import psutil
+        self.psutil, self.me, self.peak = psutil, psutil.Process(), {'rss_peak_mb': 0, 'used_peak_mb': 0, 'swap_peak_mb': 0}
+        self.swap0 = psutil.swap_memory().used
+        self.total_mb = round(psutil.virtual_memory().total / 2 ** 20)
+        self.done = threading.Event()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        while not self.done.wait(1.0):
+            vm, p = self.psutil.virtual_memory(), self.peak
+            p['rss_peak_mb'] = max(p['rss_peak_mb'], round(self.me.memory_info().rss / 2 ** 20))
+            p['used_peak_mb'] = max(p['used_peak_mb'], round((vm.total - vm.available) / 2 ** 20))
+            p['swap_peak_mb'] = max(p['swap_peak_mb'], round(max(0, self.psutil.swap_memory().used - self.swap0) / 2 ** 20))
+
+    def stop(self) -> dict:
+        self.done.set()
+        return self.peak | {'ram_total_mb': self.total_mb}
+
+
+def tts_rtf(marked) -> float | None:
+    """Synthesis time per second of speech, from the clone's own utterances (Marked)."""
+    return round(marked.synth_s / marked.audio_s, 2) if getattr(marked, 'audio_s', 0) else None
 
 
 def onset_after(x, i, quiet=int(0.1 * SR_REC)):
@@ -230,8 +270,13 @@ def run(a):
     import soundfile as sf
 
     from peresmeshnik import pipeline, voice
-    from peresmeshnik.audio.virtual_mic_linux import SOURCE, VirtualMic
     from peresmeshnik.engines import Speech
+    mac = sys.platform == 'darwin'
+    if mac:
+        from peresmeshnik.audio.macos import BLACKHOLE_UID as SOURCE
+        from peresmeshnik.audio.virtual_mic_macos import VirtualMic
+    else:
+        from peresmeshnik.audio.virtual_mic_linux import SOURCE, VirtualMic
     out = Path(a.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     clauses = []
@@ -243,7 +288,10 @@ def run(a):
     pipeline.log.setLevel(logging.INFO)
 
     t = time.perf_counter()
-    if a.remote:
+    if a.stock:  # the stock voice (Piper) instead of the clone: [local] clone = "piper"
+        from peresmeshnik.local.tts import PiperTts
+        tts, v = PiperTts('piper-en_US-john-medium', a.threads), None
+    elif a.remote:
         tts, v = RemoteTts(os.environ['CLONE_SERVER']), None
     else:
         from peresmeshnik.local.clone import XttsClone
@@ -253,7 +301,19 @@ def run(a):
     d.realtime = True
     load_s = time.perf_counter() - t
     events, src = d.events, []
-    if a.mic:  # the app's path: a microphone by its PipeWire name -> LiveSwitch -> the virtual mic
+    them = None
+    if a.with_them:  # them -> me at the same time, in this process, as in the app (its voice is not played)
+        them = pipeline.make_local('en', 'ru', threads=a.threads, max_lag_s=pipeline.MAX_LAG_S)
+        them.warm_up()
+        them.realtime = True
+        threading.Thread(target=lambda: [None for _ in them.events()], daemon=True).start()
+        load_s = time.perf_counter() - t
+    mem = Memory()
+    if a.mic and mac:  # the app's path: a Core Audio microphone -> LiveSwitch -> BlackHole 2ch
+        from peresmeshnik.audio.mic import LiveSwitch, followed
+        sw = LiveSwitch(d, tts.sample_rate)
+        events, inp = sw.events, followed(a.mic, lambda st: print(st, flush=True))
+    elif a.mic:  # the app's path: a microphone by its PipeWire name -> LiveSwitch -> the virtual mic
         from peresmeshnik.app import Microphone, pactl
         from peresmeshnik.audio.mic import LiveSwitch
         src = [pactl('load-module', 'module-null-sink', f'sink_name={a.mic}_feed', 'channels=1').strip(),
@@ -288,7 +348,16 @@ def run(a):
     pcm = pipeline.read_audio(str(a.inp))
     i0 = rec.n
     cpu0, wall0 = time.process_time(), time.perf_counter()
-    if a.mic:  # my voice into the "real" microphone, at its own pace (pacat blocks), the app records it by name
+    if them:
+        threading.Thread(target=pipeline.run, args=(them, pipeline.read_audio(str(a.with_them)), True), daemon=True).start()
+    if a.mic and mac:  # my voice into the stand-in microphone at its own pace (the helper blocks), the app records it
+        from peresmeshnik.audio import macos
+        inp.start(sw.feed)
+        feed = macos.spawn('play', '--to', a.mic, '--rate', str(pipeline.SAMPLE_RATE), stdout=subprocess.DEVNULL)
+        feed.communicate(np.concatenate([pcm, np.zeros(pipeline.SAMPLE_RATE, np.float32)]).astype('<f4').tobytes())
+        inp.stop()
+        print(f'microphone {inp.source}: {len(pcm) / pipeline.SAMPLE_RATE:.1f} s', flush=True)
+    elif a.mic:  # my voice into the "real" microphone, at its own pace (pacat blocks), the app records it by name
         inp.start(sw.feed)
         subprocess.run(['pacat', '--playback', f'--device={a.mic}_feed', '--raw', '--format=float32le', f'--rate={pipeline.SAMPLE_RATE}',
                         '--channels=1', '--latency-msec=20', '--property=node.dont-reconnect=true'],
@@ -306,6 +375,10 @@ def run(a):
     cpu = time.process_time() - cpu0
     time.sleep(0.5)
     x = rec.stop()[i0:]
+    peak = mem.stop()
+    if them:
+        them.finish()
+        them.close()
     d.close()
     mic.remove()
     for m in reversed(src):
@@ -326,6 +399,8 @@ def run(a):
         if j is not None:
             heard = rec.wall(j + i0)
             c['call_lag_s'], c['after_caption_s'] = round(heard - (cap - c['caption_lag_s']), 3), round(heard - cap, 3)
+    if them:  # both directions log their clauses: keep mine (they have my language's text)
+        clauses[:] = [c for c in clauses if re.search('[а-яё]', c.get('text', ''), re.I)]
     for c in clauses:
         print(json.dumps(c, ensure_ascii=False))
     sr = tts.sample_rate
@@ -337,7 +412,7 @@ def run(a):
     hyp_dir = transcribe(np.concatenate(direct), sr) if direct else ''
     lags = [c['call_lag_s'] for c in clauses if c.get('call_lag_s') is not None]
     remote = getattr(tts, 'stats', [])
-    row = record('e2e_me_them_mic' if a.mic else 'e2e_me_them', 'xtts-remote' if a.remote else 'xtts',
+    row = record('e2e_me_them_mic' if a.mic else 'e2e_me_them', 'piper' if a.stock else 'xtts-remote' if a.remote else 'xtts',
                  device=f'remote-{tts.device}' if a.remote else (a.device or 'auto'),
                  threads=a.threads, audio_s=round(len(pcm) / pipeline.SAMPLE_RATE, 2), clauses=len(clauses),
                  load_s=round(load_s, 1), wall_s=round(wall, 1), tail_after_input_s=round(done - feed_end, 1),
@@ -351,6 +426,7 @@ def run(a):
                  server_ttfa_s=[s['ttfa_s'] for s in remote], server_rtf=per_audio_s(remote, 'synth_s'),
                  server_cpu_per_audio_s=per_audio_s(remote, 'cpu_s'),
                  wer_recorded=wer(mt, hyp_rec), wer_direct=wer(mt, hyp_dir), summary=d.summary(),
+                 with_them=bool(them), tts_rtf=tts_rtf(marked), **peak,
                  recorded_peak=round(float(np.max(np.abs(x))), 3) if len(x) else 0.0)
     (out / 'summary.json').write_text(json.dumps(row | {'mt': mt, 'asr_recorded': hyp_rec, 'asr_direct': hyp_dir},
                                                  ensure_ascii=False, indent=1), encoding='utf-8')
@@ -372,6 +448,8 @@ def main():
     r = sub.choices['run']
     r.add_argument('--in', dest='inp', type=Path, default=ROOT / 'me_them' / 'ru_30s.wav')
     r.add_argument('--remote', action='store_true', help='clone through $CLONE_SERVER')
+    r.add_argument('--stock', action='store_true', help='the stock Piper voice instead of the clone (no --voice needed)')
+    r.add_argument('--with-them', type=Path, help='also translate this English file them -> me in this process (memory of both)')
     r.add_argument('--mic', help='play the recording into a test microphone of this PipeWire name and take it from there '
                                  'like the app (Microphone, LiveSwitch), not from the file')
     r.add_argument('--out-dir', default=str(ROOT.parent / 'out' / 'me_them'))

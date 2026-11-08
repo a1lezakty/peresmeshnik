@@ -81,11 +81,11 @@ class X11Hotkey(QObject):
         x.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
         x.XNextEvent.argtypes = [ctypes.c_void_p, ctypes.POINTER(_Event)]
         x.XkbSetDetectableAutoRepeat.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+        x.XSetErrorHandler.restype = ctypes.c_void_p
         self.dpy = x.XOpenDisplay(display.encode() if display else None)
         if not self.dpy:
             raise HotkeyError(f'cannot open X display {display or os.environ.get("DISPLAY")!r}')
         self.root = x.XDefaultRootWindow(self.dpy)
-        x.XSetErrorHandler(_x_handler)
         x.XkbSetDetectableAutoRepeat(self.dpy, 1, None)  # a held key repeats KeyPress only: one toggle per press
         self._grabs: dict[str, tuple[int, int, Callable[[], None]]] = {}
         self._down: set[int] = set()
@@ -101,9 +101,13 @@ class X11Hotkey(QObject):
         mask = sum(MODS[m] for m in mods)
         x_errors = _x_errors
         x_errors.clear()
-        for extra in (0, LOCK, NUMLOCK, LOCK | NUMLOCK):  # the grab must not depend on Caps Lock / Num Lock
-            self.x.XGrabKey(self.dpy, keycode, mask | extra, self.root, 1, 1, 1)  # GrabModeAsync = 1
-        self.x.XSync(self.dpy, 0)
+        prev = self.x.XSetErrorHandler(_x_handler)  # process-wide: only around our grab, Qt's own handler otherwise
+        try:  # (left in place, it took Qt's X errors at exit, after Python had freed it: SIGSEGV on the CI runner)
+            for extra in (0, LOCK, NUMLOCK, LOCK | NUMLOCK):  # the grab must not depend on Caps Lock / Num Lock
+                self.x.XGrabKey(self.dpy, keycode, mask | extra, self.root, 1, 1, 1)  # GrabModeAsync = 1
+            self.x.XSync(self.dpy, 0)
+        finally:
+            self.x.XSetErrorHandler(ctypes.c_void_p(prev))
         if x_errors:
             self._ungrab(keycode, mask)
             raise HotkeyError(f'{combo} is already taken by another application' if BAD_ACCESS in x_errors

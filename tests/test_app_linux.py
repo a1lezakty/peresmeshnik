@@ -107,7 +107,7 @@ def wait_line(p, what: str, timeout: float = 60) -> list[str]:
 
 def stop_app(p):
     p.terminate()
-    assert p.wait(20) == 0
+    assert p.wait(20) == 0, p.log.read_text()[-4000:]
 
 
 @pytest.mark.skipif(not (DISPLAY and shutil.which('xdotool')), reason='needs an X display and xdotool')

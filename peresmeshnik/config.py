@@ -58,6 +58,7 @@ class Ui:
     hotkey: str = 'Ctrl+Alt+Space'  # translation <-> live voice; Qt key-sequence text
     mic: str = ''  # me -> them input ('' = system default)
     headphones: str = ''  # them -> me output sink ('' = system default)
+    call_app: str = ''  # them -> me: the call app moved to "Peresmeshnik Call" (process binary, else app name; '' = none)
 
 
 @dataclass

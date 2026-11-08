@@ -741,6 +741,9 @@ def cli(argv=None) -> int:
     qapp.setApplicationName('Peresmeshnik')
     qapp.setQuitOnLastWindowClosed(False)
     qapp.setCursorFlashTime(0)  # a steady text cursor: a blinking one repaints its field twice a second (idle watchdog)
+    if sys.platform == 'darwin':
+        from peresmeshnik.ui import macos
+        macos.accessory()  # a menu-bar app: no Dock icon (the .app says so in its Info.plist too, LSUIElement)
     lock_path().parent.mkdir(parents=True, exist_ok=True)
     lock = QLockFile(str(lock_path()))
     lock.setStaleLockTime(0)  # stale only when its process is gone, however old
@@ -779,7 +782,7 @@ def cli(argv=None) -> int:
     binding = hotkey.Binding(backend, toggle_live, why)
     binding.done.connect(lambda combo, why: tray.hotkey_note(combo, why, announce=bool(why)))
     tray.toggle_live, tray.reload_hotkey = toggle_live, binding.bind
-    tray.hotkey_note('', why, announce=sys.platform.startswith('linux'))  # macOS / Windows: no hotkey before stages 3-4
+    tray.hotkey_note('', why, announce=sys.platform.startswith(('linux', 'darwin')))  # Windows: no hotkey before stage 4
     if why:
         print(f'warning: {why}', file=sys.stderr)
     binding.bind(s.ui.hotkey)

@@ -1,6 +1,7 @@
-"""Global hotkey on Linux: an X11 key grab, or the XDG GlobalShortcuts portal on Wayland.
+"""Global hotkey: an X11 key grab, or the XDG GlobalShortcuts portal on Wayland; on macOS Carbon's
+RegisterEventHotKey (`ui/macos.py`).
 
-Both wait on a socket (Qt socket notifier / a thread blocked in recv) and never poll. Callbacks
+All of them wait for the system (Qt socket notifier / a thread blocked in recv / the app's run loop) and never poll. Callbacks
 run on the Qt GUI thread. `make()` picks one, or returns (None, reason) when neither works: then
 the tray item is the only switch, and the reason is shown to the user.
 
@@ -59,6 +60,7 @@ _ERROR_HANDLER = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(
 _x_errors: list[int] = []  # Xlib has one error handler per process: one list for every connection
 _x_handler = _ERROR_HANDLER(lambda d, e: _x_errors.append(e.contents.error_code) or 0)  # the default handler exits
 KEY_PRESS, KEY_RELEASE, BAD_ACCESS = 2, 3, 10
+MENU = 'the menu-bar menu' if sys.platform == 'darwin' else 'the tray menu'
 
 
 class X11Hotkey(QObject):
@@ -287,7 +289,7 @@ class Binding(QObject):
                     self.backend.register(old, self.callback)
             except HotkeyError:
                 self.combo = ''
-            self.why = f'{e}. Use the tray menu item "Live voice"'
+            self.why = f'{e}. Use {MENU} item "Live voice"'
             self.done.emit(self.combo, self.why)
             return self.why
         self.combo, self.why = combo, ''
@@ -299,7 +301,7 @@ class Binding(QObject):
             self.backend.register(combo, self.callback)
             self.combo, self.why = combo, ''
         except Exception as e:  # refused, no answer: the previous session and combo stay
-            self.why = f'{e}. Use the tray menu item "Live voice"'
+            self.why = f'{e}. Use {MENU} item "Live voice"'
         self.done.emit(self.combo, self.why)
 
     def close(self) -> None:
@@ -314,13 +316,16 @@ def wayland() -> bool:
 
 def make() -> tuple[object | None, str]:
     """(hotkey, '') or (None, why there is no global hotkey)."""
-    if not sys.platform.startswith('linux'):
+    if not sys.platform.startswith(('linux', 'darwin')):
         return None, 'the global hotkey on this OS comes in a later version: use the tray menu'
     try:
+        if sys.platform == 'darwin':
+            from peresmeshnik.ui.macos import MacHotkey
+            return MacHotkey(), ''
         if wayland():
             return PortalHotkey(), ''
         if os.environ.get('DISPLAY'):
             return X11Hotkey(), ''
         return None, 'no X11 display and no Wayland session: use the tray menu'
     except HotkeyError as e:
-        return None, f'no global hotkey: {e}. Use the tray menu item "Live voice"'
+        return None, f'no global hotkey: {e}. Use {MENU} item "Live voice"'

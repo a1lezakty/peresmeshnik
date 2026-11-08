@@ -8,4 +8,4 @@ for _k, _v in {'OMP_NUM_THREADS': '1', 'OPENBLAS_NUM_THREADS': '1', 'MKL_NUM_THR
                'VECLIB_MAXIMUM_THREADS': '1', 'OMP_WAIT_POLICY': 'PASSIVE'}.items():
     os.environ.setdefault(_k, _v)
 
-__version__ = '0.0.0'
+__version__ = '0.1.0'

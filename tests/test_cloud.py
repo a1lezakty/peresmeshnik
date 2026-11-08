@@ -256,3 +256,23 @@ def test_vad_gate_on_a_recording():
     pcm = (read_audio(str(Path(__file__).parent / 'data' / 'call-en.ogg')) * 32767).astype(np.int16)
     evs = [g.update(pcm[i:i + BLOCK], i / 16000) for i in range(0, len(pcm) - BLOCK, BLOCK)]
     assert evs.count('start') == evs.count('end') == 3, [e for e in evs if e]
+
+
+def test_stdin_frames_keep_samples_whole(monkeypatch):
+    """`--in -` reads the pipe as it comes (os.read): a sample split between two reads stays one sample."""
+    import os
+    import sys
+
+    from peresmeshnik.cloud import frames
+    r, w = os.pipe()
+    monkeypatch.setattr(sys, 'stdin', open(r, 'rb'))
+    g = frames('-', 0.0, lambda: 0.0)
+    os.write(w, b'\x01\x00\x02')
+    assert next(g).tolist() == [1]
+    os.write(w, b'\x00\x03')
+    assert next(g).tolist() == [2]
+    os.write(w, b'\x00')
+    assert next(g).tolist() == [3]
+    os.write(w, b'\x04')  # a lone byte, then the end: no sample, and no empty frame either
+    os.close(w)
+    assert [f.tolist() for f in g] == []

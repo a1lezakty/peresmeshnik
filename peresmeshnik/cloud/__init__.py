@@ -54,9 +54,14 @@ def frames(src: str, tail_max: float, out_quiet):
     """Yield 20 ms int16 frames at capture pace, then silence until the output has been quiet for
     2.5 s (at least 3 s, at most `tail_max`) so the translator can finish."""
     t0, i = time.monotonic(), 0
-    if src == '-':
-        while b := sys.stdin.buffer.read(FRAME * 2):  # the pipe sets the pace
-            yield np.frombuffer(b[:len(b) // 2 * 2], '<i2')
+    if src == '-':  # the pipe sets the pace. os.read, not sys.stdin.buffer: a daemon thread blocked inside the
+        rest = b''  # buffered reader holds its lock, and Python aborts at exit (a failed connect: core dump, not an error)
+        while b := os.read(sys.stdin.fileno(), FRAME * 2):
+            b, rest = rest + b, b''
+            if len(b) % 2:
+                b, rest = b[:-1], b[-1:]
+            if b:  # one byte read: nothing whole yet
+                yield np.frombuffer(b, '<i2')
     else:
         pcm = read_wav(src)
         for i in range(0, len(pcm), FRAME):

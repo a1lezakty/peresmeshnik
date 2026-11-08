@@ -54,9 +54,26 @@ jobs:
           echo "DISPLAY=:99" >> "$GITHUB_ENV"
           ldd .venv/lib/python3.12/site-packages/PySide6/Qt/plugins/platforms/libqxcb.so | grep 'not found' || true
           DISPLAY=:99 xdotool getwindowfocus || true
+      - name: BlackHole 2ch and 16ch (the virtual devices of the macOS sound tests)
+        if: runner.os == 'macOS'
+        run: |
+          brew install --cask blackhole-2ch blackhole-16ch
+          if ! system_profiler SPAudioDataType | grep -q 'BlackHole 16ch'; then
+            sudo launchctl kickstart -kp system/com.apple.audio.coreaudiod
+            sleep 5
+          fi
+          system_profiler SPAudioDataType | grep -E '^ +BlackHole'
+      - name: Swift tap helper (native/macos/tap), as the .app gets it
+        if: runner.os == 'macOS' && hashFiles('native/macos/tap/*.swift') != ''
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          swiftc -O -target arm64-apple-macos12 native/macos/tap/*.swift -o "$RUNNER_TEMP/bin/peresmeshnik-tap"
+          echo "PERESMESHNIK_TAP=$RUNNER_TEMP/bin/peresmeshnik-tap" >> "$GITHUB_ENV"
       # includes the idle-CPU watchdogs: the app (tray, overlay, first-run wizard) 60 s idle, and again with
       # the overlay on screen; each fails above 0.13 s of CPU. Linux: Xvfb; macOS, Windows: the runner's desktop
       - run: uv run pytest -q -s
+        env:  # macOS: a synthetic key press or click that does not arrive fails the test instead of skipping it
+          PERESMESHNIK_REQUIRE_SYNTHETIC: ${{ runner.os == 'macOS' && '1' || '' }}
 
   # working-mode CPU gate: the local pipeline on a 30 s recording (RTF, CPU s per audio s)
   work-gate:

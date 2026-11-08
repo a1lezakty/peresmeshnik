@@ -37,18 +37,30 @@ ICONS = Path(__file__).resolve().parents[2] / 'assets' / 'icons'  # ponytail: re
 LANGS = {'en': 'English', 'ru': 'Русский'}
 MIC_LABEL = 'Microphone'  # me -> them and the loopback while translation is off
 SIDES = {'them_to_me': 'Them → me', 'me_to_them': 'Me → them'}
-BROWSER_NOTE = ('A browser moves with all of its sound: YouTube in another tab is translated too. '
+MAC = sys.platform == 'darwin'
+BROWSER_NOTE = (f'A browser {"is taken" if MAC else "moves"} with all of its sound: YouTube in another tab is translated too. '
                 'For calls a separate browser is better.')
+CALL_NOTE = 'While translating, macOS mutes it on your speakers' if MAC else 'Its sound moves to the translation while it is on'
 
 
 def tray_icon() -> QIcon:
     icon = QIcon()
-    light = sys.platform.startswith('linux') or sys.platform == 'win32'  # dark panels; macOS takes a template image (stage 3)
+    light = sys.platform.startswith('linux') or sys.platform == 'win32'  # dark panels
     for px in (16, 22, 24, 32, 44, 48, 64):
         f = ICONS / f'tray{"-light" if light else ""}-{px}.png'
         if f.exists():
             icon.addFile(str(f))
+    icon.setIsMask(sys.platform == 'darwin')  # the black glyph as a template image: macOS colours it for the menu bar
     return icon
+
+
+def capture():
+    """The call-sound module of this OS: `apps()` playing now as [(key, label)], `is_browser(key)`."""
+    if sys.platform == 'darwin':
+        from peresmeshnik.audio import capture_macos as mod
+    else:
+        from peresmeshnik.audio import capture_pipewire as mod
+    return mod
 
 
 class Tray(QObject):
@@ -83,7 +95,7 @@ class Tray(QObject):
                 group.addAction(a)
             group.triggered.connect(self._engine_chosen)
         self._call_group = None
-        if sys.platform.startswith('linux'):  # macOS / Windows take the call app's sound another way (stages 3-4)
+        if sys.platform.startswith(('linux', 'darwin')):  # Windows: stage 4
             self.call_menu = m.addMenu('Call app')
             self.call_menu.aboutToShow.connect(self._fill_call_menu)
             self.call_apps.connect(self._show_call_apps)
@@ -165,11 +177,11 @@ class Tray(QObject):
         self.call_menu.addAction('Looking for the apps playing now…').setEnabled(False)
 
         def work():
-            from peresmeshnik.audio.capture_pipewire import apps
             try:
-                self.call_apps.emit((apps(), ''))
-            except Exception as e:  # no sound server
-                self.call_apps.emit(([], str(e)))
+                self.call_apps.emit((capture().apps(), ''))
+            except Exception as e:  # no sound server; macOS: no call sound capture in this version yet
+                missing = isinstance(e, ModuleNotFoundError) and e.name == 'peresmeshnik.audio.capture_macos'
+                self.call_apps.emit(([], 'not in this version' if missing else str(e)))
         threading.Thread(target=work, name='call-apps', daemon=True).start()
 
     def _show_call_apps(self, result) -> None:
@@ -194,13 +206,12 @@ class Tray(QObject):
             group.addAction(a)
         group.triggered.connect(self._call_chosen)
         m.addSeparator()
-        m.addAction('Its sound moves to the translation while it is on').setEnabled(False)
+        m.addAction(CALL_NOTE).setEnabled(False)
         m.addAction(BROWSER_NOTE.split(':')[0] + ' (other tabs too)').setEnabled(False)
 
     def _call_chosen(self, action) -> None:
-        from peresmeshnik.audio.capture_pipewire import is_browser
         self.ctl.set_call_app(action.data())
-        if is_browser(action.data()):
+        if getattr(capture(), 'is_browser', lambda key: False)(action.data()):
             self.message(BROWSER_NOTE)
 
     def _engine_chosen(self, action) -> None:
@@ -222,6 +233,9 @@ class Tray(QObject):
         w.show()
         w.raise_()
         w.activateWindow()
+        if sys.platform == 'darwin':  # a menu-bar app is not active by itself: its window would open behind the others
+            from peresmeshnik.ui import macos
+            macos.front(int(w.winId()))
 
     def open_settings(self) -> None:
         self._show(SettingsDialog(self))

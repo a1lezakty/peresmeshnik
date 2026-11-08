@@ -532,7 +532,7 @@ class HotkeyPage(QWizardPage):
         combo = self.edit.keySequence().toString(QKeySequence.PortableText)
         if combo and combo != self.w.s.ui.hotkey:
             if why := self.w.tray.reload_hotkey(combo):
-                self.err.setText(f'Cannot use {combo}: {why}')
+                self.err.setText(f'Hotkey not changed: {why}')
                 return False
             self.w.s.ui.hotkey = combo
         return True
@@ -542,17 +542,29 @@ class DonePage(QWizardPage):
     def __init__(self):
         super().__init__()
         self.setTitle('Ready')
-        lab = QLabel('In your call app (Meet, Zoom, Telegram) choose the microphone <b>Peresmeshnik Mic</b>. While '
-                     'translation is off it carries your own voice, so the call always hears you.<br><br>'
-                     'Their voice: while translation is on, the app moves the call app\'s sound to <b>Peresmeshnik Call</b> '
-                     '(you hear the translation instead) and gives it back when translation is off. Telegram, Zoom, Discord '
-                     'and the like are found by themselves; else choose the app in the tray menu <b>Call app</b> while the '
-                     'call plays. A browser (Meet) moves with <b>all</b> of its sound: YouTube in another tab is translated '
-                     'too, so for calls a separate browser is better.<br><br>'
-                     'Turn translation on from the tray icon. The hotkey switches to your live voice and back.<br><br>'
-                     'Settings and this wizard are in the tray menu.')
+        lab = QLabel(DONE_MACOS if sys.platform == 'darwin' else DONE_LINUX)
         lab.setWordWrap(True)
         QVBoxLayout(self).addWidget(lab)
+
+
+DONE_MACOS = ('In your call app (Meet, Zoom, Telegram) choose the microphone <b>BlackHole 2ch</b>. While translation '
+              'is off it carries your own voice, so the call always hears you.<br><br>'
+              "Their voice: while translation is on, the app records the call app's sound and mutes its original for you "
+              '(you hear the translation instead); macOS asks once to allow "System Audio Recording". Telegram, Zoom, '
+              'Discord and the like are found by themselves; else choose the app in the menu <b>Call app</b> while the '
+              'call plays. A browser (Meet) is taken with <b>all</b> of its sound: YouTube in another tab is translated '
+              'too, so for calls a separate browser is better.<br><br>'
+              'Turn translation on from the Peresmeshnik icon in the menu bar. The hotkey switches to your live voice '
+              'and back.<br><br>Settings and this wizard are in the same menu.')
+DONE_LINUX = ('In your call app (Meet, Zoom, Telegram) choose the microphone <b>Peresmeshnik Mic</b>. While '
+              'translation is off it carries your own voice, so the call always hears you.<br><br>'
+              'Their voice: while translation is on, the app moves the call app\'s sound to <b>Peresmeshnik Call</b> '
+              '(you hear the translation instead) and gives it back when translation is off. Telegram, Zoom, Discord '
+              'and the like are found by themselves; else choose the app in the tray menu <b>Call app</b> while the '
+              'call plays. A browser (Meet) moves with <b>all</b> of its sound: YouTube in another tab is translated '
+              'too, so for calls a separate browser is better.<br><br>'
+              'Turn translation on from the tray icon. The hotkey switches to your live voice and back.<br><br>'
+              'Settings and this wizard are in the tray menu.')
 
 
 class SetupWizard(QWizard):

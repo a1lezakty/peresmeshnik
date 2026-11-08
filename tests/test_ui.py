@@ -228,6 +228,10 @@ def test_idle_cpu_with_tray_and_visible_overlay(tmp_path):
 
         def cpu():
             return sum(sum(q.cpu_times()[:2]) for q in [proc, *proc.children(recursive=True)])
+        if sys.platform == 'darwin':  # AppKit's one-off work after the first show, as in tests/test_idle_cpu.py: printed
+            first = cpu()
+            time.sleep(15)
+            print(f'idle CPU with tray, overlay and wizard in the first 15 s (not gated): {cpu() - first:.3f} s')
         marks = [cpu()]
         for _ in range(4):
             time.sleep(window / 4)

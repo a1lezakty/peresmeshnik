@@ -997,3 +997,43 @@ is the cloud (Gemini Live) with local subtitles (GigaAM), the 8 GB default. CPU 
   of 0.61–0.81, both sides together 2.1–2.2 instead of 0.56–0.60. The working-mode gate did not
   see it: it runs `peresmeshnik run`, which imports in the right order. The thread pins now live in the
   package's `__init__`, and a test checks them after `import peresmeshnik.app`.
+
+## Stage 3: the macOS shell and the .app (S3)
+
+Measured 2026-11-08 on the GitHub runner `macos-15` (a virtual M1, 3 cores, ~7 GB, no GPU or Neural Engine,
+its own Aqua desktop; `tests/test_macos.py`, `tests/test_app_bundle.py` in `release.yml`, several runs). Not
+measured: a real Mac (CoreML / Metal / MPS: no Apple GPU in CI), real headphones, a real call (USER-CHECKS).
+
+### The .app
+
+| | macos-15 |
+|---|---|
+| build (`packaging/macos/build.sh`: PyInstaller 6.22, the Piper runner, licenses, ad-hoc signature, `hdiutil`) | 73 s |
+| `Peresmeshnik.app` / `.dmg` (UDZO) | 266 MB / 128–129 MB (no models, no torch) |
+| launch of the app copied out of the mounted .dmg → "idle" (its first start; the first-run wizard and a sample subtitle on screen) | 2.04, 1.76, 1.91, 2.19 s; RSS 137–143 MB |
+| the same from Python (`python -m peresmeshnik app`, no wizard) | 0.52–0.88 s; RSS 107–108 MB |
+| idle CPU of the .app, 60 s after the same 15 s as `tests/test_idle_cpu.py` (limit 0.13 s) | 0.010, 0.004, 0.009, 0.005 s (the 15 s before, not gated: 0.057–0.129 s); `tests/test_idle_cpu.py` from Python: 0.007, 0.026 s |
+| SIGTERM | exit code 0 |
+| frozen cloud direction with a fake key | Google's refusal ("API key not valid"), exit code 1: google-genai is in the bundle |
+| frozen CLI: `models fetch silero-vad` over HTTPS from the bundle; `run` on the 30 s call (Parakeet + OPUS-MT + the bundled Piper runner), RTF / CPU s per audio s | 0.67 / 1.27, 0.56 / 1.01, 0.66 / 1.17, 0.70 / 1.20, 0.68 / 1.17; from Python in the same job as the last two: 0.67 / 1.24, 0.64 / 1.16 (the frozen app costs the same; runners of this type vary: the work gate gave 0.37–0.44 / 0.69–0.83) |
+
+The base app is torch-free (ARCHITECTURE §10): a local me → them clone needs the voice pack, which is not
+built yet; the 8 GB default (me → them through Gemini) does not need it.
+
+### Menu bar, overlay, hotkey (what the runner can show)
+
+| Check | How | Result |
+|---|---|---|
+| menu-bar item | the window server's on-screen windows (`CGWindowListCopyWindowInfo`) of the app's process; a screenshot | a status window (level 25) of 38×24 at y = 0; the bird drawn as a template |
+| no Dock icon | `NSApp.activationPolicy` (`LSUIElement` in the .app, `setActivationPolicy:` from Python); the screenshot | accessory; no icon in the Dock |
+| a window from the menu gets the focus | `NSApp.isActive`, the window's `isKeyWindow` and its place in the window list after "Settings…" | active, key, frontmost (once in 4 runs not, right after the full-screen test's Space animation, before `orderFrontRegardless` was added) |
+| overlay window | `level` 25, `collectionBehavior` CanJoinAllSpaces \| Stationary \| IgnoresCycle \| FullScreenAuxiliary, `ignoresMouseEvents`, `hidesOnDeactivate` off | as set |
+| overlay over another app's full-screen window | a second process shows a full-screen window (its own Space): the overlay is on screen above it, a plain window of ours is not | on screen; only for an accessory app (as a regular app the overlay stayed on the desktop's Space) |
+| click-through | a synthetic click (`CGEventPost`) on the overlay | lands in the window under it |
+| hotkey | Carbon `RegisterEventHotKey`, a synthetic ⌥⇧⌘K (`CGEventPost`) | fires once per press, another combo does not; the app gets it (`mode: translation is off`) |
+| hotkey refusals | ⌥⌘Space (Finder search), ⌘Space (Spotlight); a combo another process holds | "is a macOS shortcut", "already taken by another application"; the old combo stays bound |
+| idle with tray, overlay and wizard (`tests/test_ui.py`) | 60 s after 15 s, as `tests/test_idle_cpu.py` | 0.013 s (the 15 s before: 0.137 s); 0.116 s before the settle was added, 0.110 of it in the first quarter: AppKit's one-off work after the first show |
+
+The runner's enabled macOS shortcuts (`CopySymbolicHotKeys`) include ⌘Space, ⌥⌘Space, ⌃⌘Space and the fn
+ones (fn+Q, fn+A…); ⇧⌘Space is not one of them, hence the new default. BlackHole 2ch and 16ch 0.7.1 install
+with `brew install --cask` and show up without restarting coreaudiod.

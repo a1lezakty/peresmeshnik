@@ -7,6 +7,7 @@ changes, and nothing in it runs on a timer, so in silence it costs nothing.
 from __future__ import annotations
 
 import logging
+import sys
 import time
 from collections import OrderedDict, deque
 
@@ -30,6 +31,7 @@ class SubtitleOverlay(QWidget):
                          | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WA_MacAlwaysShowToolWindow)  # a Qt tool window on macOS hides while its app is not active
         self.setWindowTitle('Peresmeshnik subtitles')
         self.rows = rows
         self.f_orig, self.f_tr = QFont(), QFont()
@@ -89,6 +91,9 @@ class SubtitleOverlay(QWidget):
         log.info('overlay %s: %s | %s', side, row[0], row[1])
         if not self.isVisible():
             self.show()
+            if sys.platform == 'darwin':  # after show(): Qt sets the window's level and behaviour while showing it
+                from peresmeshnik.ui import macos
+                macos.overlay(int(self.winId()))
         self.update()
 
     def _on_clear(self) -> None:

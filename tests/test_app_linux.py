@@ -6,7 +6,7 @@ Needs a PipeWire/PulseAudio server (pactl); the app tests also need an X display
 end-to-end ones download and run models and the cloud: PERESMESHNIK_E2E=1 (local, not in CI).
 """
 import os
-import select
+import queue
 import shutil
 import signal
 import subprocess
@@ -49,6 +49,7 @@ def devices():
     threading.Thread(target=talk, daemon=True).start()
     yield {'headphones': 'test_headphones', 'mic': 'test_mic'}
     feed.kill()
+    feed.wait()
     for m in reversed(mods):
         subprocess.run(['pactl', 'unload-module', m], capture_output=True)
 
@@ -70,6 +71,13 @@ def start_app(tmp_path, *args, settings: str = '', env=None):
     p = subprocess.Popen([sys.executable, '-X', 'faulthandler', '-m', 'peresmeshnik', 'app', '--no-wizard', '-v', *args], env=e,
                          stdout=subprocess.PIPE, stderr=(tmp_path / 'app.err').open('w'), text=True)
     p.log = tmp_path / 'app.err'
+    p.lines = queue.Queue()  # read by a thread: select() on a buffered pipe misses lines that arrived together
+
+    def pump():
+        for line in p.stdout:
+            p.lines.put(line)
+        p.lines.put(None)
+    threading.Thread(target=pump, daemon=True).start()
     wait_line(p, 'idle', 30)
     return p
 
@@ -77,16 +85,23 @@ def start_app(tmp_path, *args, settings: str = '', env=None):
 def wait_line(p, what: str, timeout: float = 60) -> list[str]:
     """Lines up to the first with `what`; on a timeout the app's threads are dumped (faulthandler) into the error."""
     seen, end = [], time.monotonic() + timeout
-    while (left := end - time.monotonic()) > 0 and select.select([p.stdout], [], [], left)[0]:
-        line = p.stdout.readline()
-        if not line:
+    while (left := end - time.monotonic()) > 0:
+        try:
+            line = p.lines.get(timeout=left)
+        except queue.Empty:
+            break
+        if line is None:
             break
         seen.append(line.strip())
         if what in line:
             return seen
     if p.poll() is None:
         p.send_signal(signal.SIGABRT)
-        p.wait(10)
+        try:
+            p.wait(10)
+        except subprocess.TimeoutExpired:  # still writing its core dump
+            p.kill()
+            p.wait(10)
     raise AssertionError(f'no {what!r} in {seen}; the app said:\n{p.log.read_text()[-4000:]}')
 
 
@@ -96,18 +111,93 @@ def stop_app(p):
 
 
 @pytest.mark.skipif(not (DISPLAY and shutil.which('xdotool')), reason='needs an X display and xdotool')
-def test_hotkey_switches_live_voice(tmp_path):
-    p = start_app(tmp_path, settings='[ui]\nhotkey = "Ctrl+Shift+H"\n')
+def ours() -> list[str]:
+    """Our PipeWire modules: "module name args" lines."""
+    from peresmeshnik.ui.selftest import pactl
+    return [' '.join(m.split('\t')[1:3]) for m in pactl('list', 'short', 'modules').splitlines() if 'peresmeshnik_' in m]
+
+
+def test_hotkey_switches_live_voice(tmp_path, devices):
+    """Off: the hotkey only says so (the call hears the microphone through the loopback). On (E2E: the models
+    are there, both sides fed from recordings): it switches live voice and back."""
+    on = ['--on', '--them-file', str(DATA / 'call-en.ogg'), '--me-file', str(DATA / 'call-ru.ogg')] if E2E else []
+    p = start_app(tmp_path, *on, settings='me_to_them = "local"\n[ui]\nhotkey = "Ctrl+Shift+H"\nheadphones = "test_headphones"\n'
+                  if E2E else '[ui]\nhotkey = "Ctrl+Shift+H"\n')
     try:
+        if E2E:
+            wait_line(p, 'translating', 120)
         time.sleep(0.5)
         subprocess.run(['xdotool', 'key', 'ctrl+shift+h'], check=True)
+        if not E2E:
+            assert wait_line(p, 'mode:', 10)[-1] == 'mode: translation is off'
+            return
         assert wait_line(p, 'mode:', 10)[-1] == 'mode: live voice'
         subprocess.run(['xdotool', 'key', 'ctrl+shift+h'], check=True)
         assert wait_line(p, 'mode:', 10)[-1] == 'mode: translation'
     finally:
         stop_app(p)
-    from peresmeshnik.audio.virtual_mic_linux import exists
-    assert not exists()  # removed on exit (SIGTERM)
+        assert not ours()  # every device removed on exit (SIGTERM)
+
+
+def test_devices_live_with_the_app_and_the_mic_is_looped_while_off(tmp_path, devices):
+    """Call sink, virtual mic and the microphone loopback exist from the start (stale ones from a killed run
+    replaced), a second instance leaves them alone, SIGHUP removes them."""
+    from peresmeshnik.ui.selftest import pactl
+    pactl('load-module', 'module-null-sink', 'sink_name=peresmeshnik_call')  # as left by a SIGKILL
+    p = start_app(tmp_path, settings='[ui]\nmic = "test_mic"\n')
+    try:
+        mods = ours()
+        calls = [m for m in mods if 'sink_name=peresmeshnik_call' in m]
+        assert len(calls) == 1 and 'priority.session=0' in calls[0]  # the app's own sink (module ids get reused)
+        assert any(m.startswith('module-loopback') and 'source=test_mic sink=peresmeshnik_mic_sink' in m for m in mods), mods
+        assert not any('source=peresmeshnik_' in m for m in mods)  # never our own device looped back
+        second = subprocess.run([sys.executable, '-m', 'peresmeshnik', 'app', '--no-wizard'], capture_output=True, text=True,
+                                timeout=30, env={**os.environ, 'PERESMESHNIK_CONFIG': str(tmp_path / 'settings.toml')})
+        assert second.returncode == 3 and 'already running' in second.stderr
+        assert ours() == mods  # the first one's devices untouched
+        p.send_signal(signal.SIGHUP)  # the terminal closed
+        assert p.wait(20) == 0
+    finally:
+        if p.poll() is None:
+            stop_app(p)
+    assert not ours()
+
+
+def test_selftest_cleans_up_when_playing_fails(devices, monkeypatch):
+    from peresmeshnik.ui import selftest
+    recorders = []
+    real = selftest.Recorder
+
+    def track(*a, **k):
+        recorders.append(real(*a, **k))
+        return recorders[-1]
+    monkeypatch.setattr(selftest, 'Recorder', track)
+
+    def broken(*a):
+        raise OSError('pacat: connection refused')
+    monkeypatch.setattr(selftest, 'play', broken)
+    rs = selftest.run_all(devices['headphones'], devices['mic'])
+    assert [r.ok for r in rs][:3] == [False, True, False]  # the virtual mic plays through its own class
+    assert recorders and all(r.p.poll() is not None for r in recorders)  # no parec left recording
+    assert not ours()  # the temporary call sink and virtual mic are gone
+
+
+@pytest.mark.filterwarnings('ignore::pytest.PytestUnhandledThreadExceptionWarning')  # out.py's writer sees the pipe go
+def test_headphones_reopen_when_the_device_goes(devices):
+    from peresmeshnik.app import Headphones
+    errors = []
+    out = Headphones(devices['headphones'], errors.append)
+    tone = np.zeros(2400, np.float32)
+    out.play(tone, 24000)
+    first = out._out
+    first._proc.kill()  # what a Bluetooth profile switch does to pacat
+    first._proc.wait()
+    time.sleep(0.1)
+    out.play(tone, 24000)
+    out.play(tone, 24000)
+    assert out._out is not first and out._out._proc.poll() is None  # a new pacat on the same sink
+    assert errors == ['error: the headphones went away; reopening']  # once, in the tray
+    out.stop()
 
 
 @pytest.mark.skipif(not (E2E and DISPLAY), reason='PERESMESHNIK_E2E=1 and a display: models, cloud key')

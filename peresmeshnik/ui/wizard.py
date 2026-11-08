@@ -256,7 +256,7 @@ class SelfTestPage(QWizardPage):
         lay.addWidget(self.out)
         self.result.connect(lambda ok, text: self.out.setText(self.out.text() + ('✔ ' if ok else '✘ ') + text + '<br>'))
         self.done.connect(self._done)
-        self.ran = False
+        self.ran = self.running = False
         self.ok = False
 
     def isComplete(self) -> bool:  # noqa: N802
@@ -268,17 +268,23 @@ class SelfTestPage(QWizardPage):
         ctl, s = self.w.tray.ctl, self.w.s
 
         def work():
-            from peresmeshnik.ui import selftest
-            ctl.set_translation(False).result()  # our capture sink must not be in use
-            vmic = ctl.submit(ctl.virtual_mic).result()  # the app's own: a second one would replace it
-            rs = selftest.run_all(s.ui.headphones or None, s.ui.mic or None, vmic,
-                                  report=lambda r: self.result.emit(r.ok, f'{r.name}: {r.detail}'))
-            self.ok = all(r.ok for r in rs)
-            self.done.emit()
+            self.ok = False
+            try:
+                from peresmeshnik.ui import selftest
+                ctl.set_translation(False).result()  # the call sink must carry only the chirp
+                vmic = ctl.submit(ctl.virtual_mic).result()  # the app's own: a second one would replace it
+                rs = selftest.run_all(s.ui.headphones or None, s.ui.mic or None, vmic,
+                                      report=lambda r: self.result.emit(r.ok, f'{r.name}: {r.detail}'))
+                self.ok = all(r.ok for r in rs)
+            except Exception as e:  # no pactl, no sound server: say so instead of waiting forever
+                self.result.emit(False, f'self-test: {e}')
+            finally:
+                self.done.emit()
+        self.running = True
         threading.Thread(target=work, name='selftest', daemon=True).start()
 
     def _done(self) -> None:
-        self.ran = True
+        self.ran, self.running = True, False
         self.button.setEnabled(True)
         self.out.setText(self.out.text() + ('<b>All paths work.</b>' if self.ok else '<b>Some paths failed</b>: check the devices, '
                                             'run again, or continue and fix it later.'))
@@ -310,8 +316,14 @@ class HotkeyPage(QWizardPage):
         self.out.setWordWrap(True)
         lay.addWidget(self.out)
         self.err = QLabel()
+        self.err.setWordWrap(True)
         lay.addWidget(self.err)
         self.state.connect(self._state)
+        self.running, self.error = False, ''
+
+    def initializePage(self) -> None:  # noqa: N802
+        if why := self.w.tray.hotkey_why:  # e.g. taken by another app, no portal on this desktop
+            self.err.setText(f'No global hotkey now: {why}')
 
     def test(self, side: str) -> None:
         from peresmeshnik.app import Controller
@@ -321,24 +333,31 @@ class HotkeyPage(QWizardPage):
         for b in self.tests.values():
             b.setEnabled(False)
         self.out.setText('Loading the engines…')
+        self.running, self.error = True, ''
         ctl = Controller(self.w.tray.ctl.overlay, self.state.emit, sample if side == 'them' else None,
                          sample if side == 'me' else None, settings=s, test=True)
 
         def work():
-            ctl.set_translation(True).result()
-            for side_ in ctl.sides:
-                side_.inp.done.wait(60)
-            cloud = any(x.engine == 'cloud' for x in ctl.sides)
-            time.sleep(6.0 if cloud else 3.0)  # the cloud voice ends ~3-4 s after the speech (BENCH)
-            ctl.quit()
-            self.state.emit('test done')
+            try:
+                ctl.set_translation(True).result()
+                for side_ in ctl.sides:
+                    side_.inp.done.wait(60)
+                cloud = any(x.engine == 'cloud' for x in ctl.sides)
+                time.sleep(6.0 if cloud else 3.0)  # the cloud voice ends ~3-4 s after the speech (BENCH)
+                ctl.quit()
+            finally:
+                self.state.emit('test done')
         threading.Thread(target=work, name='test-phrase', daemon=True).start()
 
     def _state(self, st: str) -> None:
-        self.out.setText(st)
-        if st == 'test done' or st.startswith('error'):
+        if st.startswith('error'):
+            self.error = st  # kept: a wrong key flashes for a second otherwise and the test looks fine
+        if st == 'test done':
+            self.running = False
             for b in self.tests.values():
                 b.setEnabled(True)
+            st = f'test done with an {self.error}' if self.error else st
+        self.out.setText(st)
 
     def validatePage(self) -> bool:  # noqa: N802
         combo = self.edit.keySequence().toString(QKeySequence.PortableText)
@@ -354,7 +373,10 @@ class DonePage(QWizardPage):
     def __init__(self):
         super().__init__()
         self.setTitle('Ready')
-        lab = QLabel('In your call app (Meet, Zoom, Telegram) choose the microphone <b>Peresmeshnik Mic</b>.<br><br>'
+        lab = QLabel('In your call app (Meet, Zoom, Telegram) choose the microphone <b>Peresmeshnik Mic</b>. While '
+                     'translation is off it carries your own voice, so the call always hears you.<br><br>'
+                     'Their voice: for now move the call app\'s sound to <b>Peresmeshnik Call</b> yourself (pavucontrol or the '
+                     'sound settings); the app does not move it yet, and without it there is nothing to translate.<br><br>'
                      'Turn translation on from the tray icon. The hotkey switches to your live voice and back.<br><br>'
                      'Settings and this wizard are in the tray menu.')
         lab.setWordWrap(True)
@@ -373,6 +395,10 @@ class SetupWizard(QWizard):
         self.accepted.connect(self.finish)
         self.rejected.connect(self.cancel)
         self.finished.connect(lambda _: tray.ctl.on or tray.ctl.overlay.clear.emit())  # the test phrase's subtitles
+
+    def busy(self) -> bool:
+        """Still downloading, testing or playing a phrase: the tray keeps this wizard alive after it is closed."""
+        return any(getattr(p, 'busy', False) is True or getattr(p, 'running', False) for p in self.pages)
 
     def cancel(self) -> None:
         if (saved := config.load().ui.hotkey) != self.s.ui.hotkey:  # the hotkey page already bound the new one

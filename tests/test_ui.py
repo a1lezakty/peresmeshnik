@@ -138,7 +138,8 @@ def test_live_switch_routes_around_the_direction(monkeypatch):
     assert len(d.fed) == 1
     side.set_live(True)
     assert out.flushed == 1  # queued translation dropped
-    inp.cb(frame)
+    inp.cb(frame)  # the capture callback only queues; the pass-through thread plays
+    time.sleep(0.1)
     assert len(d.fed) == 1 and out.played[-1] == (512, 16000)  # the original goes straight out
     side.set_live(False)
     inp.cb(frame)
@@ -254,7 +255,7 @@ def test_portal_hotkey_against_a_fake_portal():
     address = bus.stdout.readline().strip()
     service = open_dbus_connection(address)
     service.send_and_get_reply(message_bus.RequestName(PORTAL))
-    calls, session = [], '/org/freedesktop/portal/desktop/session/1_2/peresmeshnik'
+    calls, session, refuse = [], '/org/freedesktop/portal/desktop/session/1_2/peresmeshnik', set()
     stop = threading.Event()
 
     def serve():
@@ -271,24 +272,39 @@ def test_portal_hotkey_against_a_fake_portal():
             if member == 'Get':
                 service.send(new_method_return(m, 'v', (('u', 1),)))
                 continue
+            if member == 'Close':
+                service.send(new_method_return(m))
+                continue
             options = m.body[-1]
             request = f'{PORTAL_PATH}/request/{sender}/{options["handle_token"][1]}'
             service.send(new_method_return(m, 'o', (request,)))
             results = ({'session_handle': ('s', session)} if member == 'CreateSession' else
                        {'shortcuts': ('a(sa{sv})', [(m.body[1][0][0], {'trigger_description': ('s', 'Ctrl+Alt+Space')})])})
-            service.send(new_signal(DBusAddress(request, interface='org.freedesktop.portal.Request'), 'Response', 'ua{sv}', (0, results)))
+            code = 2 if member in refuse else 0  # 2: the user cancelled
+            response = DBusAddress(request, interface='org.freedesktop.portal.Request')
+            service.send(new_signal(response, 'Response', 'ua{sv}', (code, results)))
     threading.Thread(target=serve, daemon=True).start()
     hk = None
     try:
         hk, hits = PortalHotkey(bus=address, timeout=5), []
-        assert hk.session == session
         hk.register('Ctrl+Alt+Space', lambda: hits.append(threading.current_thread() is threading.main_thread()))
-        assert hk.trigger == {'toggle-live': 'Ctrl+Alt+Space'}
+        assert hk.session == session and hk.trigger == {'toggle-live': 'Ctrl+Alt+Space'}
         assert calls == ['Get', 'CreateSession', 'BindShortcuts']
         for sess in (session, '/other/session', session):
             service.send(new_signal(DBusAddress(PORTAL_PATH, interface=SHORTCUTS), 'Activated', 'osta{sv}', (sess, 'toggle-live', 1, {})))
         settle(0.5)
         assert hits == [True, True]  # ours only, on the GUI thread
+        refuse.add('BindShortcuts')  # a new combo the desktop refuses: the old session and callback stay
+        with pytest.raises(HotkeyError, match='refused'):
+            hk.register('Ctrl+Alt+K', lambda: hits.append('new'))
+        assert hk.session == session and calls[-3:] == ['CreateSession', 'BindShortcuts', 'Close']  # the new session closed
+        service.send(new_signal(DBusAddress(PORTAL_PATH, interface=SHORTCUTS), 'Activated', 'osta{sv}', (session, 'toggle-live', 2, {})))
+        settle(0.3)
+        assert hits[-1] is True
+        refuse.clear()  # a new combo: a new session (one bind per session, the spec), then the old one closes
+        calls.clear()
+        hk.register('Ctrl+Alt+K', lambda: hits.append('new'))
+        assert calls == ['CreateSession', 'BindShortcuts', 'Close'] and hk.session == session  # the fake reuses the path
     finally:
         stop.set()
         if hk:
@@ -401,3 +417,101 @@ def test_side_reports_a_dead_direction_and_closes_the_cloud_on_a_failed_start(mo
     with pytest.raises(RuntimeError, match='bad model'):
         Side('them', s, FakeIn(), FakeOut(), None)
     assert cloud.closed.is_set()  # its session does not stay open
+
+
+def test_supports_live_direction_gets_the_switch_and_keeps_its_input(monkeypatch):
+    s = config.Settings()
+    s.me_to_them = 'local'
+
+    class Crossfading(FakeDirection):
+        supports_live = True
+
+        def __init__(self):
+            super().__init__()
+            self.live_calls = []
+
+        def set_live(self, on):
+            self.live_calls.append(on)
+    d, out, inp = Crossfading(), FakeOut(), FakeIn()
+    monkeypatch.setattr(Side, '_local', lambda self, s: d)
+    side = Side('me', s, inp, out, type('O', (), {'show': lambda self, c: None})())
+    side.start()
+    side.set_live(True)
+    inp.cb(np.zeros(512, np.float32))
+    time.sleep(0.1)
+    assert d.live_calls == [True] and len(d.fed) == 1  # the direction does the switch (crossfade) and still gets the input
+    assert out.played == [(10, 24000)] and out.flushed == 0  # its Speech (the live voice) plays in live mode
+    side.stop()
+
+
+def test_resampler_keeps_the_phase_between_chunks():
+    from peresmeshnik.app import Resampler
+    rs, n_in, out = Resampler(16000, 22050), 0, []
+    x = np.sin(2 * np.pi * 440 * np.arange(16000 * 60) / 16000).astype(np.float32)
+    for i in range(0, len(x), 320):  # 20 ms chunks for a minute
+        out.append(rs(x[i:i + 320]))
+        n_in += len(x[i:i + 320])
+    y = np.concatenate(out)
+    assert abs(len(y) - n_in * 22050 / 16000) <= 1  # no drift (per-chunk rounding gave +34 ms per minute)
+    ref = np.sin(2 * np.pi * 440 * np.arange(len(y)) / 22050)
+    assert np.max(np.abs(y[100:] - ref[100:])) < 0.02  # continuous: no click at chunk joins
+
+
+def test_default_devices_that_are_ours_are_refused(monkeypatch):
+    from peresmeshnik import app as app_mod
+    with pytest.raises(RuntimeError, match='our own device'):
+        app_mod.not_ours('peresmeshnik_mic_sink.monitor', 'default input')
+    monkeypatch.setattr(app_mod, 'pactl', lambda *a: 'peresmeshnik_mic_sink.monitor\n' if a == ('get-default-source',) else '')
+    ctl = app_mod.Controller(None, lambda st: None)
+    with pytest.raises(RuntimeError, match='our own device'):
+        ctl._input('me')  # me -> them would translate its own translation in a loop
+
+
+@pytest.mark.skipif(not (sys.platform.startswith('linux') and os.environ.get('DISPLAY') and shutil.which('xdotool')),
+                    reason='needs an X display and xdotool')
+def test_hotkey_rebinds_after_a_failed_first_grab():
+    from peresmeshnik.ui.hotkey import Binding, X11Hotkey
+    other = X11Hotkey()  # another app holds the combo
+    other.register('Ctrl+Shift+J', lambda: None)
+    hits, done = [], []
+    b = Binding(X11Hotkey(), lambda: hits.append(1))
+    b.done.connect(lambda combo, why: done.append((combo, bool(why))))
+    try:
+        assert 'taken' in b.bind('Ctrl+Shift+J') and b.combo == ''
+        assert b.bind('Ctrl+Shift+U') == '' and b.combo == 'Ctrl+Shift+U'  # works after the failure
+        subprocess.run(['xdotool', 'key', 'ctrl+shift+u'], check=True)
+        settle(0.5)
+        assert hits == [1] and done == [('', True), ('Ctrl+Shift+U', False)]
+        assert 'taken' in b.bind('Ctrl+Shift+J') and b.combo == 'Ctrl+Shift+U'  # a refused new combo keeps the old one
+        subprocess.run(['xdotool', 'key', 'ctrl+shift+u'], check=True)
+        settle(0.5)
+        assert hits == [1, 1]
+    finally:
+        b.close()
+        other.close()
+
+
+@pytest.mark.skipif(not (sys.platform.startswith('linux') and os.environ.get('DISPLAY') and shutil.which('xdotool')),
+                    reason='needs an X display and xdotool')
+def test_overlay_is_click_through_for_real():
+    """A click on the overlay lands in the window under it (X input shape), not in the overlay."""
+    from PySide6.QtWidgets import QWidget
+    clicks = []
+
+    class Under(QWidget):
+        def mousePressEvent(self, e):  # noqa: N802
+            clicks.append('under')
+    under = Under()
+    o = SubtitleOverlay()
+    under.setGeometry(o.geometry().adjusted(-50, -50, 50, 50))
+    under.show()
+    settle(0.3)
+    o.side('them').show(Caption('click me', 'нажми меня', True, 0))
+    settle(0.5)
+    o.mousePressEvent = lambda e: clicks.append('overlay')
+    c = o.geometry().center()
+    subprocess.run(['xdotool', 'mousemove', str(c.x()), str(c.y()), 'click', '1'], check=True)
+    settle(0.5)
+    o.close()
+    under.close()
+    assert clicks == ['under']

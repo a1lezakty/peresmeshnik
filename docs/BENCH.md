@@ -594,7 +594,9 @@ PipeWire session (null sinks as headphones and microphone), and on the GitHub ru
 ### Idle CPU with the app open
 
 App open, translation off: tray icon, overlay window (hidden), the virtual mic, the X11 hotkey grab
-and, since CI is a first run, the setup wizard. CPU seconds of the process tree in 60 s after its
+and, since CI is a first run, the setup wizard. On Linux the tray host is XEmbed (`stalonetray`); a
+StatusNotifierItem tray over D-Bus (KDE, GNOME's AppIndicator) and Qt's wayland plugin are not
+measured. CPU seconds of the process tree in 60 s after its
 "idle" line (printed once the start is done and the Qt loop has nothing left to do); limit 0.13 s.
 
 | Gate | linux-x86_64-4c | ubuntu-latest | macos-15 | windows-latest |
@@ -644,6 +646,8 @@ loading); the overlay now paints its fonts once into an image at start, so capti
   nothing, a combo already grabbed by another client is refused with a message. Ctrl+Alt+F1…F12 are
   taken by the X server (VT switch); on the `ubuntu-latest` X server xdotool also adds Alt to F-keys
   (Ctrl+Shift+F9 arrived as Ctrl+Shift+Alt+F9, state 0xd), so the tests use letters.
+- **Overlay on top and click-through**: only under Xvfb: the window flags, and an `xdotool click`
+  on the overlay reaches the window below it. Not checked on a real compositor (GNOME, KDE).
 - **Wayland portal**: the GlobalShortcuts flow (CreateSession → BindShortcuts → Activated, answers
   through `Request.Response`) against a fake portal on a private D-Bus; only our session's
   `Activated` fires, on the GUI thread. A real portal (GNOME ≥ 48, KDE 6) is not checked here.

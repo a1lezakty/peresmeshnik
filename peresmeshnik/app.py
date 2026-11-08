@@ -5,9 +5,12 @@
 
 Each side ("them -> me", "me -> them") gets a local or cloud `Direction` from the settings. Turning
 translation on loads the engines on a control thread (the tray says "warming up"), then opens the
-inputs; turning it off closes everything again, so the idle app holds no stream, no engine thread
-and no timer. The hotkey switches "translation <-> live voice": a direction that supports
-`set_live` is told so; for any other the input goes straight to the output instead.
+inputs; turning it off closes them again, so the idle app holds no stream, no engine thread and no
+timer. Linux devices live as long as the app: the call sink "Peresmeshnik Call" (the call's sound is
+moved there once) and the virtual mic "Peresmeshnik Mic"; while translation is off PipeWire loops the
+real microphone into the virtual mic, so the call still hears the user. The hotkey switches
+"translation <-> live voice": a direction that supports `set_live` is told so; for any other the input
+goes straight to the output instead. One app per sound server (a lock file).
 `--them-file` / `--me-file` feed recordings at their own pace instead of the devices (tests, demos).
 """
 from __future__ import annotations
@@ -16,9 +19,12 @@ import argparse
 import concurrent.futures
 import logging
 import os
+import queue
+import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -26,13 +32,37 @@ from peresmeshnik import __version__, config
 from peresmeshnik.engines import SAMPLE_RATE, Caption, Speech
 
 log = logging.getLogger('peresmeshnik.app')
+OURS = 'peresmeshnik_'  # every PipeWire device the app makes starts with this
+MIC_SINK = 'peresmeshnik_mic_sink'  # = audio/virtual_mic_linux.SINK, without importing it on other OSes
 
 
-def resample(pcm: np.ndarray, sr: int, to: int) -> np.ndarray:
-    if sr == to:
-        return pcm
-    # ponytail: linear interpolation, fine for speech and for the live pass-through; soxr if quality matters
-    return np.interp(np.arange(0, len(pcm), sr / to), np.arange(len(pcm)), pcm).astype(np.float32)
+def pactl(*args: str) -> str:
+    return subprocess.run(['pactl', *args], check=True, capture_output=True, text=True, timeout=10).stdout
+
+
+def not_ours(name: str, what: str) -> str:
+    """A default device that is one of ours would make a loop (the translation translated again, or sent to the call)."""
+    if name.startswith(OURS):
+        raise RuntimeError(f'the {what} is our own device {name}: choose your real device in the settings or the system')
+    return name
+
+
+class Resampler:
+    """Linear resampling of a stream in chunks, keeping the fractional position and the last sample between
+    chunks: per-chunk rounding would add ~34 ms per minute at 16 -> 22.05 kHz.
+    ponytail: linear interpolation, fine for speech and the live pass-through; soxr if quality matters."""
+
+    def __init__(self, sr: int, to: int):
+        self.step, self.pos, self.prev = sr / to, 1.0, 0.0  # pos counts from the previous chunk's last sample
+
+    def __call__(self, pcm: np.ndarray) -> np.ndarray:
+        if self.step == 1.0:
+            return pcm
+        x = np.concatenate([[self.prev], pcm])
+        t = np.arange(self.pos, len(x) - 1, self.step)
+        self.pos = (t[-1] + self.step if len(t) else self.pos) - (len(x) - 1)
+        self.prev = x[-1]
+        return np.interp(t, np.arange(len(x)), x).astype(np.float32)
 
 
 class NoTts:
@@ -71,19 +101,48 @@ class FileIn:
 
 
 class Headphones:
-    """`AudioOut` to a PipeWire/PulseAudio sink at whatever rate the first chunk has (Piper 22.05 kHz,
-    Gemini 24 kHz); later chunks at another rate (the live pass-through, 16 kHz) are resampled."""
+    """`AudioOut` to a PipeWire/PulseAudio sink at the first chunk's rate (Piper 22.05 kHz, Gemini 24 kHz);
+    chunks at another rate (the live pass-through, 16 kHz) are resampled. `sink` '' = the default.
+    pacat ends when its device goes (Bluetooth profile switch, USB unplugged: it does not follow another
+    device): the next chunk opens the saved sink again, else the current default, and the tray says so."""
+    retry_s = 2.0
 
-    def __init__(self, sink: str):
-        self.sink, self._out = sink, None
+    def __init__(self, sink: str = '', on_error=lambda text: None):
+        self.sink, self.on_error = sink, on_error
+        self._out, self._rs, self._retry_at, self._failing = None, {}, 0.0, False
         self._lock = threading.Lock()  # capture (live), events (speech) and control (switch, stop) threads
+
+    def resolve(self) -> str:
+        names = [line.split('\t')[1] for line in pactl('list', 'short', 'sinks').splitlines() if '\t' in line]
+        if self.sink in names:
+            return self.sink
+        return not_ours(pactl('get-default-sink').strip(), 'default output')
 
     def play(self, pcm: np.ndarray, sample_rate: int) -> None:
         with self._lock:
-            if self._out is None:
-                from peresmeshnik.audio.out import PulseOut
-                self._out = PulseOut(sample_rate, self.sink)
-            self._out.play(resample(pcm, sample_rate, self._out.sample_rate), self._out.sample_rate)
+            out = self._out
+            # ponytail: PulseOut (S1) has no end-of-stream callback yet; a dead pacat or writer thread is seen here
+            if out is not None and (out._proc.poll() is not None or not out._thread.is_alive()):
+                self._out = out = None
+                self._fail('the headphones went away; reopening')
+            if out is None:
+                if time.monotonic() < self._retry_at:
+                    return  # no device for now: this audio is dropped
+                try:
+                    from peresmeshnik.audio.out import PulseOut
+                    self._out = out = PulseOut(sample_rate, self.resolve())
+                    self._rs, self._failing = {}, False
+                except Exception as e:
+                    self._retry_at = time.monotonic() + self.retry_s
+                    self._fail(f'no headphones: {e}')
+                    return
+            rs = self._rs.get(sample_rate) or self._rs.setdefault(sample_rate, Resampler(sample_rate, out.sample_rate))
+            out.play(rs(pcm), out.sample_rate)
+
+    def _fail(self, why: str) -> None:
+        if not self._failing:  # once per outage, not per chunk
+            self._failing = True
+            self.on_error(f'error: {why}')
 
     def flush(self) -> None:
         with self._lock:
@@ -98,6 +157,58 @@ class Headphones:
             out.stop()  # plays out what pacat holds: outside the lock
 
 
+class CallSink:
+    """"Peresmeshnik Call": the null sink the call's sound is moved into (S1, once), kept for the app's run."""
+
+    def __init__(self):
+        from peresmeshnik.audio.capture_pipewire import CALL_SINK
+        self.name = CALL_SINK
+        # priority 0: never preferred over a real output as the default sink (as in S1's capture)
+        self.module = pactl('load-module', 'module-null-sink', f'sink_name={CALL_SINK}',
+                            'sink_properties=\'device.description="Peresmeshnik Call" priority.session=0 priority.driver=0\'').strip()
+
+    def remove(self) -> None:
+        subprocess.run(['pactl', 'unload-module', self.module], capture_output=True, timeout=10)
+
+
+class CallCapture:
+    """`AudioIn` from the call sink's monitor (parec, 20 ms), read on a thread blocked on the pipe.
+    ponytail: S1's PipeWireCapture makes and removes its own sink on every start / stop; until it can use
+    the app's sink, the app records the monitor itself with the same flags."""
+
+    def __init__(self, sink: str, frame: int = 512):
+        self.sink, self.frame, self._proc, self._thread = sink, frame, None, None
+
+    def start(self, on_frames) -> None:
+        self._proc = subprocess.Popen(['parec', f'--device={self.sink}.monitor', '--raw', '--format=float32le', f'--rate={SAMPLE_RATE}',
+                                       '--channels=1', '--latency-msec=20', '--property=node.dont-reconnect=true'], stdout=subprocess.PIPE)
+
+        def read():
+            n = self.frame * 4
+            while len(b := self._proc.stdout.read(n)) == n:
+                on_frames(np.frombuffer(b, '<f4'))
+        self._thread = threading.Thread(target=read, name='call-capture', daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self._proc:
+            self._proc.terminate()
+            try:
+                self._proc.wait(5)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+            self._thread.join(5)
+            self._proc = None
+
+
+def remove_stale() -> None:
+    """Our devices left by a run that was killed (SIGKILL, a crash): loopbacks first, then the rest, newest first."""
+    mods = [m.split('\t') for m in pactl('list', 'short', 'modules').splitlines()]
+    mods = [m for m in mods if len(m) > 2 and OURS in m[2]]
+    for m in sorted(mods, key=lambda m: (m[1] != 'module-loopback', -int(m[0]))):
+        subprocess.run(['pactl', 'unload-module', m[0]], capture_output=True, timeout=10)
+
+
 class Side:
     """One direction with its input, output and subtitles. `name` is 'them' (them -> me) or 'me'."""
 
@@ -107,7 +218,8 @@ class Side:
         self.engine = s.them_to_me if name == 'them' else s.me_to_them
         self.live = False
         self.directions = []  # (direction, takes its captions, takes its speech)
-        self._consumers: list[threading.Thread] = []
+        self._threads: list[threading.Thread] = []
+        self._live_q: queue.Queue = queue.Queue()  # the live pass-through, played on its own thread
         if self.engine == 'local':
             self.directions.append((self._local(s), True, True))
         else:
@@ -157,18 +269,23 @@ class Side:
         return GeminiDirection(self.src, self.tgt, key, s.cloud)
 
     def start(self) -> None:
-        for d, captions, speech in self.directions:
-            t = threading.Thread(target=self._consume, args=(d, captions, speech), name=f'{self.name}-events', daemon=True)
+        for target, args in [(self._consume, d) for d in self.directions] + [(self._pass_through, ())]:
+            t = threading.Thread(target=target, args=args, name=f'{self.name}-{target.__name__[1:]}', daemon=True)
             t.start()
-            self._consumers.append(t)
+            self._threads.append(t)
         self.inp.start(self._on_frames)
 
-    def _on_frames(self, pcm: np.ndarray) -> None:  # capture thread: only hand on
+    def _on_frames(self, pcm: np.ndarray) -> None:  # capture thread or PortAudio callback: only hand on
         if self.live and not self._supports_live:
-            self.out.play(pcm, SAMPLE_RATE)  # ponytail: hard switch, no crossfade; S2's set_live crossfades
+            self._live_q.put(pcm)  # ponytail: a hard switch, no crossfade; S2's set_live crossfades
             return
         for d, _, _ in self.directions:
             d.feed(pcm)
+
+    def _pass_through(self) -> None:
+        while (pcm := self._live_q.get()) is not None:
+            if self.live:  # frames queued just before switching back are dropped
+                self.out.play(pcm, SAMPLE_RATE)
 
     @property
     def _supports_live(self) -> bool:
@@ -194,9 +311,10 @@ class Side:
 
     def stop(self) -> None:
         self.inp.stop()
+        self._live_q.put(None)
         for d, _, _ in self.directions:
             d.close()
-        for t in self._consumers:
+        for t in self._threads:
             t.join(15)
         self.out.stop()
 
@@ -207,14 +325,17 @@ class Controller:
     def __init__(self, overlay, on_state, them_file: str | None = None, me_file: str | None = None,
                  settings: config.Settings | None = None, test: bool = False):
         """`settings`: use these instead of the saved ones; `test`: both directions speak into the headphones
-        (the wizard's test phrase)."""
+        (the wizard's test phrase) and the devices are left alone."""
         self.overlay, self.on_state, self.them_file, self.me_file = overlay, on_state, them_file, me_file
         self.settings, self.test = settings, test
+        self.devices = not (test or them_file or me_file)  # this controller owns the app's Linux devices
         self.sides: list[Side] = []
         self.live = False
         self.on = False
+        self.startup_error = ''
         self._pool = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix='control')  # no thread until first use
-        self._vmic = None  # the virtual microphone lives while the app runs (ARCHITECTURE §7)
+        self._vmic = self._call = None
+        self._mic = ''  # the default input as it was before our devices existed
 
     def submit(self, fn, *args):
         return self._pool.submit(self._guard, fn, *args)
@@ -237,31 +358,62 @@ class Controller:
         return self.submit(self._on if on else self._off)
 
     def startup(self) -> None:
-        """The virtual mic is there from the start, so the call app can pick it before translation is on."""
-        if self.them_file is None and self.me_file is None and sys.platform.startswith('linux'):
-            try:
-                self.virtual_mic()
-            except Exception as e:  # no sound server or no pactl: say so, the app still runs
-                log.warning('no virtual microphone: %s', e)
+        """The devices are there from the start, so the call app can pick the microphone and S1 can move the
+        call's sound once; until translation is on, the real microphone is looped into the virtual one."""
+        if not (self.devices and sys.platform.startswith('linux')):
+            return
+        try:
+            remove_stale()  # first: a stale sink of ours may be the default input now
+            self._mic = pactl('get-default-source').strip()  # before ours exist: one of them may become the default
+            self._call = CallSink()
+            self.virtual_mic()
+            self._loopback(True)
+        except Exception as e:  # no sound server or no pactl: the app still runs; the tray says why
+            log.warning('sound devices: %s', e)
+            self.startup_error = f'sound devices: {e}'
+
+    def _mic_source(self) -> str:
+        s = self.settings or config.load()
+        if s.ui.mic:
+            return not_ours(s.ui.mic, 'microphone')
+        now = pactl('get-default-source').strip()
+        return now if not now.startswith(OURS) else not_ours(self._mic, 'default input')
+
+    def _loopback(self, on: bool) -> None:
+        """Translation off: PipeWire loops the real microphone into "Peresmeshnik Mic" (none of our CPU), so the
+        call hears the user as is; translation on: our me -> them direction speaks there instead."""
+        if self._call is None or self._vmic is None:  # only once startup() made the devices
+            return
+        try:  # found by its arguments, not a kept id: it goes away with its microphone, and PipeWire reuses ids
+            loops = [m.split('\t')[0] for m in pactl('list', 'short', 'modules').splitlines()
+                     if '\tmodule-loopback\t' in m and f'sink={MIC_SINK}' in m]
+            for m in loops if not on else ():
+                subprocess.run(['pactl', 'unload-module', m], capture_output=True, timeout=10)
+            if on and not loops:
+                pactl('load-module', 'module-loopback', f'source={self._mic_source()}', f'sink={MIC_SINK}',
+                      'latency_msec=20', 'source_dont_move=true', 'sink_dont_move=true')
+        except Exception as e:
+            log.warning('microphone loopback: %s', e)
+            if on:
+                self.on_state(f'error: the call will not hear your microphone while translation is off: {e}')
 
     def _on(self) -> None:
         if self.on:
             return
         self.on_state('warming up')
         s = self.settings or config.load()
-        outs = self._outputs(s)
-        if self.them_file or self.me_file:  # recordings instead of devices
-            ins = {k: FileIn(v) for k, v in (('them', self.them_file), ('me', self.me_file)) if v}
-        else:
-            ins = self._inputs(s)
+        files = {'them': self.them_file, 'me': self.me_file}
         t, failed = time.perf_counter(), []
-        for name in ('them', 'me'):  # a side that cannot start (no key, no voice pack) does not stop the other
-            if name in ins:
+        for name in ('them', 'me'):  # a side that cannot start (no key, no voice pack, no device) does not stop the other
+            if self.devices or files[name]:
                 try:
-                    self.sides.append(Side(name, s, ins[name], outs[name], self.overlay.side(name), self.on_state))
+                    inp = FileIn(files[name]) if files[name] else self._input(name)
+                    self.sides.append(Side(name, s, inp, self._output(name, s), self.overlay.side(name), self.on_state))
                 except Exception as e:
                     log.exception('%s', name)
                     failed.append(f'{name}: {e}')
+        if any(x.name == 'me' for x in self.sides):
+            self._loopback(False)  # the call hears the user until the translation is ready
         for side in self.sides:
             side.set_live(self.live)
             side.start()
@@ -272,19 +424,23 @@ class Controller:
             self.on_state(f'translating ({", ".join(f"{x.name}: {x.engine}" for x in self.sides)}; '
                           f'ready in {time.perf_counter() - t:.1f} s)')
 
-    def _outputs(self, s: config.Settings) -> dict:
+    def _input(self, name: str):
+        if name == 'them':
+            if self._call is None:
+                raise RuntimeError(f'no call sink ({self.startup_error or "no sound server"})')
+            return CallCapture(self._call.name)
+        from peresmeshnik.audio.mic import Mic
+        not_ours(pactl('get-default-source').strip(), 'default input')  # Mic(None) records it
+        return Mic(None)  # S2's Mic takes the PipeWire source (s.ui.mic) in stage 2
+
+    def _output(self, name: str, s: config.Settings):
         if not sys.platform.startswith('linux'):
             raise RuntimeError('audio routing on this OS comes in a later version (macOS: stage 3, Windows: stage 4)')
-        from peresmeshnik.audio.out import default_sink
-        headphones = s.ui.headphones or default_sink()
-        if headphones.startswith('peresmeshnik_'):  # no real output: the default fell to our own device
-            raise RuntimeError(f'the default output is our own device {headphones}: choose the headphones in the settings')
-        return {'them': Headphones(headphones), 'me': Headphones(headphones) if self.test else self.virtual_mic()}
-
-    def _inputs(self, s: config.Settings) -> dict:
-        from peresmeshnik.audio.capture_pipewire import PipeWireCapture
-        from peresmeshnik.audio.mic import Mic
-        return {'them': PipeWireCapture(), 'me': Mic(None)}  # Mic takes a PipeWire source name in S2's stage 2 (s.ui.mic)
+        if name == 'them' or self.test:
+            out = Headphones(s.ui.headphones, self.on_state)
+            out.resolve()  # a missing device or our own as the default: say so now, not at the first word
+            return out
+        return self.virtual_mic()
 
     def _off(self) -> None:
         sides, self.sides = self.sides, []
@@ -293,8 +449,10 @@ class Controller:
                 side.stop()
             except Exception:
                 log.exception('stopping %s', side.name)
+        self.live = False
         if not self.test:  # the test phrase's subtitles stay until the wizard closes
             self.overlay.side('them').hide()
+        self._loopback(True)
         if self.on or sides:
             self.on = False
             self.on_state('idle, translation off')
@@ -310,8 +468,11 @@ class Controller:
     def quit(self) -> None:
         self.submit(self._off).result()
         self._pool.shutdown()
+        self._loopback(False)
         if self._vmic:
-            self._vmic.remove()  # the device goes with the app
+            self._vmic.remove()  # the devices go with the app
+        if self._call:
+            self._call.remove()
 
 
 def gui_available() -> bool:
@@ -323,6 +484,23 @@ def gui_available() -> bool:
     except ImportError:
         return False
     return True
+
+
+def use_xwayland() -> bool:
+    """On a Wayland session Qt would take its wayland plugin, where a window can neither stay on top nor
+    choose its place (xdg-shell): the subtitles would end up under the browser. XWayland (xcb) keeps both;
+    the hotkey still goes through the portal (hotkey.make looks at XDG_SESSION_TYPE)."""
+    wayland = os.environ.get('XDG_SESSION_TYPE') == 'wayland' or bool(os.environ.get('WAYLAND_DISPLAY'))
+    if sys.platform.startswith('linux') and wayland and os.environ.get('DISPLAY') and not os.environ.get('QT_QPA_PLATFORM'):
+        os.environ['QT_QPA_PLATFORM'] = 'xcb'
+        return True
+    return False
+
+
+def lock_path() -> Path:
+    """One app per sound server: two would remove each other's devices. XDG_RUNTIME_DIR is per login session,
+    like the user's PipeWire."""
+    return Path(os.environ.get('XDG_RUNTIME_DIR') or config.config_dir()) / 'peresmeshnik.lock'
 
 
 def cli(argv=None) -> int:
@@ -337,9 +515,11 @@ def cli(argv=None) -> int:
     logging.basicConfig(level=logging.INFO if a.verbose else logging.WARNING, stream=sys.stderr,
                         format='%(asctime)s %(name)s %(message)s')
     sys.stdout.reconfigure(encoding='utf-8')
+    if use_xwayland():
+        log.info('Wayland session: the overlay runs through XWayland')
 
-    from PySide6.QtCore import QAbstractEventDispatcher, QObject, QTimer, Signal, Slot
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import QAbstractEventDispatcher, QLockFile, QObject, QTimer, Signal, Slot
+    from PySide6.QtWidgets import QApplication, QMessageBox
 
     from peresmeshnik.ui import hotkey
     from peresmeshnik.ui.overlay import SubtitleOverlay
@@ -349,6 +529,15 @@ def cli(argv=None) -> int:
     qapp.setApplicationName('Peresmeshnik')
     qapp.setQuitOnLastWindowClosed(False)
     qapp.setCursorFlashTime(0)  # a steady text cursor: a blinking one repaints its field twice a second (idle watchdog)
+    lock_path().parent.mkdir(parents=True, exist_ok=True)
+    lock = QLockFile(str(lock_path()))
+    lock.setStaleLockTime(0)  # stale only when its process is gone, however old
+    if not lock.tryLock(200):
+        print('Peresmeshnik is already running: its icon is in the tray', file=sys.stderr, flush=True)
+        box = QMessageBox(QMessageBox.Information, 'Peresmeshnik', 'Peresmeshnik is already running: its icon is in the tray.')
+        QTimer.singleShot(5000, box.close)
+        box.exec()
+        return 3
 
     class Bridge(QObject):
         state = Signal(str)  # from the control thread to the GUI thread
@@ -365,39 +554,23 @@ def cli(argv=None) -> int:
     bridge.state.connect(lambda st: print(st, flush=True))  # tests and the idle watchdog read these lines
 
     def toggle_live():
+        if not ctl.on:  # the call hears the microphone as is already (the loopback)
+            print('mode: translation is off', flush=True)
+            tray.message('Translation is off: the call hears your own voice.')
+            return
         ctl.set_live(not ctl.live)
         tray.sync()
         print(f'mode: {"live voice" if ctl.live else "translation"}', flush=True)
 
     s = config.load()
-    hk, why = hotkey.make()
-    if hk is not None:
-        try:
-            hk.register(s.ui.hotkey, toggle_live)
-        except hotkey.HotkeyError as e:
-            hk, why = None, f'no global hotkey: {e}. Use the tray menu item "Live voice"'
-    tray.toggle_live = toggle_live
-    tray.hotkey_note(s.ui.hotkey if hk else '', why)
+    backend, why = hotkey.make()
+    binding = hotkey.Binding(backend, toggle_live, why)
+    binding.done.connect(lambda combo, why: tray.hotkey_note(combo, why, announce=bool(why)))
+    tray.toggle_live, tray.reload_hotkey = toggle_live, binding.bind
+    tray.hotkey_note('', why, announce=sys.platform.startswith('linux'))  # macOS / Windows: no hotkey before stages 3-4
     if why:
         print(f'warning: {why}', file=sys.stderr)
-    bound = [s.ui.hotkey if hk else '']
-
-    def rebind(combo: str) -> str:
-        """New hotkey from the settings or the wizard: '' when it works, else why not."""
-        if hk is None:
-            return ''  # nothing to bind here (the tray says why); the combo is kept for where it works
-        if bound[0]:
-            hk.unregister(bound[0])
-        try:
-            hk.register(combo, toggle_live)
-        except hotkey.HotkeyError as e:
-            if bound[0]:
-                hk.register(bound[0], toggle_live)
-            return str(e)
-        bound[0] = combo
-        tray.hotkey_note(combo, '')
-        return ''
-    tray.reload_hotkey = rebind
+    binding.bind(s.ui.hotkey)
 
     if a.show_overlay:
         overlay.side('them').show(Caption('Peresmeshnik subtitles: the original in grey', 'and the translation in white', True, 0))
@@ -408,24 +581,27 @@ def cli(argv=None) -> int:
     started.add_done_callback(lambda _: bridge.started.emit())
     dispatcher = QAbstractEventDispatcher.instance()
 
-    def announce():  # started (virtual mic made) and nothing left to do (first paints done): idle from here on
+    def announce():  # started (devices made) and nothing left to do (first paints done): idle from here on
         if started.done():
             dispatcher.aboutToBlock.disconnect(announce)
             bridge.state.emit(f'Peresmeshnik {__version__}: idle, translation off')
+            if ctl.startup_error:
+                tray.message(ctl.startup_error)
     dispatcher.aboutToBlock.connect(announce)
     if a.on:
         QTimer.singleShot(0, lambda: tray.set_translation(True))
     qapp.aboutToQuit.connect(ctl.quit)
     qapp.aboutToQuit.connect(lambda: log.info('overlay: %s', overlay.stats()))
-    if hk is not None:
-        qapp.aboutToQuit.connect(hk.close)
+    qapp.aboutToQuit.connect(binding.close)
+    qapp.aboutToQuit.connect(lock.unlock)
     _quit_on_signals(qapp)
     return qapp.exec()
 
 
 def _quit_on_signals(qapp) -> None:
-    """SIGTERM / Ctrl+C quit cleanly (the virtual mic is removed). Python runs a signal handler only
-    between bytecodes, and the Qt loop sits in C++: the C handler writes to a socket that wakes the loop."""
+    """SIGTERM, SIGHUP (the terminal closed) and Ctrl+C quit cleanly: the devices are removed. Python runs a
+    signal handler only between bytecodes and the Qt loop sits in C++: the C handler writes to a socket
+    that wakes the loop."""
     import signal
     import socket
 
@@ -437,5 +613,6 @@ def _quit_on_signals(qapp) -> None:
     notifier = QSocketNotifier(r.fileno(), QSocketNotifier.Read, qapp)
     notifier.activated.connect(lambda *_: r.recv(64))  # Python code runs: the handlers below fire
     qapp._signal_sockets = (r, w, notifier)
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(sig, lambda *_: qapp.quit())
+    for name in ('SIGTERM', 'SIGINT', 'SIGHUP'):
+        if hasattr(signal, name):  # no SIGHUP on Windows
+            signal.signal(getattr(signal, name), lambda *_: qapp.quit())

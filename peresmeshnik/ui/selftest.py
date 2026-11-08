@@ -101,53 +101,75 @@ def _judge(name: str, rec: np.ndarray, ref: np.ndarray, sr: int) -> Result:
                             f'{len(rec) / sr:.1f} s recorded')
 
 
+def sinks() -> list[str]:
+    return [line.split('\t')[1] for line in pactl('list', 'short', 'sinks').splitlines() if '\t' in line]
+
+
 def check_call_capture() -> Result:
-    from peresmeshnik.audio.capture_pipewire import PipeWireCapture
+    """Through the app's call sink while it runs (never a second one: that would drop the call's stream), else
+    a temporary one; recorded the way the app records it."""
+    from peresmeshnik.app import CallCapture, CallSink
+    from peresmeshnik.audio.capture_pipewire import CALL_SINK
     from peresmeshnik.engines import SAMPLE_RATE
+    own = None if CALL_SINK in sinks() else CallSink()
     frames: list[np.ndarray] = []
-    cap = PipeWireCapture()
-    cap.start(frames.append)
+    cap = CallCapture(CALL_SINK)
+    ref = chirp(SAMPLE_RATE)
     try:
+        cap.start(frames.append)
         time.sleep(0.3)
-        ref = chirp(SAMPLE_RATE)
-        play(cap.sink, ref, SAMPLE_RATE)
+        play(CALL_SINK, ref, SAMPLE_RATE)
         time.sleep(0.4)
     finally:
         cap.stop()
+        if own:
+            own.remove()
     return _judge('call capture', np.concatenate(frames) if frames else np.zeros(0, np.float32), ref, SAMPLE_RATE)
 
 
 def check_virtual_mic(vmic=None) -> Result:
-    from peresmeshnik.audio.virtual_mic_linux import SOURCE, VirtualMic
-    own = vmic is None
-    vmic = vmic or VirtualMic()
+    """Through the app's virtual mic (`vmic`, or the device while the app runs), else a temporary one."""
+    from peresmeshnik.audio.virtual_mic_linux import SINK, SOURCE, VirtualMic, exists
+    own = None if vmic is not None or exists() else VirtualMic()  # a new VirtualMic would replace the app's
+    ref = chirp()
     try:
         rec = Recorder(SOURCE)
-        time.sleep(0.3)
-        ref = chirp()
-        vmic.play(ref, SR)
-        vmic.drain()
-        time.sleep(0.4)
-        got = rec.stop()
+        try:
+            time.sleep(0.3)
+            if vmic or own:
+                (vmic or own).play(ref, SR)
+                (vmic or own).drain()
+            else:
+                play(SINK, ref, SR)
+            time.sleep(0.4)
+        finally:
+            got = rec.stop()  # also when playing failed: no parec is left recording
     finally:
         if own:
-            vmic.remove()
+            own.remove()
     return _judge('virtual mic', got, ref, SR)
 
 
 def check_headphones(sink: str) -> Result:
+    from peresmeshnik.app import not_ours
+    not_ours(sink, 'output')  # the chirp would go into the call
     rec = Recorder(f'{sink}.monitor')
-    time.sleep(0.3)
     ref = chirp()
-    play(sink, ref, SR)
-    time.sleep(0.4)
-    return _judge(f'headphones ({sink})', rec.stop(), ref, SR)
+    try:
+        time.sleep(0.3)
+        play(sink, ref, SR)
+        time.sleep(0.4)
+    finally:
+        got = rec.stop()
+    return _judge(f'headphones ({sink})', got, ref, SR)
 
 
 def check_mic(source: str, seconds: float = 3.0) -> Result:
     rec = Recorder(source, 16_000)
-    time.sleep(seconds)
-    x = rec.stop()
+    try:
+        time.sleep(seconds)
+    finally:
+        x = rec.stop()
     db = 20 * np.log10(np.max(np.sqrt(np.convolve(x ** 2, np.ones(1600) / 1600, 'valid'))) + 1e-9) if len(x) > 1600 else -120.0
     ok = bool(db >= MIN_MIC_DB)
     return Result(f'microphone ({source})', ok, f'loudest 0.1 s at {db:.0f} dBFS' + ('' if ok else ': say something, or check the input'))
@@ -155,15 +177,15 @@ def check_mic(source: str, seconds: float = 3.0) -> Result:
 
 def run_all(headphones: str | None = None, mic: str | None = None, vmic=None, report=lambda r: None) -> list[Result]:
     """Every check, each reported as soon as it is done; a failing check does not stop the others."""
-    headphones = headphones or pactl('get-default-sink').strip()  # before our sinks exist
-    checks = [check_call_capture, lambda: check_virtual_mic(vmic), lambda: check_headphones(headphones),
-              lambda: check_mic(mic or '@DEFAULT_SOURCE@')]
+    checks = [('call capture', check_call_capture), ('virtual mic', lambda: check_virtual_mic(vmic)),
+              ('headphones', lambda: check_headphones(headphones or pactl('get-default-sink').strip())),
+              ('microphone', lambda: check_mic(mic or '@DEFAULT_SOURCE@'))]
     results = []
-    for check in checks:
+    for name, check in checks:
         try:
             r = check()
-        except Exception as e:  # missing tools, no sound server, a device that went away
-            r = Result(getattr(check, '__name__', 'check'), False, f'error: {e}')
+        except Exception as e:  # missing tools, no sound server, a device that went away, our own device as the default
+            r = Result(name, False, f'error: {e}')
         results.append(r)
         report(r)
     return results

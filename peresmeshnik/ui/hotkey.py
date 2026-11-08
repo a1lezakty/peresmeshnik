@@ -151,10 +151,13 @@ SHORTCUTS = 'org.freedesktop.portal.GlobalShortcuts'
 
 
 class PortalHotkey(QObject):
-    """XDG GlobalShortcuts portal (Wayland). The desktop shows its own dialog to confirm or change
-    the key; `trigger` holds what it reports. jeepney's router thread blocks on the D-Bus socket;
-    ours blocks on the queue of Activated signals."""
+    """XDG GlobalShortcuts portal (Wayland). The desktop shows its own dialog to confirm or change the
+    key; `trigger` holds what it reports. A session binds its shortcuts once (the spec), so a new combo
+    gets a new session; the old one closes only after the new one is bound. `register` waits for the
+    user's answer (up to `timeout`): call it off the GUI thread (`Binding` does). jeepney's router
+    thread blocks on the D-Bus socket; ours blocks on the queue of Activated signals."""
     _fired = Signal(str)
+    sid = 'toggle-live'  # ponytail: one shortcut id; give each combo its own id if the app ever needs two
 
     def __init__(self, bus: str = 'SESSION', timeout: float = 60.0):
         super().__init__()
@@ -162,7 +165,7 @@ class PortalHotkey(QObject):
 
         from jeepney import DBusAddress, MatchRule, Properties, message_bus
         from jeepney.io.threading import DBusRouter, open_dbus_connection
-        self._MatchRule, self._bus, self.timeout = MatchRule, message_bus, timeout
+        self._MatchRule, self._bus, self._Address, self.timeout = MatchRule, message_bus, DBusAddress, timeout
         try:
             self._conn = open_dbus_connection(bus)
         except Exception as e:  # no session bus
@@ -178,13 +181,13 @@ class PortalHotkey(QObject):
             raise HotkeyError(f'no GlobalShortcuts portal on this desktop ({str(e)[:120]})') from e
         self._sender = self._conn.unique_name[1:].replace('.', '_')
         self._tokens = 0
+        self._lock = threading.Lock()  # one bind at a time
+        self.session = ''
         self._callbacks: dict[str, Callable[[], None]] = {}
         self.trigger: dict[str, str] = {}
         rule = MatchRule(type='signal', interface=SHORTCUTS, member='Activated', path=PORTAL_PATH)
         self.router.send_and_get_reply(message_bus.AddMatch(rule), timeout=5)
         self._activated = self.router.filter(rule, queue=queue.Queue())
-        self.session = self._request('CreateSession', 'a{sv}', lambda tok: (
-            {'handle_token': ('s', tok), 'session_handle_token': ('s', tok)},))['session_handle'][1]
         self._fired.connect(lambda sid: (cb := self._callbacks.get(sid)) and cb())
         self._thread = threading.Thread(target=self._listen, name='hotkey-portal', daemon=True)
         self._thread.start()
@@ -209,19 +212,36 @@ class PortalHotkey(QObject):
             raise HotkeyError(f'{method}: the desktop refused the shortcut (response {code})')
         return results
 
+    def _close_session(self, session: str) -> None:
+        from jeepney import new_method_call
+        try:
+            self.router.send_and_get_reply(new_method_call(self._Address(session, PORTAL, 'org.freedesktop.portal.Session'), 'Close'),
+                                           timeout=5)
+        except Exception as e:  # the session ends with our connection anyway
+            log.warning('portal: closing %s: %s', session, e)
+
     def register(self, combo: str, callback: Callable[[], None]) -> None:
         mods, sym = parse(combo)
-        sid = 'toggle-live'  # ponytail: one shortcut id; give each combo its own id if the app ever needs two
         trigger = '+'.join([PORTAL_MODS[m] for m in mods] + [sym])
-        res = self._request('BindShortcuts', 'oa(sa{sv})sa{sv}', lambda tok: (
-            self.session, [(sid, {'description': ('s', 'Peresmeshnik: translation / live voice'),
-                                  'preferred_trigger': ('s', trigger)})], '', {'handle_token': ('s', tok)}))
-        for got_id, props in res.get('shortcuts', ('', []))[1]:
-            self.trigger[got_id] = props.get('trigger_description', ('s', ''))[1]
-        self._callbacks[sid] = callback
+        with self._lock:
+            session = self._request('CreateSession', 'a{sv}', lambda tok: (
+                {'handle_token': ('s', tok), 'session_handle_token': ('s', tok)},))['session_handle'][1]
+            try:
+                res = self._request('BindShortcuts', 'oa(sa{sv})sa{sv}', lambda tok: (
+                    session, [(self.sid, {'description': ('s', 'Peresmeshnik: translation / live voice'),
+                                          'preferred_trigger': ('s', trigger)})], '', {'handle_token': ('s', tok)}))
+            except Exception:
+                self._close_session(session)  # the old session and its callback stay
+                raise
+            old, self.session = self.session, session
+            self._callbacks[self.sid] = callback
+            for got_id, props in res.get('shortcuts', ('', []))[1]:
+                self.trigger[got_id] = props.get('trigger_description', ('s', ''))[1]
+            if old:
+                self._close_session(old)
 
     def unregister(self, combo: str) -> None:
-        self._callbacks.clear()  # the portal has no unbind; the session ends with the connection
+        pass  # a new session replaces the old one in register(); the last one ends with the connection
 
     def _listen(self) -> None:
         while (msg := self._activated.queue.get()) is not None:
@@ -233,6 +253,54 @@ class PortalHotkey(QObject):
             self._activated.queue.put(None)
         self.router.close()
         self._conn.close()
+
+
+class Binding(QObject):
+    """The app's one hotkey on a backend (or none). `bind()` keeps the old combo when a new one fails and
+    works again after a failed first grab. X11 binds at once; the portal waits for the desktop's dialog,
+    so it binds on a thread and reports through `done(combo, why)` on the GUI thread."""
+    done = Signal(str, str)  # combo, '' or why it is not bound
+
+    def __init__(self, backend, callback: Callable[[], None], why: str = ''):
+        super().__init__()
+        self.backend, self.callback, self.combo, self.why = backend, callback, '', why
+
+    def bind(self, combo: str) -> str:
+        """'' when bound (or, for the portal, asked), else why not."""
+        if self.backend is None:
+            return ''  # nothing to bind on this desktop (`why` says so); the combo is kept for where it works
+        if isinstance(self.backend, PortalHotkey):
+            threading.Thread(target=self._bind_portal, args=(combo,), name='hotkey-bind', daemon=True).start()
+            return ''
+        old = self.combo
+        if old:
+            self.backend.unregister(old)
+        try:
+            self.backend.register(combo, self.callback)
+        except HotkeyError as e:
+            try:
+                if old:
+                    self.backend.register(old, self.callback)
+            except HotkeyError:
+                self.combo = ''
+            self.why = f'{e}. Use the tray menu item "Live voice"'
+            self.done.emit(self.combo, self.why)
+            return self.why
+        self.combo, self.why = combo, ''
+        self.done.emit(combo, '')
+        return ''
+
+    def _bind_portal(self, combo: str) -> None:
+        try:
+            self.backend.register(combo, self.callback)
+            self.combo, self.why = combo, ''
+        except Exception as e:  # refused, no answer: the previous session and combo stay
+            self.why = f'{e}. Use the tray menu item "Live voice"'
+        self.done.emit(self.combo, self.why)
+
+    def close(self) -> None:
+        if self.backend is not None:
+            self.backend.close()
 
 
 def make() -> tuple[object | None, str]:

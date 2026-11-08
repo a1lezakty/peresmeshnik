@@ -237,8 +237,29 @@ engine again. A cloud direction speaks with Gemini and takes its subtitles from 
 direction supports it (S2's crossfade); otherwise the app sends the input straight to the output and
 skips the direction (a hard switch). The overlay keeps the last two clauses (rows keyed by clause
 number; cloud captions without one attach to the side's open row) and repaints only when the visible
-text changes. Hotkey: X11 grab on X11; on Wayland the GlobalShortcuts portal, whose desktop dialog
-may change the key; with neither, a tray message and the menu item.
+text changes. On Wayland the windows go through XWayland (`QT_QPA_PLATFORM=xcb` unless it is set):
+a Wayland client cannot keep itself on top or let clicks through. Hotkey: X11 grab on X11; on
+Wayland the GlobalShortcuts portal (bound off the GUI thread, a new portal session for each change
+of the key, since a session binds once), whose desktop dialog may change the key. When there is no
+global hotkey or the key is taken, the reason shows once as a tray message and on the wizard's
+hotkey page, and the tray item "Live voice" does the same job; a failed change keeps the old key.
+
+Devices live with the app (Linux). At start it removes `peresmeshnik_*` modules left by a killed
+run, then makes the call capture sink "Peresmeshnik Call" and the virtual mic; it removes them at
+exit, also on SIGTERM, SIGINT and SIGHUP. While translation is off a `module-loopback` sends the
+real microphone into the virtual mic, so the other side still hears the user; it is unloaded while
+the me → them side runs, and "Live voice" is disabled while translation is off. Our own devices are
+refused as microphone or headphones, the system defaults included (the app would hear itself).
+Headphones that go away (a Bluetooth profile switch, unplugging) are reopened on the saved device
+or the default one, with one tray message per outage. One instance per user (`QLockFile` in
+`XDG_RUNTIME_DIR`): a second start shows a message and exits without touching the first one's
+devices. Moving the call app's stream into "Peresmeshnik Call" (`move-sink-input`) is S1's stage-2
+work; until then the user moves it by hand, otherwise them → me hears silence.
+
+Checked so far only in a test desktop: always-on-top and click-through under Xvfb (window flags,
+and an `xdotool click` through the overlay reaches the window below); the idle gate with an XEmbed
+tray (`stalonetray`), not a StatusNotifierItem tray over D-Bus (KDE, GNOME's AppIndicator) nor Qt's
+wayland plugin; the portal against a fake one.
 
 ## 8. Model download and cache
 

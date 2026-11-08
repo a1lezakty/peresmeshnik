@@ -54,6 +54,7 @@ class Tray(QObject):
         self.ctl = ctl
         self.toggle_live = lambda: None  # set by the app once the hotkey is known
         self.reload_hotkey = lambda combo: ''
+        self.hotkey_why = ''  # why there is no global hotkey ('' when it works); the wizard shows it too
         self.windows: list[QWidget] = []
         m = self.menu = QMenu()
         self.status = m.addAction('idle, translation off')
@@ -64,6 +65,7 @@ class Tray(QObject):
         self.translation.toggled.connect(self.set_translation)
         self.live = m.addAction('Live voice')
         self.live.setCheckable(True)
+        self.live.setEnabled(False)  # only while translating: off, the call hears the microphone as is
         self.live.triggered.connect(lambda: self.toggle_live())
         self.engines: dict[str, QActionGroup] = {}
         for key, title in SIDES.items():
@@ -89,7 +91,7 @@ class Tray(QObject):
             self.icon.show()
         else:  # no tray on this desktop: the menu on a button in a small window
             log.warning('no system tray: the menu is in the Peresmeshnik window')
-            w = self.fallback = QWidget()
+            w = self.fallback = _Window()
             w.setWindowTitle('Peresmeshnik')
             w.setWindowIcon(tray_icon())
             lay = QVBoxLayout(w)
@@ -108,13 +110,20 @@ class Tray(QObject):
                 a.setChecked(a.data()[1] == getattr(s, key))
         self.live.setChecked(self.ctl.live)
 
-    def hotkey_note(self, combo: str, why: str) -> None:
+    def hotkey_note(self, combo: str, why: str, announce: bool = False) -> None:
+        """The hotkey in the menu item; why there is none in its tooltip, on the wizard's hotkey page and, with
+        `announce`, once as a tray message (the SNI menus of GNOME / KDE show no tooltips)."""
         self.live.setText(f'Live voice ({QKeySequence(combo).toString(QKeySequence.NativeText)})' if combo else 'Live voice')
-        self.live.setToolTip(why)  # no balloon: macOS posts a notification for it (stderr has the reason too)
+        self.live.setToolTip(why)
+        self.hotkey_why = why
+        if why and announce:
+            self.message(why)
 
     def message(self, text: str) -> None:
         if self.icon.isVisible():
             self.icon.showMessage('Peresmeshnik', text, QSystemTrayIcon.Warning, 8000)
+        elif self.fallback:
+            self.fallback_status.setText(text)
 
     def set_state(self, state: str) -> None:
         self.status.setText(state[:120])
@@ -122,6 +131,8 @@ class Tray(QObject):
         if self.fallback:
             self.fallback_status.setText(state)
         on = state.startswith(('warming up', 'translating'))
+        self.live.setEnabled(self.ctl.on or state.startswith('translating'))
+        self.live.setChecked(self.ctl.live)
         if not state.startswith('error'):
             self.translation.blockSignals(True)
             self.translation.setChecked(on)
@@ -152,7 +163,8 @@ class Tray(QObject):
             self.ctl.set_translation(True)
 
     def _show(self, w: QWidget) -> None:
-        self.windows = [x for x in self.windows if x.isVisible()] + [w]  # keep a reference while it is open
+        # keep a reference while it is open or still working (a closed wizard may be downloading models)
+        self.windows = [x for x in self.windows if x.isVisible() or getattr(x, 'busy', lambda: False)()] + [w]
         w.show()
         w.raise_()
         w.activateWindow()
@@ -165,6 +177,14 @@ class Tray(QObject):
         self._show(SetupWizard(self))
 
     def _quit(self) -> None:
+        from PySide6.QtWidgets import QApplication
+        QApplication.quit()
+
+
+class _Window(QWidget):
+    """The menu's window when there is no tray: closing it quits (else the app would be gone from view for good)."""
+
+    def closeEvent(self, event) -> None:  # noqa: N802 (Qt name)
         from PySide6.QtWidgets import QApplication
         QApplication.quit()
 

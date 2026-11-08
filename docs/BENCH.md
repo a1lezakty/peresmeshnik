@@ -1037,3 +1037,76 @@ built yet; the 8 GB default (me → them through Gemini) does not need it.
 The runner's enabled macOS shortcuts (`CopySymbolicHotKeys`) include ⌘Space, ⌥⌘Space, ⌃⌘Space and the fn
 ones (fn+Q, fn+A…); ⇧⌘Space is not one of them, hence the new default. BlackHole 2ch and 16ch 0.7.1 install
 with `brew install --cask` and show up without restarting coreaudiod.
+
+## Stage 3: the call's sound on macOS (S1)
+
+Measured 2026-11-08 on the GitHub Actions `macos-15` runner (macOS 15.8.2, Apple M1 Virtual, 3 cores, 7 GB, no
+GPU; BlackHole 2ch / 16ch 0.7.1 from Homebrew; the runner has no real output, BlackHole 2ch stands in for the
+speakers / headphones and its input side is what they would play). Tests: `tests/test_macos_audio.py`.
+"System Audio Recording" was given or refused by a row in the runner VM's TCC.db (`kTCCServiceAudioCapture` for
+`/opt/hca/hosted-compute-agent`, the top of the job's process chain: TCC asks the responsible process; rows for the
+helper, python or bash did nothing); the real dialog on a user's Mac is a USER-CHECKS line.
+
+### Process tap (macOS 14.4+)
+
+| check | result |
+|---|---|
+| helper build (`swiftc -O -target arm64-apple-macos12`) | Swift 6.1.2, ~10 s, minos 12.0 |
+| permission refused | `check` → 4; the tap exits 4 at once; the app refuses the them → me side with the path to allow it |
+| permission not asked yet (no row) | `tap` asks first (TCC's own call): on the runner nobody answers, it waits until stdin closes; `--no-ask` starts and gets silence |
+| tap of `afplay` (440 Hz, 0.244 peak) by pid | 48 kHz mono, RMS 0.206–0.211 (the tone: 0.173 at the tap's level), 440 Hz |
+| the original on the speakers: before / while tapped / after | RMS 0.212 / **0.0000** / 0.212: muted only while the tap runs |
+| by bundle id, the app started after the tap | the helper waits ("waiting for … to use sound"), taps it when it plays |
+| a helper process of the app (`<id>.helper`) started later | joins the tap (Core Audio's process list changes): 440 Hz and 660 Hz equally loud |
+| a mono tap of an app on a 16-channel device | 1/8 as loud (the mixdown averages every channel): call apps play stereo |
+
+### them → me through the macOS devices
+
+`peresmeshnik run --in tests/data/call-en.ogg --from en --play "BlackHole 2ch"` with `--blackhole` (the file is
+played into BlackHole 16ch, as a call app on macOS < 14.4 would) or `--tap` (afplay plays it, a process tap of
+afplay is the input), the models of the working-mode gate (Parakeet int8 with partials, OPUS-MT, Piper), real time,
+the queue policy of stage 2 (4 s, up to 1.4×). Voice heard = 20 ms frames above RMS 0.01 recorded on BlackHole 2ch.
+Peak RSS = the run's process (`ru_maxrss`).
+
+Two runs each (two commits, the same code paths):
+
+| input | word recall | CPU s / audio s | peak RSS, MB | caption lag p50 / max, s | voice lag p50 / max, s | voice heard, s | clauses spoken / dropped |
+|---|---|---|---|---|---|---|---|
+| BlackHole 16ch | 0.82, 0.82 | 1.06, 0.92 | 1161, 1176 | 1.31 / 2.80, 0.53 / 1.66 | 2.21 / 2.98, 2.18 / 2.39 | 17.2, 17.2 | 4 / 4, 4 / 3 |
+| process tap of afplay | 0.78, 0.78 | 0.83, 1.02 | 1178, 1201 | 0.70 / 3.24, 0.93 / 1.53 | 1.51 / 1.90, 1.91 / 2.49 | 18.6, 17.1 | 4 / 4, 4 / 4 |
+
+- Both paths give subtitles and the voice at about the same cost (0.8–1.1 CPU s per audio s, 1.2 GB); the runs
+  differ more than the paths: the runner's 3 cores are noisy, the partial ASR alone takes 0.40–0.52 of real time.
+- Half of the clauses' voice was dropped by the 4 s policy on both paths: a 30 s monologue read without pauses,
+  Russian speech longer than the English and a 3-core runner. Their subtitles are all there. On B (stage 2) the same
+  policy dropped 1.8–5.4 % of the words on continuous read speech.
+- The idle gate on `macos-15` with the app's start asking the helper once (`check`): 0.008–0.016 s CPU in 60 s
+  (limit 0.13); the first 15 s after "idle" 0.08–0.15 s (not gated).
+- **CoreML / Metal: not measured** (no Apple GPU in CI: "paravirtual device does not support Metal 2.0"); CPU only.
+  USER-CHECKS has the M1 Pro run to compare.
+
+### macOS < 14.4: the call through the app while translation is off
+
+`PassThrough` (BlackHole 16ch → the headphones: a PortAudio input at the device's rate into a `SoundDeviceOut`),
+`PERESMESHNIK_CALL_PATH=blackhole` on the runner, afplay as the call app with BlackHole 16ch as its speaker: the
+tone arrives on the "headphones" (RMS 0.212 of 0.212, 440 Hz). Cost **2.2–2.7 % of a core** (the test process over
+10 s, two runs): on such a Mac the idle app is not at ≈ 0 while a call plays through it (about 1.3–1.6 s CPU per
+minute against the idle gate's 0.13); on macOS 14.4+ (the tap) nothing runs while translation is off.
+
+### Headphones back while translating: PortAudio refreshed with the streams kept
+
+The saved headphones come back (AirPods): `Controller._refresh_devices` suspends the PortAudio streams, makes
+PortAudio list the devices again and resumes them; the engines and the tap stay. On the runner (no device can be
+unplugged there) it is called directly while a tone goes BlackHole 16ch → `BlackHoleIn` → `Headphones` (BlackHole
+2ch), recorded by another process:
+
+| run | suspend, ms | refresh, ms | resume, ms | longest gap heard, ms |
+|---|---|---|---|---|
+| streams stopped one after the other | 433–450 | 7–19 | 26–40 | (the tone did not reach the test) |
+| stopped at once | 251 | 11 | 58 | 363 |
+| stopped at once | 381 | 11 | 45 | 469 |
+
+- PortAudio takes 0.1–0.25 s to stop each stream on macOS (`pa_mac_core.c` polls the audio unit with
+  `Pa_Sleep(100)` until it stops): the gap is about one stop plus 0.05–0.06 s, under the 0.5 s asked for (answer
+  19:40 (5)), so the refresh happens while translating. With the microphone's streams (S2) stopped at the same time it
+  should stay one stop long; not measured with them.

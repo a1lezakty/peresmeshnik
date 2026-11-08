@@ -172,10 +172,14 @@ class Headphones:
             log.warning('headphones: PortAudio does not see %s: another output meanwhile', sink)
             sink = self.resolve(exclude=sink)
             out = Output(sample_rate, sink, on_end=self._gone)
-        if sys.platform == 'darwin' and self.on_back and self.sink and sink != self.sink and self._arrival is None:
+        if sys.platform == 'darwin' and self.on_back and self.sink and sink != self.sink:
+            self._wait_for_saved()
+        return sink, out
+
+    def _wait_for_saved(self) -> None:  # under the lock
+        if self._arrival is None:
             from peresmeshnik.audio.coreaudio import Arrival
             self._arrival = Arrival(self.sink, lambda: threading.Thread(target=self._back, daemon=True).start())
-        return sink, out
 
     def _back(self) -> None:
         """macOS: the saved device is back while another one plays: PortAudio is refreshed, then the output moves."""
@@ -190,9 +194,14 @@ class Headphones:
                 done.result(15)
         except Exception as e:
             log.warning('headphones: refreshing the devices: %s', e)
+        from peresmeshnik.audio.out import portaudio_names
         with self._lock:
             out = self._out
             if out is None or not out.alive or out.device == self.sink:
+                return
+            if self.sink not in portaudio_names():  # PortAudio still does not see it: stay, wait for its next change
+                log.info('headphones: %s is not there for PortAudio yet', self.sink)
+                self._wait_for_saved()
                 return
             self._out = None  # the next chunk opens the saved device
             pending = [(c, out.rate) for c in out.take()]
@@ -806,9 +815,13 @@ class Controller:
         for why in r['failed']:
             self.on_state(f'error: after the device refresh: {why}')
         saved = (self.settings or config.load()).ui.headphones
-        if self._through and self._through.output and saved and self._through.output != saved:
-            self._through_stop()  # the pass-through played elsewhere meanwhile: to the saved headphones now
-            self._through_start()
+        if self._through and saved:
+            from peresmeshnik.audio.out import portaudio_names
+            if saved not in portaudio_names():  # still not there for PortAudio: the next change of it, not a loop
+                self._through_wait(saved)
+            elif self._through.output and self._through.output != saved:
+                self._through_stop()  # the pass-through played elsewhere meanwhile: to the saved headphones now
+                self._through_start()
         if self.on and r['streams']:
             self.on_state(f'translating (devices changed: reopened in {r["suspend"] + r["refresh"] + r["resume"]} ms)')
         return r
@@ -823,9 +836,9 @@ class Controller:
         try:
             saved = (self.settings or config.load()).ui.headphones
             pick = Headphones(saved).resolve
-            if saved and pick() != saved:  # the saved headphones are gone: back to them when they are back
-                from peresmeshnik.audio.coreaudio import Arrival
-                self._through_arrival = Arrival(saved, lambda: self.submit(self._refresh_devices))
+            from peresmeshnik.audio.out import portaudio_names
+            if saved and (pick() != saved or saved not in portaudio_names()):  # gone: back to them when they are back
+                self._through_wait(saved)
             self._through = through = capture_macos.PassThrough(
                 pick, on_end=lambda why: self.submit(self._through_lost, through, why),
                 on_unknown=lambda name: self.submit(self._refresh_devices))
@@ -834,6 +847,14 @@ class Controller:
             self._through = None
             log.warning('pass-through: %s', e)
             self.on_state(f'error: the call is not heard while translation is off: {e}')
+
+    def _through_wait(self, saved: str) -> None:
+        """The pass-through plays elsewhere (or will): when the saved headphones change (come, a Bluetooth profile
+        settles), PortAudio is refreshed and the pass-through moves to them (_refresh_devices)."""
+        from peresmeshnik.audio.coreaudio import Arrival
+        old, self._through_arrival = self._through_arrival, Arrival(saved, lambda: self.submit(self._refresh_devices))
+        if old:
+            old.close()
 
     def _through_lost(self, through, why: str) -> None:  # the control thread
         if through is not self._through:

@@ -324,7 +324,8 @@ device around it, and writes a header line (`rate=…`) and mono float32 to stdo
 tapped app is muted on the speakers only while the tap runs; translation off closes the helper's stdin and the call
 sounds as usual. An app that has not used sound yet is waited for, and the app's processes that start later join the
 tap (Core Audio's process-list notification, no polling). The helper's own codes: 3 no such process, 4 no permission,
-5 macOS older than 14.4, 6 Core Audio failed, 7 the tap's own rate changed (the app starts it again at the new rate;
+5 macOS older than 14.4, 6 Core Audio failed, 7 the tap's own rate changed (the app starts it again at the new rate, at most once a second, and gives up with a
+message after 5 restarts within a minute;
 the tapped app's device changing its rate keeps the tap's format, Core Audio converts: CI); "System Audio Recording" (TCC `kTCCServiceAudioCapture`) is read and asked
 through TCC's own calls (`check`, `request`), and the first tap asks by itself; denied, the them → me side does not
 start and says where to allow it. The call app is `ui.call_app` = its bundle id, found or chosen as on Linux
@@ -346,7 +347,8 @@ Linux. PortAudio lists the devices of its start only, and listing again (`refres
 stream of the process: it runs at translation on, before any stream opens, and when the saved headphones are back
 while translating (`coreaudio.Arrival`, or the saved device is there but unknown to PortAudio). Every object of the
 process that holds a PortAudio stream registers with `coreaudio` (`hold` / `release`, with `suspend()` / `resume()`):
-the sides', the pass-through's, the wizard's test phrase's; `refresh_portaudio` suspends them all at once (PortAudio
+the sides', the pass-through's, the wizard's test phrase's and voice enrollment's microphone (`mic.Mic`);
+`refresh_portaudio` suspends them all at once (PortAudio
 takes 0.1–0.25 s to stop each one), refreshes, resumes each (one that fails is reported, its owner reopens
 elsewhere); a device PortAudio still does not see after its refresh counts as absent: the default plays meanwhile,
 `Arrival` waits for it again; the engines and the process tap stay, the speech not played yet

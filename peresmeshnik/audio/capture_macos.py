@@ -22,6 +22,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -39,7 +40,8 @@ ALLOW = ('allow Peresmeshnik in System Settings > Privacy & Security > Screen & 
 EXIT = {3: 'the call app is not running', 4: f'no permission to record the call app\'s sound: {ALLOW}',
         5: f'macOS {platform.mac_ver()[0]} has no process taps (14.4+): set the call app\'s speaker to {CALL_DEVICE}',
         6: 'Core Audio could not tap the call app', 7: 'the tap\'s sample rate changed'}
-RESTART = 7  # the helper's "start me again": the tapped app moved to a device at another rate (AirPods in a call)
+RESTART = 7  # the helper's "start me again": the tap's own rate changed
+RESTART_S, RESTARTS = 1.0, 5  # at most one restart a second; asked again after 5 within a minute: given up, said why
 
 
 def helper() -> str:
@@ -125,6 +127,7 @@ class ProcessTap:
         self.status = ''  # the helper's last message
         self._on_frames = self._proc = None
         self._lock = threading.Lock()
+        self._restarts: list[float] = []  # when the helper was started again (RESTART), the last minute
 
     def start(self, on_frames: Callable[[np.ndarray], None]) -> None:
         self._on_frames = on_frames
@@ -146,10 +149,13 @@ class ProcessTap:
         self._on_frames = None
 
     def _spawn(self) -> None:
-        target = ['--pid', str(self.pid)] if self.pid else ['--bundle', self.app]
-        proc = subprocess.Popen([helper(), 'tap', *target], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         with self._lock:
-            self._proc = proc
+            self._spawn_locked()
+
+    def _spawn_locked(self) -> None:
+        target = ['--pid', str(self.pid)] if self.pid else ['--bundle', self.app]
+        self._proc = proc = subprocess.Popen([helper(), 'tap', *target], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                             stderr=subprocess.PIPE)
         threading.Thread(target=self._messages, args=(proc,), name='tap-messages', daemon=True).start()
         threading.Thread(target=self._read, args=(proc, self._on_frames), name='capture', daemon=True).start()
 
@@ -166,19 +172,27 @@ class ProcessTap:
             while len(b := proc.stdout.read(n)) == n:
                 on_frames(rs(np.frombuffer(b, '<f4')))
         proc.wait()
-        with self._lock:
-            ours = proc is self._proc  # not stopped or retargeted
-            if ours:
-                self._proc = None
-        if ours and proc.returncode == RESTART and on_frames is self._on_frames:
-            log.info('call tap: %s; starting it again', self.status)
-            self._spawn()  # the new rate comes in the new header
-            return
-        if ours:
-            why = EXIT.get(proc.returncode) or f'the tap helper ended ({proc.returncode}): {self.status}'
-            if proc.returncode == 3:
-                why = f'{self.app or self.pid} is not running'
-            self.on_end(why)
+        why = EXIT.get(proc.returncode) or f'the tap helper ended ({proc.returncode}): {self.status}'
+        if proc.returncode == 3:
+            why = f'{self.app or self.pid} is not running'
+        again = proc.returncode == RESTART
+        if again:
+            now = time.monotonic()
+            self._restarts = [t for t in self._restarts if now - t < 60]
+            if len(self._restarts) >= RESTARTS:
+                again, why = False, f'the tap\'s rate keeps changing ({len(self._restarts)} restarts in a minute): {self.status}'
+            elif self._restarts:
+                time.sleep(max(0.0, self._restarts[-1] + RESTART_S - now))
+        with self._lock:  # stop() or retarget() meanwhile: nothing more, not even a restart
+            if proc is not self._proc:
+                return
+            self._proc = None
+            if again and on_frames is self._on_frames:
+                log.info('call tap: %s; starting it again', self.status)
+                self._restarts.append(time.monotonic())
+                self._spawn_locked()  # the new rate comes in the new header
+                return
+        self.on_end(why)
 
     @staticmethod
     def _end(proc) -> None:
@@ -200,10 +214,12 @@ class BlackHoleIn:
         self.device, self.on_end, self.rate = device, on_end, rate
         self._stream = self._on_frames = None
         self._stopping = False
+        self._closed = False  # stop(): a refresh going on does not open it again
 
     def start(self, on_frames: Callable[[np.ndarray], None]) -> None:
         from peresmeshnik.audio import coreaudio
         with coreaudio.portaudio_lock:  # not while PortAudio is being refreshed
+            self._closed = False
             self._start(on_frames)
 
     def _start(self, on_frames) -> None:
@@ -232,6 +248,13 @@ class BlackHoleIn:
 
     def stop(self) -> None:
         from peresmeshnik.audio import coreaudio
+        self._closed = True
+        with coreaudio.portaudio_lock:  # a refresh going on has resumed it, or sees _closed
+            self.suspend()
+
+    def suspend(self) -> None:
+        """PortAudio is about to be refreshed (coreaudio.refresh_portaudio): close the stream, resume() opens it again."""
+        from peresmeshnik.audio import coreaudio
         self._stopping = True
         coreaudio.release(self)
         stream, self._stream = self._stream, None
@@ -239,13 +262,13 @@ class BlackHoleIn:
             stream.abort()  # nothing to drain on an input
             stream.close()
 
-    def suspend(self) -> None:
-        """PortAudio is about to be refreshed (coreaudio.refresh_portaudio): close the stream, resume() opens it again."""
-        self.stop()
-
-    def resume(self) -> None:
-        if self._on_frames is not None:
-            self.start(self._on_frames)
+    def resume(self) -> None:  # under coreaudio.portaudio_lock (the refresh)
+        if self._closed or self._on_frames is None:
+            return
+        try:
+            self._start(self._on_frames)
+        except Exception as e:  # its own thread: the owner's on_end may wait for a thread that waits for this refresh
+            threading.Thread(target=self.on_end, args=(f'{self.device} after the device refresh: {e}',), daemon=True).start()
 
 
 class PassThrough:
@@ -254,8 +277,8 @@ class PassThrough:
     (coreaudio.Running): then a BlackHoleIn at the device's rate feeds a SoundDeviceOut on `pick()` (the headphones).
     ZERO_S of exact silence on the input closes both; when the device still runs (the call app's IO is on, nobody
     talks) they open again and the next window is twice as long, up to MAX_ZERO_S. With no call app playing nothing
-    runs. `on_end(why)` once when the output goes or a stream ends by itself; `on_unknown(name)` when PortAudio does
-    not see the headphones (the owner refreshes it; another output plays meanwhile).
+    runs. `on_end(why)` once when the output goes, a stream ends by itself or the streams cannot open; `on_unknown(name)`
+    once per device when PortAudio does not see the headphones (the owner refreshes it; another output plays meanwhile).
     ponytail: two device clocks, no drift correction: the queue is cut back to nothing past MAX_QUEUE_S (a click every
     ~30 min at 100 ppm); resample adaptively if that is heard."""
     MAX_QUEUE_S = 0.2
@@ -270,12 +293,20 @@ class PassThrough:
         self._lock = threading.RLock()
         self._stopped = self._ended = False
         self._zeros, self._window = 0.0, self.ZERO_S
+        self._asked: set[str] = set()  # on_unknown, once per device
 
     def start(self) -> None:
         from peresmeshnik.audio import coreaudio
-        self._running = coreaudio.Running(CALL_DEVICE, lambda running: running and self._open())
+        self._running = coreaudio.Running(CALL_DEVICE, lambda running: running and self._try_open())
         if self._running.running():
             self._open()
+
+    def _try_open(self) -> None:  # a thread of Core Audio's event or of _quiet: nobody up the stack would hear it
+        try:
+            self._open()
+        except Exception as e:
+            log.warning('call sound: %s', e)
+            self._gone(f'the call sound cannot play: {e}')
 
     def _open(self) -> None:
         from peresmeshnik.audio import coreaudio
@@ -288,7 +319,9 @@ class PassThrough:
             try:
                 out = SoundDeviceOut(rate, name, on_end=self._gone)
             except NotInPortAudio:
-                self.on_unknown(name)
+                if name not in self._asked:
+                    self._asked.add(name)
+                    self.on_unknown(name)
                 name = self.pick(exclude=name)
                 out = SoundDeviceOut(rate, name, on_end=self._gone)
             self._out, self.output, self._zeros = out, name, 0.0
@@ -321,7 +354,7 @@ class PassThrough:
             self._close()
             if self._running.running():
                 self._window = min(self._window * 2, self.MAX_ZERO_S)
-                self._open()
+                self._try_open()
             else:
                 self._window = self.ZERO_S
                 log.info('call sound: nothing plays into %s; the pass-through waits', CALL_DEVICE)

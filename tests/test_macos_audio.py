@@ -493,10 +493,12 @@ def longest_quiet_s(x: np.ndarray, sr: int, level: float = 0.02) -> float:
 def test_devices_refresh_keeps_the_streams_with_a_short_gap(tmp_path):
     """(Answer 19:40 (5)) the saved headphones are back while translating: PortAudio is refreshed with every stream
     of the process suspended and resumed, the engines untouched. A tone goes BlackHole 16ch -> BlackHoleIn ->
-    Headphones (BlackHole 2ch); the controller owns neither stream (as the wizard's test phrase): the registry has them."""
+    Headphones (BlackHole 2ch) of the wizard's test phrase (a Controller(test=True)): the main controller owns neither
+    stream, the registry has them."""
     import soundfile as sf
 
-    from peresmeshnik.app import Controller, Headphones
+    from peresmeshnik import config
+    from peresmeshnik.app import Controller
     from peresmeshnik.audio import capture_macos as cm
     from peresmeshnik.engines import SAMPLE_RATE
     before = set_default_output(cm.CALL_DEVICE)  # afplay (another process: not touched by our refresh) is the call app
@@ -504,7 +506,10 @@ def test_devices_refresh_keeps_the_streams_with_a_short_gap(tmp_path):
     call = subprocess.Popen(['afplay', str(tmp_path / 'tone.wav')])
     states = []
     ctl = Controller(overlay=None, on_state=states.append)
-    hp = Headphones(SPEAKERS, states.append, on_back=lambda: ctl.submit(ctl._refresh_devices))
+    s = config.Settings()
+    s.ui.headphones = SPEAKERS
+    test = Controller(overlay=None, on_state=states.append, them_file=os.path.join(DATA, 'call-en.ogg'), settings=s, test=True)
+    hp = test._output('them', s)  # the test phrase's own headphones, as the wizard plays it
     cap = cm.BlackHoleIn()
     q = __import__('queue').Queue()  # as the app: the capture callback only hands on, a thread plays (a Side)
 
@@ -631,7 +636,7 @@ def test_headphones_unknown_to_portaudio_play_on_the_default_meanwhile(fakedevic
     fakedevice(SPEAKERS2, 'BlackHole 16ch')
     ca.refresh_portaudio()
     before = set_default_output(SPEAKERS2)
-    fakedevice(PHONES)  # after PortAudio's refresh: unknown to it
+    phones = fakedevice(PHONES)  # after PortAudio's refresh: unknown to it
     asked, states = [], []
     hp = Headphones(PHONES, states.append, on_back=lambda: asked.append(1))  # a refresh that does not help
     hp.retry_s = 0.1
@@ -644,6 +649,13 @@ def test_headphones_unknown_to_portaudio_play_on_the_default_meanwhile(fakedevic
         hp2.play(tone(0.3, sr=22050), 22050)
         devices = [h._out and h._out.device for h in (hp, hp2)]
         waits = hp._arrival is not None
+        # they change (out and in again), still unknown to PortAudio after the "refresh": the waiting Arrival fires,
+        # the output stays on a device that plays (N4) and waits for the next change
+        unplug(phones)
+        phones = fakedevice(PHONES)
+        assert until(lambda: len(asked) == 2), 'the waiting Arrival did not fire'
+        assert until(lambda: hp._arrival is not None), 'not waiting again'
+        stayed = hp._out and hp._out.device
     finally:
         hp.stop()
         hp2.stop()
@@ -652,6 +664,198 @@ def test_headphones_unknown_to_portaudio_play_on_the_default_meanwhile(fakedevic
     print(f'unknown to PortAudio: refresh asked {len(asked)}, then {devices}; {states}')
     assert first is None and asked == [1]  # the first chunk: a refresh is asked, nothing plays yet
     assert devices == [SPEAKERS2, SPEAKERS2] and waits  # then the default, and back to them when they change
+    assert stayed == SPEAKERS2
+
+
+PLAYER = '''
+import sys, numpy as np, sounddevice as sd
+from peresmeshnik.audio.coreaudio import stream_args
+args = stream_args(sys.argv[1])
+sr = args.pop('samplerate')
+x = (0.3 * np.sin(2 * np.pi * 440 * np.arange(int(float(sys.argv[2]) * sr)) / sr)).astype(np.float32)
+sd.play(x, sr, device=sys.argv[1], blocking=True, **args)
+'''
+
+
+def player(device: str, seconds: float) -> subprocess.Popen:
+    """A call app playing a 440 Hz tone into `device`, in a process of its own (whatever the default output)."""
+    return subprocess.Popen([sys.executable, '-c', PLAYER, device, str(seconds)])
+
+
+@needs_blackhole
+def test_pass_through_plays_on_the_default_while_portaudio_does_not_see_the_saved_headphones(fakedevice, monkeypatch):
+    """M2 / N2 (macOS < 14.4, translation off): the saved headphones are in Core Audio, PortAudio does not see them
+    (a Bluetooth profile settling: hidden here): one refresh, the default plays, no refresh loop; when they change and
+    PortAudio sees them, the waiting Arrival moves the pass-through to them."""
+    from peresmeshnik import config
+    from peresmeshnik.app import Controller
+    from peresmeshnik.audio import capture_macos as cm
+    from peresmeshnik.audio import coreaudio as ca
+    from peresmeshnik.audio import out as out_mod
+    monkeypatch.setenv('PERESMESHNIK_CALL_PATH', 'blackhole')
+    fakedevice(SPEAKERS2)
+    ca.refresh_portaudio()
+    before = set_default_output(SPEAKERS2)
+    phones = fakedevice(PHONES)
+    hidden = {PHONES}
+    names, index = out_mod.portaudio_names, out_mod.portaudio_index
+
+    def hide_index(name, output=True):
+        if name in hidden:
+            raise out_mod.NotInPortAudio(f'{name}: hidden by the test')
+        return index(name, output)
+    monkeypatch.setattr(out_mod, 'portaudio_names', lambda output=True: names(output) - hidden)
+    monkeypatch.setattr(out_mod, 'portaudio_index', hide_index)
+    refreshes = []
+    refresh = ca.refresh_portaudio
+    monkeypatch.setattr(ca, 'refresh_portaudio', lambda: refreshes.append(1) or refresh())
+    s = config.Settings()
+    s.ui.headphones = PHONES
+    states = []
+    ctl = Controller(overlay=None, on_state=states.append, settings=s)
+    call = None
+    try:
+        ctl.submit(ctl._through_start).result()
+        assert ctl._through is not None and ctl._through_arrival is not None, states
+        call = player(cm.CALL_DEVICE, 15.0)
+        assert until(lambda: ctl._through.output == SPEAKERS2), (ctl._through.output, states)
+        time.sleep(2.0)  # a loop would refresh again and again meanwhile
+        looped = len(refreshes)
+        heard = record(SPEAKERS, 1.0)  # Test Speakers plays into BlackHole 2ch
+        hidden.clear()  # the profile settled
+        unplug(phones)
+        phones = fakedevice(PHONES)  # a change of the saved headphones: the waiting Arrival
+        assert until(lambda: ctl._through is not None and ctl._through.output == PHONES, 10), (ctl._through and ctl._through.output, states)
+    finally:
+        ctl.submit(ctl._through_stop).result()
+        if call:
+            call.kill()
+        if before:
+            set_default_output(before)
+    print(f'pass-through, saved headphones unknown to PortAudio: {looped} refresh(es) in 2 s, on {SPEAKERS2} rms '
+          f'{rms(heard):.3f}; then on {PHONES} after {len(refreshes)} refreshes; {states}')
+    assert looped == 1
+    assert rms(heard) > 0.1
+
+
+@needs_blackhole
+def test_pass_through_that_cannot_open_says_so():
+    """N3: opening on Core Audio's event thread fails (no headphones): on_end says why, not lost in that thread."""
+    from peresmeshnik.audio import capture_macos as cm
+
+    def pick(exclude=''):
+        raise RuntimeError('no output device')
+    ended = []
+    through = cm.PassThrough(pick, on_end=ended.append)
+    through.start()
+    call = player(cm.CALL_DEVICE, 4.0)
+    try:
+        assert until(lambda: ended), 'the failure was lost'
+    finally:
+        through.stop()
+        call.kill()
+    print(f'pass-through cannot open: {ended}')
+    assert 'no output device' in ended[0]
+
+
+@needs_blackhole
+def test_a_stream_stopped_during_a_refresh_stays_closed():
+    """N1: stop() between a refresh's suspend and resume: resume() does not open the stream again (no stream left
+    open, the device not held)."""
+    from peresmeshnik.audio import capture_macos as cm
+    from peresmeshnik.audio import coreaudio as ca
+    from peresmeshnik.audio.out import SoundDeviceOut
+    out = SoundDeviceOut(22050, SPEAKERS)
+    cap = cm.BlackHoleIn()
+    cap.start(lambda pcm: None)
+    stops = []
+
+    class Stopper:  # a holder whose suspend stops the others from another thread, as the control thread may
+        def suspend(self):
+            for stop in (lambda: out.stop(drain=False), cap.stop):
+                stops.append(threading.Thread(target=stop))
+                stops[-1].start()
+            time.sleep(0.3)  # they are stopping now, the refresh still to come
+
+        def resume(self):
+            pass
+    stopper = Stopper()
+    ca.hold(stopper)
+    try:
+        r = ca.refresh_portaudio()
+    finally:
+        ca.release(stopper)
+    for t in stops:
+        t.join(5)
+    print(f'stopped during a refresh: {r}; streams left {out._stream, cap._stream}')
+    assert not r['failed'], r
+    assert out._stream is None and cap._stream is None
+    assert not {out, cap} & set(ca._holders)
+
+
+@needs_blackhole
+def test_the_microphone_is_kept_by_a_refresh(afplay):
+    """M1: the wizard's voice enrollment records through mic.Mic (PortAudio on macOS): registered, a refresh suspends
+    and resumes it; stopped during one, it stays closed."""
+    from peresmeshnik.audio import coreaudio as ca
+    from peresmeshnik.audio.mic import Mic
+    from peresmeshnik.engines import SAMPLE_RATE
+    frames = Frames()
+    mic = Mic(SPEAKERS)  # afplay plays into BlackHole 2ch: its input side
+    mic.start(frames)
+    try:
+        time.sleep(0.5)
+        held = mic in set(ca._holders)
+        r = ca.refresh_portaudio()
+        n = len(frames.pcm())
+        time.sleep(1.0)
+        got = frames.pcm()[n:]
+
+        class Stopper:
+            def suspend(self):
+                threading.Thread(target=mic.stop).start()
+                time.sleep(0.3)
+
+            def resume(self):
+                pass
+        stopper = Stopper()
+        ca.hold(stopper)
+        r2 = ca.refresh_portaudio()
+        ca.release(stopper)
+        time.sleep(0.5)
+    finally:
+        mic.stop()
+    print(f'microphone: held {held}, refresh {r}, then {len(got) / SAMPLE_RATE:.2f} s rms {rms(got):.3f}; stopped during '
+          f'one: {r2}, stream {mic._stream}')
+    assert held and r['streams'] >= 1 and not r['failed']
+    assert len(got) > SAMPLE_RATE // 2 and rms(got) > 0.1, 'the microphone did not come back after the refresh'
+    assert mic._stream is None and mic not in set(ca._holders)
+
+
+@needs_blackhole
+def test_tap_restarts_at_most_once_a_second_and_gives_up(tmp_path, monkeypatch):
+    """m5: a helper asking to be started again (exit 7) again and again: restarted at most once per RESTART_S; asked
+    again after RESTARTS restarts within a minute, it ends with a message."""
+    from peresmeshnik.audio import capture_macos as cm
+    fake = tmp_path / 'tap'
+    fake.write_text('#!/bin/sh\necho "peresmeshnik-tap 1 rate=48000 channels=1 format=f32le"\n'
+                    'echo "peresmeshnik-tap: the tap\'s rate changed" >&2\nexit 7\n')
+    fake.chmod(0o755)
+    monkeypatch.setenv('PERESMESHNIK_TAP', str(fake))
+    monkeypatch.setattr(cm, 'RESTART_S', 0.3)
+    ended = []
+    tap = cm.ProcessTap(pid=os.getpid(), on_end=ended.append)
+    t0 = time.monotonic()
+    tap.start(lambda pcm: None)
+    try:
+        assert until(lambda: ended, 10), 'no end'
+        took = time.monotonic() - t0
+    finally:
+        tap.stop()
+    gaps = np.diff(tap._restarts)
+    print(f'restarts: {len(tap._restarts)} in {took:.2f} s, gaps {np.round(gaps, 2).tolist()}; {ended}')
+    assert 'keeps changing' in ended[0], ended
+    assert len(tap._restarts) == cm.RESTARTS and gaps.min() >= 0.3 * 0.95, gaps
 
 
 MODELS = os.environ.get('PERESMESHNIK_WORK_GATE') == '1'

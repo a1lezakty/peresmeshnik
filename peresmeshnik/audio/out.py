@@ -189,8 +189,12 @@ def portaudio_index(name: str, output: bool = True) -> int:
     """PortAudio's index of the device `name` (exact). PortAudio lists the devices of its start only: a device plugged
     in since is not there until coreaudio.refresh_portaudio()."""
     import sounddevice as sd
+
+    from peresmeshnik.audio.coreaudio import portaudio_lock
     key = 'max_output_channels' if output else 'max_input_channels'
-    for i, d in enumerate(sd.query_devices()):
+    with portaudio_lock:  # not while it is being refreshed
+        devices = sd.query_devices()
+    for i, d in enumerate(devices):
         if d['name'] == name and d[key] > 0:
             return i
     raise NotInPortAudio(f'no {"output" if output else "input"} device {name!r} for PortAudio (plugged in after its start)')
@@ -198,8 +202,11 @@ def portaudio_index(name: str, output: bool = True) -> int:
 
 def portaudio_names(output: bool = True) -> set[str]:
     import sounddevice as sd
+
+    from peresmeshnik.audio.coreaudio import portaudio_lock
     key = 'max_output_channels' if output else 'max_input_channels'
-    return {d['name'] for d in sd.query_devices() if d[key] > 0}
+    with portaudio_lock:
+        return {d['name'] for d in sd.query_devices() if d[key] > 0}
 
 
 class SoundDeviceOut:
@@ -224,6 +231,7 @@ class SoundDeviceOut:
         self._rs = Resampler(sample_rate, self.rate)
         self.alive = True  # False once the device is gone
         self._stopping = False  # stop() or suspend(): the stream's end is ours
+        self._closed = False  # stop(): a refresh going on does not open it again
         self._lock = threading.Lock()  # play() / flush() and the callback
         self._chunks: collections.deque[np.ndarray] = collections.deque()
         self._pos = 0  # samples of _chunks[0] already played
@@ -317,22 +325,25 @@ class SoundDeviceOut:
         self._stopping = True
         self._close(drain=False)
 
-    def resume(self) -> None:
-        if not self.alive:
+    def resume(self) -> None:  # under coreaudio.portaudio_lock (the refresh)
+        if self._closed or not self.alive:
             return
         try:
             self._open()
         except Exception as e:  # gone meanwhile, or PortAudio still does not see it: the owner opens another device
             self._stopping = False
-            self._lost(f'{self.device} after the device refresh: {e}')
+            # on a thread of its own: the owner's on_end may wait for a lock of a thread that waits for this refresh
+            threading.Thread(target=self._lost, args=(f'{self.device} after the device refresh: {e}',), daemon=True).start()
 
     def stop(self, drain: bool = True) -> None:
         """Play what is queued (drain), then close the device."""
+        from peresmeshnik.audio import coreaudio
         if self.alive and drain:
             self._empty.wait(self.queued_s() + 2.0)
-        self._stopping = True
+        self._closed = self._stopping = True
         self._watch.close()
-        self._close(drain=self.alive and drain)
+        with coreaudio.portaudio_lock:  # a refresh going on has resumed it, or sees _closed
+            self._close(drain=self.alive and drain)
 
     def _finished(self) -> None:  # PortAudio's thread: the stream stopped (ours: stop(), suspend(); else by itself)
         if not self._stopping:

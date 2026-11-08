@@ -748,8 +748,11 @@ def cli(argv=None) -> int:
     lock = QLockFile(str(lock_path()))
     lock.setStaleLockTime(0)  # stale only when its process is gone, however old
     if not lock.tryLock(200):
-        print('Peresmeshnik is already running: its icon is in the tray', file=sys.stderr, flush=True)
-        box = QMessageBox(QMessageBox.Information, 'Peresmeshnik', 'Peresmeshnik is already running: its icon is in the tray.')
+        where = 'the menu bar' if sys.platform == 'darwin' else 'the tray'
+        print(f'Peresmeshnik is already running: its icon is in {where}', file=sys.stderr, flush=True)
+        box = QMessageBox(QMessageBox.Information, 'Peresmeshnik', f'Peresmeshnik is already running: its icon is in {where}.')
+        if sys.platform == 'darwin':
+            macos.activate()  # an accessory app's box would open behind the other windows
         QTimer.singleShot(5000, box.close)
         box.exec()
         return 3

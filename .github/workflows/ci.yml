@@ -72,6 +72,8 @@ jobs:
       # includes the idle-CPU watchdogs: the app (tray, overlay, first-run wizard) 60 s idle, and again with
       # the overlay on screen; each fails above 0.13 s of CPU. Linux: Xvfb; macOS, Windows: the runner's desktop
       - run: uv run pytest -q -s
+        env:  # macOS: a synthetic key press or click that does not arrive fails the test instead of skipping it
+          PERESMESHNIK_REQUIRE_SYNTHETIC: ${{ runner.os == 'macOS' && '1' || '' }}
 
   # working-mode CPU gate: the local pipeline on a 30 s recording (RTF, CPU s per audio s)
   work-gate:

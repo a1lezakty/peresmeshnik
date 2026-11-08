@@ -66,6 +66,14 @@ def click(x: float, y: float) -> None:
         time.sleep(0.05)
 
 
+def no_synthetic(what: str) -> None:
+    """Synthetic input did not arrive: CI (PERESMESHNIK_REQUIRE_SYNTHETIC=1) fails, elsewhere the test skips."""
+    why = f'the runner does not deliver synthetic {what} (CGEventPost)'
+    if os.environ.get('PERESMESHNIK_REQUIRE_SYNTHETIC') == '1':
+        pytest.fail(why)
+    pytest.skip(f'{why}; it is in USER-CHECKS')
+
+
 def synthetic_keys_arrive() -> bool:
     """The control for the press tests: a typed 'a' reaches a focused text field of ours."""
     edit = QLineEdit()
@@ -86,7 +94,8 @@ def test_system_shortcuts_are_read_and_the_default_combo_is_free():
     print('macOS shortcuts enabled on this machine:', ' '.join(sorted(macos.native(*k) for k in taken)))
     assert taken, 'CopySymbolicHotKeys gave nothing'
     assert (macos.KEYS['space'], macos.CMD) in taken  # ⌘Space, Spotlight
-    assert macos.key_code(config.Ui().hotkey) not in taken, f'the default hotkey {config.Ui().hotkey} is a macOS shortcut'
+    code, mods = macos.key_code(config.Ui().hotkey)
+    assert not {(code, mods), (code, mods | macos.FN)} & taken, f'the default hotkey {config.Ui().hotkey} is a macOS shortcut'
 
 
 def test_key_codes_follow_qt_on_macos():
@@ -141,10 +150,11 @@ def test_binding_says_why_and_keeps_the_old_combo():
 
 def test_hotkey_fires_once_per_press():
     if not synthetic_keys_arrive():
-        pytest.skip('the runner does not deliver synthetic key events (CGEventPost); the press is in USER-CHECKS')
+        no_synthetic('key events')
     hk, hits = macos.MacHotkey(), []
     try:
         hk.register(COMBO, lambda: hits.append(1))
+        hk.register(COMBO, lambda: hits.append(1))  # again (a settings save): replaces, does not add a second one
         code, mods = macos.key_code(COMBO)
         press(code, mods)
         settle(0.5)
@@ -192,7 +202,7 @@ def test_overlay_window_floats_over_everything_and_lets_clicks_through():
     o.close()
     under.close()
     if not clicks:
-        pytest.skip('the runner does not deliver synthetic clicks; click-through is in USER-CHECKS')
+        no_synthetic('clicks')
     assert clicks == ['under']
 
 
@@ -299,7 +309,7 @@ def test_app_menu_bar_icon_hotkey_and_sigterm(tmp_path):
             press(*macos.key_code(COMBO))
             _wait(q, 'mode: translation is off', 5)  # the hotkey reached the app (translation is off: a tray message)
         else:
-            print('synthetic key events are not delivered here: the hotkey press is not checked')
+            no_synthetic('key events')
         p.send_signal(signal.SIGTERM)
         assert p.wait(15) == 0
     finally:

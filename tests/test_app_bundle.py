@@ -58,10 +58,52 @@ def test_bundle_contents(app):
     assert Path(exe(app, 'piper-runner')).exists()
     lic = app / 'Contents' / 'Resources' / 'licenses'
     assert (lic / 'piper-runner-LICENSE.txt').exists() and (lic / 'Peresmeshnik-LICENSE.txt').exists()
+    assert 'espeak-ng' in (lic / 'piper-runner-SOURCE.txt').read_text()  # where the GPL program's sources are
     assert not list(app.rglob('torch')), 'torch in the base app'
     size = sum(f.stat().st_size for f in app.rglob('*') if f.is_file() and not f.is_symlink())
     print(f'bundle: {size / 1e6:.0f} MB in the .app, {Path(DMG).stat().st_size / 1e6:.0f} MB .dmg, '
           f'tap helper {"in" if Path(exe(app, "peresmeshnik-tap")).exists() else "not in"} the bundle')
+
+
+def _modules(executable: str) -> set[str]:
+    """The Python modules in a frozen program's own archive (PYZ inside its executable)."""
+    from PyInstaller.archive.readers import CArchiveReader
+    pkg = CArchiveReader(executable)
+    return set(pkg.open_embedded_archive(next(n for n in pkg.toc if n.endswith('.pyz'))).toc)
+
+
+def test_piper_stays_out_of_the_app(app):
+    """GPL separation: piper (piper-tts) is only in piper-runner's archive, never in the app's."""
+    ours, runner = _modules(exe(app)), _modules(exe(app, 'piper-runner'))
+    assert 'peresmeshnik.app' in ours and 'piper' in runner
+    assert not {m for m in ours if m == 'piper' or m.startswith('piper.')}, 'piper in the app'
+    assert not {m for m in runner if m.startswith('peresmeshnik')}, 'the app in piper-runner'
+
+
+def test_app_opens_like_from_the_finder(app, tmp_path):
+    """`open -a`, no arguments: LaunchServices starts it as a double click does; its menu-bar item comes up, and it
+    quits on SIGTERM without a crash report."""
+    from peresmeshnik.ui import macos
+    reports = Path.home() / 'Library' / 'Logs' / 'DiagnosticReports'
+    before = set(reports.glob('Peresmeshnik*')) if reports.exists() else set()
+    subprocess.run(['open', '-n', '-a', str(app), '--env', f'PERESMESHNIK_CONFIG={tmp_path / "settings.toml"}'], check=True)
+    exe_path, proc, wins, end = os.path.realpath(exe(app)), None, [], time.monotonic() + 60
+    while time.monotonic() < end and not any(w['layer'] == macos.STATUS_LEVEL and w['bounds'][1] == 0 for w in wins):
+        time.sleep(0.5)
+        proc = proc or next((q for q in psutil.process_iter(['exe']) if q.info['exe'] == exe_path), None)
+        wins = macos.windows_of(proc.pid) if proc else []
+    try:
+        assert proc, 'not started'
+        print(f'opened from LaunchServices: windows {wins}')
+        assert any(w['layer'] == macos.STATUS_LEVEL and w['bounds'][1] == 0 for w in wins), 'no menu-bar item'
+        proc.terminate()
+        proc.wait(20)
+    finally:
+        if proc and proc.is_running():
+            proc.kill()
+    time.sleep(2)
+    after = set(reports.glob('Peresmeshnik*')) if reports.exists() else set()
+    assert after == before, f'crash report: {after - before}'
 
 
 def test_app_starts_shows_its_icon_idles_and_quits_on_sigterm(app, tmp_path):
@@ -114,7 +156,7 @@ def test_frozen_cloud_direction_reaches_google(app, tmp_path):
     print('frozen cloud with a fake key:', code, err.strip().splitlines()[-1][:200] if err.strip() else '')
     assert code != 0
     assert not any(w in err for w in ('No module named', 'PackageNotFoundError', 'ImportError')), err[-2000:]
-    assert 'key' in err.lower(), err[-2000:]  # Google's answer: the API key is not valid
+    assert 'API key not valid' in err, err[-2000:]  # Google's answer
 
 
 def test_frozen_cli_fetches_and_translates(app, tmp_path):

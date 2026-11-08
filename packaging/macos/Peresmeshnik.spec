@@ -2,8 +2,10 @@
 # PyInstaller: one tool for the .app now and the Windows / Linux folders of stages 4+ (ARCHITECTURE §10).
 # Build: packaging/macos/build.sh (it also adds the Swift tap helper, the licenses, the ad-hoc signature, the .dmg).
 import re
+import shutil
 from pathlib import Path
 
+from PyInstaller.config import CONF
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
 
 ROOT = Path(SPECPATH).parents[1]
@@ -20,6 +22,7 @@ app = Analysis(
            *collect_data_files('onnx_asr'), *copy_metadata('onnx-asr'), *copy_metadata('google-genai')],
     excludes=EXCLUDES + ['piper'],  # GPL: only in piper-runner's own archive (build.sh fails if the app imports it)
 )
+shutil.copyfile(CONF['warnfile'], Path(CONF['warnfile']).with_name('warn-app.txt'))  # the next Analysis overwrites it
 piper = Analysis(
     [str(ROOT / 'piper-runner' / 'piper_runner.py')],
     hiddenimports=collect_submodules('piper', filter=lambda n: '.train' not in n),

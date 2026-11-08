@@ -269,7 +269,10 @@ def test_stdin_frames_keep_samples_whole(monkeypatch):
     g = frames('-', 0.0, lambda: 0.0)
     os.write(w, b'\x01\x00\x02')
     assert next(g).tolist() == [1]
-    os.write(w, b'\x00')
-    os.close(w)
+    os.write(w, b'\x00\x03')
     assert next(g).tolist() == [2]
-    assert list(g) == []
+    os.write(w, b'\x00')
+    assert next(g).tolist() == [3]
+    os.write(w, b'\x04')  # a lone byte, then the end: no sample, and no empty frame either
+    os.close(w)
+    assert [f.tolist() for f in g] == []

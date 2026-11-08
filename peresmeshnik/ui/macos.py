@@ -208,6 +208,7 @@ class MacHotkey:
             raise HotkeyError(f'cannot listen for hotkeys (Carbon error {err})')
 
     def register(self, combo: str, callback: Callable[[], None]) -> None:
+        self.unregister(combo)  # the same combo again: its old registration goes, not leaks
         code, mods = key_code(combo)
         if not mods:
             raise HotkeyError(f'{native(code, mods)} alone would take the key from every app: add ⌘, ⌥, ⌃ or ⇧')

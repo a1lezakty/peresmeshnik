@@ -60,7 +60,8 @@ def frames(src: str, tail_max: float, out_quiet):
             b, rest = rest + b, b''
             if len(b) % 2:
                 b, rest = b[:-1], b[-1:]
-            yield np.frombuffer(b, '<i2')
+            if b:  # one byte read: nothing whole yet
+                yield np.frombuffer(b, '<i2')
     else:
         pcm = read_wav(src)
         for i in range(0, len(pcm), FRAME):

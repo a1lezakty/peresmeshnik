@@ -15,23 +15,36 @@ TEXTS = Path(__file__).parent / 'licenses'  # full texts for packages that only 
 
 out = Path(sys.argv[1])
 out.mkdir(parents=True, exist_ok=True)
+missing = []
 for dist in metadata.distributions():
     name = dist.metadata['Name']
-    if name.lower() in TOOLS:
+    if name.lower() in TOOLS or name == 'peresmeshnik':  # ours: build.sh copies LICENSE
         continue
     files = [f for f in dist.files or [] if any(w in f.name.lower() for w in LICENSE_WORDS)
              and (len(f.parts) <= 2 or f.parts[1] == 'licenses')]  # <pkg>/LICENSE, *.dist-info/licenses/* (PEP 639)
     (out / name).mkdir(exist_ok=True)
     for f in files:
         shutil.copyfile(f.locate(), out / name / '-'.join(f.parts[2:] or [f.name]))
-    if not files:  # the wheel names its license only: that, where the source is, and the license's text
-        said = dist.metadata.get('License-Expression') or dist.metadata.get('License') or ''
-        urls = [dist.metadata.get('Home-page') or '', *(dist.metadata.get_all('Project-URL') or [])]
-        (out / name / 'LICENSE-declared.txt').write_text(f'{name} {dist.version}: {said}\n' + '\n'.join(u for u in urls if u) + '\n')
-        for key, text in (('LGPL-3.0', 'LGPL-3.0.txt'), ('Apache', 'Apache-2.0.txt')):
-            if key in said:
-                shutil.copyfile(TEXTS / text, out / name / text)
-        print(f'licenses: {name} {dist.version} has no license file; its metadata says {said!r}')
+    if files:
+        continue
+    # the wheel names its license only: that, where the source is, and the full text
+    said = dist.metadata.get('License-Expression') or dist.metadata.get('License') or ''
+    urls = [dist.metadata.get('Home-page') or '', *(dist.metadata.get_all('Project-URL') or [])]
+    (out / name / 'LICENSE-declared.txt').write_text(f'{name} {dist.version}: {said}\n' + '\n'.join(u for u in urls if u) + '\n')
+    if (TEXTS / f'{name}.txt').exists():  # the upstream file of that version, with its copyright (MIT, BSD)
+        texts = [f'{name}.txt']
+    elif 'LGPL-3.0' in said:  # the LGPL is a set of permissions on top of the GPL: both texts
+        texts = ['LGPL-3.0.txt', 'GPL-3.0.txt']
+    elif 'Apache' in said:
+        texts = ['Apache-2.0.txt']
+    else:  # MIT / BSD need the upstream copyright: add packaging/licenses/<name>.txt from its repository
+        missing.append(f'{name} {dist.version} ({said or "no license named"})')
+        continue
+    for text in texts:
+        shutil.copyfile(TEXTS / text, out / name / text.replace(f'{name}.txt', 'LICENSE'))
+    print(f'licenses: {name} {dist.version} ships no license file ({said}): added {", ".join(texts)}')
 python_license = Path(sysconfig.get_paths()['stdlib']) / 'LICENSE.txt'
 if python_license.exists():
     shutil.copyfile(python_license, out / 'Python-LICENSE.txt')
+if missing:
+    sys.exit('licenses: no license text for ' + '; '.join(missing))

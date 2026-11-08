@@ -37,8 +37,10 @@ ICONS = Path(__file__).resolve().parents[2] / 'assets' / 'icons'  # ponytail: re
 LANGS = {'en': 'English', 'ru': 'Русский'}
 MIC_LABEL = 'Microphone'  # me -> them and the loopback while translation is off
 SIDES = {'them_to_me': 'Them → me', 'me_to_them': 'Me → them'}
-BROWSER_NOTE = ('A browser moves with all of its sound: YouTube in another tab is translated too. '
+MAC = sys.platform == 'darwin'
+BROWSER_NOTE = (f'A browser {"is taken" if MAC else "moves"} with all of its sound: YouTube in another tab is translated too. '
                 'For calls a separate browser is better.')
+CALL_NOTE = 'While translating, macOS mutes it on your speakers' if MAC else 'Its sound moves to the translation while it is on'
 
 
 def tray_icon() -> QIcon:
@@ -177,6 +179,8 @@ class Tray(QObject):
         def work():
             try:
                 self.call_apps.emit((capture().apps(), ''))
+            except ImportError:  # no call sound capture for this OS in this version
+                self.call_apps.emit(([], 'not in this version'))
             except Exception as e:  # no sound server
                 self.call_apps.emit(([], str(e)))
         threading.Thread(target=work, name='call-apps', daemon=True).start()
@@ -203,7 +207,7 @@ class Tray(QObject):
             group.addAction(a)
         group.triggered.connect(self._call_chosen)
         m.addSeparator()
-        m.addAction('Its sound moves to the translation while it is on').setEnabled(False)
+        m.addAction(CALL_NOTE).setEnabled(False)
         m.addAction(BROWSER_NOTE.split(':')[0] + ' (other tabs too)').setEnabled(False)
 
     def _call_chosen(self, action) -> None:

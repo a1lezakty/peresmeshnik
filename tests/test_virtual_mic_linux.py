@@ -227,22 +227,22 @@ def test_microphone_survives_a_sound_server_restart(monkeypatch, mic_dies):
             monkeypatch.setattr(app, 'mic_source', down)
             mic._mic._proc.kill()
         first.kill()
-        wait(lambda: len(states) == 2, show=lambda: states)
+        wait(lambda: len(states) >= 2, show=lambda: states)  # the next ones may come at once
         assert states[0] == 'error: lost the sound server; reconnecting the microphone in 0.3 s'
         if mic_dies:
             assert states[1] == 'error: the microphone went away (test_mic_a ended with the sound server); reopening'
-            wait(lambda: len(states) == 3, show=lambda: states)
-            assert states[2] == 'translating (the microphone is back: test_mic_a)'
+            wait(lambda: len(states) >= 3, show=lambda: states)
+            assert states[2:] == ['translating (the microphone is back: test_mic_a)']
         else:
-            assert states[1] == 'translating (the sound server is back)'
+            assert states[1:] == ['translating (the sound server is back)']
         assert mic._watch is not first and mic._watch.poll() is None
         n = len(frames)
         wait(lambda: len(frames) > n + 40)
         assert hz(frames) == pytest.approx(400, abs=10)
         k = len(states)
         a.remove()  # seen by the new subscription
-        wait(lambda: len(states) == k + 2, show=lambda: states)
-        assert states[k + 1] == 'translating (the microphone is back: test_mic_b)'
+        wait(lambda: len(states) >= k + 2, show=lambda: states)
+        assert states[k + 1:] == ['translating (the microphone is back: test_mic_b)']
     finally:
         mic.stop()
         a.remove()

@@ -90,6 +90,13 @@ class Direction(Protocol):
     def events(self) -> Iterator[Caption | Speech]: ...  # blocks until the next event
     def close(self) -> None: ...  # free models / close the session; idle again
 
+    supports_live: bool = False  # True where set_live() works; the app checks getattr(d, 'supports_live', False)
+
+    def set_live(self, on: bool) -> None:
+        """Hotkey "translation <-> live voice". on=True: the direction passes its input through as `Speech`
+        (crossfaded, no click) and stops translating; False: back to translation. The app keeps feeding it."""
+        raise NotImplementedError
+
 
 class Overlay(Protocol):
     def show(self, caption: Caption) -> None: ...  # repaint only when the text changed

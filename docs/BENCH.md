@@ -1059,6 +1059,9 @@ helper, python or bash did nothing); the real dialog on a user's Mac is a USER-C
 | by bundle id, the app started after the tap | the helper waits ("waiting for … to use sound"), taps it when it plays |
 | a helper process of the app (`<id>.helper`) started later | joins the tap (Core Audio's process list changes): 440 Hz and 660 Hz equally loud |
 | a mono tap of an app on a 16-channel device | 1/8 as loud (the mixdown averages every channel): call apps play stereo |
+| the helper killed (SIGKILL) while tapping | the original comes back (RMS 0.0000 → 0.212): Core Audio removes the private tap and its device with the process; the app is told (exit −9) |
+| the app's device changes its rate (BlackHole 2ch 48 → 44.1 kHz under afplay) | the tap keeps 48 kHz (Core Audio converts), 440 Hz, RMS 0.212: no restart needed; exit 7 stays for a change of the tap's own rate |
+| Safari / a WKWebView playing `<audio>` | the sound is played by `com.apple.WebKit.GPU` ("Safari Graphics and Media", "web Graphics and Media"), not by Safari: the tray lists it as "Safari (WebKit)", a tap of it takes every WebKit app |
 
 ### them → me through the macOS devices
 
@@ -1091,9 +1094,17 @@ Two runs each (two commits, the same code paths):
 
 `PassThrough` (BlackHole 16ch → the headphones: a PortAudio input at the device's rate into a `SoundDeviceOut`),
 `PERESMESHNIK_CALL_PATH=blackhole` on the runner, afplay as the call app with BlackHole 16ch as its speaker: the
-tone arrives on the "headphones" (RMS 0.212 of 0.212, 440 Hz). Cost **2.2–2.7 % of a core** (the test process over
-10 s, two runs): on such a Mac the idle app is not at ≈ 0 while a call plays through it (about 1.3–1.6 s CPU per
-minute against the idle gate's 0.13); on macOS 14.4+ (the tap) nothing runs while translation is off.
+tone arrives on the "headphones" (RMS 0.212 of 0.212, 440 Hz). It opens only while a call app plays into BlackHole
+16ch (Core Audio's `DeviceIsRunningSomewhere`) and closes after 5 s of exact zeros (1 s in the test):
+
+| | CPU, % of a core (the test process, 3 s) | streams |
+|---|---|---|
+| no call (round 1) | **0.01** | none open |
+| a call playing through (round 1; before it, two runs over 10 s: 2.2–2.7) | 2.62 | open |
+| the call app stopped / the next call | — | closed, then open again (2 opens in the run) |
+
+So the idle app is at ≈ 0 without a call on macOS < 14.4 too; while a call plays through it, it costs about 1.6 s
+CPU per minute. On macOS 14.4+ (the tap) nothing runs while translation is off.
 
 ### Headphones back while translating: PortAudio refreshed with the streams kept
 
@@ -1107,8 +1118,13 @@ unplugged there) it is called directly while a tone goes BlackHole 16ch → `Bla
 | streams stopped one after the other | 433–450 | 7–19 | 26–40 | (the tone did not reach the test) |
 | stopped at once | 251 | 11 | 58 | 363 |
 | stopped at once | 381 | 11 | 45 | 469 |
+| round 1: every registered stream of the process (2) | 278 | 6 | 60 | 341 |
 
 - PortAudio takes 0.1–0.25 s to stop each stream on macOS (`pa_mac_core.c` polls the audio unit with
-  `Pa_Sleep(100)` until it stops): the gap is about one stop plus 0.05–0.06 s, under the 0.5 s asked for (answer
-  19:40 (5)), so the refresh happens while translating. With the microphone's streams (S2) stopped at the same time it
+  `Pa_Sleep(100)` until it stops): the gap is about one stop plus 0.05–0.06 s. The aim is 0.5 s (answer 19:40 (5)),
+  met in every run so far (341–469 ms); the test's limit is 0.8 s, as a stop is quantised by `Pa_Sleep(100)`.
+- Real Core Audio notifications (round 1): an aggregate device made and destroyed by another process stands in for
+  the headphones (`tests/macos/fakedevice.swift`). The saved one comes back: `Arrival`, a refresh, the output moves to
+  it in 0.38 s; unplugged: `Watch` tells in 0.08 s, the default plays again. Saved headphones Core Audio has and
+  PortAudio does not see even after its refresh: the default plays meanwhile. With the microphone's streams (S2) stopped at the same time it
   should stay one stop long; not measured with them.

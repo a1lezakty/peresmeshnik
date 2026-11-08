@@ -28,6 +28,7 @@ import numpy as np
 
 from peresmeshnik.engines import Voice
 
+STOCK = 'piper'  # [local] clone = this: me -> them speaks in the stock Piper voice of its language, not a clone of mine
 MIN_S, MAX_S = 30.0, 60.0  # recording length
 MIN_SPEECH_S = 15.0  # speech inside it (pauses and silence excluded)
 MIN_SR = 16_000
@@ -302,8 +303,8 @@ def main(argv=None) -> int:
     en.add_argument('--name', default='me')
     en.add_argument('--lang', default='ru', help='language spoken in the recording')
     en.add_argument('--transcript', help='what is said (text or @file); --record uses the prompt text')
-    en.add_argument('--device', help='microphone: Linux: a PipeWire source name (pactl list short sources); '
-                                     'elsewhere a PortAudio name or index (python -m sounddevice)')
+    en.add_argument('--device', help='microphone: Linux: a PipeWire source name (pactl list short sources); macOS: a '
+                                     'Core Audio UID or name (peresmeshnik-audio list); elsewhere a PortAudio name or index')
     en.add_argument('--force', action='store_true', help='keep the profile even if the checks fail')
     en.add_argument('--engine', choices=['xtts'], help='also prepare the clone engine now (needs the voice pack)')
     en.add_argument('--model-dir', type=Path, help='XTTS-v2 model folder (config.json, model.pth, vocab.json)')

@@ -492,6 +492,8 @@ def test_default_devices_that_are_ours_are_refused(monkeypatch):
     from peresmeshnik import app as app_mod
     with pytest.raises(RuntimeError, match='our own device'):
         app_mod.not_ours('peresmeshnik_mic_sink.monitor', 'default input')
+    if sys.platform == 'darwin':  # no pactl there: the helper refuses BlackHole 2ch (tests/test_virtual_mic_macos.py)
+        return
     monkeypatch.setattr(app_mod, 'pactl', lambda *a: 'peresmeshnik_mic_sink.monitor\n' if a == ('get-default-source',) else '')
     ctl = app_mod.Controller(None, lambda st: None)
     with pytest.raises(RuntimeError, match='our own device'):

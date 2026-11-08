@@ -462,6 +462,8 @@ class Side:
         if self.name == 'them':
             from peresmeshnik.pipeline import MAX_LAG_S
             d = make_local(self.src, self.tgt, settings=s, max_lag_s=MAX_LAG_S)  # the queue policy: subtitles keep the rest
+        elif s.local.clone == 'piper':  # voice.STOCK: a stock voice, live where the clone falls behind (an 8 GB Mac, BENCH)
+            d = make_local(self.src, self.tgt, settings=s)
         else:
             if not s.local.voice:
                 raise RuntimeError('me -> them local needs your voice: enroll it first (python -m peresmeshnik.voice enroll), '
@@ -566,7 +568,7 @@ class Controller:
         self.on = False
         self.startup_error = ''
         self._pool = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix='control')  # no thread until first use
-        self._vmic = self._call = self._router = None
+        self._vmic = self._call = self._router = self._loop = None
         self._through = self._through_arrival = None  # macOS < 14.4, translation off: the call app's speaker on to the headphones
         self._mic = ''  # the default input as it was before our devices existed
 
@@ -590,6 +592,9 @@ class Controller:
         if self._vmic is None and sys.platform.startswith('linux'):
             from peresmeshnik.audio.virtual_mic_linux import VirtualMic
             self._vmic = VirtualMic()
+        elif self._vmic is None and sys.platform == 'darwin':  # BlackHole 2ch, the user's (BlackHoleMissing says how)
+            from peresmeshnik.audio.virtual_mic_macos import VirtualMic
+            self._vmic = VirtualMic()
         return self._vmic
 
     def set_translation(self, on: bool) -> concurrent.futures.Future:
@@ -600,6 +605,7 @@ class Controller:
         call's sound once; until translation is on, the real microphone is looped into the virtual one."""
         if self.devices and sys.platform == 'darwin':
             self._startup_call_macos()
+            self._startup_macos()
         if not (self.devices and sys.platform.startswith('linux')):
             return
         errors = []
@@ -635,6 +641,16 @@ class Controller:
         if code:
             self.startup_error = '; '.join(x for x in (self.startup_error, why) if x)
 
+    def _startup_macos(self) -> None:
+        """macOS: BlackHole 2ch is the user's (nothing to make); the loop starts. Missing: the tray says how to install."""
+        try:
+            self.virtual_mic()
+        except Exception as e:
+            log.warning('virtual mic: %s', e)
+            self.startup_error = '; '.join(x for x in (self.startup_error, str(e)) if x)  # next to S1's, not over it
+            return
+        self._loopback(True)
+
     def _mic_source(self) -> str:
         return mic_source((self.settings or config.load()).ui.mic, self._mic)
 
@@ -643,6 +659,8 @@ class Controller:
         call hears the user as is; translation on: our me -> them direction speaks there instead."""
         if not self.devices or self._vmic is None:  # only the app's own devices (startup), not files or tests
             return
+        if sys.platform == 'darwin':
+            return self._loop_macos(on)
         try:  # found by its arguments, not a kept id: it goes away with its microphone, and PipeWire reuses ids
             loops = [m.split('\t')[0] for m in pactl('list', 'short', 'modules').splitlines()
                      if '\tmodule-loopback\t' in m and f'sink={MIC_SINK}' in m]
@@ -657,6 +675,44 @@ class Controller:
             log.warning('microphone loopback: %s', e)
             if on:
                 self.on_state(f'error: the call will not hear your microphone while translation is off: {e}')
+
+    def _loop_macos(self, on: bool) -> None:
+        """macOS: the helper's loop "microphone -> BlackHole 2ch" (none of our CPU). It opens the microphone only while
+        a call app records BlackHole 2ch (macOS 14+), so no orange dot and no AirPods call profile outside a call."""
+        from peresmeshnik.audio import macos
+        loop = self._loop
+        if on and loop and loop.poll() is None:
+            return
+        self._loop = None  # before it ends: its watcher then knows it was stopped
+        if loop:
+            loop.stdin.close()  # it closes the microphone and exits
+            try:
+                loop.wait(5)
+            except subprocess.TimeoutExpired:
+                loop.kill()
+                loop.wait()
+        if not on:
+            return
+        why = 'error: the call will not hear your microphone while translation is off: '
+        try:
+            mic = macos.not_blackhole((self.settings or config.load()).ui.mic)
+            self._loop = p = macos.spawn('loop', '--from', mic, '--to', self._vmic.device['uid'], stdout=subprocess.DEVNULL)
+        except Exception as e:
+            log.warning('microphone loop: %s', e)
+            self.on_state(why + str(e))
+            return
+
+        ready = threading.Event()
+
+        def watch():
+            for line in p.stderr:
+                ready.set()
+                log.info('microphone loop: %s', line.decode(errors='replace').strip())
+            ready.set()
+            if p.wait() and p is self._loop:  # ended by itself
+                self.on_state(why + (macos.NO_PERMISSION if p.returncode == 6 else f'the loop ended ({p.returncode})'))
+        threading.Thread(target=watch, name='mic-loop', daemon=True).start()
+        ready.wait(3)  # its first word ("idle": set up, waiting for a call): its start belongs to ours, not to the idle
 
     def _on(self) -> None:
         if self.on:
@@ -769,6 +825,9 @@ class Controller:
             from peresmeshnik.audio.capture_pipewire import PipeWireCapture
             return PipeWireCapture(self._call.name, make_sink=False,  # the app's sink, kept for its whole run
                                    on_end=lambda why: self.on_state(f'error: the call sound capture stopped: {why}'))
+        if sys.platform == 'darwin':  # the helper keeps to the saved microphone or the default one by itself
+            from peresmeshnik.audio.mic import followed
+            return followed(s.ui.mic, self.on_state)
         mic_source(s.ui.mic, self._mic)  # no microphone now: this side says why, the other one still starts
         return Microphone(s.ui.mic, self.on_state, self._mic)
 
@@ -780,8 +839,6 @@ class Controller:
             out = Headphones(s.ui.headphones, self.on_state, on_back=back)
             out.resolve()  # a missing device or our own as the default: say so now, not at the first word
             return out
-        if not sys.platform.startswith('linux'):
-            raise RuntimeError('the virtual microphone on macOS comes in a later version (stage 3)')
         return self.virtual_mic()
 
     def _off(self) -> None:

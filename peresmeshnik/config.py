@@ -54,6 +54,13 @@ class Cloud:
 
 
 @dataclass
+class Ui:
+    hotkey: str = 'Ctrl+Alt+Space'  # translation <-> live voice; Qt key-sequence text
+    mic: str = ''  # me -> them input ('' = system default)
+    headphones: str = ''  # them -> me output sink ('' = system default)
+
+
+@dataclass
 class Settings:
     my_lang: str = 'ru'
     their_lang: str = 'en'
@@ -62,6 +69,7 @@ class Settings:
     models_dir: str = ''  # '' = <cache dir>/models; $PERESMESHNIK_MODELS wins
     local: Local = field(default_factory=Local)
     cloud: Cloud = field(default_factory=Cloud)
+    ui: Ui = field(default_factory=Ui)
 
 
 def settings_path() -> Path:

@@ -26,6 +26,7 @@ recordings/
 *.mp3
 *.ogg
 !tests/data/*.ogg
+!peresmeshnik/ui/samples/*.ogg
 
 # Secrets
 *.key

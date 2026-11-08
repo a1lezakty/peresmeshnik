@@ -1,4 +1,4 @@
-# Benchmarks (stages 0–1)
+# Benchmarks (stages 0–2)
 
 Scripts: [`bench/`](../bench). Raw rows: `bench/results/<host>.jsonl`; the tables below are made
 by `python bench/report.py`. Measured 2026-11-07.
@@ -584,3 +584,105 @@ both recordings, measured 2026-11-08:
 - Original subtitles (partials) are not logged per update; from the cost above a partial takes
   0.08 s (7950X3D) – 0.2 s (CI runners) every 300 ms of audio, i.e. ≈ 0.25–0.35 s from a word to
   the screen.
+## Stage 2: the app shell (tray, overlay, hotkey, wizard)
+
+Measured 2026-11-08 on `linux-x86_64-4c` (this dev server, 4 cores, shared with other work; every
+run under `nice -n 19`), under Xvfb 1280×800 with `stalonetray` as the system tray and an own
+PipeWire session (null sinks as headphones and microphone), and on the GitHub runners
+(`macos-15`, `windows-latest`: their own desktop; `ubuntu-latest`: Xvfb + stalonetray).
+
+### Idle CPU with the app open
+
+App open, translation off: tray icon, overlay window (hidden), the virtual mic, the X11 hotkey grab
+and, since CI is a first run, the setup wizard. On Linux the tray host is XEmbed (`stalonetray`); a
+StatusNotifierItem tray over D-Bus (KDE, GNOME's AppIndicator) and Qt's wayland plugin are not
+measured. CPU seconds of the process tree in 60 s after its
+"idle" line (printed once the start is done and the Qt loop has nothing left to do); limit 0.13 s.
+
+| Gate | linux-x86_64-4c | ubuntu-latest | macos-15 | windows-latest |
+|---|---|---|---|---|
+| `tests/test_idle_cpu.py` (`python -m peresmeshnik`) | 0.000 | 0.000 | 0.104, 0.093 | 0.000, 0.000 |
+| `tests/test_ui.py`: + overlay on screen + wizard, per 15 s | 0.000: 0.000 / 0.000 / 0.000 / 0.000 | 0.000: 0.000 / 0.000 / 0.000 / 0.000 | 0.077: 0.072 / 0.002 / 0.000 / 0.002; 0.054: 0.049 / 0.002 / 0.001 / 0.001 | 0.016: 0.000 / 0.000 / 0.000 / 0.016; 0.000 |
+
+Before stage 2 the idle process had no GUI and used 0.000 s on all three. On macOS the cost sits in
+the first quarter (window server work after the first paint), not in a loop. Two things were found by
+the gate and fixed: a tray balloon at start (macOS posts a notification: 0.092 → 0.045 s) and the
+idle line coming before the wizard was built (0.308 → 0.104 s); the text cursor does not blink
+(`QApplication.setCursorFlashTime(0)`), since a blinking cursor repaints its field twice a second.
+
+The working-mode gate (`work-gate`, the local pipeline on the 30 s call; S3 does not touch it) stayed
+green on every stage-2 push; on fe5cb0f RTF / CPU s per audio s: ubuntu-latest 0.628 / 1.25 (Xeon),
+windows-latest 0.635 / 1.277, macos-15 0.381 / 0.722, against limits 1.0 / 2.0 — within the 2×
+runner spread seen in stage 1 (0.27–0.67 / 0.55–1.32).
+
+### Overlay repaint
+
+CI numbers: two runs (78b6c1f, 9f070bc). Repaints happen only when the visible text changes (`SubtitleOverlay.updates` vs `.paints`); paint
+time is the whole `paintEvent` (two rows, two lines each, software raster).
+
+| Run | Text changes | Repaints | Paint median / p99 / max, ms |
+|---|---|---|---|
+| app, both sides from the 30 s test calls: them → me local, me → them cloud with local subtitles | 118 | 119 (the first show) | 0.64 / 5.24 / 5.73 |
+| app, both sides cloud, subtitles from Gemini | 116 | 117 | 0.80 / 1.64 / 1.72 |
+| `tests/test_ui.py`, 20 new captions (median / max): linux-x86_64-4c; ubuntu-latest; macos-15, two runs; windows-latest, two runs | 20 | 40 (each also forced) | 0.63 / 2.07; 0.29 / 1.17; 0.68 / 3.55 and 0.54 / 22.4 (one paint of 40; p90 < 16); 0.77 / 7.40 and 0.53 / 5.17 |
+
+The first paint with Cyrillic took 23–28 ms on the macOS and Windows runners (font fallback
+loading); the overlay now paints its fonts once into an image at start, so captions stay under the
+16 ms budget from the first one.
+
+### Start and switching on
+
+| | linux-x86_64-4c |
+|---|---|
+| launch → "idle" (tray, overlay, virtual mic, hotkey), warm file cache, median of 5 | 0.31 s (0.27–0.34), RSS 74 MB |
+| the same with the first-run wizard open | 0.39 s (0.34–0.41), RSS 88 MB |
+| translation on → ready: them → me local (Parakeet en + OPUS-MT + Piper, warmed up), me → them cloud (Gemini connect) with local subtitles (GigaAM ru + OPUS-MT) | 6.2–6.3 s (2 runs) |
+| me → them local through `app.Side` on `rtx3060-laptop` (server B): GigaAM + OPUS-MT + XTTS-v2 on the GPU, warmed up | 10.4 s |
+
+### Hotkey, self-test, wizard
+
+- **X11 hotkey** (`XGrabKey` over ctypes, read when the X socket has data): `xdotool key` of the combo
+  toggles "translation ⇄ live voice" once per press (detectable auto-repeat), another combo does
+  nothing, a combo already grabbed by another client is refused with a message. Ctrl+Alt+F1…F12 are
+  taken by the X server (VT switch); on the `ubuntu-latest` X server xdotool also adds Alt to F-keys
+  (Ctrl+Shift+F9 arrived as Ctrl+Shift+Alt+F9, state 0xd), so the tests use letters.
+- **Overlay on top and click-through**: only under Xvfb: the window flags, and an `xdotool click`
+  on the overlay reaches the window below it. Not checked on a real compositor (GNOME, KDE).
+- **Wayland portal**: the GlobalShortcuts flow (CreateSession → BindShortcuts → Activated, answers
+  through `Request.Response`) against a fake portal on a private D-Bus; only our session's
+  `Activated` fires, on the GUI thread. A real portal (GNOME ≥ 48, KDE 6) is not checked here.
+- **Loopback self-test** on the virtual devices: a 0.4 s chirp at −12 dBFS is found by
+  cross-correlation with match 0.97–1.00 at −15 dBFS through the call capture sink (S1's capture,
+  16 kHz), the virtual mic (S2's, recorded from "Peresmeshnik Mic") and the headphones sink's
+  monitor; microphone level −23 dBFS (a test tone); silence, noise and a steady tone score < 0.1.
+  Same on `ubuntu-latest` (match 1.00).
+- **Wizard, every Linux page** (`tests/test_app_linux.py`, `PERESMESHNIK_E2E=1`): 35 s from the
+  first page to "finish" with models present: devices chosen, self-test green, test phrase
+  them → me local ("It is Martelli's / Fifth CEP in four years." → "Это Мартелли. / Пятый КЭП через
+  четыре года.") and me → them cloud with local subtitles ("Это пятый серб Мартеи за четыре года." →
+  "This is the fifth Martei Serb in four years.", Gemini voice 3.2 s after the start), settings saved.
+  Downloads: silero-vad from Hugging Face through the models page; a cut download resumes with HTTP
+  Range (`tests/test_ui.py`, local server). The project's GitHub release `models-1` answered 502 and
+  timed out from this server and from server B for ~30 min (11:10–11:40 UTC); OPUS-MT was taken from
+  the stage-1 cache (same SHA-256 pins).
+- **me → them local** (clone) through the app's wiring, `rtx3060-laptop`: the 30 s Russian test call →
+  7 clauses with translation in the subtitles (first at 6.5 s, i.e. right after the first sentence),
+  17.2 s of cloned English speech, first audio 6.7 s after the start.
+
+### Cloud direction with Silero VAD
+
+`peresmeshnik cloud --subtitles` on the 30 s test calls (3 sentences each), the new Silero gate vs the
+stage-1 energy gate (the fallback while silero-vad is not downloaded). Seconds, `median / p90 (n)`.
+Each gate sets its own start / pause / end, so the columns compare where the gate puts them as much
+as the cloud: Silero opens at the voice, not at the lead-in noise (first partial earlier), and does
+not cut pauses inside a sentence (no 3.8–7.4 s outliers of the final text).
+
+| Link | Silero en → ru | Silero ru → en | energy en → ru | energy ru → en |
+|---|---|---|---|---|
+| subtitles: first word after speech start | 0.55 / 1.05 (3) | 1.06 / 1.11 (3) | 1.22 / 1.91 (3) | 2.46 / 6.76 (4) |
+| subtitles: final text after a 300 ms pause | 0.61 / 0.69 (3) | 0.63 / 0.66 (3) | 0.64 / 3.80 (3) | 0.66 / 7.37 (4) |
+| voice: first translated audio after the start | 3.21 (1) | 3.13 (1) | 3.81 (1) | 4.66 (1) |
+| voice: done after the speaker stops | 3.76 / 4.81 (3) | 3.54 / 3.89 (3) | 2.60 / 3.00 (3) | 1.96 / 3.61 (3) |
+
+"Done after the end" is shorter with the energy gate because its end comes later (the last block above
+its threshold, trailing noise included); Silero ends at the voice.

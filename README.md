@@ -22,6 +22,15 @@ Design and numbers: [architecture](docs/ARCHITECTURE.md), [benchmarks](docs/BENC
 Later, with release 0.1.0 (macOS first). Builds are ad-hoc signed: on first launch macOS asks you
 to allow the app in System Settings → Privacy & Security → "Open Anyway".
 
+### Trying it from source (Linux)
+
+Not ready for calls yet. With PipeWire and Python 3.11+: `uv run peresmeshnik app`. Qt needs
+`libxcb-cursor0` (`sudo apt install libxcb-cursor0` on Debian / Ubuntu); on Wayland the app runs
+through XWayland so that its subtitles stay on top. The call's sound is not routed into the app
+yet: until that lands, move the call app's output to "Peresmeshnik Call" yourself (pavucontrol or
+the sound settings), otherwise you hear silence instead of the translation. One instance runs per user:
+while yours is open, the app instances that the tests start exit with code 3 ("already running").
+
 ## License
 
 [PolyForm Noncommercial 1.0.0](LICENSE): anyone may use, change and share it for any

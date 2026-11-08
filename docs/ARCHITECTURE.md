@@ -324,13 +324,16 @@ device around it, and writes a header line (`rate=…`) and mono float32 to stdo
 tapped app is muted on the speakers only while the tap runs; translation off closes the helper's stdin and the call
 sounds as usual. An app that has not used sound yet is waited for, and the app's processes that start later join the
 tap (Core Audio's process-list notification, no polling). The helper's own codes: 3 no such process, 4 no permission,
-5 macOS older than 14.4, 6 Core Audio failed; "System Audio Recording" (TCC `kTCCServiceAudioCapture`) is read and asked
+5 macOS older than 14.4, 6 Core Audio failed, 7 the tap's rate changed (the app moved to a device at another rate:
+AirPods in a call), the app starts it again at the new rate; "System Audio Recording" (TCC `kTCCServiceAudioCapture`) is read and asked
 through TCC's own calls (`check`, `request`), and the first tap asks by itself; denied, the them → me side does not
 start and says where to allow it. The call app is `ui.call_app` = its bundle id, found or chosen as on Linux
 (`capture_macos.apps()` lists the processes playing now, helpers folded into their app). FaceTime cannot be tapped
 this way (the system's avconferenced plays its sound). macOS < 14.4 (no taps): the call app's speaker is BlackHole
 16ch; translating, the app records it (`BlackHoleIn`), off, it plays it on to the headphones itself (`PassThrough`),
-so the call is heard; `PERESMESHNIK_CALL_PATH=blackhole` takes that path on a newer macOS (tests).
+so the call is heard. The pass-through runs only while a call app plays into BlackHole 16ch (Core Audio's
+`DeviceIsRunningSomewhere`): with no call nothing is open; 5 s of exact zeros close it (opened again at once if the
+call app's IO is still on, the next window twice as long, up to 60 s); `PERESMESHNIK_CALL_PATH=blackhole` takes that path on a newer macOS (tests).
 
 **macOS: PortAudio.** Headphones (`audio/out.py` `SoundDeviceOut`) and every other sounddevice stream of the app on
 macOS open with `coreaudio.stream_args()`: the device's own rate (resampled in the app; PortAudio would otherwise
@@ -341,9 +344,12 @@ first stream (−10863), seen on the CI runner. A dead output is known from Core
 left the list or is not alive; PortAudio itself only goes quiet), the stream's own end too; the headphones reopen as on
 Linux. PortAudio lists the devices of its start only, and listing again (`refresh_portaudio`) closes every PortAudio
 stream of the process: it runs at translation on, before any stream opens, and when the saved headphones are back
-while translating (`coreaudio.Arrival`, or the saved device is there but unknown to PortAudio): `Controller.
-_refresh_devices` suspends the streams that hold PortAudio (`suspend()` / `resume()`) all at once (PortAudio takes
-0.1–0.25 s to stop each one), refreshes, resumes them; the engines and the process tap stay, the speech not played yet
+while translating (`coreaudio.Arrival`, or the saved device is there but unknown to PortAudio). Every object of the
+process that holds a PortAudio stream registers with `coreaudio` (`hold` / `release`, with `suspend()` / `resume()`):
+the sides', the pass-through's, the wizard's test phrase's; `refresh_portaudio` suspends them all at once (PortAudio
+takes 0.1–0.25 s to stop each one), refreshes, resumes each (one that fails is reported, its owner reopens
+elsewhere); a device PortAudio still does not see after its refresh counts as absent: the default plays meanwhile,
+`Arrival` waits for it again; the engines and the process tap stay, the speech not played yet
 plays on the new device (the gap heard: 0.36–0.47 s on the runner, BENCH). BlackHole 16ch is read on every channel
 that carries sound: a mono app lands in the centre channel (3) of a multichannel device.
 

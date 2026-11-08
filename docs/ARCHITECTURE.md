@@ -347,8 +347,8 @@ Linux. PortAudio lists the devices of its start only, and listing again (`refres
 stream of the process: it runs at translation on, before any stream opens, and when the saved headphones are back
 while translating (`coreaudio.Arrival`, or the saved device is there but unknown to PortAudio). Every object of the
 process that holds a PortAudio stream registers with `coreaudio` (`hold` / `release`, with `suspend()` / `resume()`):
-the sides', the pass-through's, the wizard's test phrase's and voice enrollment's microphone (`mic.Mic`);
-`refresh_portaudio` suspends them all at once (PortAudio
+the sides', the pass-through's, the wizard's test phrase's (the microphone is not one: on macOS `mic.Mic` is the
+Core Audio helper of S2); `refresh_portaudio` suspends them all at once (PortAudio
 takes 0.1–0.25 s to stop each one), refreshes, resumes each (one that fails is reported, its owner reopens
 elsewhere); a device PortAudio still does not see after its refresh counts as absent: the default plays meanwhile,
 `Arrival` waits for it again; the engines and the process tap stay, the speech not played yet

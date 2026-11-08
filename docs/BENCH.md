@@ -1126,8 +1126,8 @@ unplugged there) it is called directly while a tone goes BlackHole 16ch → `Bla
 - Real Core Audio notifications (round 1): an aggregate device made and destroyed by another process stands in for
   the headphones (`tests/macos/fakedevice.swift`). The saved one comes back: `Arrival`, a refresh, the output moves to
   it in 0.38 s; unplugged: `Watch` tells in 0.08 s, the default plays again. Saved headphones Core Audio has and
-  PortAudio does not see even after its refresh: the default plays meanwhile. With the microphone's streams (S2) stopped at the same time it
-  should stay one stop long; not measured with them.
+  PortAudio does not see even after its refresh: the default plays meanwhile. The microphone (S2) is no PortAudio
+  stream on macOS (the Core Audio helper), so a refresh does not stop it (`test_the_microphone_is_kept_by_a_refresh`).
 
 ## Stage 3: me → them on macOS (BlackHole 2ch, the microphone, the clone)
 

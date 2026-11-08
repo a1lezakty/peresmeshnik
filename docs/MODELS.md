@@ -70,3 +70,5 @@ Checked 2026-11-07 from the model cards and license files linked below.
 | FLEURS, 1 + 1 sentences in [`peresmeshnik/ui/samples/`](../peresmeshnik/ui/samples) (shipped) | the setup wizard's test phrase | CC-BY-4.0, attribution in its README |
 | [LibriSpeech](https://www.openslr.org/12) test-clean | English voice reference for cloning | CC-BY-4.0 |
 | [Russian LibriSpeech](https://huggingface.co/datasets/bond005/rulibrispeech) test (LibriVox) | Russian voice reference for cloning | public domain recordings |
+| [AMI Meeting Corpus](https://groups.inf.ed.ac.uk/ami/corpus/) ES2002a, IS1009a (Mix-Headset, manual words) | English conversational speech: clause segmentation, voice lag (`bench/conversation.py`) | CC-BY-4.0 |
+| [YODAS2](https://huggingface.co/datasets/espnet/yodas2) ru000 shard 0, two videos with uploaded subtitles | Russian conversational speech: the same | CC-BY-3.0 (videos under Creative Commons on YouTube) |

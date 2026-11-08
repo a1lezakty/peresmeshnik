@@ -544,8 +544,11 @@ class DonePage(QWizardPage):
         self.setTitle('Ready')
         lab = QLabel('In your call app (Meet, Zoom, Telegram) choose the microphone <b>Peresmeshnik Mic</b>. While '
                      'translation is off it carries your own voice, so the call always hears you.<br><br>'
-                     'Their voice: for now move the call app\'s sound to <b>Peresmeshnik Call</b> yourself (pavucontrol or the '
-                     'sound settings); the app does not move it yet, and without it there is nothing to translate.<br><br>'
+                     'Their voice: while translation is on, the app moves the call app\'s sound to <b>Peresmeshnik Call</b> '
+                     '(you hear the translation instead) and gives it back when translation is off. Telegram, Zoom, Discord '
+                     'and the like are found by themselves; else choose the app in the tray menu <b>Call app</b> while the '
+                     'call plays. A browser (Meet) moves with <b>all</b> of its sound: YouTube in another tab is translated '
+                     'too, so for calls a separate browser is better.<br><br>'
                      'Turn translation on from the tray icon. The hotkey switches to your live voice and back.<br><br>'
                      'Settings and this wizard are in the tray menu.')
         lab.setWordWrap(True)

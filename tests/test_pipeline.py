@@ -251,3 +251,105 @@ def test_dedup_across_cut_and_empty_final_retry():
     assert s.finish() == 'four'
     s = stream_of(asr, 1.0)
     assert s.finish() == 'five' and asr.calls[-2:] == [(1.0, True), (1.0, False)]
+
+
+# queue policy and barge-in: real-time feeds (a few seconds each), so the lags are real
+class LongTts(ToneTts):
+    """Speech twice as long as its clause (0.5 s of audio per word -> 1 s of speech), as a translation into a
+    longer language on continuous speech; `speed` shortens it."""
+    def __init__(self, speeds=False):
+        self.speeds = []
+        if speeds:
+            self.synth = self._synth_speed
+
+    def synth(self, text, lang, voice=None):
+        for _ in text.split():
+            yield np.zeros(self.sample_rate, np.float32)
+
+    def _synth_speed(self, text, lang, voice=None, speed=1.0):
+        self.speeds.append(speed)
+        for _ in text.split():
+            yield np.zeros(int(self.sample_rate / speed), np.float32)
+
+
+def voice_rows(tts, max_lag_s, seconds=4.0):
+    rows = []
+    handler = logging.Handler()
+    handler.emit = lambda r: rows.append(json.loads(r.getMessage()))
+    log = logging.getLogger('peresmeshnik.latency')
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
+    try:
+        d = LocalDirection(EnergyVad(), WordAsr(), UpperMt(), tts, 'en', 'ru', max_clause_s=1.0, max_lag_s=max_lag_s)
+        threading.Thread(target=lambda: list(d.events()), daemon=True).start()
+        run(d, np.concatenate([tone(seconds), silence(0.6)]), realtime=True)
+        d.finish()
+    finally:
+        log.removeHandler(handler)
+    return rows
+
+
+def test_queue_policy_caps_the_voice_lag():
+    free = voice_rows(LongTts(), None)
+    assert max(r['voice_lag_s'] for r in free) > 2.5 and not any('dropped' in r for r in free)  # falls ever further behind
+    capped = voice_rows(LongTts(), 1.5)
+    spoken = [r for r in capped if 'dropped' not in r]
+    assert spoken and max(r['voice_lag_s'] for r in spoken) < 1.5 + 0.3  # + one TTS first-chunk time
+    assert any('dropped' in r for r in capped)  # and it costs whole clauses (their captions stay)
+    tts = LongTts(speeds=True)
+    voice_rows(tts, 3.0)
+    assert max(tts.speeds) > 1.0 and all(1.0 <= s <= 1.4 for s in tts.speeds)  # behind: faster, within the cap
+
+
+def test_barge_in_drops_what_is_not_heard_yet():
+    """The user talks over the voice: the clause being spoken stops, a clause that ends later is spoken."""
+    d = LocalDirection(EnergyVad(), WordAsr(), UpperMt(), SlowTts(), 'en', 'ru')
+    got = []
+
+    def consume():
+        for e in d.events():
+            if isinstance(e, Speech):
+                got.append(time.perf_counter())
+                if len(got) == 1:
+                    d.interrupt()
+    threading.Thread(target=consume, daemon=True).start()
+    run(d, np.concatenate([tone(1.5), silence(1.5), tone(1.5), silence(0.6)]), realtime=True)
+    d.finish()
+    time.sleep(0.1)
+    assert len(got) == 1 + 3  # clause 0: one chunk of its 3 words, then cut; clause 1: all 3 words
+    assert d.stats['dropped'] == 0  # nothing was queued at the cut; clause 0's tail broke off mid-synthesis
+
+
+def test_call_app_choice():
+    """A known call app is taken by itself only when it is the one playing; a browser never (all its tabs would move)."""
+    from peresmeshnik.audio.capture_pipewire import apps, guess_call_app, is_browser
+    tg, web = {'key': 'Telegram', 'name': 'TelegramDesktop'}, {'key': 'chrome', 'name': 'Google Chrome'}
+    zoom = {'key': 'zoom', 'name': 'ZOOM'}
+    assert guess_call_app([tg, web, web]) == 'Telegram'
+    assert guess_call_app([tg, zoom]) == '' and guess_call_app([web]) == ''
+    assert apps([web, tg, web]) == [('chrome', 'Google Chrome (all its sound, every tab)'), ('Telegram', 'TelegramDesktop')]
+    assert is_browser('firefox-esr') and not is_browser('telegram-desktop')
+
+
+def test_barge_in_on_my_words_not_on_a_backchannel():
+    """My side's partial captions cut their voice once I say a few words; "yeah" / "ага" while listening does not."""
+    from peresmeshnik.app import Side
+    me = object.__new__(Side)
+    me.name, me.live, me.overlay, me.on_error = 'me', False, type('O', (), {'show': lambda self, c: None})(), print
+    talks = []
+    me.on_talk = lambda: talks.append(1)
+    events = [Caption('ага', clause=0), Caption('ага', 'yeah', True, 0), Caption('да, но я', clause=1), Caption('да, но я думаю', clause=1)]
+    me._consume(type('D', (), {'events': lambda self: iter(events)})(), True, False)
+    assert len(talks) == 2  # the two partials of clause 1, none for the back-channel
+
+
+def test_blas_threads_pinned_before_numpy_whatever_imports_first():
+    """The app imports numpy before the pipeline: the BLAS pool must be pinned by the package itself
+    (it took every core: 3.0 instead of 0.8 CPU s per audio s for them -> me on a 16-core box)."""
+    import os
+    import subprocess
+    import sys
+    env = {k: v for k, v in os.environ.items() if k not in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS')}
+    code = 'import peresmeshnik.app, os, sys; print(os.environ["OPENBLAS_NUM_THREADS"], os.environ["OMP_NUM_THREADS"])'
+    r = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, env=env, timeout=60)
+    assert r.stdout.split() == ['1', '1'], r.stdout + r.stderr

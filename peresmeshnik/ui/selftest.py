@@ -108,12 +108,12 @@ def sinks() -> list[str]:
 def check_call_capture() -> Result:
     """Through the app's call sink while it runs (never a second one: that would drop the call's stream), else
     a temporary one; recorded the way the app records it."""
-    from peresmeshnik.app import CallCapture, CallSink
-    from peresmeshnik.audio.capture_pipewire import CALL_SINK
+    from peresmeshnik.app import CallSink
+    from peresmeshnik.audio.capture_pipewire import CALL_SINK, PipeWireCapture
     from peresmeshnik.engines import SAMPLE_RATE
     own = None if CALL_SINK in sinks() else CallSink()
     frames: list[np.ndarray] = []
-    cap = CallCapture(CALL_SINK)
+    cap = PipeWireCapture(CALL_SINK, make_sink=False)
     ref = chirp(SAMPLE_RATE)
     try:
         cap.start(frames.append)

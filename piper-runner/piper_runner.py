@@ -8,7 +8,8 @@ the pool sleep between sentences.
     uv run --no-project --with piper-tts==1.8.0 python piper_runner.py VOICE.onnx [--threads 2]
 
 Protocol: on start it writes the sample rate as uint32 LE. Then per request, one JSON line on
-stdin {"text": "..."}; per sentence a uint32 LE byte count plus float32 LE mono PCM; 0 ends it.
+stdin {"text": "...", "speed": 1.0} (speed optional: > 1 speaks faster); per sentence a uint32 LE
+byte count plus float32 LE mono PCM; 0 ends it.
 """
 import argparse
 import json
@@ -17,7 +18,7 @@ import sys
 
 import onnxruntime as rt
 from piper import PiperVoice
-from piper.config import PiperConfig
+from piper.config import PiperConfig, SynthesisConfig
 
 
 def main():
@@ -35,7 +36,9 @@ def main():
     out.write(struct.pack('<I', config.sample_rate))
     out.flush()
     for line in sys.stdin:
-        for chunk in voice.synthesize(json.loads(line)['text']):
+        req = json.loads(line)
+        syn = SynthesisConfig(length_scale=config.length_scale / req.get('speed', 1.0))
+        for chunk in voice.synthesize(req['text'], syn):
             pcm = chunk.audio_float_array.astype('<f4').tobytes()
             out.write(struct.pack('<I', len(pcm)) + pcm)
             out.flush()

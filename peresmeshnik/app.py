@@ -107,8 +107,8 @@ class Headphones:
     device): the next chunk opens the saved sink again, else the current default, and the tray says so."""
     retry_s = 2.0
 
-    def __init__(self, sink: str = '', on_error=lambda text: None):
-        self.sink, self.on_error = sink, on_error
+    def __init__(self, sink: str = '', on_state=lambda text: None):
+        self.sink, self.on_state = sink, on_state
         self._out, self._rs, self._retry_at, self._failing = None, {}, 0.0, False
         self._lock = threading.Lock()  # capture (live), events (speech) and control (switch, stop) threads
 
@@ -123,6 +123,8 @@ class Headphones:
             out = self._out
             # ponytail: PulseOut (S1) has no end-of-stream callback yet; a dead pacat or writer thread is seen here
             if out is not None and (out._proc.poll() is not None or not out._thread.is_alive()):
+                out.flush()
+                threading.Thread(target=out.stop, daemon=True).start()  # its writer thread ends (pacat is gone)
                 self._out = out = None
                 self._fail('the headphones went away; reopening')
             if out is None:
@@ -130,7 +132,10 @@ class Headphones:
                     return  # no device for now: this audio is dropped
                 try:
                     from peresmeshnik.audio.out import PulseOut
-                    self._out = out = PulseOut(sample_rate, self.resolve())
+                    sink = self.resolve()
+                    self._out = out = PulseOut(sample_rate, sink)
+                    if self._failing:  # the tray still shows the error: put it back
+                        self.on_state(f'translating (the headphones are back: {sink})')
                     self._rs, self._failing = {}, False
                 except Exception as e:
                     self._retry_at = time.monotonic() + self.retry_s
@@ -142,7 +147,7 @@ class Headphones:
     def _fail(self, why: str) -> None:
         if not self._failing:  # once per outage, not per chunk
             self._failing = True
-            self.on_error(f'error: {why}')
+            self.on_state(f'error: {why}')
 
     def flush(self) -> None:
         with self._lock:
@@ -362,15 +367,20 @@ class Controller:
         call's sound once; until translation is on, the real microphone is looped into the virtual one."""
         if not (self.devices and sys.platform.startswith('linux')):
             return
-        try:
-            remove_stale()  # first: a stale sink of ours may be the default input now
-            self._mic = pactl('get-default-source').strip()  # before ours exist: one of them may become the default
-            self._call = CallSink()
-            self.virtual_mic()
-            self._loopback(True)
-        except Exception as e:  # no sound server or no pactl: the app still runs; the tray says why
-            log.warning('sound devices: %s', e)
-            self.startup_error = f'sound devices: {e}'
+        errors = []
+
+        def step(what, fn):  # each device on its own: no call sink still leaves the microphone working
+            try:
+                return fn()
+            except Exception as e:  # no sound server or no pactl: the app still runs; the tray says why
+                log.warning('%s: %s', what, e)
+                errors.append(f'{what}: {e}')
+        step('old devices', remove_stale)  # first: a stale sink of ours may be the default input now
+        self._mic = step('default input', lambda: pactl('get-default-source').strip()) or ''  # before ours exist
+        self._call = step('call sink', CallSink)
+        step('virtual mic', self.virtual_mic)
+        self._loopback(True)
+        self.startup_error = '; '.join(errors)
 
     def _mic_source(self) -> str:
         s = self.settings or config.load()
@@ -382,7 +392,7 @@ class Controller:
     def _loopback(self, on: bool) -> None:
         """Translation off: PipeWire loops the real microphone into "Peresmeshnik Mic" (none of our CPU), so the
         call hears the user as is; translation on: our me -> them direction speaks there instead."""
-        if self._call is None or self._vmic is None:  # only once startup() made the devices
+        if not self.devices or self._vmic is None:  # only the app's own devices (startup), not files or tests
             return
         try:  # found by its arguments, not a kept id: it goes away with its microphone, and PipeWire reuses ids
             loops = [m.split('\t')[0] for m in pactl('list', 'short', 'modules').splitlines()
@@ -489,17 +499,17 @@ def gui_available() -> bool:
 def use_xwayland() -> bool:
     """On a Wayland session Qt would take its wayland plugin, where a window can neither stay on top nor
     choose its place (xdg-shell): the subtitles would end up under the browser. XWayland (xcb) keeps both;
-    the hotkey still goes through the portal (hotkey.make looks at XDG_SESSION_TYPE)."""
-    wayland = os.environ.get('XDG_SESSION_TYPE') == 'wayland' or bool(os.environ.get('WAYLAND_DISPLAY'))
-    if sys.platform.startswith('linux') and wayland and os.environ.get('DISPLAY') and not os.environ.get('QT_QPA_PLATFORM'):
+    the hotkey still goes through the portal (the same `hotkey.wayland()` test)."""
+    from peresmeshnik.ui.hotkey import wayland
+    if sys.platform.startswith('linux') and wayland() and os.environ.get('DISPLAY') and not os.environ.get('QT_QPA_PLATFORM'):
         os.environ['QT_QPA_PLATFORM'] = 'xcb'
         return True
     return False
 
 
 def lock_path() -> Path:
-    """One app per sound server: two would remove each other's devices. XDG_RUNTIME_DIR is per login session,
-    like the user's PipeWire."""
+    """One app per sound server: two would remove each other's devices. XDG_RUNTIME_DIR is per user, like
+    the user's PipeWire (its socket is $XDG_RUNTIME_DIR/pulse/native)."""
     return Path(os.environ.get('XDG_RUNTIME_DIR') or config.config_dir()) / 'peresmeshnik.lock'
 
 

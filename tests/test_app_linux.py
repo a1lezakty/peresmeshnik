@@ -110,13 +110,13 @@ def stop_app(p):
     assert p.wait(20) == 0, p.log.read_text()[-4000:]
 
 
-@pytest.mark.skipif(not (DISPLAY and shutil.which('xdotool')), reason='needs an X display and xdotool')
 def ours() -> list[str]:
     """Our PipeWire modules: "module name args" lines."""
     from peresmeshnik.ui.selftest import pactl
     return [' '.join(m.split('\t')[1:3]) for m in pactl('list', 'short', 'modules').splitlines() if 'peresmeshnik_' in m]
 
 
+@pytest.mark.skipif(not (DISPLAY and shutil.which('xdotool')), reason='needs an X display and xdotool')
 def test_hotkey_switches_live_voice(tmp_path, devices):
     """Off: the hotkey only says so (the call hears the microphone through the loopback). On (E2E: the models
     are there, both sides fed from recordings): it switches live voice and back."""
@@ -139,6 +139,7 @@ def test_hotkey_switches_live_voice(tmp_path, devices):
         assert not ours()  # every device removed on exit (SIGTERM)
 
 
+@pytest.mark.skipif(not (DISPLAY and shutil.which('xdotool')), reason='needs an X display and xdotool')
 def test_devices_live_with_the_app_and_the_mic_is_looped_while_off(tmp_path, devices):
     """Call sink, virtual mic and the microphone loopback exist from the start (stale ones from a killed run
     replaced), a second instance leaves them alone, SIGHUP removes them."""
@@ -160,6 +161,27 @@ def test_devices_live_with_the_app_and_the_mic_is_looped_while_off(tmp_path, dev
     finally:
         if p.poll() is None:
             stop_app(p)
+    assert not ours()
+
+
+def test_one_device_failing_leaves_the_others(devices, monkeypatch):
+    from peresmeshnik import app, config
+
+    def broken():
+        raise RuntimeError('no call sink here')
+    monkeypatch.setattr(app, 'CallSink', broken)
+    s = config.Settings()
+    s.ui.mic = devices['mic']
+    side = type('S', (), {'hide': lambda self: None})()
+    ctl = app.Controller(type('O', (), {'side': lambda self, name: side})(), lambda state: None, settings=s)
+    ctl.startup()
+    try:
+        assert ctl.startup_error == 'call sink: no call sink here'
+        mods = ours()
+        assert any('source_name=peresmeshnik_mic ' in m for m in mods), mods  # the virtual mic is still made
+        assert any(m.startswith('module-loopback') and 'source=test_mic' in m for m in mods), mods  # and fed
+    finally:
+        ctl.quit()
     assert not ours()
 
 
@@ -219,7 +241,10 @@ def test_headphones_reopen_when_the_device_goes(devices):
     out.play(tone, 24000)
     out.play(tone, 24000)
     assert out._out is not first and out._out._proc.poll() is None  # a new pacat on the same sink
-    assert errors == ['error: the headphones went away; reopening']  # once, in the tray
+    first._thread.join(2)
+    assert not first._thread.is_alive()  # the dead one's writer thread ended too
+    assert errors == ['error: the headphones went away; reopening',  # once, in the tray
+                      'translating (the headphones are back: test_headphones)']  # and the tray says it is over
     out.stop()
 
 

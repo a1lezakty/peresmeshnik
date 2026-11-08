@@ -307,13 +307,17 @@ class Binding(QObject):
             self.backend.close()
 
 
+def wayland() -> bool:
+    """A Wayland session, XWayland's DISPLAY or not: an X11 grab there only sees keys while an X11 window has focus."""
+    return os.environ.get('XDG_SESSION_TYPE') == 'wayland' or bool(os.environ.get('WAYLAND_DISPLAY'))
+
+
 def make() -> tuple[object | None, str]:
     """(hotkey, '') or (None, why there is no global hotkey)."""
     if not sys.platform.startswith('linux'):
         return None, 'the global hotkey on this OS comes in a later version: use the tray menu'
-    wayland = os.environ.get('XDG_SESSION_TYPE') == 'wayland' or (os.environ.get('WAYLAND_DISPLAY') and not os.environ.get('DISPLAY'))
     try:
-        if wayland:  # an X11 grab under XWayland only sees keys while an X11 window has focus
+        if wayland():
             return PortalHotkey(), ''
         if os.environ.get('DISPLAY'):
             return X11Hotkey(), ''

@@ -823,3 +823,172 @@ again: 3 s recorded, need 30-60 s; only 0 s of speech …"); a good take is a dr
 replaces the saved voice only on Finish, Cancel keeps the old one; "Check the clone" runs `check_clone` (the
 voice pack and the clone model are needed: on this server without the voice pack the button says so; while a
 local me → them translates the button is off: a second clone would not fit next to it in 8 GB).
+
+## Stage 2: the call's sound, both directions, the voice queue (S1)
+
+Measured 2026-11-08 on `vast-b-stage2` (server B: Ryzen 9 7950X3D, 32 threads, RTX 3060 Laptop
+12 GB; every run under `nice -n 15`, up to 6 at once) and `linux-x86_64-4c` (this dev server, 4
+cores, shared; an own PipeWire session). Scripts: [`bench/conversation.py`](../bench/conversation.py)
+(segmentation and the voice lag), [`bench/app_both.py`](../bench/app_both.py) (both directions).
+
+### Moving the call's sound
+
+Checked by `tests/test_pipeline_pipewire.py` on PipeWire 1.0.5 / WirePlumber 0.4.17 with fake
+players (`pacat` streams named like Telegram, Chrome, Zoom): the chosen app's stream goes into
+"Peresmeshnik Call" at switch-on, a new stream of it (a reconnect) is there 66 ms after it
+appears (median of 40; p95 95 ms, max 139 ms), a browser playing next to it stays where it is;
+off and exit give every stream back (to the default output when its device was unplugged
+meanwhile), and the next stream of the app follows the default output again (WirePlumber's
+remembered target is cleared). While
+translation is off there is no `pactl subscribe` process (checked in the test): the idle gate is
+unchanged. WirePlumber links ~5 % of new streams to the default output again right after our move
+(the move itself succeeds): within 1 s of a move the router checks the stream's change events and
+moves it again (2 of 30 stayed on the speakers before, 0 of 40 after).
+
+Headphones' flush (barge-in): a 3 s chunk flushed 1.0 s after it started played 0.98–1.00 s (5
+runs); before the fix (pacat left alone, stdin drained) the stream kept its last part below the
+prebuffer and played ~0.2 s of the old speech in front of the next one.
+
+### Clause segmentation on conversational speech
+
+Twenty minutes of spontaneous speech, streamed through VAD + ASR partials + clause cuts + MT
+(TTS off, as fast as the pipeline takes it): **en** — AMI meetings ES2002a and IS1009a, 5 min
+each from the first word (Mix-Headset, four people: overlaps, "um", "yeah", room noise; Parakeet);
+**ru** — YODAS2 ru000 YAYMb4M8-tQ and YtyM7ojCUz8, 5 min each (a vlog and an interview, long
+stretches without a 300 ms pause; GigaAM). Both scaled to −26 dBFS. `wer` = joined clause texts
+against the reference words (fillers such as "um" / "э" dropped on both sides); `chrf` = joined
+clause translations against the translation of the reference segments (a pseudo-reference: no
+human translations exist), so it measures what segmentation does to MT, not MT itself. `*_offline`
+= each reference segment recognised (and translated) in one window: for ru the uploaded subtitles'
+times are loose, the windows clip words, so its `wer_offline` is worse than the stream's. `wait` =
+how long a word waits for its clause to end (words spread evenly over the clause): the voice can
+start no earlier. First row of each language = the defaults.
+
+| lang | VAD threshold | pause ms | max_clause_s | clauses | ≤ 2 words | clause s p50 / p95 | wait s p50 / p95 | ends: pause / punct / max | wer | wer_offline | chrf | chrf_offline |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| en | 0.5 | 300 | 5 | 206 | 0.42 | 1.59 / 4.05 | 1.09 / 3.26 | 0.74 / 0.14 / 0.12 | 23.4 % | 21.4 % | 62.2 | 68.0 |
+| en | 0.5 | 300 | 4 | 219 | 0.45 | 1.6 / 3.25 | 0.97 / 2.64 | 0.70 / 0.10 / 0.20 | 26.2 % | 21.4 % | 61.4 | 68.0 |
+| en | 0.35 | 300 | 5 | 207 | 0.42 | 1.6 / 4.09 | 1.09 / 3.29 | 0.70 / 0.16 / 0.14 | 22.6 % | 21.4 % | 63.3 | 68.0 |
+| en | 0.5 | 200 | 5 | 218 | 0.46 | 1.48 / 3.88 | 1.01 / 3.15 | 0.86 / 0.07 / 0.06 | 24.9 % | 21.4 % | 62.2 | 68.0 |
+| en | 0.5 | 500 | 5 | 182 | 0.35 | 2.09 / 4.08 | 1.19 / 3.31 | 0.54 / 0.24 / 0.21 | 24.1 % | 21.4 % | 63.3 | 68.0 |
+| en | 0.65 | 300 | 5 | 209 | 0.43 | 1.57 / 3.95 | 1.02 / 3.04 | 0.79 / 0.12 / 0.09 | 23.6 % | 21.4 % | 61.7 | 68.0 |
+| en | 0.5 | 300 | 6 | 199 | 0.45 | 1.6 / 4.79 | 1.13 / 3.81 | 0.77 / 0.17 / 0.06 | 23.8 % | 21.4 % | 63.0 | 68.0 |
+| en | 0.5 | 300 | 8 | 191 | 0.43 | 1.58 / 5.62 | 1.21 / 4.65 | 0.81 / 0.18 / 0.01 | 22.5 % | 21.4 % | 64.3 | 68.0 |
+| en | 0.5 | 300 | 10 | 190 | 0.43 | 1.57 / 5.62 | 1.21 / 4.76 | 0.81 / 0.19 / 0.00 | 22.5 % | 21.4 % | 64.8 | 68.0 |
+| ru | 0.5 | 300 | 5 | 209 | 0.19 | 3.08 / 4.12 | 1.56 / 3.58 | 0.17 / 0.37 / 0.46 | 7.1 % | 15.7 % | 73.1 | 79.3 |
+| ru | 0.5 | 300 | 4 | 252 | 0.18 | 2.61 / 3.14 | 1.26 / 2.75 | 0.14 / 0.27 / 0.59 | 7.4 % | 15.7 % | 71.2 | 79.3 |
+| ru | 0.35 | 300 | 5 | 207 | 0.17 | 3.18 / 4.13 | 1.57 / 3.6 | 0.16 / 0.36 / 0.48 | 7.1 % | 15.7 % | 73.0 | 79.3 |
+| ru | 0.5 | 200 | 5 | 211 | 0.18 | 2.88 / 4.26 | 1.51 / 3.61 | 0.40 / 0.25 / 0.35 | 7.1 % | 15.7 % | 73.9 | 79.3 |
+| ru | 0.5 | 500 | 5 | 202 | 0.15 | 3.31 / 4.1 | 1.59 / 3.54 | 0.05 / 0.40 / 0.55 | 6.8 % | 15.7 % | 73.3 | 79.3 |
+| ru | 0.65 | 300 | 5 | 210 | 0.19 | 3.06 / 4.12 | 1.54 / 3.56 | 0.19 / 0.35 / 0.46 | 7.1 % | 15.7 % | 73.0 | 79.3 |
+| ru | 0.5 | 300 | 6 | 179 | 0.14 | 3.5 / 5.06 | 1.8 / 4.39 | 0.20 / 0.45 / 0.35 | 7.0 % | 15.7 % | 74.6 | 79.3 |
+| ru | 0.5 | 300 | 8 | 153 | 0.18 | 4.1 / 6.82 | 2.21 / 5.63 | 0.23 / 0.54 / 0.23 | 6.8 % | 15.7 % | 73.1 | 79.3 |
+| ru | 0.5 | 300 | 10 | 135 | 0.16 | 4.12 / 8.4 | 2.55 / 7.05 | 0.27 / 0.62 / 0.11 | 6.8 % | 15.7 % | 75.5 | 79.3 |
+
+- **`max_clause_s`** is the one setting that matters. Longer clauses translate better (en chrF
+  62.2 → 64.3, ru 73.1 → 73.1–75.5 from 5 to 8–10 s; WER −0.3…−0.9 points) and every second of it
+  adds ~0.6–0.9 s to the p95 wait. In the meetings 74–81 % of the clauses end at a pause anyway
+  (people take turns), so the limit acts in monologues: in the Russian videos 46 % of the clauses
+  at 5 s end at the limit.
+- **VAD** threshold 0.35 / 0.5 / 0.65 and the pause 200 / 300 / 500 ms move WER and chrF by ≤ 1.5
+  points without a trend that holds in both languages (≈ the noise of 1100–1300 reference words):
+  the defaults stay (0.5, 300 ms). A 200 ms pause cuts English more often (86 % pause ends) and
+  costs 1.5 WER points; 500 ms merges back-channels into longer clauses (≤ 2 words 0.42 → 0.35).
+- Short clauses are the nature of a meeting: 42–46 % have ≤ 2 words ("yeah", "okay", "mm-hmm").
+
+### The voice queue: lag with and without the policy
+
+Real-time runs of them → me with Piper (`bench/conversation.py lag`), back-to-back playback as in
+the app. **fleurs-continuous** = 30 FLEURS sentences 0.15 s apart (5–6 min of read speech with no
+300 ms pause: the worst case), **conversation** = the AMI / YODAS2 excerpts above (10 min per
+language). `voice_lag` = clause end → start of its voice (spoken clauses only); `evs` (ear–voice
+span) = a word → the start of its clause's voice, words spread evenly over the clause; `dropped`
+= clauses / words not said (their subtitles stay); `speed` = mean TTS speed of the spoken
+clauses; `speech/audio` = seconds of translated speech per second of input. `policy`: the cap
+`max_lag_s`, and from which lag the speech is sped up to which speed at the cap; the default is
+cap 4 s, 0.5 s → 1.4×.
+
+| data | lang | max_clause_s | policy | clauses | voice_lag p50 / p95 / max, s | evs p50 / p95, s | dropped clauses / words | speed | speech/audio |
+|---|---|---|---|---|---|---|---|---|---|
+| fleurs-continuous | en | 5 | none | 85 | 1.45 / 5.95 / 7.67 | 3.4 / 6.9 | 0 % / 0.0 % | 1.0 | 0.75 |
+| fleurs-continuous | en | 5 | cap 3 s, 0.5 s → 1.4× | 85 | 0.79 / 2.16 / 2.85 | 2.88 / 4.99 | 15 % / 8.2 % | 1.085 | 0.665 |
+| fleurs-continuous | en | 5 | cap 3 s, 1 s → 1.25× | 85 | 0.93 / 2.5 / 2.97 | 2.96 / 5.08 | 14 % / 6.7 % | 1.04 | 0.687 |
+| fleurs-continuous | en | 5 | cap 4 s, 0.5 s → 1.4× | 85 | 1.03 / 2.87 / 3.85 | 2.94 / 5.05 | 11 % / 5.4 % | 1.076 | 0.688 |
+| fleurs-continuous | en | 5 | cap 4 s, 1 s → 1.25× | 85 | 1.07 / 2.57 / 3.7 | 2.97 / 5.09 | 13 % / 6.1 % | 1.029 | 0.696 |
+| fleurs-continuous | en | 6 | cap 3 s, 1 s → 1.25× | 75 | 0.75 / 2.48 / 2.98 | 3.09 / 5.79 | 12 % / 10.5 % | 1.043 | 0.636 |
+| fleurs-continuous | en | 8 | none | 67 | 1.36 / 5.89 / 8.02 | 4.39 / 8.36 | 0 % / 0.0 % | 1.0 | 0.729 |
+| fleurs-continuous | en | 8 | cap 3 s, 1 s → 1.25× | 67 | 0.72 / 2.51 / 2.78 | 3.39 / 7.51 | 18 % / 12.2 % | 1.032 | 0.623 |
+| fleurs-continuous | ru | 5 | none | 91 | 1.59 / 4.38 / 7.34 | 3.36 / 5.35 | 0 % / 0.0 % | 1.0 | 0.778 |
+| fleurs-continuous | ru | 5 | cap 3 s, 0.5 s → 1.4× | 91 | 1.31 / 2.5 / 2.98 | 3.04 / 4.92 | 12 % / 5.4 % | 1.135 | 0.687 |
+| fleurs-continuous | ru | 5 | cap 3 s, 1 s → 1.25× | 91 | 1.34 / 2.52 / 2.96 | 3.07 / 4.92 | 13 % / 6.4 % | 1.058 | 0.707 |
+| fleurs-continuous | ru | 5 | cap 4 s, 0.5 s → 1.4× | 91 | 1.39 / 3.38 / 3.91 | 3.17 / 4.94 | 6 % / 1.8 % | 1.117 | 0.722 |
+| fleurs-continuous | ru | 5 | cap 4 s, 1 s → 1.25× | 91 | 1.42 / 3.32 / 3.78 | 3.26 / 5.0 | 7 % / 2.5 % | 1.056 | 0.736 |
+| fleurs-continuous | ru | 6 | cap 3 s, 1 s → 1.25× | 78 | 1.46 / 2.72 / 2.81 | 3.45 / 5.89 | 13 % / 6.7 % | 1.067 | 0.679 |
+| fleurs-continuous | ru | 8 | none | 61 | 1.95 / 5.57 / 7.69 | 4.62 / 8.23 | 0 % / 0.0 % | 1.0 | 0.766 |
+| fleurs-continuous | ru | 8 | cap 3 s, 1 s → 1.25× | 61 | 0.67 / 2.62 / 2.92 | 3.88 / 7.66 | 23 % / 15.5 % | 1.057 | 0.625 |
+| conversation | en | 5 | none | 207 | 0.82 / 3.34 / 5.21 | 2.41 / 4.91 | 0 % / 0.0 % | 1.0 | 0.472 |
+| conversation | en | 5 | cap 3 s, 0.5 s → 1.4× | 207 | 0.55 / 2.58 / 3.03 | 2.23 / 4.6 | 5 % / 3.1 % | 1.084 | 0.435 |
+| conversation | en | 5 | cap 3 s, 1 s → 1.25× | 209 | 0.56 / 2.54 / 2.95 | 2.19 / 4.63 | 7 % / 5.2 % | 1.036 | 0.436 |
+| conversation | en | 5 | cap 4 s, 0.5 s → 1.4× | 207 | 0.58 / 2.82 / 3.87 | 2.3 / 4.67 | 2 % / 0.8 % | 1.07 | 0.454 |
+| conversation | en | 5 | cap 4 s, 1 s → 1.25× | 207 | 0.64 / 2.91 / 3.93 | 2.33 / 4.71 | 2 % / 0.8 % | 1.034 | 0.464 |
+| conversation | en | 6 | cap 3 s, 1 s → 1.25× | 200 | 0.53 / 2.42 / 2.95 | 2.19 / 5.19 | 8 % / 6.7 % | 1.033 | 0.426 |
+| conversation | en | 8 | none | 191 | 0.71 / 3.62 / 6.26 | 2.45 / 6.12 | 0 % / 0.0 % | 1.0 | 0.463 |
+| conversation | en | 8 | cap 3 s, 1 s → 1.25× | 190 | 0.54 / 2.39 / 2.84 | 2.22 / 5.86 | 8 % / 5.9 % | 1.029 | 0.428 |
+| conversation | ru | 5 | none | 210 | 4.68 / 20.06 / 23.07 | 6.32 / 22.21 | 0 % / 0.0 % | 1.0 | 0.982 |
+| conversation | ru | 5 | cap 3 s, 0.5 s → 1.4× | 209 | 1.58 / 2.79 / 2.98 | 3.31 / 5.07 | 14 % / 5.8 % | 1.185 | 0.817 |
+| conversation | ru | 5 | cap 3 s, 1 s → 1.25× | 209 | 1.53 / 2.74 / 2.93 | 3.36 / 5.21 | 19 % / 9.9 % | 1.088 | 0.825 |
+| conversation | ru | 5 | cap 4 s, 0.5 s → 1.4× | 209 | 1.81 / 3.45 / 3.95 | 3.47 / 5.27 | 7 % / 2.9 % | 1.159 | 0.865 |
+| conversation | ru | 5 | cap 4 s, 1 s → 1.25× | 210 | 1.96 / 3.7 / 3.94 | 3.66 / 5.65 | 10 % / 3.5 % | 1.09 | 0.896 |
+| conversation | ru | 6 | cap 3 s, 1 s → 1.25× | 179 | 1.47 / 2.68 / 2.9 | 3.65 / 5.98 | 22 % / 13.8 % | 1.083 | 0.76 |
+| conversation | ru | 8 | none | 153 | 4.25 / 7.61 / 11.06 | 6.24 / 10.42 | 0 % / 0.0 % | 1.0 | 0.911 |
+| conversation | ru | 8 | cap 3 s, 1 s → 1.25× | 154 | 1.55 / 2.78 / 2.98 | 3.97 / 7.62 | 27 % / 21.4 % | 1.082 | 0.663 |
+
+- **Without a policy the voice drifts away.** Read speech without pauses: p95 4.4–6.0 s, max
+  7.3–8.0 s. The Russian videos (fast monologue; its English takes 0.98 s per second of input):
+  p95 20 s, max 23 s — the voice catches up only in a pause. Meetings (people take turns): p95
+  3.3–3.6 s, max 5.2–6.3 s.
+- **The default** (cap 4 s, faster from 0.5 s up to 1.4×): p95 2.8–3.5 s, never above the cap;
+  dropped words 0.8 % (en) and 2.9 % (ru) in conversation, 5.4 % / 1.8 % on non-stop read speech;
+  mean speed 1.07–1.16×.
+- A 3 s cap gains 0.3–0.7 s at the p95 and drops twice as many words. Speeding up early and
+  harder (0.5 s → 1.4×) drops ~40 % fewer words than 1.0 s → 1.25× at the same lag.
+- The ear–voice span is set by the clause, not the queue: its p95 moves by ≤ 0.2 s between the
+  policies but by +1.2–2.4 s with `max_clause_s` 8 (longer clauses also mean longer bursts of
+  speech: more is dropped, 21 % of the words in the Russian videos at cap 3 s). With the quality
+  gain of 8 s being 0–2 chrF (segmentation above), `max_clause_s` stays 5; 6 s sits between.
+- Barge-in (my side's partial reaches 3 words) is not in these runs: they have only one side. In
+  the both-sides runs below it cuts their voice while I talk.
+
+### Both directions at once
+
+Their 30 s recording (`call-en.ogg`) and mine (`call-ru.ogg`), mine starting `overlap` s after
+theirs (15 = half of each overlaps, 0 = both talk all the time). **B**: the app's two sides
+(`app.Side`, the barge-in wiring as in the app) in one process from the files — them → me local
+(Parakeet + OPUS-MT + Piper), me → them local (GigaAM + OPUS-MT + XTTS-v2 on the GPU, the voice of
+S2's tests). **This dev server** (no GPU, no clone): the real app (`peresmeshnik app --on`, Qt
+offscreen) through its PipeWire devices: a fake call app (`pacat` with its own
+`application.process.binary`, chosen as `ui.call_app`) starts playing after translation is on and
+is moved into "Peresmeshnik Call" by the app; my recording plays into a virtual microphone (the
+default input); the headphones (a null sink) and "Peresmeshnik Mic" are recorded back. me → them
+is the cloud (Gemini Live) with local subtitles (GigaAM), the 8 GB default. CPU = the process tree
+(the app, Piper, pacat/parec, `pactl subscribe`) over the run; RSS = the tree's peak sum.
+
+| host | sides | overlap s | CPU s / audio s | cores, mean | RSS idle → peak, MB | GPU MB | translated speech heard / into the mic, s | their clauses dropped |
+|---|---|---|---|---|---|---|---|---|
+| vast-b-stage2 | them local (app.Side, files) | 0 | 0.609 | 0.46 | 1611 → 1831 | 19 | 18.8 / — | 2 |
+| vast-b-stage2 | me local (app.Side, files) | 0 | 0.497 | 0.37 | 2269 → 2316 | 2212 | — / 17.3 | — |
+| vast-b-stage2 | them local + me local (app.Side, files) | 15 | 0.566 | 0.61 | 3409 → 3680 | 2264 | 14.5 / 17.7 | 2 |
+| vast-b-stage2 | them local + me local (app.Side, files) | 0 | 0.557 | 0.83 | 3389 → 3545 | 2212 | 3.4 / 17.2 | 4 |
+| linux-x86_64-4c | them local + me cloud | 15 | 0.992 | 1.12 | 1739 → 1962 | — | 7.2 / 14.9 | 1 late + 4 barge-in |
+
+- Both sides at once cost about the sum of each: on B 0.46 + 0.37 cores alone, 0.61–0.83 together
+  (CPU per second of input 0.56–0.57), 3.5–3.7 GB of RAM and 2.2 GB of VRAM; here 1.12 cores of 4
+  and 2.0 GB with the cloud for my side (whose local subtitles run GigaAM).
+- While I talk their translated voice is cut (barge-in): with both talking all the time (overlap
+  0) little of it is heard; the subtitles keep every clause. My own voice into the call is never
+  dropped (no queue policy for me → them: the other side has no subtitles).
+- Found on the way: the app imported numpy before the pipeline pinned the BLAS threads, so
+  OpenBLAS took every core — them → me alone cost 3.0 CPU s per audio s on B (2.24 cores) instead
+  of 0.61–0.81, both sides together 2.1–2.2 instead of 0.56–0.60. The working-mode gate did not
+  see it: it runs `peresmeshnik run`, which imports in the right order. The thread pins now live in the
+  package's `__init__`, and a test checks them after `import peresmeshnik.app`.

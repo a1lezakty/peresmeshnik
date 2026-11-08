@@ -43,9 +43,15 @@ mic ─▶ capture ─▶ queue ─▶ VAD ─▶ ASR ─clause end─▶ MT ─
   TTS starts on the first clause while the speaker is still talking.
 - **Subtitles** show ASR partials of the current clause immediately and replace them with the
   final text + translation at clause end. The overlay repaints only when the text changes.
-- **Barge-in / queue.** If translated speech falls behind by more than ~1 clause, queued TTS
-  audio is sped up (≤ 1.15×) and, past 3 clauses, dropped (`AudioOut.flush`) — subtitles keep
-  everything.
+- **Queue and barge-in** (`pipeline.py`; numbers: BENCH, stage 2). Translated speech plays back to
+  back and is often longer than its clause, so on continuous speech the voice would fall ever
+  further behind. The speak worker knows when a clause's voice would start: from 0.5 s behind the
+  clause end it asks the TTS for faster speech (linearly up to 1.4× at the cap; Piper's length
+  scale), and a clause whose voice would start more than `max_lag_s` = 4 s after its end is not
+  said at all — its subtitle stays. Them → me only: the other side has no subtitles of what me → them
+  would drop (`make_local(max_lag_s=None)`, the default). Barge-in: once my own side's partial caption has 3 words (not
+  a "yeah" / "ага" while listening), their side drops what is not heard yet (the queue, the clause
+  being synthesized, the headphones' buffer: `PulseOut.flush` ends pacat within ~50 ms).
 
 ## 3. Engine interfaces
 
@@ -99,6 +105,11 @@ RTX 3060 / A4000. Row names refer to BENCH.md tables.
 
 Clause length drives the voice latency: the segmenter cuts at pauses ≥ 300 ms, at ASR
 punctuation and hard at 5 s, so the worst case (first word of a 5 s clause) is ≈ 5.8–6 s.
+Measured on conversational speech (BENCH, stage 2; B, real time): ear–voice span p50 2.3 s (en
+meetings) – 3.5 s (ru monologue), p95 4.7–5.3 s, with the queue policy (§2) holding the voice
+within 4 s of its clause end; without it the queue alone let the voice fall 20 s behind a fast
+Russian speaker. An 8 s limit translates 0–2 chrF better and adds 1.2–2.4 s to the p95, so 5 s
+stays.
 
 **Me → them, local clone** — the same chain with the clone TTS instead of Piper:
 
@@ -172,6 +183,10 @@ one direction mostly alternate, and the two directions rarely talk at the same t
 | M1 8 GB | ~0 CPU; engines unloaded when translation is turned off ("free memory" default on), UI ~150 MB | ≈ 1 core while they speak, 0 in silence; ~2.5 GB | me → them through Gemini: +~0 CPU, +0.1 GB → ~2.6 GB |
 | M1 Pro 16 GB | ~0 CPU; engines may stay loaded (pools sleep: `idle_loaded` 0.0005–0.013 CPU s per 20 s with the flags above) | ~1 core, ~4.5 GB (GigaAM + T-one for RU) | local XTTS only if the machine's own check gives RTF < 0.7, else Gemini |
 | NVIDIA ≥ 6 GB VRAM | same | ~1 core | + XTTS on GPU: ~0.5 core, +4.5 GB RAM, 2.1 GB VRAM |
+
+Measured with both directions at once (BENCH, stage 2): on the 7950X3D with an RTX 3060 Laptop
+(both local, XTTS on the GPU) 0.61–0.83 cores, 3.5–3.7 GB RAM, 2.2 GB VRAM; on a 4-core x86 box
+(them → me local, me → them Gemini with local subtitles) 1.1 cores, 2.0 GB.
 
 Engines load when translation turns on (cached models: OPUS-MT 0.3 s, Parakeet 2–7 s, XTTS ~10 s),
 so the first switch-on shows "warming up".
@@ -270,8 +285,26 @@ one for the translation and for the loopback (`s.ui.mic`, else the default input
 sink's monitor). The virtual mic's sink and source have `priority.session=-10`, below any real device and
 below a device without a priority (WirePlumber counts that as −1), so they never become the default. One instance per user (`QLockFile` in
 `XDG_RUNTIME_DIR`): a second start shows a message and exits without touching the first one's
-devices. Moving the call app's stream into "Peresmeshnik Call" (`move-sink-input`) is S1's stage-2
-work; until then the user moves it by hand, otherwise them → me hears silence.
+devices.
+
+The call's sound (`audio/capture_pipewire.py` `CallRouter`). While translation is on, every playback
+stream of the call app goes into "Peresmeshnik Call" (`pactl move-sink-input`): the ones playing at
+switch-on and each new one (a reconnect, the next call), seen from `pactl subscribe` — a process
+blocked on the sound server's events, which exists only while translating. Translation off and exit
+give each stream back to the device it came from, or to the default output when that one is gone.
+The call app is remembered as `ui.call_app` (`application.process.binary`, else
+`application.name`: Electron apps all call themselves "Chromium"); with none chosen, the one known
+call app playing (Telegram, Zoom, Discord, …) is taken and remembered; otherwise the tray menu
+"Call app" lists what plays now (read when the menu opens). A browser is never taken by itself:
+its sound is one stream for all tabs (Chrome names every stream "Playback"), so YouTube in another
+tab would be translated too — the menu, the wizard and a tray message say so. WirePlumber
+remembers every move per application name (`restore-stream`): a stream left in our sink would go
+there again next time, so streams go back by a move as well (a move to the default device makes
+it forget the target), and at start the app sends other apps' streams out of its sink. After a
+SIGKILL the remembered target stays: a new stream of the call app then lands in our sink while
+translation is off (silence) until translation goes on and off once.
+Output and capture report their end: `PulseOut` waits on pacat's exit and calls `on_end` (the
+headphones' wrapper reopens on the next chunk), `PipeWireCapture` on parec's (a tray error).
 
 Checked so far only in a test desktop: always-on-top and click-through under Xvfb (window flags,
 and an `xdotool click` through the overlay reaches the window below); the idle gate with an XEmbed

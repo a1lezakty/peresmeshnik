@@ -47,8 +47,9 @@ class PiperTts:
     def _u32(self) -> int:
         return struct.unpack('<I', self._read(4))[0]
 
-    def synth(self, text: str, lang: str, voice: Voice | None = None) -> Iterator[np.ndarray]:
-        self._p.stdin.write(json.dumps({'text': text}).encode() + b'\n')  # ASCII JSON: no console code page issues
+    def synth(self, text: str, lang: str, voice: Voice | None = None, speed: float = 1.0) -> Iterator[np.ndarray]:
+        """`speed` > 1 speaks faster (Piper's length scale; the pipeline uses it when the voice falls behind)."""
+        self._p.stdin.write(json.dumps({'text': text, 'speed': speed}).encode() + b'\n')  # ASCII JSON: no console code page issues
         self._p.stdin.flush()
         try:
             while n := self._u32():

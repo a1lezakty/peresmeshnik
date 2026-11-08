@@ -7,7 +7,16 @@ clause is spoken while the next one is recognised. Generic over `Tts` and `Voice
 voice (them -> me) and the clone (me -> them) plug in the same way. On silence only the VAD runs.
 
 A clause ends at a VAD pause (>= 300 ms), at sentence punctuation from the ASR with a word after
-it, or at `max_clause_s` (then at a comma or between words). Per clause one JSON line goes to the
+it, or at `max_clause_s` (then at a comma or between words).
+
+The voice must not fall ever further behind on continuous speech (a translation is often longer than
+its clause, and the speech plays back to back). When audio arrives in real time, the speak worker
+knows when the clause's voice would start: from `FAST_AFTER_S` behind its clause end it speaks faster
+(linearly up to `MAX_SPEED` at `max_lag_s`, where the TTS supports `speed`), and a clause whose voice
+would start more than `max_lag_s` after its end is not said at all (its caption stays). `interrupt()`
+is barge-in: the user talks over the voice, so what is not heard yet is dropped.
+
+Per clause one JSON line goes to the
 `peresmeshnik.latency` logger: time of each link and, when audio arrives in real time, the lag
 from the end of the clause's speech to its caption, to its synthesized audio and to the estimated
 start of its playback (the output plays speech back to back, so a clause can wait behind the last).
@@ -16,39 +25,44 @@ start of its playback (the output plays speech back to back, so a clause can wai
     peresmeshnik run --in call.wav [--from en] [--to ru] [--out speech.wav] [--log latency.jsonl]
     peresmeshnik run --in call.wav --pipewire --play   # Linux: file -> "Peresmeshnik Call" sink -> monitor
 """
+import argparse
+import inspect
+import json
+import logging
 import os
+import queue
+import subprocess
+import sys
+import threading
+import time
+from collections import defaultdict
 
-for _k, _v in {'OMP_NUM_THREADS': '1', 'OPENBLAS_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1',
-               'VECLIB_MAXIMUM_THREADS': '1', 'OMP_WAIT_POLICY': 'PASSIVE'}.items():
-    os.environ.setdefault(_k, _v)  # before numpy: its BLAS pool would otherwise take every core
+import numpy as np  # BLAS threads: pinned in peresmeshnik/__init__.py, which runs first
 
-import argparse  # noqa: E402
-import json  # noqa: E402
-import logging  # noqa: E402
-import queue  # noqa: E402
-import subprocess  # noqa: E402
-import sys  # noqa: E402
-import threading  # noqa: E402
-import time  # noqa: E402
-from collections import defaultdict  # noqa: E402
-
-import numpy as np  # noqa: E402
-
-from peresmeshnik.engines import SAMPLE_RATE, Caption, Speech, Voice  # noqa: E402
+from peresmeshnik.engines import SAMPLE_RATE, Caption, Speech, Voice
 
 log = logging.getLogger('peresmeshnik.latency')
 OTHER = {'en': 'ru', 'ru': 'en'}
 HELLO = {'en': 'Hello.', 'ru': 'Привет.'}
 MAX_BEHIND_S = 0.15
+MAX_LAG_S = 4.0  # them -> me: voice starting later than this after its clause ended is dropped (BENCH stage 2: queue policy)
+FAST_AFTER_S = 0.5  # voice this far behind its clause end is sped up ...
+MAX_SPEED = 1.4  # ... linearly up to this at MAX_LAG_S (4 s, 0.5 s, 1.4x: 1-3 % of the words dropped in conversation, BENCH)
 
 
 class LocalDirection:
     """`asr.stream()` objects also take `feed(pcm, partial=False)` and expose `duration` (s) and
-    `cut(force) -> str | None` (local/asr.py)."""
+    `cut(force) -> str | None` (local/asr.py). A `tts.synth` with a `speed` keyword is sped up when
+    behind. `max_lag_s` None: no queue policy, every clause is said however late — me -> them, where the other
+side has no subtitles of what was dropped; them -> me takes MAX_LAG_S."""
 
-    def __init__(self, vad, asr, mt, tts, src: str, tgt: str, voice: Voice | None = None, max_clause_s: float = 5.0):
+    def __init__(self, vad, asr, mt, tts, src: str, tgt: str, voice: Voice | None = None, max_clause_s: float = 5.0,
+                 max_lag_s: float | None = None):
         self.vad, self.asr, self.mt, self.tts, self.voice = vad, asr, mt, tts, voice
-        self.src, self.tgt, self.max_clause_s = src, tgt, max_clause_s
+        self.src, self.tgt, self.max_clause_s, self.max_lag_s = src, tgt, max_clause_s, max_lag_s
+        self._speeds = 'speed' in inspect.signature(tts.synth).parameters
+        self._ttfa = 0.0  # the last TTS first-chunk time: a clause's voice starts at least that late
+        self._cut = 0.0  # interrupt(): speech of clauses that ended before this is not said
         self.realtime = True  # audio arrives at its own pace, so lags to the clause end are real
         self.stats: dict[str, float] = defaultdict(float)  # busy seconds per link, counts; see summary()
         self._in: queue.Queue = queue.Queue()
@@ -56,6 +70,7 @@ class LocalDirection:
         self._spoken: queue.Queue = queue.Queue()  # translated clauses waiting for TTS
         self._events: queue.Queue = queue.Queue()
         self._fed, self._fed_wall = 0, 0.0  # samples fed so far and when the last chunk arrived
+        self._start = 0  # where the current clause starts, samples
         self._play_end = 0.0  # when the speech put out so far has played, if played back to back
         self._stop = threading.Event()  # close(): drop what is queued instead of saying it
         self._error: BaseException | None = None  # the first worker that died
@@ -72,6 +87,11 @@ class LocalDirection:
     def events(self):
         while (e := self._events.get()) is not None:
             yield e
+
+    def interrupt(self) -> None:
+        """Barge-in (the user talks over the voice): speech not heard yet is dropped, captions stay; the app
+        flushes its output too. Clauses that end from now on are spoken as usual."""
+        self._cut = self._play_end = time.perf_counter()
 
     def warm_up(self) -> None:
         """Run every engine once before audio comes (first calls allocate); the app shows "warming up"."""
@@ -130,6 +150,7 @@ class LocalDirection:
                 pos = self.vad.pos
                 if kind == 'start':
                     stream, seg0, partial_s = self.asr.stream(self.src), pos - len(x), 0.0
+                    self._start = seg0
                 t = time.perf_counter()
                 partial = stream.feed(x, partial=not catch_up)
                 partial_s += time.perf_counter() - t
@@ -152,6 +173,7 @@ class LocalDirection:
         self.stats['vad_s'] = self.vad.busy_s
 
     def _clause(self, n, stream, text, reason, end, partial_s, final_s=0.0, settled_s=0.0):
+        start, self._start = self._start, end  # a cut's audio after `end` starts the next clause
         if text is None:
             t = time.perf_counter()
             text = stream.finish(settled_s)
@@ -160,7 +182,8 @@ class LocalDirection:
         self.stats['asr_final_s'] += final_s
         if not text:
             return n
-        self._clauses.put({'clause': n, 'reason': reason, 'end_s': round(end / SAMPLE_RATE, 2), 'end_wall': self._wall(end),
+        self._clauses.put({'clause': n, 'reason': reason, 'start_s': round(start / SAMPLE_RATE, 2), 'end_s': round(end / SAMPLE_RATE, 2),
+                           'end_wall': self._wall(end),
                            'asr_partial_ms': round(1000 * partial_s), 'asr_final_ms': round(1000 * final_s), 'text': text})
         return n + 1
 
@@ -184,13 +207,26 @@ class LocalDirection:
                 continue
             end_wall, translation = c.pop('end_wall'), c.pop('translation')
             t, samples, start = time.perf_counter(), 0, 0.0
-            for chunk in self.tts.synth(translation, self.tgt, self.voice):
-                if self._stop.is_set():
+            speed = 1.0
+            if self.realtime:  # lags are real: the queue policy applies
+                lag = max(self._play_end, t + self._ttfa) - end_wall  # when this clause's voice would start
+                if end_wall < self._cut or (self.max_lag_s is not None and lag > self.max_lag_s):
+                    c['dropped'] = 'barge-in' if end_wall < self._cut else round(lag, 3)
+                    st['dropped'] += 1
+                    log.info(json.dumps(c | {'translation': translation}, ensure_ascii=False))
+                    continue
+                if self.max_lag_s is not None and self._speeds and lag > FAST_AFTER_S:
+                    speed = round(1 + (MAX_SPEED - 1) * min(1.0, (lag - FAST_AFTER_S) / max(self.max_lag_s - FAST_AFTER_S, 1e-3)), 3)
+                    c['speed'] = speed
+            cut = self._cut
+            for chunk in self.tts.synth(translation, self.tgt, self.voice, **({'speed': speed} if speed != 1.0 else {})):
+                if self._stop.is_set() or self._cut != cut:
                     break  # closes synth(), which reads away the rest of the request
                 now = time.perf_counter()
                 if not samples:
                     start = max(self._play_end, now)  # its playback starts after the speech before it
                     c['tts_first_ms'] = round(1000 * (now - t))
+                    self._ttfa = now - t
                     if self.realtime:
                         c |= {'synth_lag_s': round(now - end_wall, 3), 'voice_lag_s': round(start - end_wall, 3),
                               'play_queue_s': round(start - now, 3)}
@@ -206,12 +242,12 @@ class LocalDirection:
     def summary(self) -> dict:
         """Busy time of each link per second of input audio (link RTF)."""
         s, a = self.stats, max(self.stats['audio_s'], 1e-9)
-        return {'audio_s': round(a, 2), 'clauses': int(s['clauses']), 'speech_s': round(s['tts_audio_s'], 2),
+        return {'audio_s': round(a, 2), 'clauses': int(s['clauses']), 'dropped': int(s['dropped']), 'speech_s': round(s['tts_audio_s'], 2),
                 **{f'{k[:-2]}_rtf': round(s[k] / a, 4) for k in ('vad_s', 'asr_partial_s', 'asr_final_s', 'mt_s', 'tts_s')}}
 
 
 def make_local(src: str, tgt: str, asr: str | None = None, threads: int | None = None, tts=None, voice: Voice | None = None,
-               settings=None) -> LocalDirection:
+               settings=None, max_lag_s: float | None = None) -> LocalDirection:
     """Engines and threads from the settings (`[local]`, ARCHITECTURE §6), models from the registry
     (raises models.ModelMissing until fetched); S2 passes its clone `tts` and `voice`."""
     from peresmeshnik import config
@@ -223,7 +259,7 @@ def make_local(src: str, tgt: str, asr: str | None = None, threads: int | None =
     threads = threads or loc.threads
     return LocalDirection(SileroVad(), OnnxAsr(asr or loc.asr[src], threads=threads),
                           OpusMt(src, tgt, loc.mt[f'{src}-{tgt}'], threads=threads),
-                          tts or PiperTts(loc.tts[tgt], threads=threads), src, tgt, voice)
+                          tts or PiperTts(loc.tts[tgt], threads=threads), src, tgt, voice, max_lag_s=max_lag_s)
 
 
 def cpu_s(direction: LocalDirection | None = None) -> float:
@@ -275,6 +311,9 @@ def cli(argv=None) -> int:
     ap.add_argument('--out', help='write the translated speech here (wav)')
     ap.add_argument('--log', help='per-clause latency, JSON lines')
     ap.add_argument('--partials', action='store_true', help='print ASR partials too')
+    ap.add_argument('--max-lag', type=float, default=MAX_LAG_S,
+                    help=f'with --realtime / --pipewire: drop speech that would start later than this after its clause, s '
+                         f'(0 = say everything; default {MAX_LAG_S:g})')
     a = ap.parse_args(argv)
     tgt = a.tgt or OTHER[a.src]
     if tgt == a.src:
@@ -303,7 +342,7 @@ def cli(argv=None) -> int:
 
     t = time.perf_counter()
     try:
-        d = make_local(a.src, tgt, a.asr, a.threads)
+        d = make_local(a.src, tgt, a.asr, a.threads, max_lag_s=a.max_lag or None)
     except models.ModelMissing as e:
         print(e, file=sys.stderr)
         return 2

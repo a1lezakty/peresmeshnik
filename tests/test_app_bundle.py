@@ -56,6 +56,10 @@ def test_bundle_contents(app):
     assert info['LSUIElement'] is True and info['CFBundleIdentifier'] == 'io.github.a1lezakty.peresmeshnik'
     assert info['NSMicrophoneUsageDescription'] and info['NSAudioCaptureUsageDescription']
     assert Path(exe(app, 'piper-runner')).exists()
+    audio = exe(app, 'peresmeshnik-audio')  # me -> them on macOS (BlackHole 2ch, the microphone): signed with the app
+    assert os.access(audio, os.X_OK), 'no peresmeshnik-audio in Contents/MacOS'
+    subprocess.run(['codesign', '--verify', '--strict', audio], check=True)
+    assert isinstance(json.loads(subprocess.run([audio, 'list'], capture_output=True, text=True, timeout=20, check=True).stdout), list)
     lic = app / 'Contents' / 'Resources' / 'licenses'
     assert (lic / 'piper-runner-LICENSE.txt').exists() and (lic / 'Peresmeshnik-LICENSE.txt').exists()
     assert 'espeak-ng' in (lic / 'piper-runner-SOURCE.txt').read_text()  # where the GPL program's sources are

@@ -4,12 +4,13 @@ audio_stream_end, resumption handles are passed on."""
 import asyncio
 import queue
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 from google.genai import types
 
-from peresmeshnik.cloud.gemini import BLOCK, GeminiDirection, _Conn, _Link
+from peresmeshnik.cloud.gemini import BLOCK, GeminiDirection, _Conn, _Gate, _Link
 from peresmeshnik.config import Cloud
 from peresmeshnik.engines import Caption, Speech
 
@@ -98,7 +99,7 @@ def collect(d, n_speech, timeout=10):
 def test_reconnects_keep_order_and_lose_nothing():
     c = FakeClient()
     c.live.broken = {3, 7}  # these connections fail on the first send: their blocks go to the next one
-    d = GeminiDirection('en', 'ru', cfg=Cloud(translate_model='translate', reconnect_s=0.0), client=c)
+    d = GeminiDirection('en', 'ru', cfg=Cloud(translate_model='translate', reconnect_s=0.0), client=c, gate=_Gate())
     n = 40
     for i in range(n + 10):  # quiet input (the gate stays off), so a reconnect is due at every block
         blk = np.ones(BLOCK, np.int16)
@@ -121,7 +122,8 @@ def test_reconnects_keep_order_and_lose_nothing():
 
 def test_subtitles_get_stream_end_at_pauses():
     c = FakeClient()
-    d = GeminiDirection('en', 'ru', cfg=Cloud(translate_model='translate', transcribe_model='transcribe', subtitles=True), client=c)
+    d = GeminiDirection('en', 'ru', cfg=Cloud(translate_model='translate', transcribe_model='transcribe', subtitles=True),
+                        client=c, gate=_Gate())
     loud = (np.sin(np.arange(BLOCK) / 3) * 8000).astype(np.int16)
     for _ in range(10):
         d.feed(loud)
@@ -144,7 +146,7 @@ def test_silent_session_is_replaced(monkeypatch):
     monkeypatch.setattr(gemini._Link, 'stall_s', {'translate': 0.3, 'transcribe': 0.3})
     c = FakeClient()
     c.live.mute = {1}  # the first connection never answers
-    d = GeminiDirection('en', 'ru', cfg=Cloud(translate_model='translate'), client=c)
+    d = GeminiDirection('en', 'ru', cfg=Cloud(translate_model='translate'), client=c, gate=_Gate())
     loud = (np.sin(np.arange(BLOCK) / 3) * 8000).astype(np.int16)
     for i in range(30):
         loud[0] = i
@@ -188,7 +190,8 @@ def test_failed_start_leaves_no_socket(monkeypatch):
     monkeypatch.setattr(_Link, 'retry_pause_s', 0.0)
     c = FakeClient()
     c.live.fail, c.live.slow = {'transcribe'}, {'translate'}  # transcribe fails while translate still connects
-    d = GeminiDirection('en', 'ru', cfg=Cloud(translate_model='translate', transcribe_model='transcribe', subtitles=True), client=c)
+    d = GeminiDirection('en', 'ru', cfg=Cloud(translate_model='translate', transcribe_model='transcribe', subtitles=True),
+                        client=c, gate=_Gate())
     e = d._events.get(timeout=5)
     assert isinstance(e, ConnectionError)
     d.close()
@@ -199,7 +202,7 @@ def test_failed_start_leaves_no_socket(monkeypatch):
 def test_replaced_transcriber_gives_its_final():
     c = FakeClient()
     d = GeminiDirection('en', 'ru', cfg=Cloud(translate_model='translate', transcribe_model='transcribe', subtitles=True,
-                                               reconnect_s=0.5), client=c)
+                                               reconnect_s=0.5), client=c, gate=_Gate())
     for i in range(30):  # quiet input: a reconnect is due every 0.5 s
         d.feed(np.ones(BLOCK, np.int16))
         time.sleep(0.1)
@@ -210,3 +213,46 @@ def test_replaced_transcriber_gives_its_final():
         got.append(e)
     finals = [e.original for e in got if isinstance(e, Caption) and e.final]
     assert len(finals) >= 3 and finals == sorted(finals, key=lambda t: int(t.split()[1]))
+
+
+def test_vad_gate_maps_silero_segments_to_blocks():
+    from peresmeshnik.cloud.gemini import _VadGate
+
+    class FakeVad:  # speech starts in block 2; the VAD closes the segment in block 8 (300 ms after it ended)
+        min_silence_frames = 10
+
+        def __init__(self):
+            self.n, self.speaking = 0, False
+
+        def feed(self, x):
+            self.n += 1
+            if self.n == 2:
+                self.speaking = True
+                yield 'start', x
+            elif self.n == 8:
+                self.speaking = False
+                yield 'end', x
+    g = _VadGate(FakeVad())
+    evs = {}
+    for t in range(1, 20):
+        if ev := g.update(np.zeros(BLOCK, np.int16), float(t)):
+            evs[t] = (ev, g.on, g.quiet)
+        if t == 8:
+            assert abs(g.last_voiced - (8 - 0.32)) < 1e-9  # the speech ended before the VAD's 300 ms wait
+    assert evs == {2: ('start', True, 0), 8: ('pause', True, 3), 15: ('end', False, 10)}
+
+
+def test_vad_gate_on_a_recording():
+    """Silero (when downloaded) finds the three sentences of the test call: one utterance each."""
+    import pytest
+
+    from peresmeshnik import models
+    from peresmeshnik.cloud.gemini import _VadGate
+    from peresmeshnik.pipeline import read_audio
+    try:
+        g = _VadGate()
+    except models.ModelMissing:
+        pytest.skip('silero-vad not downloaded')
+    pcm = (read_audio(str(Path(__file__).parent / 'data' / 'call-en.ogg')) * 32767).astype(np.int16)
+    evs = [g.update(pcm[i:i + BLOCK], i / 16000) for i in range(0, len(pcm) - BLOCK, BLOCK)]
+    assert evs.count('start') == evs.count('end') == 3, [e for e in evs if e]

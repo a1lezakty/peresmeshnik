@@ -2,7 +2,7 @@
 
 - voice: `gemini-3.5-live-translate-preview`, a continuous interpreter (24 kHz speech out). It
   never gets `audio_stream_end`: that cuts the end of the translation (stage-0 bench);
-- subtitles (optional): `gemini-3.5-transcribe-live`; a speech gate sends `audio_stream_end` at
+- subtitles (optional): `gemini-3.5-transcribe-live`; Silero VAD sends `audio_stream_end` at
   each 300 ms pause, which brings the final text from ~1.6 s to ~0.65 s after the speaker stops;
 - a connection lives ~10 min (transcribe: 10 min of audio per session). After `reconnect_s`, at
   the next quiet moment (at once on GoAway or a dropped connection) a new connection opens - the
@@ -40,11 +40,48 @@ def _rms(a: np.ndarray) -> float:
     return float(np.sqrt(np.mean(a.astype(np.float32) ** 2)))
 
 
+class _VadGate:
+    """Speech from Silero VAD (local/vad.py), per 100 ms block: 'start', 'pause' when the VAD closes a
+    segment after 300 ms below its threshold (transcribe gets audio_stream_end), 'end' of the utterance
+    1 s after the speech. `on`, `quiet` (blocks since speech) and `last_voiced` as in `_Gate`."""
+
+    def __init__(self, vad=None):
+        if vad is None:
+            from peresmeshnik.local.vad import SileroVad
+            vad = SileroVad(threads=1)
+        self.vad, self.hangover = vad, vad.min_silence_frames * 512 / SAMPLE_RATE
+        self.on, self.quiet, self.last_voiced = False, 0, 0.0
+
+    def update(self, x: np.ndarray, t: float) -> str | None:
+        ev = None
+        for kind, _ in self.vad.feed(x.astype(np.float32) / 32768):
+            if kind == 'start' and not self.on:
+                self.on, ev = True, 'start'
+            elif kind == 'end':  # the VAD waited 300 ms: speech ended that long ago
+                self.quiet, self.last_voiced, ev = 3, t - self.hangover, 'pause'
+        if self.vad.speaking:
+            self.quiet, self.last_voiced = 0, t
+        elif self.on and ev != 'pause':
+            self.quiet += 1
+            if self.quiet >= 10:
+                self.on, ev = False, 'end'
+        return ev
+
+
+def make_gate():
+    """Silero VAD; the energy gate below only while silero-vad is not downloaded (CLI use without setup)."""
+    from peresmeshnik.models import ModelMissing
+    try:
+        return _VadGate()
+    except ModelMissing as e:
+        warn('%s: using the energy gate instead of Silero VAD', e)
+        return _Gate()
+
+
 class _Gate:
     """Speech from block energy: above an absolute floor (-70 dBFS), 3x the noise (a slowly rising
     minimum) and -26 dB from a fast-decaying peak (speaker levels differ a lot). 'pause' after 300 ms
-    below it (transcribe gets audio_stream_end), 'end' of the utterance after 1 s.
-    ponytail: energy gate; feed S1's Silero VAD events once app.py wires both."""
+    below it, 'end' of the utterance after 1 s. The fallback of `make_gate()`, and the tests' gate."""
     def __init__(self):
         self.peak, self.noise, self.on, self.quiet, self.last_voiced = 0.0, 0.0003, False, 0, 0.0
 
@@ -308,8 +345,9 @@ class _Link:
 class GeminiDirection:
     """Direction (engines.py) over Gemini Live: Speech from the translator, Caption from both models."""
 
-    def __init__(self, src: str, tgt: str, key: str | None = None, cfg: Cloud | None = None, client=None):
+    def __init__(self, src: str, tgt: str, key: str | None = None, cfg: Cloud | None = None, client=None, gate=None):
         self.src, self.tgt, self.cfg = src, tgt, cfg or Cloud()
+        self.gate = gate or make_gate()  # before the thread: a model error comes out here
         if client is None:
             from google import genai
             from google.genai import types
@@ -399,7 +437,7 @@ class GeminiDirection:
                     t.cancel()
                 await asyncio.gather(*starts, return_exceptions=True)
                 raise
-            gate, buf = _Gate(), np.zeros(0, np.int16)
+            gate, buf = self.gate, np.zeros(0, np.int16)
             while (item := await self._in.get()) is not None:
                 t, pcm = item
                 if pcm.dtype != np.int16:

@@ -12,6 +12,9 @@ import psutil
 
 WINDOW_S = float(os.environ.get('IDLE_WINDOW_S', 60))
 LIMIT_S = float(os.environ.get('IDLE_CPU_LIMIT_S', 0.13)) * WINDOW_S / 60
+# macOS: AppKit does one-off work in the first seconds after the windows are first shown (0.07-0.09 s, BENCH);
+# the gate measures the settled idle after it, the first seconds are printed, not gated
+SETTLE_S = 15.0 if sys.platform == 'darwin' else 0.0
 
 
 def cpu_s(proc):
@@ -32,6 +35,10 @@ def test_idle_cpu():
         assert 'idle' in app.stdout.readline()  # started; startup cost is not counted
         proc = psutil.Process(app.pid)
         before = cpu_s(proc)
+        if SETTLE_S:
+            time.sleep(SETTLE_S)
+            settle, before = cpu_s(proc) - before, cpu_s(proc)
+            print(f'idle CPU in the first {SETTLE_S:.0f} s after "idle" (not gated): {settle:.3f} s')
         time.sleep(WINDOW_S)
         used = cpu_s(proc) - before
         assert app.poll() is None, 'app exited while idle'

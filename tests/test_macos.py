@@ -305,13 +305,14 @@ def test_app_menu_bar_icon_hotkey_and_sigterm(tmp_path):
         wins = macos.windows_of(p.pid)
         print('app windows:', wins)
         assert any(w['layer'] == macos.STATUS_LEVEL and w['bounds'][1] == 0 for w in wins), 'no menu-bar item on screen'
-        if synthetic_keys_arrive():
+        delivered = synthetic_keys_arrive()
+        if delivered:
             press(*macos.key_code(COMBO))
             _wait(q, 'mode: translation is off', 5)  # the hotkey reached the app (translation is off: a tray message)
-        else:
-            no_synthetic('key events')
         p.send_signal(signal.SIGTERM)
         assert p.wait(15) == 0
+        if not delivered:  # after the SIGTERM check: that one runs anyway
+            no_synthetic('key events')
     finally:
         if p.poll() is None:
             p.kill()

@@ -52,11 +52,12 @@ jobs:
           PERESMESHNIK_MODELS: ${{ runner.temp }}/models
           PERESMESHNIK_REQUIRE_SYNTHETIC: '1'
         run: |
-          dmg=$(ls dist/*.dmg) && test -n "$dmg"
+          dmg=$(ls dist/*.dmg)
+          test -n "$dmg"
           export PERESMESHNIK_DMG=$dmg SCREENSHOTS=$RUNNER_TEMP/screens
           mkdir -p "$SCREENSHOTS"
           uv run --no-sync pytest -q -s -rs tests/test_app_bundle.py | tee "$RUNNER_TEMP/bundle.log"
-          ! grep -q SKIPPED "$RUNNER_TEMP/bundle.log"  # every check of the .dmg ran
+          if grep -q SKIPPED "$RUNNER_TEMP/bundle.log"; then echo 'a check of the .dmg was skipped' >&2; exit 1; fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -179,10 +179,9 @@ class Tray(QObject):
         def work():
             try:
                 self.call_apps.emit((capture().apps(), ''))
-            except ImportError:  # no call sound capture for this OS in this version
-                self.call_apps.emit(([], 'not in this version'))
-            except Exception as e:  # no sound server
-                self.call_apps.emit(([], str(e)))
+            except Exception as e:  # no sound server; macOS: no call sound capture in this version yet
+                missing = isinstance(e, ModuleNotFoundError) and e.name == 'peresmeshnik.audio.capture_macos'
+                self.call_apps.emit(([], 'not in this version' if missing else str(e)))
         threading.Thread(target=work, name='call-apps', daemon=True).start()
 
     def _show_call_apps(self, result) -> None:

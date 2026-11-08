@@ -16,7 +16,7 @@ uv pip install --python "$PY" --no-deps --require-hashes -r packaging/macos/pipe
 $PY -m PyInstaller --noconfirm --clean --distpath dist --workpath build/pyinstaller packaging/macos/Peresmeshnik.spec
 WARN=build/pyinstaller/Peresmeshnik/warn-app.txt  # the app's own Analysis (the spec copies it before piper's)
 test -s "$WARN" || { echo "no $WARN: the GPL check cannot run" >&2; exit 1; }
-if grep -q 'excluded module named piper ' "$WARN"; then
+if grep -qE 'excluded module named piper( |\.)' "$WARN"; then  # piper and piper.voice, not piper_x
   echo 'the app imports piper (GPL): it must only talk to piper-runner over the pipe' >&2
   exit 1
 fi

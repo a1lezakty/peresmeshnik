@@ -208,7 +208,6 @@ class MacHotkey:
             raise HotkeyError(f'cannot listen for hotkeys (Carbon error {err})')
 
     def register(self, combo: str, callback: Callable[[], None]) -> None:
-        self.unregister(combo)  # the same combo again: its old registration goes, not leaks
         code, mods = key_code(combo)
         if not mods:
             raise HotkeyError(f'{native(code, mods)} alone would take the key from every app: add ⌘, ⌥, ⌃ or ⇧')
@@ -219,6 +218,7 @@ class MacHotkey:
             taken = set()
         if (code, mods) in taken or (code, mods | FN) in taken:  # ⌃↑, ⌃← (Mission Control) come with the fn bit
             raise HotkeyError(f'{native(code, mods)} is a macOS shortcut (System Settings → Keyboard → Keyboard Shortcuts)')
+        self.unregister(combo)  # the same combo again (checks passed): its old registration goes, not leaks
         self._next += 1
         ref = c_void_p()
         err = carbon.RegisterEventHotKey(code, mods, _HotKeyID(self.SIGNATURE, self._next), carbon.GetApplicationEventTarget(),

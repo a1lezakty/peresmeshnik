@@ -181,6 +181,13 @@ def test_helper_answers_check_and_lists_the_playing_process(afplay):
     assert any(p['pid'] == afplay.pid and p['playing'] for p in procs), procs
 
 
+def test_call_app_keys_fold_helpers_and_webkit():
+    from peresmeshnik.audio import capture_macos as cm
+    assert cm.app_of('com.google.Chrome.helper.renderer') == 'com.google.Chrome'
+    assert cm.app_of('us.zoom.xos') == 'us.zoom.xos'
+    assert cm.app_of('com.apple.WebKit.GPU') == cm.WEBKIT  # Safari's media; the tap's --bundle prefix takes it
+
+
 @needs_helper
 @needs_blackhole
 @pytest.mark.usefixtures('denied')
@@ -262,9 +269,10 @@ def test_a_killed_helper_lets_the_original_through(afplay):
 @needs_helper
 @needs_blackhole
 @pytest.mark.usefixtures('granted')
-def test_tap_follows_a_new_rate_of_the_device(afplay):
-    """m5: the call app's device changes its rate (speakers at 48 kHz -> AirPods in a call, 16/24 kHz): the helper
-    exits with 7 and is started again at the new rate, the voice keeps its pitch. Here BlackHole 2ch 48 -> 44.1 kHz."""
+def test_tap_keeps_the_pitch_when_the_device_changes_its_rate(afplay):
+    """m5: the call app's device changes its rate (speakers at 48 kHz -> AirPods in a call, 16/24 kHz; here BlackHole
+    2ch 48 -> 44.1 kHz): the voice keeps its pitch. On the runner the tap keeps its own format (Core Audio converts);
+    if the tap's own rate changes, the helper exits with 7 and is started again at the new one."""
     from peresmeshnik.audio import capture_macos as cm
     from peresmeshnik.audio import coreaudio as ca
     from peresmeshnik.engines import SAMPLE_RATE
@@ -277,17 +285,17 @@ def test_tap_follows_a_new_rate_of_the_device(afplay):
         first = tap.rate
         set_rate(SPEAKERS, 44100 if old != 44100 else 48000)
         new = ca.rate(SPEAKERS)
-        followed = until(lambda: tap.rate == new)
+        time.sleep(1.0)  # a restart takes ~0.3 s
         n = len(frames.pcm())
         time.sleep(1.5)
         got = frames.pcm()[n:]
     finally:
         tap.stop()
         set_rate(SPEAKERS, old)
-    print(f'rate change: device {old} -> {new} Hz, tap {first} -> {tap.rate} Hz (followed: {followed}); after it '
+    print(f'rate change: device {old} -> {new} Hz, tap {first} -> {tap.rate} Hz; after it '
           f'{len(got) / SAMPLE_RATE:.2f} s, {peak_hz(got, SAMPLE_RATE):.0f} Hz, rms {rms(got):.3f}; {tap.status}')
     assert not ended, ended
-    assert followed, 'the helper did not start again at the new rate'
+    assert tap.rate in (first, new), tap.rate
     assert len(got) > SAMPLE_RATE and rms(got) > 0.1 and abs(peak_hz(got, SAMPLE_RATE) - 440) <= 2
 
 

@@ -324,8 +324,8 @@ device around it, and writes a header line (`rate=…`) and mono float32 to stdo
 tapped app is muted on the speakers only while the tap runs; translation off closes the helper's stdin and the call
 sounds as usual. An app that has not used sound yet is waited for, and the app's processes that start later join the
 tap (Core Audio's process-list notification, no polling). The helper's own codes: 3 no such process, 4 no permission,
-5 macOS older than 14.4, 6 Core Audio failed, 7 the tap's rate changed (the app moved to a device at another rate:
-AirPods in a call), the app starts it again at the new rate; "System Audio Recording" (TCC `kTCCServiceAudioCapture`) is read and asked
+5 macOS older than 14.4, 6 Core Audio failed, 7 the tap's own rate changed (the app starts it again at the new rate;
+the tapped app's device changing its rate keeps the tap's format, Core Audio converts: CI); "System Audio Recording" (TCC `kTCCServiceAudioCapture`) is read and asked
 through TCC's own calls (`check`, `request`), and the first tap asks by itself; denied, the them → me side does not
 start and says where to allow it. The call app is `ui.call_app` = its bundle id, found or chosen as on Linux
 (`capture_macos.apps()` lists the processes playing now, helpers folded into their app). FaceTime cannot be tapped

@@ -13,8 +13,9 @@
 // notifications, a process-exit source and a blocked read of stdin. Permission not asked yet: the system dialog first
 // (--no-ask: start anyway, the system asks by itself when the tap starts).
 // Exit: 0 stdin or stdout closed, 2 usage, 3 no such process (--pid: not running, or it ended), 4 no permission,
-// 5 macOS older than 14.4, 6 a Core Audio error, 7 the tap's rate or format changed (the app moved to a device at
-// another rate, AirPods in a call): start it again, the new header has the new rate. Messages go to stderr.
+// 5 macOS older than 14.4, 6 a Core Audio error, 7 the tap's own rate or format changed: start it again, the new header
+// has the new rate (the tapped app's device changing its rate does not do it: Core Audio converts, CI). Messages go
+// to stderr.
 //
 // Build (no Xcode project): swiftc -O -target arm64-apple-macos12 native/macos/tap/*.swift -o <dir>/peresmeshnik-tap
 

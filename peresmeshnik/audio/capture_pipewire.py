@@ -33,7 +33,7 @@ CALL_APPS = ('telegram', 'zoom', 'discord', 'skype', 'teams', 'slack', 'webex', 
 # WirePlumber's restore-stream remembers a stream's target under the first of these the stream has
 RESTORE_KEYS = ('media.role', 'application.id', 'application.name', 'media.name', 'node.name')
 BROWSERS = ('chrome', 'chromium', 'firefox', 'brave', 'opera', 'vivaldi', 'edge', 'yandex', 'epiphany', 'librewolf', 'floorp',
-            'zen', 'falkon', 'midori', 'qutebrowser', 'safari', 'thebrowser')  # macOS: com.apple.Safari, Arc
+            'zen', 'falkon', 'midori', 'qutebrowser', 'webkit', 'thebrowser')  # macOS: com.apple.WebKit (Safari), Arc
 
 
 def pactl(*args: str) -> str:

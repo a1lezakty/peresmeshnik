@@ -81,8 +81,14 @@ def processes() -> list[dict]:
     return [json.loads(line) for line in r.stdout.splitlines() if line.startswith('{')]
 
 
+WEBKIT = 'com.apple.WebKit'  # Safari's media plays in com.apple.WebKit.GPU ("Safari Graphics and Media", CI)
+
+
 def app_of(bundle: str) -> str:
-    """The app a helper process belongs to: com.google.Chrome.helper.renderer -> com.google.Chrome."""
+    """The app a helper process belongs to: com.google.Chrome.helper.renderer -> com.google.Chrome. WebKit's processes
+    -> com.apple.WebKit: a tap of it takes Safari and every other WebKit app (their GPU processes share one bundle id)."""
+    if bundle.startswith(WEBKIT + '.'):
+        return WEBKIT
     return re.sub(r'\.helper(\..*)?$', '', bundle, flags=re.IGNORECASE)
 
 
@@ -92,7 +98,8 @@ def players() -> list[dict]:
     for p in processes():
         if p['playing'] and p['bundle'] and p['pid'] != os.getpid():
             key = app_of(p['bundle'])
-            seen.setdefault(key, {'key': key, 'name': re.sub(r' Helper( \(.*\))?$', '', p['name']) or key})
+            name = 'Safari (WebKit)' if key == WEBKIT else re.sub(r' Helper( \(.*\))?$', '', p['name'])
+            seen.setdefault(key, {'key': key, 'name': name or key})
     return list(seen.values())
 
 

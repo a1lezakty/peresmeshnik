@@ -69,11 +69,28 @@ jobs:
           mkdir -p "$RUNNER_TEMP/bin"
           swiftc -O -target arm64-apple-macos12 native/macos/tap/*.swift -o "$RUNNER_TEMP/bin/peresmeshnik-tap"
           echo "PERESMESHNIK_TAP=$RUNNER_TEMP/bin/peresmeshnik-tap" >> "$GITHUB_ENV"
+      # "System Audio Recording" for the call-sound tests (tests/test_macos_audio.py), on the runner's VM only: a TCC.db row
+      # for the job's top process (TCC asks the responsible process); refused here, allowed for the rest of the job
+      - name: macOS call sound, System Audio Recording refused
+        if: runner.os == 'macOS'
+        env:  # a missing BlackHole, tap helper or TCC answer fails the test instead of skipping it
+          PERESMESHNIK_REQUIRE_MACOS: '1'
+        run: |
+          sudo sqlite3 "$HOME/Library/Application Support/com.apple.TCC/TCC.db" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, flags, last_modified) VALUES ('kTCCServiceAudioCapture', '/opt/hca/hosted-compute-agent', 1, 0, 4, 1, 0, strftime('%s','now'))"
+          killall tccd; sleep 1
+          PERESMESHNIK_TCC=denied uv run pytest -q -s -rs tests/test_macos_audio.py -k 'check or permission'
+      - name: System Audio Recording allowed (the tap tests in the run below)
+        if: runner.os == 'macOS'
+        run: |
+          sudo sqlite3 "$HOME/Library/Application Support/com.apple.TCC/TCC.db" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, flags, last_modified) VALUES ('kTCCServiceAudioCapture', '/opt/hca/hosted-compute-agent', 1, 2, 4, 1, 0, strftime('%s','now'))"
+          killall tccd; sleep 1
+          echo "PERESMESHNIK_TCC=granted" >> "$GITHUB_ENV"
       # includes the idle-CPU watchdogs: the app (tray, overlay, first-run wizard) 60 s idle, and again with
       # the overlay on screen; each fails above 0.13 s of CPU. Linux: Xvfb; macOS, Windows: the runner's desktop
       - run: uv run pytest -q -s
         env:  # macOS: a synthetic key press or click that does not arrive fails the test instead of skipping it
           PERESMESHNIK_REQUIRE_SYNTHETIC: ${{ runner.os == 'macOS' && '1' || '' }}
+          PERESMESHNIK_REQUIRE_MACOS: ${{ runner.os == 'macOS' && '1' || '' }}  # the call-sound tests run, not skip
 
   # working-mode CPU gate: the local pipeline on a 30 s recording (RTF, CPU s per audio s)
   work-gate:
@@ -103,3 +120,22 @@ jobs:
           PERESMESHNIK_WORK_GATE: '1'
           PERESMESHNIK_MODELS: ${{ runner.temp }}/models
         run: uv run pytest -q -s tests/test_pipeline_cpu.py
+      - name: macOS call sound with the models (file -> BlackHole 16ch / a tapped afplay -> subtitles and voice)
+        if: runner.os == 'macOS'
+        env:
+          PERESMESHNIK_WORK_GATE: '1'
+          PERESMESHNIK_MODELS: ${{ runner.temp }}/models
+          PERESMESHNIK_TCC: granted
+          PERESMESHNIK_REQUIRE_MACOS: '1'
+        run: |
+          brew install --cask blackhole-2ch blackhole-16ch
+          if ! system_profiler SPAudioDataType | grep -q 'BlackHole 16ch'; then
+            sudo launchctl kickstart -kp system/com.apple.audio.coreaudiod
+            sleep 5
+          fi
+          mkdir -p "$RUNNER_TEMP/bin"
+          swiftc -O -target arm64-apple-macos12 native/macos/tap/*.swift -o "$RUNNER_TEMP/bin/peresmeshnik-tap"
+          export PERESMESHNIK_TAP=$RUNNER_TEMP/bin/peresmeshnik-tap
+          sudo sqlite3 "$HOME/Library/Application Support/com.apple.TCC/TCC.db" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, flags, last_modified) VALUES ('kTCCServiceAudioCapture', '/opt/hca/hosted-compute-agent', 1, 2, 4, 1, 0, strftime('%s','now'))"
+          killall tccd; sleep 1
+          uv run pytest -q -s -rs tests/test_macos_audio.py -k path_gives

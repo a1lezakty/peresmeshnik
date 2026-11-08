@@ -260,3 +260,28 @@ def test_headphones_end_callback_and_flush(speakers):
     loud = np.flatnonzero(np.abs(x) > 0.1)
     played = (loud[-1] - loud[0]) / SAMPLE_RATE
     assert 0.8 < played < 1.0 + 0.3, f"{played:.2f} s played"  # flushed after 1 s: ≤ 0.3 s more, nothing stale later
+
+
+def test_headphones_end_when_the_sink_goes_but_pacat_stays(speakers):
+    """WirePlumber 0.5: a `node.dont-reconnect` stream may outlive its device. pacat is frozen here so it cannot end
+    by itself: the sink's removal event ends the output, on_end once; stop() leaves no pactl subscribe behind."""
+    import signal
+
+    from peresmeshnik.audio.capture_pipewire import pactl
+    from peresmeshnik.audio.out import PulseOut
+    mod = pactl('load-module', 'module-null-sink', 'sink_name=test_headset').strip()
+    ended = []
+    out = PulseOut(SAMPLE_RATE, 'test_headset', on_end=ended.append)
+    try:
+        os.kill(out._proc.pid, signal.SIGSTOP)
+        pactl('unload-module', mod)
+        for _ in range(200):
+            if ended:
+                break
+            time.sleep(0.01)
+        time.sleep(0.3)  # a second on_end, from pacat's exit, would come by now
+        assert ended == ['test_headset was removed'] and not out.alive
+    finally:
+        out.stop()
+    assert not [p.name() for p in psutil.Process().children(recursive=True) if p.name() in ('pactl', 'pacat')]
+

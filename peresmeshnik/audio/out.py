@@ -4,11 +4,13 @@ play() only enqueues; one playback thread writes to the device in short slices, 
 flush() (barge-in, mode switch) ends that pacat at once: a stream that runs dry keeps its last bit below
 the prebuffer and would play it later, in front of the next speech; the next chunk opens a new one.
 A thread per pacat waits on its exit and calls `on_end` when the device went away, so a dead output is
-known at once, not at the next chunk.
+known at once, not at the next chunk. With a named device one `pactl subscribe` also watches for its removal:
+since WirePlumber 0.5 a `node.dont-reconnect` stream may outlive its device without ending.
 """
 from __future__ import annotations
 
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -26,9 +28,10 @@ def default_sink() -> str:
 
 
 class PulseOut:
-    """`on_end(why)` runs once (on a thread of its own) when pacat ends by itself: its device went away
-    (a Bluetooth profile switch, unplugged; `node.dont-reconnect` keeps it from following another device)
-    or the sound server stopped. stop() and flush() do not call it. The owner reopens (app.Headphones)."""
+    """`on_end(why)` runs once (on a thread of its own) when the device went away (a Bluetooth profile
+    switch, unplugged; `node.dont-reconnect` keeps it from following another device: pacat ends, or the
+    named sink's removal event comes first) or the sound server stopped.
+    stop() and flush() do not call it. The owner reopens (app.Headphones)."""
     slice_s = 0.05
 
     def __init__(self, sample_rate: int, device: str | None = None, latency_ms: int = 40,
@@ -44,6 +47,7 @@ class PulseOut:
         self._gen = 0  # flush() count: a chunk queued before the last flush is not written on
         self._q: queue.Queue[tuple[int, np.ndarray] | None] = queue.Queue()
         self._end = 0.0  # monotonic time when the audio written so far has played
+        self._events = self._subscribe(device) if device else None  # before pacat: a removal right after is seen
         self._proc = self._open()  # at once: a missing device shows now, not at the first word
         self._thread = threading.Thread(target=self._run, name='playback', daemon=True)
         self._thread.start()
@@ -57,6 +61,30 @@ class PulseOut:
             pass  # the default pipe: more audio ahead of the device
         threading.Thread(target=self._watch, args=(p,), name='playback-watch', daemon=True).start()
         return p
+
+    def _subscribe(self, device: str) -> subprocess.Popen:
+        sub = subprocess.Popen(['pactl', 'subscribe'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        sinks = subprocess.run(['pactl', 'list', 'short', 'sinks'], capture_output=True, text=True, timeout=10).stdout
+        index = next((line.split('\t')[0] for line in sinks.splitlines() if line.split('\t')[1:2] == [device]), None)
+
+        def watch():
+            for line in sub.stdout:  # until stop() kills it, or the sound server goes (pacat ends with it)
+                if (ev := re.match(r"Event 'remove' on sink #(\d+)", line)) and ev[1] == index:
+                    self._lost(f'{device} was removed')
+                    return
+        if index is not None:  # else pacat fails on the missing device and _watch tells
+            threading.Thread(target=watch, name='playback-events', daemon=True).start()
+        return sub
+
+    def _lost(self, why: str) -> None:
+        with self._lock:
+            if self._stopping or not self.alive:
+                return
+            self.alive = False
+            proc = self._proc
+        if proc is not None:
+            proc.kill()  # its _watch sees alive False: on_end stays once
+        self.on_end(why)
 
     def play(self, pcm: np.ndarray, sample_rate: int) -> None:
         assert sample_rate == self.sample_rate, f'{sample_rate} != {self.sample_rate}'
@@ -78,6 +106,9 @@ class PulseOut:
     def stop(self) -> None:
         """Play what is queued, then close the device."""
         self._stopping = True
+        if self._events is not None:
+            self._events.kill()
+            self._events.wait()
         self._q.put(None)
         self._thread.join()
         with self._lock:
@@ -123,7 +154,7 @@ class PulseOut:
         err = proc.stderr.read().decode(errors='replace').strip().splitlines()  # until pacat exits
         proc.wait()
         with self._lock:
-            ours = proc is self._proc and not self._stopping  # not flushed, not stopped: it ended by itself
+            ours = proc is self._proc and not self._stopping and self.alive  # it ended by itself
             if ours:
                 self.alive = False
         if ours:

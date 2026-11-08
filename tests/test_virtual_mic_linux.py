@@ -23,9 +23,10 @@ CPU_PER_AUDIO_S = 0.05  # our process + pacat incl. its start, per second of aud
 
 
 def record(source):
-    """Record the source like a call app does."""
-    return subprocess.Popen(['parec', f'--device={source}', '--format=float32le', f'--rate={SR_OUT}', '--channels=1', '--raw',
-                             '--latency-msec=20', '--property=node.dont-reconnect=true'], stdout=subprocess.PIPE)
+    """Record the source like a call app does. Read on a thread while recording: a pipe nobody reads holds ~1 s
+    (64 KB at 16 kHz), and what parec buffers past that is lost at SIGTERM (the rate-switch flake under load)."""
+    from peresmeshnik.ui.selftest import Recorder
+    return Recorder(source, SR_OUT)
 
 
 def test_round_trip():
@@ -46,8 +47,7 @@ def test_round_trip():
         wall = time.perf_counter() - t0
         cpu = sum(me.cpu_times()[:4]) - cpu0
         time.sleep(0.3)
-        rec.terminate()
-        x = np.frombuffer(rec.communicate()[0], dtype=np.float32)
+        x = rec.stop()
     finally:
         mic.remove()
     assert not vm.exists(), 'device left behind'
@@ -76,8 +76,7 @@ def test_rate_switch_plays_both_in_order():
         mic.drain()
         assert first.poll() is not None, 'old pacat still running'
         time.sleep(0.3)
-        rec.terminate()
-        x = np.frombuffer(rec.communicate()[0], dtype=np.float32)
+        x = rec.stop()
     finally:
         mic.remove()
     on = np.nonzero(np.abs(x) > 0.1)[0]
@@ -97,9 +96,149 @@ def test_flush_drops_queued_audio():
         time.sleep(0.5)
         mic.flush()
         time.sleep(1.0)
-        rec.terminate()
-        x = np.frombuffer(rec.communicate()[0], dtype=np.float32)
+        x = rec.stop()
     finally:
         mic.remove()
     loud = np.nonzero(np.abs(x) > 0.1)[0]
     assert len(loud) and (loud[-1] - loud[0]) / SR_OUT < 1.5  # ~0.5 s played + buffers, not 5 s
+
+
+def test_never_the_default_device():
+    """Another output and input are there (here without a priority, like any module-made device): the virtual mic
+    must not take over as the default sink or source (the system's sound would go into the call)."""
+    from peresmeshnik.audio import virtual_mic_linux as vm
+    pa = vm._pactl
+    mods = [pa('load-module', 'module-null-sink', 'sink_name=test_real_out').strip(),
+            pa('load-module', 'module-null-sink', 'sink_name=test_real_in_feed').strip(),
+            pa('load-module', 'module-remap-source', 'master=test_real_in_feed.monitor', 'source_name=test_real_in').strip()]
+    try:
+        time.sleep(0.3)
+        before = pa('get-default-sink').strip(), pa('get-default-source').strip()
+        mic = vm.VirtualMic()
+        try:
+            time.sleep(0.5)  # the session manager picks defaults asynchronously
+            assert (pa('get-default-sink').strip(), pa('get-default-source').strip()) == before
+        finally:
+            mic.remove()
+    finally:
+        for m in reversed(mods):
+            subprocess.run(['pactl', 'unload-module', m], capture_output=True)
+
+
+class Source:
+    """A test microphone: a null sink fed by a tone, its monitor remapped as a source named `name`."""
+
+    def __init__(self, name, hz):
+        from peresmeshnik.audio import virtual_mic_linux as vm
+        self.name = name
+        self.mods = [vm._pactl('load-module', 'module-null-sink', f'sink_name={name}_feed', 'channels=1').strip(),
+                     vm._pactl('load-module', 'module-remap-source', f'master={name}_feed.monitor', f'source_name={name}',
+                               'channels=1').strip()]
+        t = (0.2 * np.sin(2 * np.pi * hz * np.arange(1600) / 16000)).astype('<f4').tobytes()  # 0.1 s, whole periods
+        # dont-reconnect: PipeWire would move it into a sink the app makes (the call sink takes over as the default)
+        self.feed = subprocess.Popen(['pacat', f'--device={name}_feed', '--raw', '--format=float32le', '--rate=16000',
+                                      '--channels=1', '--latency-msec=20', '--property=node.dont-reconnect=true'],
+                                     stdin=subprocess.PIPE)
+
+        def talk():  # the pipe blocks: real-time pace
+            try:
+                while True:
+                    self.feed.stdin.write(t)
+            except (BrokenPipeError, ValueError, OSError):
+                pass
+        import threading
+        threading.Thread(target=talk, daemon=True).start()
+
+    def remove(self):
+        self.feed.kill()
+        self.feed.wait()
+        for m in reversed(self.mods):
+            subprocess.run(['pactl', 'unload-module', m], capture_output=True)
+        self.mods = []
+
+
+def hz(frames):
+    x = np.concatenate(frames[-25:])  # the last 0.5 s
+    return np.argmax(np.abs(np.fft.rfft(x))) * 16000 / len(x)
+
+
+def wait(cond, timeout=5.0, show=lambda: ''):
+    end = time.monotonic() + timeout
+    while not cond():
+        assert time.monotonic() < end, f'timed out {show()}'
+        time.sleep(0.02)
+
+
+def test_mic_by_name_and_never_ours():
+    from peresmeshnik.audio.mic import Mic
+    from peresmeshnik.audio.virtual_mic_linux import SOURCE
+    with pytest.raises(ValueError, match='not a microphone'):
+        Mic(SOURCE).start(lambda f: None)
+    with pytest.raises(RuntimeError, match='no microphone'):
+        Mic('test_no_such_mic').start(lambda f: None)
+    a = Source('test_mic_a', 400)
+    frames, ended = [], []
+    mic = Mic('test_mic_a', on_end=ended.append)
+    try:
+        mic.start(frames.append)
+        wait(lambda: len(frames) > 40)
+        assert {len(f) for f in frames} == {320} and hz(frames) == pytest.approx(400, abs=10)  # 20 ms frames of that source
+        n = len(frames)
+        a.remove()  # what this PipeWire / WirePlumber does to the recording when its source goes (printed, not asserted)
+        time.sleep(1.0)
+        print(f'source removed under parec: parec {"ended" if mic._proc.poll() is not None else "still running"}, '
+              f'end reported {ended}, {len(frames) - n} frames after the removal')
+    finally:
+        ended.clear()
+        mic.stop()
+        a.remove()
+    assert not ended  # stop() is no outage
+
+
+@pytest.mark.parametrize('end_reported', [True, False])
+def test_microphone_reopens_when_the_source_goes(monkeypatch, end_reported):
+    """The saved microphone is unplugged: the default one takes over, once in the tray; with none left the app waits
+    for PipeWire to announce a source (an event, not polling) and takes it. `end_reported=False`: the stream outlives
+    its device without an end (WirePlumber 0.5 on ubuntu-latest), only the removal event tells."""
+    from peresmeshnik.app import Microphone
+    from peresmeshnik.audio import mic as mic_mod
+    if not end_reported:
+        start = mic_mod.Mic.start
+
+        def silent(self, on_frames):
+            start(self, on_frames)
+            self.on_end = None
+        monkeypatch.setattr(mic_mod.Mic, 'start', silent)
+    a, b = Source('test_mic_a', 400), Source('test_mic_b', 700)
+    frames, states = [], []
+    mic = Microphone('test_mic_a', states.append)
+    c = None
+    try:
+        mic.start(frames.append)
+        wait(lambda: len(frames) > 40)
+        assert hz(frames) == pytest.approx(400, abs=10)
+        a.remove()  # unplugged
+        wait(lambda: len(states) == 2, show=lambda: states)
+        assert states[0].startswith('error: the microphone went away (test_mic_a') and states[0].endswith('; reopening')
+        assert states[1] == 'translating (the microphone is back: test_mic_b)'
+        n = len(frames)
+        wait(lambda: len(frames) > n + 40)
+        assert hz(frames) == pytest.approx(700, abs=10)
+        b.remove()  # no microphone at all now
+        wait(lambda: len(states) == 3, show=lambda: states)
+        time.sleep(0.5)
+        assert len(states) == 3  # waiting, quietly
+        c = Source('test_mic_c', 1000)  # plugged in
+        wait(lambda: len(states) == 4, show=lambda: states)
+        assert states[3] == 'translating (the microphone is back: test_mic_c)', states
+        n = len(frames)
+        wait(lambda: len(frames) > n + 40)
+        assert hz(frames) == pytest.approx(1000, abs=10)
+    finally:
+        mic.stop()
+        for s in (a, b, c):
+            if s:
+                s.remove()
+    n = len(frames)
+    time.sleep(0.2)
+    assert len(frames) == n  # stopped for good

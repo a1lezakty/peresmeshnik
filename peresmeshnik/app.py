@@ -605,7 +605,7 @@ def _quit_on_signals(qapp) -> None:
     import signal
     import socket
 
-    from PySide6.QtCore import QSocketNotifier
+    from PySide6.QtCore import QSocketNotifier, QTimer
     r, w = socket.socketpair()
     r.setblocking(False)
     w.setblocking(False)
@@ -615,4 +615,6 @@ def _quit_on_signals(qapp) -> None:
     qapp._signal_sockets = (r, w, notifier)
     for name in ('SIGTERM', 'SIGINT', 'SIGHUP'):
         if hasattr(signal, name):  # no SIGHUP on Windows
-            signal.signal(getattr(signal, name), lambda *_: qapp.quit())
+            # queued: the handler runs between any two bytecodes of the GUI thread, e.g. inside the hotkey's
+            # X read, and a direct quit() (aboutToQuit: hotkey.close) would close its display under it
+            signal.signal(getattr(signal, name), lambda *_: QTimer.singleShot(0, qapp.quit))

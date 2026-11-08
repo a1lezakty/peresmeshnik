@@ -182,6 +182,29 @@ def test_selftest_cleans_up_when_playing_fails(devices, monkeypatch):
     assert not ours()  # the temporary call sink and virtual mic are gone
 
 
+def test_a_signal_quits_after_the_running_slot():
+    """SIGTERM's Python handler runs between any two bytecodes of the GUI thread: a direct quit() there ran
+    aboutToQuit (hotkey.close: XCloseDisplay) inside the hotkey's X read, which then crashed (SIGSEGV on CI)."""
+    code = """if True:
+        import os, signal
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QApplication
+        from peresmeshnik.app import _quit_on_signals
+        qapp = QApplication([])
+        seen = []
+        qapp.aboutToQuit.connect(lambda: seen.append('quit'))
+        _quit_on_signals(qapp)
+        def slot():
+            os.kill(os.getpid(), signal.SIGTERM)
+            seen.append('slot end')
+        QTimer.singleShot(0, slot)
+        qapp.exec()
+        print(seen)"""
+    r = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, timeout=30,
+                       env={**os.environ, 'QT_QPA_PLATFORM': 'offscreen'})
+    assert r.stdout.strip() == "['slot end', 'quit']", r.stdout + r.stderr
+
+
 @pytest.mark.filterwarnings('ignore::pytest.PytestUnhandledThreadExceptionWarning')  # out.py's writer sees the pipe go
 def test_headphones_reopen_when_the_device_goes(devices):
     from peresmeshnik.app import Headphones

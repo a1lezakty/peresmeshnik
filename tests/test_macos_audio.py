@@ -648,7 +648,7 @@ def test_headphones_unknown_to_portaudio_play_on_the_default_meanwhile(fakedevic
         hp.play(tone(0.3, sr=22050), 22050)
         hp2.play(tone(0.3, sr=22050), 22050)
         devices = [h._out and h._out.device for h in (hp, hp2)]
-        waits = hp._arrival is not None
+        waits, asked_first = hp._arrival is not None, list(asked)
         # they change (out and in again), still unknown to PortAudio after the "refresh": the waiting Arrival fires,
         # the output stays on a device that plays (N4) and waits for the next change
         unplug(phones)
@@ -662,7 +662,7 @@ def test_headphones_unknown_to_portaudio_play_on_the_default_meanwhile(fakedevic
         if before:
             set_default_output(before)
     print(f'unknown to PortAudio: refresh asked {len(asked)}, then {devices}; {states}')
-    assert first is None and asked == [1]  # the first chunk: a refresh is asked, nothing plays yet
+    assert first is None and asked_first == [1]  # the first chunk: a refresh is asked, nothing plays yet
     assert devices == [SPEAKERS2, SPEAKERS2] and waits  # then the default, and back to them when they change
     assert stayed == SPEAKERS2
 

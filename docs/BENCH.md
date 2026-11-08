@@ -1015,6 +1015,7 @@ measured: a real Mac (CoreML / Metal / MPS: no Apple GPU in CI), real headphones
 | idle CPU of the .app, 60 s after the same 15 s as `tests/test_idle_cpu.py` (limit 0.13 s) | 0.010, 0.004, 0.009, 0.005 s (the 15 s before, not gated: 0.057–0.129 s); `tests/test_idle_cpu.py` from Python: 0.007, 0.026 s |
 | SIGTERM | exit code 0 |
 | frozen cloud direction with a fake key | Google's refusal ("API key not valid"), exit code 1: google-genai is in the bundle |
+| `piper-runner.exe` (windowed) on an error (a missing voice) | its traceback, exit code 1: no dialog left waiting |
 | frozen CLI: `models fetch silero-vad` over HTTPS from the bundle; `run` on the 30 s call (Parakeet + OPUS-MT + the bundled Piper runner), RTF / CPU s per audio s | 0.67 / 1.27, 0.56 / 1.01, 0.66 / 1.17, 0.70 / 1.20, 0.68 / 1.17; from Python in the same job as the last two: 0.67 / 1.24, 0.64 / 1.16 (the frozen app costs the same; runners of this type vary: the work gate gave 0.37–0.44 / 0.69–0.83) |
 
 The base app is torch-free (ARCHITECTURE §10): a local me → them clone needs the voice pack, which is not
@@ -1128,3 +1129,49 @@ unplugged there) it is called directly while a tone goes BlackHole 16ch → `Bla
   it in 0.38 s; unplugged: `Watch` tells in 0.08 s, the default plays again. Saved headphones Core Audio has and
   PortAudio does not see even after its refresh: the default plays meanwhile. With the microphone's streams (S2) stopped at the same time it
   should stay one stop long; not measured with them.
+
+## Stage 4: the Windows shell and the installer (S3)
+
+Measured 2026-11-08 on the GitHub runner `windows-latest` (Windows Server 2025, build 26100, in a VM: 4 cores,
+16 GB, no GPU, no sound devices; its own desktop at 1024×768 with a light taskbar; `tests/test_windows.py` in
+ci.yml, `tests/test_app_windows.py` in release.yml, several runs). Not measured: a desktop Windows 10 / 11
+(SmartScreen, a user's own theme switch, high DPI), a real call, VB-Cable, CUDA under Windows (USER-CHECKS).
+
+### The installer and the .zip
+
+| | windows-latest |
+|---|---|
+| build (`packaging/windows/build.sh`: PyInstaller 6.22, the Piper runner, licenses, `zipfile`, Inno Setup 6.7 `ISCC`, lzma2/max) | 185 s (PyInstaller ≈ 100 s) |
+| installed folder / installer / `.zip` (no models, no torch) | 339 MB / 109 MB / 150 MB; without the rest of the standard library (it is there for the voice pack, ARCHITECTURE §10): 336 / 108 / 149 MB |
+| silent install for the current user (`/VERYSILENT /CURRENTUSER`): the files, a Start menu shortcut, an uninstall entry, no start at sign-in | 12.7, 14.1, 12.2, 11.7, 9.4 s |
+| installed app → "idle" (its first start: the wizard and a sample subtitle on screen) | 0.92, 0.90, 0.78, 0.64, 0.59 s; RSS 93–94 MB |
+| idle CPU of the installed app, 60 s (limit 0.13 s) | 0.000, 0.000, 0.000, 0.016, 0.000 s |
+| taskkill (a posted WM_CLOSE) of the installed app, and of the app started from its Start menu shortcut | exit code 0 |
+| update over the running app (the installer asks it to quit first) | 11.2, 12.9, 11.3, 10.0, 8.5 s; the app exits with code 0 |
+| silent uninstall with the app running | the app exits with code 0; the folder, shortcut and uninstall entry are gone |
+| frozen CLI from the `.zip` in a folder with spaces: `models fetch` over HTTPS; `run` on the 30 s call (Parakeet + OPUS-MT + the bundled `piper-runner.exe`), RTF / CPU s per audio s | 0.635 / 1.288, 0.633 / 1.281, 0.525 / 1.056, 0.274 / 0.537, 0.280 / 0.557; from Python in the same jobs 0.636 / 1.284, 0.631 / 1.276, 0.525 / 1.059, 0.278 / 0.544, 0.282 / 0.560: the frozen app costs the same (runners of this type vary 2×) |
+| frozen cloud direction with a fake key | Google's refusal ("API key not valid"), exit code 1: google-genai is in the bundle |
+| `piper-runner.exe` (windowed) on an error (a missing voice) | its traceback, exit code 1: no dialog left waiting |
+
+### Tray, overlay, hotkey (what the runner can show)
+
+| Check | How | Result |
+|---|---|---|
+| tray icon | `Shell_NotifyIconGetRect` for the app's tray window (Qt's hidden `QTrayIconMessageWindow`, id 0); a screenshot | in the notification area, 32×48 at the clock; the same from the Start menu shortcut |
+| icon under the taskbar's theme | `SystemUsesLightTheme` flipped and `WM_SETTINGCHANGE "ImmersiveColorSet"` broadcast, as Settings does | glyph lightness 1.00 on a dark taskbar, 0.00 on a light one, switched without a restart |
+| overlay window | `GetWindowLongPtr(GWL_EXSTYLE)` | `0x080800a8`: TOPMOST, TRANSPARENT, TOOLWINDOW, LAYERED, NOACTIVATE (from Qt's window flags) |
+| no focus taken | `GetForegroundWindow` before and after a subtitle shows | unchanged |
+| click-through | a synthetic click (`SendInput`) on the overlay | lands in the window under it |
+| above full-screen windows | another process shows a full-screen window, then one that is also always on top, and takes the foreground | the overlay stays above both in the z-order (`EnumWindows`); re-raised twice per test by the foreground hook |
+| hotkey | `RegisterHotKey` with `MOD_NOREPEAT`, a synthetic Ctrl+Alt+Shift+K (`SendInput`), the key held (3 key-downs) | fires once per press, another combo does not; the app gets it (`mode: translation is off`) |
+| hotkey refusals | Alt+Tab, Ctrl+Space, Win+Space, a bare F9, Shift+K; a combo another process holds | "switches windows in Windows", "... input method ...", "alone would take the key", "taken by another application or by Windows"; the old combo stays bound |
+| which combos the runner's Windows holds | `RegisterHotKey` | Win+E, Win+D taken (Explorer); Ctrl+Alt+Space (the default), Ctrl+Shift+Space, Win+Alt+Space, Ctrl+Alt+P free |
+| closing | taskkill; the wizard's own close (`SC_CLOSE`); `WM_QUERYENDSESSION` + `WM_ENDSESSION` (sign-out); Ctrl+Break | taskkill, sign-out, Ctrl+Break: exit code 0; the wizard closes and the app stays |
+| idle with tray, overlay and wizard (`tests/test_ui.py`), `tests/test_idle_cpu.py` | 60 s | 0.000 s, 0.000 s |
+
+`taskkill` posts WM_CLOSE to the app's visible windows (the overlay, the wizard) rather than to its hidden one,
+and Qt does not show the app-level filter `WM_SYSCOMMAND`: a posted WM_CLOSE is told from a window's own close
+by the filter seeing it twice in a row (Qt's dispatcher, then the window procedure); any WM_CLOSE to the hidden
+window (the installer's) quits. A command that fails in the
+windowed `.exe` (e.g. the cloud refusing a key) printed its error and then waited forever on PyInstaller's
+"Unhandled exception" dialog; `packaging/entry.py` now prints it and exits with code 1 when there is a stderr.

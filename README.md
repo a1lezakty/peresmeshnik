@@ -51,6 +51,41 @@ headphones): the app starts from the .dmg, its menu-bar icon, overlay and hotkey
 ~0 CPU and translates a recording with the bundled engines. A live check on a real Mac comes before the
 release is published.
 
+## Installation on Windows
+
+Windows 10 version 2004 or later, or Windows 11 (x64).
+
+1. Download `Peresmeshnik-<version>-windows-x64-setup.exe` from
+   [Releases](https://github.com/a1lezakty/peresmeshnik/releases) (its SHA-256 is in the release notes) and run
+   it. It installs for your user only, without administrator rights, into `%LOCALAPPDATA%\Programs\Peresmeshnik`,
+   with a Start menu shortcut; starting at sign-in is a checkbox, off unless you tick it. The `.zip` of the same
+   release is the same folder without an installer: unpack it anywhere and run `Peresmeshnik.exe`.
+2. The app is not code-signed, so SmartScreen stops the first start of the installer ("Windows protected your
+   PC"): click **More info → Run anyway**. Some antivirus programs distrust unsigned programs too.
+3. Install [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) yourself (unpack it, run its setup as
+   administrator, restart Windows): the virtual microphone that the other side hears. In your call app choose
+   **CABLE Output** as the microphone.
+4. Start Peresmeshnik from the Start menu: its icon is in the notification area (Windows may put it behind the
+   ^ arrow at first; drag it out to keep it in view). The setup wizard downloads the models (they are not in the
+   app, 0.5–2 GB depending on the choice). Use headphones: through speakers the microphone hears the translation.
+5. While translation is on, the app records the call app's own sound and mutes it on your speakers (you hear the
+   translation instead), and gives it back when translation is off. Telegram, Zoom, Discord and the like are found
+   by themselves; otherwise choose the app in the tray menu **Call app** while the call plays. A browser (Meet) is
+   taken with all of its sound, other tabs too.
+6. Without an NVIDIA GPU, what you say is translated and spoken to the other side by the cloud (Gemini); a local
+   clone of your own voice needs an NVIDIA GPU.
+
+The hotkey Ctrl+Alt+Space switches between translation and your live voice (Settings to change it; a combo that
+Windows keeps for itself, such as Alt+Tab or Win+Space, or that another app has taken is refused with the reason).
+The uninstaller (Settings → Apps → Peresmeshnik, or `unins000.exe` in its folder) closes the app and removes its files;
+your settings, voice and models stay in `%LOCALAPPDATA%\Peresmeshnik` until you delete that folder.
+
+Checked so far only on GitHub's `windows-latest` runners (Windows Server 2025 in a VM, without a GPU, real sound
+devices or a real call): the installer runs silently, the installed app starts, its tray icon, overlay and hotkey
+work there, it idles at ~0 CPU, closes cleanly when asked, and the frozen app translates a recording with the
+bundled engines. SmartScreen on a fresh PC, VB-Cable, a real call and the NVIDIA voice pack on Windows are
+checked by hand before the release is published.
+
 ### Trying it from source (Linux)
 
 Not ready for calls yet. With PipeWire and Python 3.11+: `uv run peresmeshnik app`. Qt needs
@@ -69,10 +104,10 @@ the app have their own licenses, listed in [docs/MODELS.md](docs/MODELS.md).
 
 Required Notice: Copyright (c) 2026 Akty (https://github.com/a1lezakty)
 
-The macOS app bundles a Piper TTS runner ([`piper-runner/`](piper-runner/), GPL-3.0, with
+The macOS and Windows apps bundle a Piper TTS runner ([`piper-runner/`](piper-runner/), GPL-3.0, with
 [piper-tts](https://github.com/OHF-Voice/piper1-gpl) and espeak-ng): a separate program the app talks
 to over a pipe. Its license and those of the other bundled packages are in
-`Peresmeshnik.app/Contents/Resources/licenses/`.
+`Peresmeshnik.app/Contents/Resources/licenses/` and in the `licenses` folder of the Windows install.
 
 ---
 

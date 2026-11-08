@@ -972,6 +972,9 @@ def cli(argv=None) -> int:
         def wake(self):  # a queued call: the GUI loop runs once more
             pass
     bridge = Bridge()
+    if sys.platform == 'win32':  # WM_CLOSE from outside (taskkill, an installer): quit as on SIGTERM
+        from peresmeshnik.ui import windows
+        windows.host().closing.connect(lambda: QTimer.singleShot(0, qapp.quit))
     overlay = SubtitleOverlay()
     ctl = Controller(overlay, bridge.state.emit, a.them_file, a.me_file)
     tray = Tray(ctl)
@@ -992,7 +995,7 @@ def cli(argv=None) -> int:
     binding = hotkey.Binding(backend, toggle_live, why)
     binding.done.connect(lambda combo, why: tray.hotkey_note(combo, why, announce=bool(why)))
     tray.toggle_live, tray.reload_hotkey = toggle_live, binding.bind
-    tray.hotkey_note('', why, announce=sys.platform.startswith(('linux', 'darwin')))  # Windows: no hotkey before stage 4
+    tray.hotkey_note('', why, announce=True)
     if why:
         print(f'warning: {why}', file=sys.stderr)
     binding.bind(s.ui.hotkey)
@@ -1024,7 +1027,7 @@ def cli(argv=None) -> int:
 
 
 def _quit_on_signals(qapp) -> None:
-    """SIGTERM, SIGHUP (the terminal closed) and Ctrl+C quit cleanly: the devices are removed. Python runs a
+    """SIGTERM, SIGHUP (the terminal closed), Ctrl+C and Ctrl+Break (Windows) quit cleanly: the devices are removed. Python runs a
     signal handler only between bytecodes and the Qt loop sits in C++: the C handler writes to a socket
     that wakes the loop."""
     import signal
@@ -1038,8 +1041,8 @@ def _quit_on_signals(qapp) -> None:
     notifier = QSocketNotifier(r.fileno(), QSocketNotifier.Read, qapp)
     notifier.activated.connect(lambda *_: r.recv(64))  # Python code runs: the handlers below fire
     qapp._signal_sockets = (r, w, notifier)
-    for name in ('SIGTERM', 'SIGINT', 'SIGHUP'):
-        if hasattr(signal, name):  # no SIGHUP on Windows
+    for name in ('SIGTERM', 'SIGINT', 'SIGHUP', 'SIGBREAK'):
+        if hasattr(signal, name):  # no SIGHUP on Windows, SIGBREAK only there
             # queued: the handler runs between any two bytecodes of the GUI thread, e.g. inside the hotkey's
             # X read, and a direct quit() (aboutToQuit: hotkey.close) would close its display under it
             signal.signal(getattr(signal, name), lambda *_: QTimer.singleShot(0, qapp.quit))

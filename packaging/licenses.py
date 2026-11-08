@@ -1,7 +1,15 @@
-"""Copy the license files of every package in this environment that the app ships into one folder.
+"""The licenses of a frozen build, after two checks. Shared by packaging/macos/build.sh and packaging/windows/build.sh:
 
-    python packaging/licenses.py OUT_DIR     (build.sh: Peresmeshnik.app/Contents/Resources/licenses)
+    python packaging/licenses.py OUT_DIR WARN_FILE RUNNER
+
+- WARN_FILE (the spec's copy of the app's PyInstaller warnings): the app must not import piper (GPL-3.0); it only
+  talks to the Piper runner over a pipe. The build fails otherwise, or when the file is missing (the check could
+  not run);
+- OUT_DIR gets the license files of every package in this environment that the app ships, ours, the runner's, and
+  where the runner's sources are (RUNNER: its path in the build, e.g. Contents/MacOS/piper-runner). A package that
+  only names its license gets the full text from packaging/licenses/; an unknown one fails the build.
 """
+import re
 import shutil
 import sys
 import sysconfig
@@ -9,16 +17,23 @@ from importlib import metadata
 from pathlib import Path
 
 TOOLS = {'pyinstaller', 'pyinstaller-hooks-contrib', 'pytest', 'ruff', 'pluggy', 'iniconfig', 'altgraph', 'macholib',
-         'pefile', 'pywin32-ctypes', 'pip'}  # build and test tools, never in the app (a license too many does no harm)
+         'pefile', 'pywin32-ctypes', 'pip', 'colorama'}  # build and test tools, never in the app (a license too many does no harm)
 LICENSE_WORDS = ('license', 'licence', 'copying', 'notice', 'authors', 'thirdparty')
-TEXTS = Path(__file__).parent / 'licenses'  # full texts for packages that only name their license
+ROOT = Path(__file__).resolve().parents[1]
+TEXTS = ROOT / 'packaging' / 'licenses'  # full texts for packages that only name their license
 
-out = Path(sys.argv[1])
+out, warn, runner = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+if not warn.is_file() or not warn.stat().st_size:
+    sys.exit(f'no {warn}: the GPL check cannot run')
+if re.search(r'excluded module named piper( |\.)', warn.read_text('utf-8', 'replace')):  # piper and piper.voice, not piper_x
+    sys.exit('the app imports piper (GPL): it must only talk to piper-runner over the pipe')
+version = re.search(r"__version__ = '([^']+)'", (ROOT / 'peresmeshnik' / '__init__.py').read_text())[1]
+
 out.mkdir(parents=True, exist_ok=True)
 missing = []
 for dist in metadata.distributions():
     name = dist.metadata['Name']
-    if name.lower() in TOOLS or name == 'peresmeshnik':  # ours: build.sh copies LICENSE
+    if name.lower() in TOOLS or name == 'peresmeshnik':  # ours: below
         continue
     files = [f for f in dist.files or [] if any(w in f.name.lower() for w in LICENSE_WORDS)
              and (len(f.parts) <= 2 or f.parts[1] == 'licenses')]  # <pkg>/LICENSE, *.dist-info/licenses/* (PEP 639)
@@ -48,3 +63,16 @@ if python_license.exists():
     shutil.copyfile(python_license, out / 'Python-LICENSE.txt')
 if missing:
     sys.exit('licenses: no license text for ' + '; '.join(missing))
+
+shutil.copyfile(ROOT / 'LICENSE', out / 'Peresmeshnik-LICENSE.txt')
+shutil.copyfile(ROOT / 'piper-runner' / 'LICENSE', out / 'piper-runner-LICENSE.txt')
+(out / 'piper-runner-SOURCE.txt').write_text(f'''\
+{runner} is a separate program under GPL-3.0-or-later, built with PyInstaller from:
+- piper-runner/piper_runner.py (on Windows with its entry packaging/windows/piper_entry.py) of
+  https://github.com/a1lezakty/peresmeshnik (version {version}, tag v{version});
+- piper-tts 1.8.0: https://github.com/OHF-Voice/piper1-gpl, tag v1.8.0 (its PyPI sdist has no C sources);
+- espeak-ng, built statically into piper's espeakbridge module: https://github.com/espeak-ng/espeak-ng, commit 724808c
+  (the GIT_TAG in piper1-gpl v1.8.0's CMakeLists.txt);
+- onnxruntime and numpy, whose licenses are in this folder.
+Peresmeshnik itself never imports it; it talks to it over stdin/stdout.
+''')

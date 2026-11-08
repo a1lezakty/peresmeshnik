@@ -57,6 +57,10 @@ class SubtitleOverlay(QWidget):
         self.paint_ms: deque[float] = deque(maxlen=10_000)
         self.caption.connect(self._on_caption)
         self.clear.connect(self._on_clear)
+        self.on_top = None
+        if sys.platform == 'win32':  # above other always-on-top windows too, while shown
+            from peresmeshnik.ui.windows import OnTop
+            self.on_top = OnTop()
 
     def side(self, name: str) -> OverlaySide:
         return OverlaySide(self, name)
@@ -94,6 +98,8 @@ class SubtitleOverlay(QWidget):
             if sys.platform == 'darwin':  # after show(): Qt sets the window's level and behaviour while showing it
                 from peresmeshnik.ui import macos
                 macos.overlay(int(self.winId()))
+            if self.on_top:
+                self.on_top.start(int(self.winId()))
         self.update()
 
     def _on_clear(self) -> None:
@@ -101,6 +107,8 @@ class SubtitleOverlay(QWidget):
         self._open.clear()
         self._shown = ()
         self.hide()
+        if self.on_top:
+            self.on_top.stop()
 
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt name)
         t = time.perf_counter()

@@ -46,11 +46,15 @@ class VirtualMic:
             raise RuntimeError('pactl/pacat not found: install pulseaudio-utils (PipeWire: pipewire-pulse)')
         self.latency_ms = latency_ms
         _remove_stale()
+        # never the default output or input in place of another device (the system's sound would go into the call,
+        # other apps would record our translation). Negative, not 0: WirePlumber 0.4 counts a device without a
+        # priority as -1, so 0 would win over it (measured); real ALSA / Bluetooth devices have ~1000-2000
+        low = 'priority.session=-10'
         self._modules = [
             _pactl('load-module', 'module-null-sink', f'sink_name={SINK}', 'channels=1',
-                   f"sink_properties='device.description=\"{NAME} (feed)\"'").strip(),
+                   f"sink_properties='device.description=\"{NAME} (feed)\" {low}'").strip(),
             _pactl('load-module', 'module-remap-source', f'master={SINK}.monitor', f'source_name={SOURCE}', 'channels=1',
-                   f"source_properties='device.description=\"{NAME}\"'").strip(),
+                   f"source_properties='device.description=\"{NAME}\" {low}'").strip(),
         ]
         self._q: queue.Queue = queue.Queue()
         self._proc: subprocess.Popen | None = None

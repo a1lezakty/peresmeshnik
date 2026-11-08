@@ -4,6 +4,8 @@
     python bench/me_them.py input                       # 30 s of the enrolled reader, other lines than the reference
     python bench/me_them.py run --voice DIR --model-dir DIR    # clone in this process (GPU box; on CPU it falls behind)
     CLONE_SERVER='<command>' python bench/me_them.py run --remote   # clone on a GPU box, audio back over a pipe
+    CLONE_SERVER='<command>' python bench/me_them.py run --remote --mic test_me_mic   # the recording goes into a test
+                                                        # PipeWire microphone, taken from there by name like the app
     python bench/me_them.py serve --voice DIR --model-dir DIR  # what $CLONE_SERVER starts on the GPU box
 
 `$CLONE_SERVER` is any command that starts `me_them.py serve` elsewhere (for example through ssh);
@@ -250,6 +252,14 @@ def run(a):
     d = pipeline.make_local('ru', 'en', threads=a.threads, tts=marked, voice=v)
     d.realtime = True
     load_s = time.perf_counter() - t
+    events, src = d.events, []
+    if a.mic:  # the app's path: a microphone by its PipeWire name -> LiveSwitch -> the virtual mic
+        from peresmeshnik.app import Microphone, pactl
+        from peresmeshnik.audio.mic import LiveSwitch
+        src = [pactl('load-module', 'module-null-sink', f'sink_name={a.mic}_feed', 'channels=1').strip(),
+               pactl('load-module', 'module-remap-source', f'master={a.mic}_feed.monitor', f'source_name={a.mic}', 'channels=1').strip()]
+        sw = LiveSwitch(d, tts.sample_rate)
+        events, inp = sw.events, Microphone(a.mic)
     mic = VirtualMic()
     rec = Recorder(SOURCE)
     time.sleep(0.5)
@@ -260,7 +270,7 @@ def run(a):
 
     def consume():
         due = 0.0  # when what is queued in the mic has played (it plays back to back)
-        for e in d.events():
+        for e in events():
             if isinstance(e, Speech):
                 now = time.perf_counter()
                 k = next((k for k, f in enumerate(marked.firsts) if f is e.pcm), None)
@@ -278,7 +288,15 @@ def run(a):
     pcm = pipeline.read_audio(str(a.inp))
     i0 = rec.n
     cpu0, wall0 = time.process_time(), time.perf_counter()
-    pipeline.run(d, pcm, realtime=True)
+    if a.mic:  # my voice into the "real" microphone, at its own pace (pacat blocks), the app records it by name
+        inp.start(sw.feed)
+        subprocess.run(['pacat', '--playback', f'--device={a.mic}_feed', '--raw', '--format=float32le', f'--rate={pipeline.SAMPLE_RATE}',
+                        '--channels=1', '--latency-msec=20', '--property=node.dont-reconnect=true'],
+                       input=np.concatenate([pcm, np.zeros(pipeline.SAMPLE_RATE, np.float32)]).astype('<f4').tobytes(), check=True)
+        inp.stop()
+        print(f'microphone {inp._mic and inp._mic.source or a.mic}: {len(pcm) / pipeline.SAMPLE_RATE:.1f} s', flush=True)
+    else:
+        pipeline.run(d, pcm, realtime=True)
     feed_end = time.perf_counter()
     d.finish()
     th.join()
@@ -290,6 +308,8 @@ def run(a):
     x = rec.stop()[i0:]
     d.close()
     mic.remove()
+    for m in reversed(src):
+        subprocess.run(['pactl', 'unload-module', m], capture_output=True)
 
     for k, c in enumerate(clauses):  # clause end -> its translated audio at the call app's mic
         s, cap = starts.get(k), captions.get(c['clause'])
@@ -300,6 +320,12 @@ def run(a):
         c['mic_lag_s'] = round(heard - s, 3)  # virtual mic link, from when the audio was due to play
         c['call_lag_s'] = round(heard - (cap - c['caption_lag_s']), 3)  # from the clause end
         c['after_caption_s'] = round(heard - cap, 3)  # TTS + playback queue + virtual mic
+    for c in clauses if a.mic else ():  # LiveSwitch re-chunks the speech: the first new sound after the caption
+        cap = captions.get(c['clause'])
+        j = onset_after(x, rec.index(cap) - i0) if cap is not None else None
+        if j is not None:
+            heard = rec.wall(j + i0)
+            c['call_lag_s'], c['after_caption_s'] = round(heard - (cap - c['caption_lag_s']), 3), round(heard - cap, 3)
     for c in clauses:
         print(json.dumps(c, ensure_ascii=False))
     sr = tts.sample_rate
@@ -311,7 +337,8 @@ def run(a):
     hyp_dir = transcribe(np.concatenate(direct), sr) if direct else ''
     lags = [c['call_lag_s'] for c in clauses if c.get('call_lag_s') is not None]
     remote = getattr(tts, 'stats', [])
-    row = record('e2e_me_them', 'xtts-remote' if a.remote else 'xtts', device=f'remote-{tts.device}' if a.remote else (a.device or 'auto'),
+    row = record('e2e_me_them_mic' if a.mic else 'e2e_me_them', 'xtts-remote' if a.remote else 'xtts',
+                 device=f'remote-{tts.device}' if a.remote else (a.device or 'auto'),
                  threads=a.threads, audio_s=round(len(pcm) / pipeline.SAMPLE_RATE, 2), clauses=len(clauses),
                  load_s=round(load_s, 1), wall_s=round(wall, 1), tail_after_input_s=round(done - feed_end, 1),
                  cpu_s_per_audio_s=round(cpu / (len(pcm) / pipeline.SAMPLE_RATE), 3),
@@ -345,6 +372,8 @@ def main():
     r = sub.choices['run']
     r.add_argument('--in', dest='inp', type=Path, default=ROOT / 'me_them' / 'ru_30s.wav')
     r.add_argument('--remote', action='store_true', help='clone through $CLONE_SERVER')
+    r.add_argument('--mic', help='play the recording into a test microphone of this PipeWire name and take it from there '
+                                 'like the app (Microphone, LiveSwitch), not from the file')
     r.add_argument('--out-dir', default=str(ROOT.parent / 'out' / 'me_them'))
     a = ap.parse_args()
     {'input': make_input, 'run': run, 'serve': serve}[a.cmd](a)

@@ -9,8 +9,10 @@ inputs; turning it off closes them again, so the idle app holds no stream, no en
 timer. Linux devices live as long as the app: the call sink "Peresmeshnik Call" (the call's sound is
 moved there once) and the virtual mic "Peresmeshnik Mic"; while translation is off PipeWire loops the
 real microphone into the virtual mic, so the call still hears the user. The hotkey switches
-"translation <-> live voice": a direction that supports `set_live` is told so; for any other the input
-goes straight to the output instead. One app per sound server (a lock file).
+"translation <-> live voice": a direction that supports `set_live` is told so (me -> them: wrapped in
+audio/mic.LiveSwitch, a crossfade); for any other the input goes straight to the output instead. The
+microphone is the PipeWire source of the settings, reopened when it goes away. One app per sound server
+(a lock file).
 `--them-file` / `--me-file` feed recordings at their own pace instead of the devices (tests, demos).
 """
 from __future__ import annotations
@@ -20,6 +22,7 @@ import concurrent.futures
 import logging
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -29,6 +32,7 @@ from pathlib import Path
 import numpy as np
 
 from peresmeshnik import __version__, config
+from peresmeshnik.audio.resample import Resampler
 from peresmeshnik.engines import SAMPLE_RATE, Caption, Speech
 
 log = logging.getLogger('peresmeshnik.app')
@@ -45,24 +49,6 @@ def not_ours(name: str, what: str) -> str:
     if name.startswith(OURS):
         raise RuntimeError(f'the {what} is our own device {name}: choose your real device in the settings or the system')
     return name
-
-
-class Resampler:
-    """Linear resampling of a stream in chunks, keeping the fractional position and the last sample between
-    chunks: per-chunk rounding would add ~34 ms per minute at 16 -> 22.05 kHz.
-    ponytail: linear interpolation, fine for speech and the live pass-through; soxr if quality matters."""
-
-    def __init__(self, sr: int, to: int):
-        self.step, self.pos, self.prev = sr / to, 1.0, 0.0  # pos counts from the previous chunk's last sample
-
-    def __call__(self, pcm: np.ndarray) -> np.ndarray:
-        if self.step == 1.0:
-            return pcm
-        x = np.concatenate([[self.prev], pcm])
-        t = np.arange(self.pos, len(x) - 1, self.step)
-        self.pos = (t[-1] + self.step if len(t) else self.pos) - (len(x) - 1)
-        self.prev = x[-1]
-        return np.interp(t, np.arange(len(x)), x).astype(np.float32)
 
 
 class NoTts:
@@ -162,6 +148,161 @@ class Headphones:
             out.stop()  # plays out what pacat holds: outside the lock
 
 
+class NoMicrophone(RuntimeError):
+    """No microphone at all (none plugged in, or only our devices and monitors of sinks)."""
+
+
+def mic_source(saved: str, fallback: str = '') -> str:
+    """The microphone of me -> them, the same for the translation and for the loopback while it is off: the saved
+    PipeWire source when it is there, else the default input, else `fallback` (the default from before our devices
+    existed); never one of ours (the app would hear itself)."""
+    names = [line.split('\t')[1] for line in pactl('list', 'short', 'sources').splitlines() if '\t' in line]
+    if saved and (saved in names or saved.startswith(OURS)):
+        return not_ours(saved, 'microphone')
+    now = pactl('get-default-source').strip()
+    # then any real source: WirePlumber 0.5 may keep naming a default that is gone; a monitor of a sink is no
+    # microphone (the headphones' monitor would echo into the call)
+    for name in (now, fallback, *names):
+        if name and name in names and not name.startswith(OURS) and not name.endswith('.monitor'):
+            if saved or name != now:
+                log.warning('microphone %s is not there: using %s', saved or now or 'the default', name)
+            return name
+    missing = f'{saved} is not there and ' if saved else ''
+    if now.startswith(OURS):
+        raise NoMicrophone(f'no microphone: {missing}the default input is our own device {now}: choose your real '
+                           'microphone in the settings or the system')
+    raise NoMicrophone(f'no microphone: {missing}the default input is {now or "none"}; plug one in or choose it in the settings')
+
+
+class Microphone:
+    """`AudioIn` for me -> them from `mic_source`. While it runs one `pactl subscribe` watches PipeWire's events (no
+    polling): when its source is removed (a headset unplugged, a Bluetooth profile switch) or the stream ends by
+    itself, it is reopened on the saved source if it is back, else on the default, with one tray message per outage;
+    with no microphone at all the next new source is taken. The removal event matters: since WirePlumber 0.5 a
+    `node.dont-reconnect` stream may outlive its device without an end. When the event stream itself ends (the sound
+    server restarted) it subscribes again after a pause, longer while the server stays away, then reopens."""
+    RESUBSCRIBE_S, RESUBSCRIBE_MAX_S = 2.0, 30.0
+
+    def __init__(self, saved: str, on_state=lambda text: None, fallback: str = ''):
+        self.saved, self.on_state, self.fallback = saved, on_state, fallback
+        self._mic = self._index = self._watch = self._on_frames = None
+        self._stopped = False
+        self._wake = threading.Event()  # stop() ends a pause before resubscribing
+        self._lock = threading.Lock()  # the current stream: control thread (stop), events thread, a dead stream's reader
+        self._opening = threading.RLock()  # one reopen at a time (a source gone while opening retries from inside)
+
+    def start(self, on_frames) -> None:
+        self._on_frames, self._stopped = on_frames, False
+        self._wake.clear()
+        # subscribed before opening: a removal right after the start is still seen
+        self._watch = watch = self._subscribe()
+        try:
+            self._open()
+        except BaseException:
+            watch.kill()
+            watch.wait()
+            raise
+        threading.Thread(target=self._events, args=(watch,), name='mic-events', daemon=True).start()
+
+    @staticmethod
+    def _subscribe():
+        return subprocess.Popen(['pactl', 'subscribe'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+
+    def _index_of(self, name: str) -> str | None:
+        return next((line.split('\t')[0] for line in pactl('list', 'short', 'sources').splitlines()
+                     if line.split('\t')[1:2] == [name]), None)
+
+    def _open(self) -> str:
+        from peresmeshnik.audio.mic import Mic
+        name = mic_source(self.saved, self.fallback)
+        index = self._index_of(name)  # before the start: its removal event can come any time after
+        m = Mic(name)
+        m.on_end = lambda why: self._lost(m, why)
+        m.start(self._on_frames)
+        with self._lock:
+            if self._stopped:
+                m.stop()
+                return ''
+            self._mic, self._index = m, index
+        if self._index_of(name) != index:  # gone (or replaced) while opening: its event may have come before us
+            self._lost(m, f'{name} went away while opening')
+            return ''
+        return m.source
+
+    def _lost(self, m, why: str) -> None:
+        with self._lock:
+            if self._stopped or m is not self._mic:  # stopping, or a stream already given up
+                return
+            self._mic = self._index = None
+        m.stop()
+        log.warning('microphone: %s', why)
+        self.on_state(f'error: the microphone went away ({why}); reopening')
+        self._retry()  # the default input may be there already
+
+    def _retry(self) -> None:
+        with self._opening:
+            if self._mic is not None or self._stopped:
+                return
+            try:
+                name = self._open()
+            except Exception as e:
+                log.info('microphone: not yet (%s)', e)
+                return
+        if name:
+            self.on_state(f'translating (the microphone is back: {name})')
+
+    def _events(self, watch) -> None:
+        pause = self.RESUBSCRIBE_S
+        while True:
+            t0 = time.monotonic()
+            for line in watch.stdout:
+                ev = re.match(r"Event '(\w+)' on (\w+) #(\d+)", line)
+                if self._stopped:
+                    return
+                if not ev:
+                    continue
+                what, kind, index = ev.groups()
+                m = self._mic
+                if m is not None and kind == 'source' and what == 'remove' and index == self._index:
+                    self._lost(m, f'{m.source} was removed')
+                elif m is None and (kind == 'server' or (kind == 'source' and what == 'new')):
+                    self._retry()
+            watch.wait()
+            if self._stopped:
+                return
+            # the event stream ended: the sound server restarted or is gone. A repeat after a pause, not polling;
+            # the pause grows while the server stays away
+            pause = self.RESUBSCRIBE_S if time.monotonic() - t0 > self.RESUBSCRIBE_MAX_S else pause
+            log.warning('microphone: PipeWire events ended (pactl exit %s); subscribing again in %g s', watch.returncode, pause)
+            if pause == self.RESUBSCRIBE_S:  # once per outage
+                self.on_state(f'error: lost the sound server; reconnecting the microphone in {pause:g} s')
+            if self._wake.wait(pause):
+                return
+            with self._lock:
+                if self._stopped:
+                    return
+                self._watch = watch = self._subscribe()
+            pause = min(pause * 2, self.RESUBSCRIBE_MAX_S)
+            m = self._mic
+            if m is None:
+                self._retry()
+            elif m._proc is None or m._proc.poll() is not None:  # went down with the server, its end not reported
+                self._lost(m, f'{m.source} ended with the sound server')
+            else:  # only the events were gone
+                self.on_state('translating (the sound server is back)')
+
+    def stop(self) -> None:
+        with self._lock:
+            self._stopped = True
+            mic, self._mic = self._mic, None
+        self._wake.set()
+        if self._watch:
+            self._watch.kill()
+            self._watch.wait()
+        if mic:
+            mic.stop()
+
+
 class CallSink:
     """"Peresmeshnik Call": the null sink the call's sound is moved into (S1, once), kept for the app's run."""
 
@@ -244,6 +385,10 @@ class Side:
             self.directions.append((voice, local_captions is None, True))
             if local_captions:
                 self.directions.append((local_captions, True, False))
+        d, captions, speech = self.directions[0]
+        if name == 'me' and not getattr(d, 'supports_live', False):  # "translation <-> live voice" crossfaded (S2)
+            from peresmeshnik.audio.mic import LiveSwitch
+            self.directions[0] = (LiveSwitch(d), captions, speech)
 
     def _local(self, s: config.Settings):
         from peresmeshnik.pipeline import make_local
@@ -284,7 +429,7 @@ class Side:
         if self.live and not self._supports_live:
             self._live_q.put(pcm)  # ponytail: a hard switch, no crossfade; S2's set_live crossfades
             return
-        for d, _, _ in self.directions:
+        for d, _, _ in self.directions[:1] if self.live else self.directions:  # live: only the switch, nothing translates
             d.feed(pcm)
 
     def _pass_through(self) -> None:
@@ -310,6 +455,9 @@ class Side:
     def set_live(self, on: bool) -> None:
         if self._supports_live:
             self.directions[0][0].set_live(on)
+            if on and not self.live:  # the local subtitles get no input while live: a pause closes their open clause
+                for d, _, _ in self.directions[1:]:
+                    d.feed(np.zeros(SAMPLE_RATE // 2, np.float32))
         elif on != self.live:
             self.out.flush()  # drop translated speech still queued (going live) or the live tail (back)
         self.live = on
@@ -383,11 +531,7 @@ class Controller:
         self.startup_error = '; '.join(errors)
 
     def _mic_source(self) -> str:
-        s = self.settings or config.load()
-        if s.ui.mic:
-            return not_ours(s.ui.mic, 'microphone')
-        now = pactl('get-default-source').strip()
-        return now if not now.startswith(OURS) else not_ours(self._mic, 'default input')
+        return mic_source((self.settings or config.load()).ui.mic, self._mic)
 
     def _loopback(self, on: bool) -> None:
         """Translation off: PipeWire loops the real microphone into "Peresmeshnik Mic" (none of our CPU), so the
@@ -402,6 +546,8 @@ class Controller:
             if on and not loops:
                 pactl('load-module', 'module-loopback', f'source={self._mic_source()}', f'sink={MIC_SINK}',
                       'latency_msec=20', 'source_dont_move=true', 'sink_dont_move=true')
+        except NoMicrophone as e:  # nothing to loop; me -> them says so when translation is turned on
+            log.warning('microphone loopback: %s', e)
         except Exception as e:
             log.warning('microphone loopback: %s', e)
             if on:
@@ -417,7 +563,7 @@ class Controller:
         for name in ('them', 'me'):  # a side that cannot start (no key, no voice pack, no device) does not stop the other
             if self.devices or files[name]:
                 try:
-                    inp = FileIn(files[name]) if files[name] else self._input(name)
+                    inp = FileIn(files[name]) if files[name] else self._input(name, s)
                     self.sides.append(Side(name, s, inp, self._output(name, s), self.overlay.side(name), self.on_state))
                 except Exception as e:
                     log.exception('%s', name)
@@ -434,14 +580,14 @@ class Controller:
             self.on_state(f'translating ({", ".join(f"{x.name}: {x.engine}" for x in self.sides)}; '
                           f'ready in {time.perf_counter() - t:.1f} s)')
 
-    def _input(self, name: str):
+    def _input(self, name: str, s: config.Settings | None = None):
+        s = s or self.settings or config.load()
         if name == 'them':
             if self._call is None:
                 raise RuntimeError(f'no call sink ({self.startup_error or "no sound server"})')
             return CallCapture(self._call.name)
-        from peresmeshnik.audio.mic import Mic
-        not_ours(pactl('get-default-source').strip(), 'default input')  # Mic(None) records it
-        return Mic(None)  # S2's Mic takes the PipeWire source (s.ui.mic) in stage 2
+        mic_source(s.ui.mic, self._mic)  # no microphone now: this side says why, the other one still starts
+        return Microphone(s.ui.mic, self.on_state, self._mic)
 
     def _output(self, name: str, s: config.Settings):
         if not sys.platform.startswith('linux'):

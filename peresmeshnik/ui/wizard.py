@@ -1,5 +1,6 @@
 """Setup wizard (first run, and from the tray): languages and engines, devices, models with their
-licenses, the loopback self-test, the hotkey and a test phrase in both directions.
+licenses, the loopback self-test, your voice (recorded or imported, checked, and the clone checked),
+the hotkey and a test phrase in both directions.
 
 Slow work (downloads, the self-test, the test phrase) runs on worker threads and reports through
 Qt signals; nothing is polled. Settings are written when the wizard finishes.
@@ -18,6 +19,7 @@ from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QKeySequenceEdit,
@@ -291,6 +293,173 @@ class SelfTestPage(QWizardPage):
         self.completeChanged.emit()
 
 
+class VoicePage(QWizardPage):
+    """Voice enrollment (ARCHITECTURE §7, step 5): record or import 30-60 s of the user's own voice, the quality report
+    with its verdict; with the local clone also the clone check (voice.check_clone). Optional for a cloud me -> them.
+    A new take is kept as the profile "<name>.new" (the test phrase already speaks with it) and replaces "<name>" only
+    when the wizard finishes; cancelled, it is dropped."""
+    progress = Signal(float)
+    result = Signal(object)  # (Report, Voice | None), or an error text
+    checked = Signal(str)
+    seconds = 45.0
+    name = 'me'
+
+    def __init__(self, w: SetupWizard):
+        super().__init__()
+        self.w = w
+        self.setTitle('Your voice')
+        lay = QVBoxLayout(self)
+        self.prompt = QLabel()
+        self.prompt.setWordWrap(True)
+        row = QHBoxLayout()
+        self.record_button = QPushButton(f'Record {self.seconds:.0f} s')
+        self.record_button.clicked.connect(self.record)
+        self.import_button = QPushButton('Import a recording…')
+        self.import_button.clicked.connect(lambda: self.import_file())
+        self.check_button = QPushButton('Check the clone')
+        self.check_button.clicked.connect(self.check_clone)
+        for b in (self.record_button, self.import_button, self.check_button):
+            row.addWidget(b)
+        self.bar = QProgressBar()
+        self.bar.setVisible(False)
+        self.out, self.clone_out = QLabel(), QLabel()
+        for x in (self.out, self.clone_out):
+            x.setWordWrap(True)
+        lay.addWidget(self.prompt)
+        lay.addLayout(row)
+        for x in (self.bar, self.out, self.clone_out):
+            lay.addWidget(x)
+        self.progress.connect(lambda t: self.bar.setValue(int(t)))
+        self.result.connect(self._result)
+        self.checked.connect(self._checked)
+        self.voice = None
+        self.running = False
+        self.draft = f'{self.name}.new'
+
+    def local(self) -> bool:
+        return self.w.s.me_to_them == 'local'
+
+    def initializePage(self) -> None:  # noqa: N802
+        from peresmeshnik import voice
+        s = self.w.s
+        self.setSubTitle('"Me → them" on this computer speaks the translation in your voice. Read the text below aloud for '
+                         f'about {self.seconds:.0f} s, at your normal pace, in a quiet room — or import 30-60 s of your own '
+                         'voice. The recording stays on this computer.' if self.local() else
+                         'Optional: "me → them" runs in the cloud, in Gemini\'s voice. Your recording is only needed for the '
+                         'local clone.')
+        self.prompt.setText(voice.PROMPTS.get(s.my_lang, 'Read any text in your language aloud, at your normal pace.'))
+        self.check_button.setVisible(self.local())
+        if self.voice is None and s.local.voice and (voice.voices_dir() / s.local.voice / 'voice.json').exists():
+            self.voice = voice.load(s.local.voice)
+            q = self.voice.meta.get('quality', {})
+            self.out.setText(f'Saved voice "{self.voice.name}": {q.get("seconds", 0):.0f} s, '
+                             f'recorded {self.voice.meta.get("created", "")}.')
+        self._buttons()
+
+    def isComplete(self) -> bool:  # noqa: N802
+        return not self.running and (not self.local() or self.voice is not None)
+
+    def translating(self) -> bool:
+        """Translation on: a local me -> them already holds the clone; the check would load a second one (~3 GB)."""
+        return bool(getattr(getattr(getattr(self.w, 'tray', None), 'ctl', None), 'on', False))
+
+    def _buttons(self) -> None:
+        for b in (self.record_button, self.import_button):
+            b.setEnabled(not self.running)
+        self.check_button.setEnabled(not self.running and self.voice is not None and not self.translating())
+        self.check_button.setToolTip('Turn translation off first: the check loads a second clone (~3 GB)'
+                                     if self.translating() else '')
+        self.completeChanged.emit()
+
+    def _run(self, work) -> None:
+        self.running = True
+        self._buttons()
+
+        def go():
+            try:
+                work()
+            except Exception as e:  # no microphone, an unreadable file, no voice pack: say so
+                self.result.emit(f'error: {e}')
+        threading.Thread(target=go, name='voice', daemon=True).start()
+
+    def record(self) -> None:
+        from peresmeshnik import voice
+        from peresmeshnik.audio.mic import record
+        s, sr = self.w.s, 24_000  # above the 16 kHz pipeline rate: the clone conditions at 22.05 kHz
+        self.out.setText('Recording… read the text aloud.')
+        self.clone_out.setText('')
+        self.bar.setMaximum(int(self.seconds))
+        self.bar.setValue(0)
+        self.bar.setVisible(True)
+        self._run(lambda: self.result.emit(voice.enroll(record(self.seconds, s.ui.mic or None, sr, self.progress.emit), sr,
+                                                        self.draft, s.my_lang, voice.PROMPTS.get(s.my_lang))))
+
+    def import_file(self, path: str | None = None) -> None:
+        from peresmeshnik import voice
+        path = path or QFileDialog.getOpenFileName(self, 'Your voice: a recording of 30-60 s', '',
+                                                   'Audio (*.wav *.flac *.ogg *.mp3)')[0]
+        if path:
+            self.clone_out.setText('')
+            self._run(lambda: self.result.emit(voice.enroll(*voice.read_audio(Path(path)), self.draft, self.w.s.my_lang)))
+
+    def _result(self, res) -> None:
+        from peresmeshnik import voice
+        self.running = False
+        self.bar.setVisible(False)
+        if isinstance(res, str):
+            self.out.setText(res)
+        else:
+            r, v = res
+            saved = ' Kept as your new voice: it is saved when you finish the wizard.' if v else ' Not saved.'
+            self.out.setText(f'<b>{voice.verdict(r)}</b>{saved}<br>{voice.summary(r)}')
+            if v:
+                self.voice, self.w.s.local.voice = v, v.name
+        self._buttons()
+
+    def check_clone(self) -> None:
+        """The clone says the test phrases in their language; the app's ASR must understand them (voice.check_clone)."""
+        from peresmeshnik import models, voice
+        s, v = self.w.s, self.voice
+        if self.translating():
+            self.clone_out.setText('Turn translation off first: the check loads a second clone (~3 GB).')
+            return
+        self.clone_out.setText('Checking the clone: it says two test phrases… (first time: loading the voice pack)')
+
+        def work():
+            try:
+                from peresmeshnik.local.clone import XttsClone
+            except ImportError as e:
+                self.checked.emit(f'The clone check needs the voice pack (torch, coqui-tts): {e}')
+                return
+            from peresmeshnik.local.asr import OnnxAsr
+            try:
+                tts = XttsClone(models.path(s.local.clone), threads=s.local.threads)
+                asr = OnnxAsr(s.local.asr[s.their_lang], s.local.threads)
+                self.checked.emit(voice.clone_verdict(voice.check_clone(tts, v, s.their_lang, asr)))
+            except Exception as e:  # a model not downloaded yet, out of memory
+                self.checked.emit(f'error: {e}')
+        self.running = True
+        self._buttons()
+        threading.Thread(target=work, name='clone-check', daemon=True).start()
+
+    def _checked(self, text: str) -> None:
+        self.running = False
+        self.clone_out.setText(text)
+        self._buttons()
+
+    def commit(self) -> None:
+        """The wizard finished: a new take becomes the profile."""
+        from peresmeshnik import voice
+        if self.voice is not None and self.voice.name == self.draft:
+            self.voice = voice.promote(self.draft, self.name)
+            self.w.s.local.voice = self.name
+
+    def rollback(self) -> None:
+        """The wizard was cancelled: the saved profile stays as it was."""
+        from peresmeshnik import voice
+        voice.discard(self.draft)
+
+
 class HotkeyPage(QWizardPage):
     state = Signal(str)
 
@@ -389,7 +558,8 @@ class SetupWizard(QWizard):
         self.tray, self.s, self.key = tray, config.load(), ''
         self.setWindowTitle('Peresmeshnik setup')
         self.pages = [LanguagesPage(self)] + ([DevicesPage(self)] if LINUX else []) + [ModelsPage(self)] \
-            + ([SelfTestPage(self)] if LINUX else []) + [HotkeyPage(self), DonePage()]
+            + ([SelfTestPage(self)] if LINUX else []) + [VoicePage(self), HotkeyPage(self), DonePage()]
+        self.voice_page = next(p for p in self.pages if isinstance(p, VoicePage))
         for p in self.pages:
             self.addPage(p)
         self.accepted.connect(self.finish)
@@ -403,8 +573,10 @@ class SetupWizard(QWizard):
     def cancel(self) -> None:
         if (saved := config.load().ui.hotkey) != self.s.ui.hotkey:  # the hotkey page already bound the new one
             self.tray.reload_hotkey(saved)
+        self.voice_page.rollback()
 
     def finish(self) -> None:
+        self.voice_page.commit()  # before saving: the settings name the profile, not the draft
         config.save(self.s)
         self.tray.sync()
         self.tray.restart()

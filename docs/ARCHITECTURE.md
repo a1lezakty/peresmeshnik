@@ -129,7 +129,8 @@ Requirement from day one (Zagon 0.1.2 burned 104 % CPU on a redraw loop):
 are closed, `Direction.close()` has unloaded the engines or left them without busy threads. CI
 gate: `tests/test_idle_cpu.py` starts the app (tray, hidden overlay, virtual mic, and the setup
 wizard, since CI is a first run; Linux under Xvfb with a tray host), waits 60 s and fails above
-**0.13 s CPU** (Linux, macOS, Windows on pushes to main and on PRs); `tests/test_ui.py` repeats it
+**0.13 s CPU** (on macOS the 60 s start 15 s after the idle line; AppKit's one-off work after the first
+show, 0.07–0.09 s, is printed, not gated) (Linux, macOS, Windows on pushes to main and on PRs); `tests/test_ui.py` repeats it
 with the overlay on screen. The working-mode gate (`tests/test_pipeline_cpu.py`,
 CI job `work-gate`, three OSes) runs `peresmeshnik run` on a 30 s recording and fails at RTF ≥ 1.0
 or ≥ 2.0 CPU s per audio s (0.27–0.54 and 0.55–1.09 on the runners, which vary up to 2× between runs; BENCH.md, stage 1).
@@ -151,6 +152,7 @@ RAM = peak RSS of the model's own process):
 | Link | Threads | CPU s / audio s, M1 / x86 | RAM | Notes |
 |---|---|---|---|---|
 | Silero VAD | 1 | 0.003–0.01 (stage 1, BENCH `pipeline` vad_rtf) | ~50 MB | runs on every frame while a direction is on |
+| Microphone (`parec`) + live switch (me → them) | 1 reader + 1 events thread | 0.0096 + 0.012 while sound goes out (BENCH stage 2) | — | the switch is idle while the direction is silent |
 | ASR Parakeet v3 int8 | 2 | 0.10 / 0.18 | 1.4–1.8 GB | partials: re-running every 300 ms on a window growing to 3 s costs ~0.5 (M1) – 0.9 (x86) core while someone speaks; a 500 ms refresh halves it for +100 ms subtitle latency |
 | ASR GigaAM v3 e2e (RU, ≥ 16 GB) | 2 | 0.16 / 0.15 | 1.7–1.8 GB | fp32; int8 to try in stage 1 |
 | ASR T-one (RU partials, ≥ 16 GB) | 1 | 0.21 / 0.19 | 0.7 GB | 12–19 ms per 300 ms chunk |
@@ -226,7 +228,12 @@ output looks like loudspeakers), 3 (`ui/selftest.py`: a 0.4 s chirp through the 
 the virtual mic and the headphones sink, each recorded back and found by cross-correlation; the
 microphone's level while the user speaks), 6 (hotkey; a recorded phrase played through each
 direction into the headphones, subtitles in the overlay) and a last page for step 4 in words.
-Voice enrollment (5) gets its page with S2's enrollment hooks.
+Voice enrollment (5, `VoicePage`): record from the chosen microphone or import 30–60 s; the verdict of
+`voice.check` (length, speech time, level, clipping, background, a telephone band) and, for a local
+me → them, of `voice.check_clone` (the clone says two test phrases: the app's ASR must understand them,
+and XTTS's speaker encoder must find the recorded voice; thresholds in BENCH; not while a local
+me → them runs, a second clone would not fit). A bad take is not kept; a good one replaces the saved voice
+on Finish only (a draft `voices/<name>.new` until then, Cancel drops it).
 
 **App shell** (`app.py`, `ui/`). The tray menu: translation on/off, live voice (the hotkey's
 fallback), local / cloud per direction, settings, wizard, quit; without a system tray (GNOME without
@@ -234,8 +241,12 @@ the AppIndicator extension) the same menu sits on a button in a small window. Tr
 the engines on one control thread ("warming up"), then opens capture; off closes every stream and
 engine again. A cloud direction speaks with Gemini and takes its subtitles from the local ASR + MT
 (`cloud.subtitles = false`, faster, §4) or from Gemini. The hotkey calls `Direction.set_live` where a
-direction supports it (S2's crossfade); otherwise the app sends the input straight to the output and
-skips the direction (a hard switch). The overlay keeps the last two clauses (rows keyed by clause
+direction supports it; the me → them direction, local or cloud, is wrapped in `LiveSwitch`
+(`audio/mic.py`): its output is clocked by the microphone's frames, so the queued translation stays in
+the process, and each switch is a 30 ms equal-power crossfade, no click (BENCH). While live, the side's
+other directions (the local subtitles of a cloud me → them) get no input, only a pause that closes their
+open clause: nothing is translated. For any other direction
+(them → me for now) the app sends the input straight to the output and skips it (a hard switch). The overlay keeps the last two clauses (rows keyed by clause
 number; cloud captions without one attach to the side's open row) and repaints only when the visible
 text changes. On Wayland the windows go through XWayland (`QT_QPA_PLATFORM=xcb` unless it is set):
 a Wayland client cannot keep itself on top or let clicks through. Hotkey: X11 grab on X11; on
@@ -251,7 +262,13 @@ real microphone into the virtual mic, so the other side still hears the user; it
 the me → them side runs, and "Live voice" is disabled while translation is off. Our own devices are
 refused as microphone or headphones, the system defaults included (the app would hear itself).
 Headphones that go away (a Bluetooth profile switch, unplugging) are reopened on the saved device
-or the default one, with one tray message per outage. One instance per user (`QLockFile` in
+or the default one, with one tray message per outage; so is the microphone (`app.Microphone`: a
+`pactl subscribe` sees its source go, since with WirePlumber 0.5 the recording may not end by itself; with
+no microphone at all it takes the next new source; when the event stream ends, as on a pipewire-pulse restart,
+it subscribes again after a pause and reopens). `Mic` records the PipeWire source by its name, the same
+one for the translation and for the loopback (`s.ui.mic`, else the default input; never ours, never a
+sink's monitor). The virtual mic's sink and source have `priority.session=-10`, below any real device and
+below a device without a priority (WirePlumber counts that as −1), so they never become the default. One instance per user (`QLockFile` in
 `XDG_RUNTIME_DIR`): a second start shows a message and exits without touching the first one's
 devices. Moving the call app's stream into "Peresmeshnik Call" (`move-sink-input`) is S1's stage-2
 work; until then the user moves it by hand, otherwise them → me hears silence.

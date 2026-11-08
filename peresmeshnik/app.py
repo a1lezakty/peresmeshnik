@@ -6,8 +6,8 @@
 Each side ("them -> me", "me -> them") gets a local or cloud `Direction` from the settings. Turning
 translation on loads the engines on a control thread (the tray says "warming up"), then opens the
 inputs; turning it off closes them again, so the idle app holds no stream, no engine thread and no
-timer. Linux devices live as long as the app: the call sink "Peresmeshnik Call" (the call's sound is
-moved there once) and the virtual mic "Peresmeshnik Mic"; while translation is off PipeWire loops the
+timer. Linux devices live as long as the app: the call sink "Peresmeshnik Call" (while translating the call
+app's sound is moved there, and back when off) and the virtual mic "Peresmeshnik Mic"; while translation is off PipeWire loops the
 real microphone into the virtual mic, so the call still hears the user. The hotkey switches
 "translation <-> live voice": a direction that supports `set_live` is told so (me -> them: wrapped in
 audio/mic.LiveSwitch, a crossfade); for any other the input goes straight to the output instead. The
@@ -38,6 +38,7 @@ from peresmeshnik.engines import SAMPLE_RATE, Caption, Speech
 log = logging.getLogger('peresmeshnik.app')
 OURS = 'peresmeshnik_'  # every PipeWire device the app makes starts with this
 MIC_SINK = 'peresmeshnik_mic_sink'  # = audio/virtual_mic_linux.SINK, without importing it on other OSes
+BARGE_IN_WORDS = 3  # my clause has this many words: I talk over their voice (fewer: "yeah", "ага" while listening)
 
 
 def pactl(*args: str) -> str:
@@ -90,7 +91,8 @@ class Headphones:
     """`AudioOut` to a PipeWire/PulseAudio sink at the first chunk's rate (Piper 22.05 kHz, Gemini 24 kHz);
     chunks at another rate (the live pass-through, 16 kHz) are resampled. `sink` '' = the default.
     pacat ends when its device goes (Bluetooth profile switch, USB unplugged: it does not follow another
-    device): the next chunk opens the saved sink again, else the current default, and the tray says so."""
+    device): PulseOut's `on_end` tells the tray at once, the next chunk opens the saved sink again, else the
+    current default."""
     retry_s = 2.0
 
     def __init__(self, sink: str = '', on_state=lambda text: None):
@@ -107,19 +109,16 @@ class Headphones:
     def play(self, pcm: np.ndarray, sample_rate: int) -> None:
         with self._lock:
             out = self._out
-            # ponytail: PulseOut (S1) has no end-of-stream callback yet; a dead pacat or writer thread is seen here
-            if out is not None and (out._proc.poll() is not None or not out._thread.is_alive()):
-                out.flush()
-                threading.Thread(target=out.stop, daemon=True).start()  # its writer thread ends (pacat is gone)
-                self._out = out = None
-                self._fail('the headphones went away; reopening')
+            if out is not None and not out.alive:  # died just now (its on_end may come before or after this)
+                self._drop()
+                out = None
             if out is None:
                 if time.monotonic() < self._retry_at:
                     return  # no device for now: this audio is dropped
                 try:
                     from peresmeshnik.audio.out import PulseOut
                     sink = self.resolve()
-                    self._out = out = PulseOut(sample_rate, sink)
+                    self._out = out = PulseOut(sample_rate, sink, on_end=self._gone)
                     if self._failing:  # the tray still shows the error: put it back
                         self.on_state(f'translating (the headphones are back: {sink})')
                     self._rs, self._failing = {}, False
@@ -129,6 +128,19 @@ class Headphones:
                     return
             rs = self._rs.get(sample_rate) or self._rs.setdefault(sample_rate, Resampler(sample_rate, out.sample_rate))
             out.play(rs(pcm), out.sample_rate)
+
+    def _gone(self, why: str) -> None:
+        """PulseOut's on_end, on its own thread: the tray hears it now; the next chunk reopens."""
+        log.warning('headphones: %s', why)
+        with self._lock:
+            if self._out is not None and not self._out.alive:  # else play() has already reopened
+                self._drop()
+
+    def _drop(self) -> None:  # under the lock: the current output is dead
+        out, self._out = self._out, None
+        out.flush()
+        threading.Thread(target=out.stop, daemon=True).start()  # its writer thread ends (pacat is gone)
+        self._fail('the headphones went away; reopening')
 
     def _fail(self, why: str) -> None:
         if not self._failing:  # once per outage, not per chunk
@@ -304,7 +316,7 @@ class Microphone:
 
 
 class CallSink:
-    """"Peresmeshnik Call": the null sink the call's sound is moved into (S1, once), kept for the app's run."""
+    """"Peresmeshnik Call": the null sink the call's sound is moved into while translating, kept for the app's run."""
 
     def __init__(self):
         from peresmeshnik.audio.capture_pipewire import CALL_SINK
@@ -315,36 +327,6 @@ class CallSink:
 
     def remove(self) -> None:
         subprocess.run(['pactl', 'unload-module', self.module], capture_output=True, timeout=10)
-
-
-class CallCapture:
-    """`AudioIn` from the call sink's monitor (parec, 20 ms), read on a thread blocked on the pipe.
-    ponytail: S1's PipeWireCapture makes and removes its own sink on every start / stop; until it can use
-    the app's sink, the app records the monitor itself with the same flags."""
-
-    def __init__(self, sink: str, frame: int = 512):
-        self.sink, self.frame, self._proc, self._thread = sink, frame, None, None
-
-    def start(self, on_frames) -> None:
-        self._proc = subprocess.Popen(['parec', f'--device={self.sink}.monitor', '--raw', '--format=float32le', f'--rate={SAMPLE_RATE}',
-                                       '--channels=1', '--latency-msec=20', '--property=node.dont-reconnect=true'], stdout=subprocess.PIPE)
-
-        def read():
-            n = self.frame * 4
-            while len(b := self._proc.stdout.read(n)) == n:
-                on_frames(np.frombuffer(b, '<f4'))
-        self._thread = threading.Thread(target=read, name='call-capture', daemon=True)
-        self._thread.start()
-
-    def stop(self) -> None:
-        if self._proc:
-            self._proc.terminate()
-            try:
-                self._proc.wait(5)
-            except subprocess.TimeoutExpired:
-                self._proc.kill()
-            self._thread.join(5)
-            self._proc = None
 
 
 def remove_stale() -> None:
@@ -363,6 +345,7 @@ class Side:
         self.src, self.tgt = (s.their_lang, s.my_lang) if name == 'them' else (s.my_lang, s.their_lang)
         self.engine = s.them_to_me if name == 'them' else s.me_to_them
         self.live = False
+        self.on_talk = lambda: None  # 'me': I am talking (a partial caption of BARGE_IN_WORDS): barge-in on the other side
         self.directions = []  # (direction, takes its captions, takes its speech)
         self._threads: list[threading.Thread] = []
         self._live_q: queue.Queue = queue.Queue()  # the live pass-through, played on its own thread
@@ -393,7 +376,8 @@ class Side:
     def _local(self, s: config.Settings):
         from peresmeshnik.pipeline import make_local
         if self.name == 'them':
-            d = make_local(self.src, self.tgt, settings=s)
+            from peresmeshnik.pipeline import MAX_LAG_S
+            d = make_local(self.src, self.tgt, settings=s, max_lag_s=MAX_LAG_S)  # the queue policy: subtitles keep the rest
         else:
             if not s.local.voice:
                 raise RuntimeError('me -> them local needs your voice: enroll it first (python -m peresmeshnik.voice enroll), '
@@ -446,11 +430,22 @@ class Side:
             for e in d.events():
                 if isinstance(e, Caption) and captions:
                     self.overlay.show(e)
+                    if not e.final and len(e.original.split()) >= BARGE_IN_WORDS:
+                        self.on_talk()
                 elif isinstance(e, Speech) and speech and (not self.live or self._supports_live):
                     self.out.play(e.pcm, e.sample_rate)
         except Exception as e:  # a dead session (key revoked, quota, network) must show in the tray, not only in the log
             log.exception('%s: direction failed', self.name)
             self.on_error(f'error: {self.name}: {e}')
+
+    def interrupt(self) -> None:
+        """Barge-in: the user talks over this side's voice. What is not heard yet goes; the subtitles stay."""
+        if self.live:  # the original voice passes through: the user chose to hear it
+            return
+        for d, _, _ in self.directions:
+            if hasattr(d, 'interrupt'):
+                d.interrupt()
+        self.out.flush()
 
     def set_live(self, on: bool) -> None:
         if self._supports_live:
@@ -487,7 +482,7 @@ class Controller:
         self.on = False
         self.startup_error = ''
         self._pool = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix='control')  # no thread until first use
-        self._vmic = self._call = None
+        self._vmic = self._call = self._router = None
         self._mic = ''  # the default input as it was before our devices existed
 
     def submit(self, fn, *args):
@@ -526,6 +521,10 @@ class Controller:
         step('old devices', remove_stale)  # first: a stale sink of ours may be the default input now
         self._mic = step('default input', lambda: pactl('get-default-source').strip()) or ''  # before ours exist
         self._call = step('call sink', CallSink)
+        if self._call:  # a killed run, or WirePlumber restoring an old move: the call must not go silent while off
+            from peresmeshnik.audio.capture_pipewire import return_strays
+            if back := step('call streams', lambda: return_strays(self._call.name)):
+                log.warning('gave the call sound back to the default output: %s', ', '.join(back))
         step('virtual mic', self.virtual_mic)
         self._loopback(True)
         self.startup_error = '; '.join(errors)
@@ -570,22 +569,77 @@ class Controller:
                     failed.append(f'{name}: {e}')
         if any(x.name == 'me' for x in self.sides):
             self._loopback(False)  # the call hears the user until the translation is ready
+        them = next((x for x in self.sides if x.name == 'them'), None)
+        for x in self.sides:
+            if x.name == 'me' and them is not None:
+                x.on_talk = them.interrupt
         for side in self.sides:
             side.set_live(self.live)
             side.start()
         self.on = bool(self.sides)
+        call = self._route(s) if self.devices and any(x.name == 'them' for x in self.sides) else ''
         for f in failed:
             self.on_state(f'error: {f}')
         if self.sides:
-            self.on_state(f'translating ({", ".join(f"{x.name}: {x.engine}" for x in self.sides)}; '
+            self.on_state(f'translating ({", ".join(f"{x.name}: {x.engine}" for x in self.sides)}; {call}'
                           f'ready in {time.perf_counter() - t:.1f} s)')
+        if call.startswith('call app: none'):
+            self.on_state('error: choose the call app in the tray menu (Call app): until then the call is not translated')
+
+    def _route(self, s: config.Settings) -> str:
+        """The call app's sound into the call sink while translating: the app chosen, else the one known call app
+        playing now (remembered; a browser only by hand: all of its tabs would move)."""
+        from peresmeshnik.audio.capture_pipewire import CallRouter, guess_call_app
+        try:
+            app = s.ui.call_app
+            if not app and (app := guess_call_app()):
+                self._save_call_app(app)
+            if not app:
+                return 'call app: none; '
+            self._router = CallRouter(app, self._call.name)
+            self._router.start()
+            return f'call sound: {app}{"" if self._router.moved else " (not playing yet)"}; '
+        except Exception as e:
+            log.exception('call routing')
+            self._router = None
+            self.on_state(f'error: cannot move the call sound: {e}')
+            return ''
+
+    def _unroute(self) -> None:
+        router, self._router = self._router, None
+        if router:
+            try:
+                router.stop()  # the call app's sound goes back where it was
+            except Exception as e:
+                log.exception('call routing')
+                self.on_state(f'error: give the call sound back by hand (pavucontrol): {e}')
+
+    def _save_call_app(self, app: str) -> None:
+        if self.settings is not None:
+            self.settings.ui.call_app = app
+        else:
+            s = config.load()
+            s.ui.call_app = app
+            config.save(s)
+
+    def set_call_app(self, app: str) -> concurrent.futures.Future:
+        """From the tray: remember the call app; while translating its sound moves now (the old one's goes back)."""
+        return self.submit(self._set_call_app, app)
+
+    def _set_call_app(self, app: str) -> None:
+        self._save_call_app(app)
+        if self.on and self._call and any(x.name == 'them' for x in self.sides):
+            self._unroute()
+            self.on_state(f'translating ({self._route(self.settings or config.load()).rstrip("; ")})')
 
     def _input(self, name: str, s: config.Settings | None = None):
         s = s or self.settings or config.load()
         if name == 'them':
             if self._call is None:
                 raise RuntimeError(f'no call sink ({self.startup_error or "no sound server"})')
-            return CallCapture(self._call.name)
+            from peresmeshnik.audio.capture_pipewire import PipeWireCapture
+            return PipeWireCapture(self._call.name, make_sink=False,  # the app's sink, kept for its whole run
+                                   on_end=lambda why: self.on_state(f'error: the call sound capture stopped: {why}'))
         mic_source(s.ui.mic, self._mic)  # no microphone now: this side says why, the other one still starts
         return Microphone(s.ui.mic, self.on_state, self._mic)
 
@@ -599,6 +653,7 @@ class Controller:
         return self.virtual_mic()
 
     def _off(self) -> None:
+        self._unroute()  # first: the user hears the call as is again at once
         sides, self.sides = self.sides, []
         for side in sides:
             try:

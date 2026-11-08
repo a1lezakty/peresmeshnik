@@ -26,9 +26,10 @@ to allow the app in System Settings → Privacy & Security → "Open Anyway".
 
 Not ready for calls yet. With PipeWire and Python 3.11+: `uv run peresmeshnik app`. Qt needs
 `libxcb-cursor0` (`sudo apt install libxcb-cursor0` on Debian / Ubuntu); on Wayland the app runs
-through XWayland so that its subtitles stay on top. The call's sound is not routed into the app
-yet: until that lands, move the call app's output to "Peresmeshnik Call" yourself (pavucontrol or
-the sound settings), otherwise you hear silence instead of the translation. One instance runs per user:
+through XWayland so that its subtitles stay on top. While translation is on, the app moves the call
+app's sound to "Peresmeshnik Call" and gives it back when it is off: Telegram, Zoom, Discord and the like
+are found by themselves, otherwise choose the app in the tray menu "Call app" while the call plays. A
+browser (Meet) moves with all of its sound, other tabs too. One instance runs per user:
 while yours is open, the app instances that the tests start exit with code 3 ("already running").
 
 ## License

@@ -227,7 +227,6 @@ def test_a_signal_quits_after_the_running_slot():
     assert r.stdout.strip() == "['slot end', 'quit']", r.stdout + r.stderr
 
 
-@pytest.mark.filterwarnings('ignore::pytest.PytestUnhandledThreadExceptionWarning')  # out.py's writer sees the pipe go
 def test_headphones_reopen_when_the_device_goes(devices):
     from peresmeshnik.app import Headphones
     errors = []

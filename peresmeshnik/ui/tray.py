@@ -36,6 +36,8 @@ ICONS = Path(__file__).resolve().parents[2] / 'assets' / 'icons'  # ponytail: re
 LANGS = {'en': 'English', 'ru': 'Русский'}
 MIC_LABEL = 'Microphone'  # me -> them and the loopback while translation is off
 SIDES = {'them_to_me': 'Them → me', 'me_to_them': 'Me → them'}
+BROWSER_NOTE = ('A browser moves with all of its sound: YouTube in another tab is translated too. '
+                'For calls a separate browser is better.')
 
 
 def tray_icon() -> QIcon:
@@ -77,6 +79,10 @@ class Tray(QObject):
                 a.setData((key, engine))
                 group.addAction(a)
             group.triggered.connect(self._engine_chosen)
+        self._call_group = None
+        if sys.platform.startswith('linux'):  # macOS / Windows take the call app's sound another way (stages 3-4)
+            self.call_menu = m.addMenu('Call app')
+            self.call_menu.aboutToShow.connect(self._fill_call_menu)
         m.addSeparator()
         m.addAction('Settings…', self.open_settings)
         m.addAction('Setup wizard…', self.open_wizard)
@@ -148,6 +154,40 @@ class Tray(QObject):
         self.translation.setChecked(on)
         self.translation.blockSignals(False)
         self.ctl.set_translation(on)
+
+    def _fill_call_menu(self) -> None:
+        """The apps playing now, read when the menu opens (never polled); the chosen one stays listed."""
+        from peresmeshnik.audio.capture_pipewire import apps
+        m, cur = self.call_menu, config.load().ui.call_app
+        m.clear()
+        if self._call_group:
+            self._call_group.deleteLater()
+        try:
+            items = apps()
+        except Exception as e:  # no sound server
+            items = []
+            m.addAction(f'Cannot list the playing apps: {e}').setEnabled(False)
+        if cur and cur not in dict(items):
+            items.append((cur, f'{cur} (not playing now)'))
+        if not items:
+            m.addAction('Nothing plays now: start the call, then open this menu again').setEnabled(False)
+        group = self._call_group = QActionGroup(m)
+        for key, label in items:
+            a = m.addAction(label)
+            a.setCheckable(True)
+            a.setChecked(key == cur)
+            a.setData(key)
+            group.addAction(a)
+        group.triggered.connect(self._call_chosen)
+        m.addSeparator()
+        m.addAction('Its sound moves to the translation while it is on').setEnabled(False)
+        m.addAction(BROWSER_NOTE.split(':')[0] + ' (other tabs too)').setEnabled(False)
+
+    def _call_chosen(self, action) -> None:
+        from peresmeshnik.audio.capture_pipewire import is_browser
+        self.ctl.set_call_app(action.data())
+        if is_browser(action.data()):
+            self.message(BROWSER_NOTE)
 
     def _engine_chosen(self, action) -> None:
         key, engine = action.data()

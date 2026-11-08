@@ -90,6 +90,24 @@ class RemoteTts:
         self.p.wait(60)
 
 
+class Marked:
+    """Remembers the first chunk of each utterance: the k-th synth() speaks the k-th logged clause
+    (Speech events carry no clause number, and captions no longer wait for speech)."""
+
+    def __init__(self, tts):
+        self.tts, self.sample_rate, self.firsts = tts, tts.sample_rate, []
+
+    def __getattr__(self, name):  # close() and the rest: the wrapped engine's
+        return getattr(self.tts, name)
+
+    def synth(self, text, lang, voice=None):
+        self.firsts.append(None)
+        for c in self.tts.synth(text, lang, voice):
+            if self.firsts[-1] is None:
+                self.firsts[-1] = c
+            yield c
+
+
 # --- the call app's side
 
 class Recorder:
@@ -97,7 +115,8 @@ class Recorder:
 
     def __init__(self, source: str):
         self.p = subprocess.Popen(['parec', f'--device={source}', '--format=float32le', f'--rate={SR_REC}',
-                                   '--channels=1', '--raw', '--latency-msec=20'], stdout=subprocess.PIPE)
+                                   '--channels=1', '--raw', '--latency-msec=20', '--property=node.dont-reconnect=true'],
+                                  stdout=subprocess.PIPE)
         self.chunks, self.marks, self.n = [], [(0, time.perf_counter())], 0
         self.t = threading.Thread(target=self._run, daemon=True)
         self.t.start()
@@ -227,7 +246,8 @@ def run(a):
     else:
         from peresmeshnik.local.clone import XttsClone
         tts, v = XttsClone(a.model_dir, a.device, a.threads), voice.load(a.voice.name, a.voice.parent)
-    d = pipeline.make_local('ru', 'en', threads=a.threads, tts=tts, voice=v)
+    marked = Marked(tts)
+    d = pipeline.make_local('ru', 'en', threads=a.threads, tts=marked, voice=v)
     d.realtime = True
     load_s = time.perf_counter() - t
     mic = VirtualMic()
@@ -236,21 +256,23 @@ def run(a):
     link = probe(mic, rec)
     print(f'engines {load_s:.1f} s; virtual mic link {[round(x * 1000) for x in link]} ms', flush=True)
 
-    starts, direct, said = [], [], []
+    starts, captions, direct, said = {}, {}, [], []  # utterance k -> its first sample due at the mic; clause -> caption
 
     def consume():
-        first = False
+        due = 0.0  # when what is queued in the mic has played (it plays back to back)
         for e in d.events():
             if isinstance(e, Speech):
+                now = time.perf_counter()
+                k = next((k for k, f in enumerate(marked.firsts) if f is e.pcm), None)
+                if k is not None:
+                    starts[k] = max(due, now)
+                due = max(due, now) + len(e.pcm) / e.sample_rate
                 mic.play(e.pcm, e.sample_rate)
                 direct.append(e.pcm)
-                if first:
-                    starts.append(time.perf_counter())
-                    first = False
             elif e.final:
+                captions[e.clause] = time.perf_counter()
                 said.append(e.translation)
                 print(f'ru: {e.original}\nen: {e.translation}', flush=True)
-                first = True
     th = threading.Thread(target=consume)
     th.start()
     pcm = pipeline.read_audio(str(a.inp))
@@ -269,12 +291,15 @@ def run(a):
     d.close()
     mic.remove()
 
-    for c, s in zip(clauses, starts):  # clause end -> its translated audio at the call app's mic
-        j = onset_after(x, rec.index(s) - i0 - SR_REC // 50)
-        c['mic_lag_s'] = round(rec.wall(j + i0) - s, 3) if j is not None else None
-        if c.get('voice_lag_s') is not None and c['mic_lag_s'] is not None:
-            c['call_lag_s'] = round(c['voice_lag_s'] + c['mic_lag_s'], 3)
-            c['after_caption_s'] = round(c['call_lag_s'] - c['caption_lag_s'], 3)  # TTS + queue + virtual mic
+    for k, c in enumerate(clauses):  # clause end -> its translated audio at the call app's mic
+        s, cap = starts.get(k), captions.get(c['clause'])
+        j = onset_after(x, rec.index(s) - i0 - SR_REC // 50) if s is not None else None
+        if j is None or cap is None:
+            continue
+        heard = rec.wall(j + i0)
+        c['mic_lag_s'] = round(heard - s, 3)  # virtual mic link, from when the audio was due to play
+        c['call_lag_s'] = round(heard - (cap - c['caption_lag_s']), 3)  # from the clause end
+        c['after_caption_s'] = round(heard - cap, 3)  # TTS + playback queue + virtual mic
     for c in clauses:
         print(json.dumps(c, ensure_ascii=False))
     sr = tts.sample_rate

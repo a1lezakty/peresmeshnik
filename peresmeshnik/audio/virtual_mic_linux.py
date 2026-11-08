@@ -63,7 +63,8 @@ class VirtualMic:
     def _open(self, sample_rate: int) -> None:
         self._proc = subprocess.Popen(
             ['pacat', '--playback', f'--device={SINK}', '--format=float32le', f'--rate={sample_rate}', '--channels=1',
-             '--raw', f'--latency-msec={self.latency_ms}', '--client-name=Peresmeshnik', f'--stream-name={NAME}'],
+             '--raw', f'--latency-msec={self.latency_ms}', '--client-name=Peresmeshnik', f'--stream-name={NAME}',
+             '--property=node.dont-reconnect=true'],  # else PipeWire moves it to the next new sink (e.g. the call capture)
             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self._sr = sample_rate
 

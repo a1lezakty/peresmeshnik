@@ -105,8 +105,8 @@ def check(pcm: np.ndarray, sr: int) -> Report:
 
 
 def voices_dir() -> Path:
-    import platformdirs
-    return Path(platformdirs.user_data_dir('Peresmeshnik', appauthor=False)) / 'voices'
+    from peresmeshnik.config import data_dir
+    return data_dir() / 'voices'
 
 
 def save(pcm: np.ndarray, sr: int, name: str, lang: str, transcript: str | None = None,

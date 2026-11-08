@@ -22,13 +22,18 @@ SR_IN, SR_OUT = 24_000, 16_000  # TTS rate in, call-app rate out
 CPU_PER_AUDIO_S = 0.05  # our process + pacat incl. its start, per second of audio; a spinning pacat costs 0.2-1
 
 
+def record(source):
+    """Record the source like a call app does."""
+    return subprocess.Popen(['parec', f'--device={source}', '--format=float32le', f'--rate={SR_OUT}', '--channels=1', '--raw',
+                             '--latency-msec=20', '--property=node.dont-reconnect=true'], stdout=subprocess.PIPE)
+
+
 def test_round_trip():
     from peresmeshnik.audio import virtual_mic_linux as vm
     mic = vm.VirtualMic()
     try:
         assert vm.exists()
-        rec = subprocess.Popen(['parec', f'--device={vm.SOURCE}', '--format=float32le', f'--rate={SR_OUT}',
-                                '--channels=1', '--raw', '--latency-msec=20'], stdout=subprocess.PIPE)
+        rec = record(vm.SOURCE)
         time.sleep(0.3)  # recorder connected
         t = np.arange(int(SR_IN * 3)) / SR_IN
         tone = (0.3 * np.sin(2 * np.pi * 440 * t) * (t < 1.5)).astype(np.float32)  # 1.5 s tone, 1.5 s silence
@@ -62,8 +67,7 @@ def test_rate_switch_plays_both_in_order():
     from peresmeshnik.audio import virtual_mic_linux as vm
     mic = vm.VirtualMic()
     try:
-        rec = subprocess.Popen(['parec', f'--device={vm.SOURCE}', '--format=float32le', f'--rate={SR_OUT}',
-                                '--channels=1', '--raw', '--latency-msec=20'], stdout=subprocess.PIPE)
+        rec = record(vm.SOURCE)
         time.sleep(0.3)
         tone = lambda sr, hz: (0.3 * np.sin(2 * np.pi * hz * np.arange(sr) / sr)).astype(np.float32)  # noqa: E731
         mic.play(tone(24_000, 440), 24_000)
@@ -87,8 +91,7 @@ def test_flush_drops_queued_audio():
     from peresmeshnik.audio import virtual_mic_linux as vm
     mic = vm.VirtualMic()
     try:
-        rec = subprocess.Popen(['parec', f'--device={vm.SOURCE}', '--format=float32le', f'--rate={SR_OUT}',
-                                '--channels=1', '--raw', '--latency-msec=20'], stdout=subprocess.PIPE)
+        rec = record(vm.SOURCE)
         time.sleep(0.3)
         mic.play(np.full(SR_IN * 5, 0.3, np.float32) * np.sin(np.arange(SR_IN * 5) / 10), SR_IN)  # 5 s
         time.sleep(0.5)

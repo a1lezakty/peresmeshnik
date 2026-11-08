@@ -315,31 +315,39 @@ a tone round trip keeps frequency, level and length; play → audio at the `Pere
 source as a call app records it: **10–61 ms** (the first chunk after the stream opens 38–61 ms,
 then 10–37 ms); CPU of the output path 0.01–0.017 s per second of audio (our process + pacat).
 `pacat` itself spins a core if its stdin closes while it still holds audio (0.64 s CPU for a 0.7 s
-tail), so the writer closes it only after the written audio has played.
+tail), so the writer closes it only after the written audio has played. The stream is opened with
+`node.dont-reconnect`: PipeWire otherwise moves it to a newer device, such as the call capture sink.
 
-**End to end** (`bench/me_them.py run --remote`): 33 s of the "me" reader in Russian (other lines
-than the enrollment) → the local pipeline's `LocalDirection` (Silero VAD, Parakeet v3, OPUS-MT
-ru-en, on the dev server) with the clone TTS on the GPU host behind a pipe (`me_them.py serve`)
-→ `Peresmeshnik Mic` → recorded back from the source → Whisper-small. Per clause: `caption` = clause end → translated
-caption (ASR + MT), `after caption` = caption → translated audio at the virtual mic (clone
-first audio incl. ~45 ms network + queue behind the previous clause + virtual mic).
+**End to end** (`bench/me_them.py run --remote`, re-run 2026-11-08 on the merged local pipeline):
+33 s of the "me" reader in Russian (other lines than the enrollment) → `LocalDirection` with the
+app's defaults (Silero VAD, GigaAM v3 for Russian, OPUS-MT ru-en, 2 threads, on the dev server)
+and the clone TTS on the GPU host behind a pipe (`me_them.py serve`) → `Peresmeshnik Mic` →
+recorded back from the source → Whisper-small. Per clause, from the end of its speech: `caption`
+(ASR + MT), `clone audio` = first clone audio here (`synth_lag_s`: caption + clone first audio incl.
+~45 ms network), `queue` = waits behind the previous translation still playing (`play_queue_s`),
+`call app hears` = sound onset in the recording (`call_lag_s`); `mic link` = onset − when the audio
+was due to play.
 
-| clone on | clauses | caption lag s | after caption s, median (range) | clone first audio s (server) | clone RTF | WER of the recording vs MT text | spk-sim, recording vs "me" (vs another speaker) |
-|---|---|---|---|---|---|---|---|
-| RTX 3060 Laptop | 9 | 2.2–5.1 | 0.33 (0.26–2.87) | 0.22–0.28 (0.17–0.23) | 0.22 | 0.036 (direct TTS output: 0.036) | 0.44 (−0.07) |
-| 8 CPU threads | 9 | 2.4 → 16.1 | 1.17 (1.14–1.18) | 1.10–1.15 (1.05–1.11) | 1.35 | 0.024 (0.024) | 0.46 (−0.05) |
+| clone on | runs × clauses | caption s | clone audio s | queue s | call app hears s, median (range) | mic link ms | WER, recording (direct TTS) | spk-sim, recording vs "me" (vs another speaker) |
+|---|---|---|---|---|---|---|---|---|
+| RTX 3060 Laptop | 2 × 9 | 0.34–2.9 | 0.55–3.1 | 0–6.1 | 4.4 (1.0–6.7) | 35–67 | 0.012 (0–0.012) | 0.44–0.45 (−0.06..−0.07) |
+| 8 CPU threads | 1 × 9 | 0.34–2.9 | 2.0–11.6 | 0 | 8.9 (2.1–11.7) | 21–55 | 0.035 (0.012) | 0.46 (−0.06) |
 
-- The path is lossless: the recording from the virtual mic transcribes exactly like the TTS output
-  itself; the voice in it is the clone (0.44–0.46 vs the profile, the cross-lingual level of
-  XTTS; another speaker −0.05..−0.07; the real Russian input 0.88).
-- With the GPU clone, translated audio is at the call app's mic **0.26–0.33 s after the caption**
-  when it does not queue; it queues (up to 2.9 s) when clauses come in bursts and the previous
-  translation is still playing. The caption lag itself (2.2–5.1 s) is the pipeline's ASR on the busy
-  dev server: Parakeet partials ran at RTF 1.0 there under `nice 19`; see the pipeline rows for a
-  machine without other load.
-- With the CPU clone (RTF 1.35) the TTS holds the speak worker, so the lag grows through the run
-  (caption 2.4 s → 16 s, the voice ~1.2 s behind it): not live, as expected; the queue policy
-  (speed-up, then drop past 3 clauses) has to handle it, and captions should not wait for the TTS.
+- The path is lossless: the recording from the virtual mic transcribes like the TTS output itself
+  (the CPU run's difference is Whisper on near-homophones: silence/silent, sweats/sweat's); the
+  voice in it is the clone (0.44–0.46 vs the profile, the cross-lingual level of XTTS; the real
+  Russian input 0.88).
+- With the GPU clone the first translated audio is ready **0.20–0.25 s after the caption** and is
+  at the call app's mic ~50 ms after it is due. What adds up is the queue: the English speech
+  (29 s) nearly fills the 33 s of input, so when clauses come in bursts the next one waits up to
+  6 s for the previous one to finish playing. That is the stage-2 queue policy (speed-up, then
+  drop), not a link that can be made faster.
+- Captions no longer wait for the voice: with the CPU clone (RTF 1.3) they stay at 0.34–2.9 s,
+  as with the GPU, while the voice falls behind through the run (up to 11.6 s). The earlier run on
+  a pre-merge pipeline (Parakeet for Russian, captions put out by the speak worker) had captions
+  at 2.2–5.1 s with the GPU clone and growing to 16 s with the CPU one.
+- Clauses cut at 5 s (`max`) get their caption at 1.3–2.9 s, clauses closed by a pause at
+  0.34–0.97 s; the dev server was lightly loaded this time (load average ~1).
 
 ### Cloud: Gemini Live
 

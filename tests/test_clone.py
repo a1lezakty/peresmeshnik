@@ -44,6 +44,37 @@ def test_bad_recordings_fail(pcm, sr, problem):
     assert not r.ok and any(problem in e for e in r.errors), r.errors
 
 
+def test_telephone_band_warns():
+    x = speech_like(45)
+    X = np.fft.rfft(x)
+    f = np.fft.rfftfreq(len(x), 1 / 16_000)
+    X[(f < 300) | (f > 3400)] = 0
+    r = voice.check(np.fft.irfft(X, len(x)).astype(np.float32), 16_000)
+    assert r.ok and r.band_db < voice.BAND_DB and any('above 4 kHz' in w for w in r.warnings), r
+    assert voice.verdict(r).startswith('Good enough: no sound above 4 kHz')
+    assert voice.check(x, 16_000).band_db > -10  # white-noise "speech" has it all
+
+
+def test_clone_check_thresholds():
+    class Clone:
+        sample_rate = 24_000
+
+        def synth(self, text, lang, v):
+            yield np.zeros(2400, np.float32)
+
+        def similarity(self, v, pcm, sr):
+            return 0.3
+
+    class Asr:
+        def recognize(self, pcm):
+            return type('R', (), {'text': 'good morning can you hear me well'})()
+    r = voice.check_clone(Clone(), None, 'en', Asr())
+    assert r.wer > voice.MAX_WER and r.similarity == 0.3 and not r.ok
+    assert voice.clone_verdict(r).startswith('Record again: the clone is hard to understand')
+    assert any('somewhat like you' in w for w in r.warnings)
+    assert voice.wer('Ёлка, раз два!', 'елка раз три') == pytest.approx(1 / 3)
+
+
 def test_too_long_is_trimmed_with_warning(tmp_path):
     x = speech_like(75)
     r = voice.check(x, 16_000)

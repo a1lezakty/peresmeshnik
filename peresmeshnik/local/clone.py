@@ -123,14 +123,26 @@ class XttsClone:
             self._latents[key] = (lat['gpt'].to(self.device), lat['spk'].to(self.device))
         return self._latents[key]
 
-    def _condition(self, pcm: np.ndarray, sr: int) -> dict:
+    def _audio(self, pcm: np.ndarray, sr: int):
         import torch
         import torchaudio.functional as F
         x = torch.from_numpy(np.asarray(pcm, dtype=np.float32))[None]
-        x = F.resample(x, sr, COND_SR)[:, :COND_SR * REF_S].to(self.device)
+        return F.resample(x, sr, COND_SR)[:, :COND_SR * REF_S].to(self.device)
+
+    def _condition(self, pcm: np.ndarray, sr: int) -> dict:
+        x = self._audio(pcm, sr)
         gpt = self.model.get_gpt_cond_latents(x, COND_SR, length=6, chunk_length=6)
         spk = self.model.get_speaker_embedding(x, COND_SR)
         return {'gpt': gpt.cpu(), 'spk': spk.cpu()}
+
+    def similarity(self, voice: Voice, pcm: np.ndarray, sr: int) -> float:
+        """How much `pcm` sounds like the profile: cosine of XTTS's own speaker embeddings (its speaker encoder, no
+        extra model or license). Thresholds and how it compares with an independent judge (ECAPA): BENCH."""
+        import torch
+        ref = self.latents(voice)[1].flatten().float()
+        with torch.inference_mode():
+            emb = self.model.get_speaker_embedding(self._audio(pcm, sr), COND_SR).flatten().float()
+        return float(torch.nn.functional.cosine_similarity(ref, emb.to(ref.device), dim=0))
 
     def enroll(self, pcm: np.ndarray, sample_rate: int, transcript: str | None = None, name: str = 'me',
                lang: str = 'ru', root: Path | None = None) -> Voice:

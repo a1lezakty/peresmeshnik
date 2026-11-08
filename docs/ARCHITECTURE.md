@@ -152,7 +152,7 @@ RAM = peak RSS of the model's own process):
 | TTS Piper (own process, §10) | 2 | RTF 0.03–0.06 | 0.3–0.5 GB | |
 | Clone XTTS-v2 | GPU (+1 CPU) | CPU RTF 1.8 → not live | 3.6–4.5 GB RAM, 2.1 GB VRAM | |
 | Clone Chatterbox | GPU | CPU RTF 3.3–3.5 → not live | 5–7 GB RAM, 3.7 GB VRAM | |
-| Gemini Live session | — | ~0 (network, 56–66 MB process) | — | |
+| Gemini Live direction (translate + transcribe) | 1 asyncio thread | 0.03 (x86, measured in stage 1) | ~90 MB process | network only; nothing exists while translation is off |
 
 Concurrently busy threads stay ≤ the number of performance cores (4 on M1): ASR, MT and TTS of
 one direction mostly alternate, and the two directions rarely talk at the same time.
@@ -214,16 +214,22 @@ translation and translate it back).
 
 ## 8. Model download and cache
 
-- Registry: a TOML file in the package lists every model: id, Hugging Face repo, pinned
-  revision, files, SHA-256, size, license, languages, tier.
+- Registry: [`peresmeshnik/models.toml`](../peresmeshnik/models.toml) lists every model: id, role,
+  languages, license, a URL prefix pinned to a revision (Hugging Face `resolve/<sha>/` or a release
+  of this project), files with SHA-256 and size. The tier is picked by the setup wizard (stage 2).
 - Cache: `platformdirs.user_cache_dir("Peresmeshnik")/models` (`~/Library/Caches/Peresmeshnik`,
   `%LOCALAPPDATA%\Peresmeshnik\Cache`, `~/.cache/Peresmeshnik`); overridable in settings.
-- Download with `huggingface_hub` (resume, revision pin), then SHA-256 check; nothing is fetched
-  at run time after setup — the app works offline in local mode.
+- Download over plain HTTPS with `urllib` (HTTP Range resume, no credentials sent), then SHA-256
+  check and a "verified" marker with a fingerprint of the pins; engines only call
+  `models.path(id)`, nothing is fetched at run time after setup — the app works offline in local
+  mode. CLI: `peresmeshnik models list | fetch <id>...`.
 - First download shows each license; noncommercial and territory-limited ones (CPML, CC-BY-NC,
-  Tencent HY) need an explicit tick.
-- Conversions we need (OPUS-MT → CTranslate2 int8) are made once by us and published to a
-  Hugging Face repo of the project with the original license, so users never need torch for it.
+  Tencent HY; `consent = true` in the registry) need an explicit "yes" (`--accept-licenses` without
+  a terminal).
+- Conversions we need (OPUS-MT → CTranslate2 int8, made from the original Marian models without
+  torch) are published once as assets of the project's GitHub release
+  [`models-1`](https://github.com/a1lezakty/peresmeshnik/releases/tag/models-1) with the original
+  license, README and attribution.
 - Voice profiles: `platformdirs.user_data_dir`, never uploaded.
 
 ## 9. Hardware tiers
@@ -271,8 +277,10 @@ RTF; the user can override it in settings.
    energy guard; cross-lingual similarity is modest (0.35–0.44); CosyVoice3 truncates Russian.
 3. **Gemini Live.** Preview models; the voice lags ~3.2 s and up to 6 s in long en → ru speech;
    `audio_stream_end` cuts the end of a translation (never send it to translate); connections
-   last ~10 min, sessions 15 min → resumption handles; paid tier bills open time incl. silence
-   (~$0.037/min translate); on the free tier Google uses the data — the app says so and suggests
+   last ~10 min (server GoAway at ~540 s), sessions 15 min → handled in stage 1: hand-over at a
+   quiet moment with the resumption handle and context compression, dead sessions replaced (BENCH,
+   stage 1); the free tier refuses connections beyond a few at once (seen at 8); paid tier bills
+   open time incl. silence (~$0.037/min translate); on the free tier Google uses the data — the app says so and suggests
    a paid key for real calls.
 4. **Real calls ≠ FLEURS.** Read speech here; calls bring codecs, noise, overlap and accents —
    WER will be higher. Stage 2 adds consented recordings of real calls to the bench.

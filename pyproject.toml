@@ -7,7 +7,7 @@ license = "PolyForm-Noncommercial-1.0.0"
 license-files = ["LICENSE"]
 authors = [{ name = "Akty" }]
 requires-python = ">=3.11"
-dependencies = ["numpy>=2"]
+dependencies = ["numpy>=2", "platformdirs>=4", "google-genai>=3"]
 
 [project.scripts]
 peresmeshnik = "peresmeshnik.__main__:main"

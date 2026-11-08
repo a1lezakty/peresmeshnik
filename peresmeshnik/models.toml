@@ -1,0 +1,136 @@
+# Model registry. Every file is pinned: `url` is a prefix (a Hugging Face `resolve/<revision>/` path
+# or a GitHub release of this project), file URL = url + file name; sha256 and size are checked
+# after download. `consent = true`: noncommercial or territory-limited license, the user must
+# accept it explicitly before the download. Licenses: docs/MODELS.md.
+# sha256/size of LFS files come from the Hugging Face API (files_metadata), small files are hashed.
+
+[silero-vad]
+role = "vad"
+langs = ["*"]
+license = "MIT"
+license_url = "https://github.com/snakers4/silero-vad"
+url = "https://huggingface.co/istupakov/silero-vad-onnx/resolve/b3e3ee3cce4c11ceb63b1a0b229d916069c1ddf6/"
+[silero-vad.files]
+"config.json" = { sha256 = "1094039d370c82889582ba739a3d1caac5754c8b3a17a66a534200c9f72086e2", size = 30 }
+"silero_vad.onnx" = { sha256 = "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3", size = 2327524 }
+"LICENSE.txt" = { sha256 = "2e63e9a38b6e8fc0c7bc37ce174caca1862870856c6daf5697cfb785e925520b", size = 1075 }
+
+["parakeet-tdt-0.6b-v3"]  # int8 ONNX for onnx-asr ("nemo-parakeet-tdt-0.6b-v3", quantization="int8")
+role = "asr"
+langs = ["en", "ru"]  # and 23 more European languages
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3"
+note = "Parakeet TDT 0.6B v3 by NVIDIA, ONNX conversion by istupakov"
+url = "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/"
+["parakeet-tdt-0.6b-v3".files]
+"config.json" = { sha256 = "666903c76b9798caf2c210afd4f6cd60b08a8dbf9800ec8d7a3bc0d2148ac466", size = 97 }
+"encoder-model.int8.onnx" = { sha256 = "6139d2fa7e1b086097b277c7149725edbab89cc7c7ae64b23c741be4055aff09", size = 652183999 }
+"decoder_joint-model.int8.onnx" = { sha256 = "eea7483ee3d1a30375daedc8ed83e3960c91b098812127a0d99d1c8977667a70", size = 18202004 }
+"vocab.txt" = { sha256 = "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d", size = 93939 }
+
+[gigaam-v3-e2e-ctc]  # int8 ONNX for onnx-asr ("gigaam-v3-e2e-ctc", quantization="int8"), punctuation included
+role = "asr"
+langs = ["ru"]
+license = "MIT"
+license_url = "https://github.com/salute-developers/GigaAM"
+url = "https://huggingface.co/istupakov/gigaam-v3-onnx/resolve/322c3b29492673eb7d0b434bfa9dfb8653e34d02/"
+[gigaam-v3-e2e-ctc.files]
+"config.json" = { sha256 = "0641fcf73f4af791c73f05083e38a658ff5dcbee3534a0c61396c10f4b97f0fe", size = 135 }
+"v3_e2e_ctc.int8.onnx" = { sha256 = "2e3fcb7a7b66030336fd10c2fcfb033bd1dc7e1bf238fe5cfd83b1d0cfc9d28e", size = 224893347 }
+"v3_e2e_ctc.yaml" = { sha256 = "e67eca3a311ad7c8813d36dff6b8eeba7ad3459fd811d6faea2a26535754a358", size = 899 }
+"v3_e2e_ctc_vocab.txt" = { sha256 = "142de7570b3de5b3035ce111a89c228e80e6085273731d944093ddf24fa539cd", size = 2007 }
+"LICENSE.txt" = { sha256 = "f00de6715714c7a63d08639cdbfaa40224eefc407302614bd19f1a8b98c875aa", size = 1070 }
+
+[t-one]  # streaming CTC, 300 ms chunks, 8 kHz; onnx-asr "t-tech/t-one"
+role = "asr"
+langs = ["ru"]
+license = "Apache-2.0"
+license_url = "https://huggingface.co/t-tech/T-one"
+url = "https://huggingface.co/t-tech/t-one/resolve/106f3b0b32a9e107eb613312e4ebc61ff3d53926/"
+[t-one.files]
+"config.json" = { sha256 = "8a6272e21a05301afac2686f6066554151f9cd85bd0d817297339e8c3dc778a6", size = 1821 }
+"model.onnx" = { sha256 = "707e4a282d5036304a0b8603ad83945840c3075f53c49911ef88c19bcc5a7d52", size = 144193371 }
+
+# OPUS-MT -> CTranslate2 int8, converted by this project from the original Marian models
+# (opus-2020-02-11.zip, ctranslate2 OpusMTConverter, add_source_eos = true) and published as
+# assets of the release "models-1"; LICENSE and README of the original are included.
+[opus-mt-en-ru]
+role = "mt"
+langs = ["en-ru"]
+license = "CC-BY-4.0"
+license_url = "https://github.com/Helsinki-NLP/OPUS-MT-train/tree/master/models/en-ru"
+note = "OPUS-MT by Helsinki-NLP (University of Helsinki)"
+url = "https://github.com/a1lezakty/peresmeshnik/releases/download/models-1/opus-mt-en-ru-"
+[opus-mt-en-ru.files]
+"config.json" = { sha256 = "152eb448f1020eb55f90971d7b95f61896abee8415d555ca51ae7897ac0a0e68", size = 221 }
+"model.bin" = { sha256 = "a2a719b92a1d7664497bcc655534cfb7345dfa44e91774fb831f3eeaf07a1d3d", size = 81422197 }
+"shared_vocabulary.json" = { sha256 = "bf1812383ed402163a2ed1b553e175e7db96a54ed68b6c15566018fdf945ed99", size = 2300269 }
+"source.spm" = { sha256 = "16bebef1389a0b8ab452772c4e35b9e605e5713f8ac7baa71ca701394eaa086d", size = 802781 }
+"target.spm" = { sha256 = "745998e51ba5b058e38b7ac7765c25c43ed5c1c39cc92b27163b9b2e323c9d7c", size = 1080169 }
+"LICENSE" = { sha256 = "945fbcb37deca05bccd7c3ca0e261679f1f5373515504fdbad68f6f3cf6f49b9", size = 18652 }
+"README.md" = { sha256 = "5b06e18de0760979432961c923a9013ff92a8d29f7f64d0a97d91ba07fdca08f", size = 906 }
+
+[opus-mt-ru-en]
+role = "mt"
+langs = ["ru-en"]
+license = "CC-BY-4.0"
+license_url = "https://github.com/Helsinki-NLP/OPUS-MT-train/tree/master/models/ru-en"
+note = "OPUS-MT by Helsinki-NLP (University of Helsinki)"
+url = "https://github.com/a1lezakty/peresmeshnik/releases/download/models-1/opus-mt-ru-en-"
+[opus-mt-ru-en.files]
+"config.json" = { sha256 = "152eb448f1020eb55f90971d7b95f61896abee8415d555ca51ae7897ac0a0e68", size = 221 }
+"model.bin" = { sha256 = "51fbcd3ef67afaa5e178bc070d7d05429bcfd7ac055ad970f7bef5cb14f9225a", size = 81422197 }
+"shared_vocabulary.json" = { sha256 = "bf1812383ed402163a2ed1b553e175e7db96a54ed68b6c15566018fdf945ed99", size = 2300269 }
+"source.spm" = { sha256 = "745998e51ba5b058e38b7ac7765c25c43ed5c1c39cc92b27163b9b2e323c9d7c", size = 1080169 }
+"target.spm" = { sha256 = "16bebef1389a0b8ab452772c4e35b9e605e5713f8ac7baa71ca701394eaa086d", size = 802781 }
+"LICENSE" = { sha256 = "945fbcb37deca05bccd7c3ca0e261679f1f5373515504fdbad68f6f3cf6f49b9", size = 18652 }
+"README.md" = { sha256 = "0f10ddd4853633fd7002a75dbfb2a1eff7b7675b5bf8384686dc4d5e16707099", size = 951 }
+
+# Piper voices (the voice data license is what matters; Piper itself is GPL and runs as its own process)
+[piper-en_US-john-medium]
+role = "tts"
+langs = ["en"]
+license = "public domain"
+license_url = "https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_US/john/medium/MODEL_CARD"
+url = "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/en/en_US/john/medium/"
+[piper-en_US-john-medium.files]
+"en_US-john-medium.onnx" = { sha256 = "789c6c875726e627ddee93d51d8727859abe9c091c3d141591f4b83c2072e988", size = 63531379 }
+"en_US-john-medium.onnx.json" = { sha256 = "af60f177b6b550f3d7a302720c0fb89e7f94a82b5dca464775ef63b1c69ba09a", size = 4965 }
+"MODEL_CARD" = { sha256 = "a056da65cd70dcbda96fc3420fe8d3442dbf3c8b75f49cdf800a715b42e299d1", size = 498 }
+
+[piper-en_US-joe-medium]
+role = "tts"
+langs = ["en"]
+license = "CC0-1.0"
+license_url = "https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_US/joe/medium/MODEL_CARD"
+url = "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/en/en_US/joe/medium/"
+[piper-en_US-joe-medium.files]
+"en_US-joe-medium.onnx" = { sha256 = "58afce0321b8d9c46d7cdf9c16500cc55a793b4220212dba6b70fb788b3baf06", size = 63201294 }
+"en_US-joe-medium.onnx.json" = { sha256 = "3d6d5410b3795cb1950595247ef8f06190719e6fdbfa3a2356d8ec368e1aad33", size = 4794 }
+"MODEL_CARD" = { sha256 = "d2caa63aca0fccb155105e959e393e5c0c0f03a1f388ef5ba217b83ef860c760", size = 281 }
+
+[piper-ru_RU-dmitri-medium]
+role = "tts"
+langs = ["ru"]
+license = "CC0-1.0"
+license_url = "https://huggingface.co/rhasspy/piper-voices/blob/main/ru/ru_RU/dmitri/medium/MODEL_CARD"
+url = "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/ru/ru_RU/dmitri/medium/"
+[piper-ru_RU-dmitri-medium.files]
+"ru_RU-dmitri-medium.onnx" = { sha256 = "f073356ebc4bd0f80c5af58df2953a5988bd5bdab1eb38635ce960b071fbefcb", size = 63201294 }
+"ru_RU-dmitri-medium.onnx.json" = { sha256 = "667ef3117bc642c2892dff7690d8bdc8ca4228aeaa783b2dc1416df632855e0d", size = 4824 }
+"MODEL_CARD" = { sha256 = "6d59c756776d57860232cea6484e1b2ea1fc1c8d2c3446ef246f706fd9875821", size = 277 }
+
+[xtts-v2]  # voice clone (coqui-tts); needs the optional voice pack with torch
+role = "clone"
+langs = ["en", "ru"]  # and 15 more
+license = "CPML-1.0"
+license_url = "https://coqui.ai/cpml"
+note = "Coqui Public Model License: noncommercial use only"
+consent = true
+url = "https://huggingface.co/coqui/XTTS-v2/resolve/6c2b0d75eae4b7047358e3b6bd9325f857d43f77/"
+[xtts-v2.files]
+"config.json" = { sha256 = "ef262b1454dd2a77e1461b0b2cd53e19b8a7624cc131b837d36df67356bc75e8", size = 4368 }
+"model.pth" = { sha256 = "c7ea20001c6a0a841c77e252d8409f6a74fb423e79b3206a0771ba5989776187", size = 1867929118 }
+"vocab.json" = { sha256 = "928260878a59da8a72a2a5b7687fea29d5106137669d90945430fe17e415304a", size = 361219 }
+"speakers_xtts.pth" = { sha256 = "f0f6137c19a4eab0cbbe4c99b5babacf68b1746e50da90807708c10e645b943b", size = 7754818 }
+"LICENSE.txt" = { sha256 = "190f6d7c19b8984f91b97712b94ce92d2b2e640fc677dacab966e955ece9d043", size = 4014 }

@@ -319,11 +319,10 @@ class CallSink:
     """"Peresmeshnik Call": the null sink the call's sound is moved into while translating, kept for the app's run."""
 
     def __init__(self):
-        from peresmeshnik.audio.capture_pipewire import CALL_SINK
+        from peresmeshnik.audio.capture_pipewire import CALL_SINK, LOW_PRIORITY
         self.name = CALL_SINK
-        # priority 0: never preferred over a real output as the default sink (as in S1's capture)
         self.module = pactl('load-module', 'module-null-sink', f'sink_name={CALL_SINK}',
-                            'sink_properties=\'device.description="Peresmeshnik Call" priority.session=0 priority.driver=0\'').strip()
+                            f'sink_properties=\'device.description="Peresmeshnik Call" {LOW_PRIORITY}\'').strip()
 
     def remove(self) -> None:
         subprocess.run(['pactl', 'unload-module', self.module], capture_output=True, timeout=10)

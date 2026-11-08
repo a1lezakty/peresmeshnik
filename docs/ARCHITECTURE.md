@@ -277,12 +277,13 @@ real microphone into the virtual mic, so the other side still hears the user; it
 the me → them side runs, and "Live voice" is disabled while translation is off. Our own devices are
 refused as microphone or headphones, the system defaults included (the app would hear itself).
 Headphones that go away (a Bluetooth profile switch, unplugging) are reopened on the saved device
-or the default one, with one tray message per outage; so is the microphone (`app.Microphone`: a
+or the default one, with one tray message per outage (`PulseOut`'s `on_end`: pacat ended, or a `pactl
+subscribe` saw its sink removed, which WirePlumber 0.5 may not end the stream for); so is the microphone (`app.Microphone`: a
 `pactl subscribe` sees its source go, since with WirePlumber 0.5 the recording may not end by itself; with
 no microphone at all it takes the next new source; when the event stream ends, as on a pipewire-pulse restart,
 it subscribes again after a pause and reopens). `Mic` records the PipeWire source by its name, the same
 one for the translation and for the loopback (`s.ui.mic`, else the default input; never ours, never a
-sink's monitor). The virtual mic's sink and source have `priority.session=-10`, below any real device and
+sink's monitor). The call sink and the virtual mic's sink and source have `priority.session=-10`, below any real device and
 below a device without a priority (WirePlumber counts that as −1), so they never become the default. One instance per user (`QLockFile` in
 `XDG_RUNTIME_DIR`): a second start shows a message and exits without touching the first one's
 devices.

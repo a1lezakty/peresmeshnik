@@ -65,7 +65,7 @@ def speakers():
 
 def call_sink(mods):
     from peresmeshnik.audio.capture_pipewire import CALL_SINK, pactl
-    mods.append(pactl('load-module', 'module-null-sink', f'sink_name={CALL_SINK}', 'sink_properties=priority.session=0').strip())
+    mods.append(pactl('load-module', 'module-null-sink', f'sink_name={CALL_SINK}', 'sink_properties=priority.session=-10').strip())
     return CALL_SINK
 
 
@@ -285,3 +285,29 @@ def test_headphones_end_when_the_sink_goes_but_pacat_stays(speakers):
         out.stop()
     assert not [p.name() for p in psutil.Process().children(recursive=True) if p.name() in ('pactl', 'pacat')]
 
+
+def test_call_sink_never_the_default():
+    """Another output without a priority is there (as any module-made device; WirePlumber 0.4 counts it as -1): the
+    call sink, the app's or the capture's own, must not take over as the default (the system's sound would go silent
+    into it)."""
+    from peresmeshnik.app import CallSink
+    from peresmeshnik.audio.capture_pipewire import PipeWireCapture, pactl
+    real = pactl('load-module', 'module-null-sink', 'sink_name=test_real_out').strip()
+    try:
+        time.sleep(0.3)
+        before = pactl('get-default-sink').strip()
+        sink = CallSink()
+        try:
+            time.sleep(0.5)  # the session manager picks the default asynchronously
+            assert pactl('get-default-sink').strip() == before
+        finally:
+            sink.remove()
+        cap = PipeWireCapture()
+        cap.start(lambda x: None)
+        try:
+            time.sleep(0.5)
+            assert pactl('get-default-sink').strip() == before
+        finally:
+            cap.stop()
+    finally:
+        pactl('unload-module', real)

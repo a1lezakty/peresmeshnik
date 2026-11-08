@@ -20,6 +20,9 @@ from peresmeshnik.engines import SAMPLE_RATE
 log = logging.getLogger('peresmeshnik.call')
 CALL_SINK = 'peresmeshnik_call'
 CLIENT = 'Peresmeshnik'  # application.name of our own streams (headphones, virtual mic): never moved
+# never the default output in place of a real one (the system's sound would go silent into our sink). Negative,
+# not 0: WirePlumber 0.4 counts a device without a priority as -1, so 0 wins over it (S2 measured; as the virtual mic)
+LOW_PRIORITY = 'priority.session=-10 priority.driver=0'
 SETTLE_S = 1.0  # WirePlumber may still link a new stream to its default this long after our move: move it again
 # found by themselves when no call app is chosen yet (matched in application.process.binary / application.name)
 CALL_APPS = ('telegram', 'zoom', 'discord', 'skype', 'teams', 'slack', 'webex', 'signal', 'element', 'jitsi', 'whatsapp', 'viber')
@@ -48,10 +51,8 @@ class PipeWireCapture:
             for line in pactl('list', 'short', 'modules').splitlines():  # a sink left by a crashed run goes first
                 if 'module-null-sink' in line and f'sink_name={self.sink}' in line.split():
                     pactl('unload-module', line.split()[0])
-            # priority 0: never preferred over a real output device as the default sink
             self._module = pactl('load-module', 'module-null-sink', f'sink_name={self.sink}',
-                                 f'sink_properties=\'device.description="{self.description}"'
-                                 ' priority.session=0 priority.driver=0\'').strip()
+                                 f'sink_properties=\'device.description="{self.description}" {LOW_PRIORITY}\'').strip()
         self._stopping = False
         # dont-reconnect: PipeWire would move the recording to the next new device (e.g. the virtual mic's sink)
         self._proc = subprocess.Popen(['parec', f'--device={self.sink}.monitor', '--raw', '--format=float32le',

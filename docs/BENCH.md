@@ -843,7 +843,9 @@ remembered target is cleared). While
 translation is off there is no `pactl subscribe` process (checked in the test): the idle gate is
 unchanged. WirePlumber links ~5 % of new streams to the default output again right after our move
 (the move itself succeeds): within 1 s of a move the router checks the stream's change events and
-moves it again (2 of 30 stayed on the speakers before, 0 of 40 after).
+moves it again (2 of 30 stayed on the speakers before, 0 of 40 after). The call sink, like the
+virtual mic, now has `priority.session=-10`: with the 0 it had, it became the default output in
+place of a device without a priority (measured: the system's sound would have gone silent into it).
 
 Headphones' flush (barge-in): a 3 s chunk flushed 1.0 s after it started played 0.98–1.00 s (5
 runs); before the fix (pacat left alone, stdin drained) the stream kept its last part below the

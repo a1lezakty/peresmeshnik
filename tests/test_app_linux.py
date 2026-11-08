@@ -149,7 +149,7 @@ def test_devices_live_with_the_app_and_the_mic_is_looped_while_off(tmp_path, dev
     try:
         mods = ours()
         calls = [m for m in mods if 'sink_name=peresmeshnik_call' in m]
-        assert len(calls) == 1 and 'priority.session=0' in calls[0]  # the app's own sink (module ids get reused)
+        assert len(calls) == 1 and 'priority.session=-10' in calls[0]  # the app's own sink (module ids get reused)
         assert any(m.startswith('module-loopback') and 'source=test_mic sink=peresmeshnik_mic_sink' in m for m in mods), mods
         assert not any('source=peresmeshnik_' in m for m in mods)  # never our own device looped back
         second = subprocess.run([sys.executable, '-m', 'peresmeshnik', 'app', '--no-wizard'], capture_output=True, text=True,

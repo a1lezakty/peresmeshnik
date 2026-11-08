@@ -6,8 +6,8 @@ Real-time translator for calls. You hear the other side in your language — as 
 headphones and as subtitles — and they hear you in theirs, spoken in **your own cloned voice**.
 Works with any call app (Google Meet, Zoom, Telegram, …) through system audio devices.
 
-**Status: in development.** Version 0.1.0 for macOS is the first build to try; on Linux it runs
-from source. Not yet tried in a real call (see below).
+**Status: in development.** Version 0.2.0 adds Windows to macOS; on Linux it runs from source. Not yet
+tried in a real call (see below).
 
 - English ↔ Russian first, more languages later.
 - macOS, Windows and Linux. Local models (CPU, Apple Silicon, optional NVIDIA GPU) or cloud
@@ -114,5 +114,5 @@ to over a pipe. Its license and those of the other bundled packages are in
 **По-русски.** Пересмешник — переводчик звонков в реальном времени. Собеседника вы слышите
 на своём языке — голосом в наушниках и субтитрами, а он вас — на своём, вашим же клонированным
 голосом. Работает с любой программой созвона через системные аудиоустройства; macOS, Windows и
-Linux, локальные модели или облако. Сейчас в разработке; первая сборка для macOS — 0.1.0 (установка — выше).
+Linux, локальные модели или облако. Сейчас в разработке; сборки для macOS и Windows — 0.2.0 (установка — выше).
 Лицензия некоммерческая: пользоваться можно всем, продавать нельзя.

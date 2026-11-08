@@ -1082,6 +1082,8 @@ Two runs each (two commits, the same code paths):
   policy dropped 1.8–5.4 % of the words on continuous read speech.
 - The idle gate on `macos-15` with the app's start asking the helper once (`check`): 0.008–0.016 s CPU in 60 s
   (limit 0.13); the first 15 s after "idle" 0.08–0.15 s (not gated).
+- The working-mode gate on `macos-15` at this branch (ci.yml `work-gate`, the file fed as fast as it goes):
+  RTF 0.484, 0.876 CPU s per audio s, word recall 0.84 (limits 1.0 / 2.0 / 0.6).
 - **CoreML / Metal: not measured** (no Apple GPU in CI: "paravirtual device does not support Metal 2.0"); CPU only.
   USER-CHECKS has the M1 Pro run to compare.
 

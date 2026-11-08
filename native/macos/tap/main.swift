@@ -13,7 +13,8 @@
 // notifications, a process-exit source and a blocked read of stdin. Permission not asked yet: the system dialog first
 // (--no-ask: start anyway, the system asks by itself when the tap starts).
 // Exit: 0 stdin or stdout closed, 2 usage, 3 no such process (--pid: not running, or it ended), 4 no permission,
-// 5 macOS older than 14.4, 6 a Core Audio error. Messages go to stderr.
+// 5 macOS older than 14.4, 6 a Core Audio error, 7 the tap's rate or format changed (the app moved to a device at
+// another rate, AirPods in a call): start it again, the new header has the new rate. Messages go to stderr.
 //
 // Build (no Xcode project): swiftc -O -target arm64-apple-macos12 native/macos/tap/*.swift -o <dir>/peresmeshnik-tap
 
@@ -21,7 +22,7 @@ import AppKit
 import CoreAudio
 import Foundation
 
-enum Code: Int32 { case ok = 0, usage = 2, noProcess = 3, noPermission = 4, oldMacOS = 5, coreAudio = 6 }
+enum Code: Int32 { case ok = 0, usage = 2, noProcess = 3, noPermission = 4, oldMacOS = 5, coreAudio = 6, restart = 7 }
 
 func say(_ text: String) { FileHandle.standardError.write(Data("peresmeshnik-tap: \(text)\n".utf8)) }
 
@@ -211,9 +212,26 @@ final class Tapper {
         let header = "peresmeshnik-tap 1 rate=\(Int(rate)) channels=1 format=f32le\n"
         header.withCString { _ = Darwin.write(1, $0, strlen($0)) }
         say("starting")
+        // the header's rate holds for this run only: a change ends it (7), the caller starts again
+        let started = (device: rate, tap: format?.mSampleRate ?? 0)
+        for (object, selector) in [(device, kAudioDevicePropertyNominalSampleRate), (tap, kAudioTapPropertyFormat)] {
+            var a = address(selector)
+            let status = AudioObjectAddPropertyListenerBlock(object, &a, notes) { [self] _, _ in
+                queue.async { self.rateChanged(started) }
+            }
+            if status != noErr { say("cannot watch the tap's rate: \(fourcc(status))") }
+        }
         must(AudioDeviceStart(device, proc), "starting the tap")
         let given = format.map { "\($0.mSampleRate) Hz, \($0.mChannelsPerFrame) ch" } ?? "?"
         say("tapping \(pids(processes)) at \(Int(rate)) Hz (tap format: \(given))")
+    }
+
+    func rateChanged(_ was: (device: Float64, tap: Float64)) {  // on the queue
+        let now = read(device, kAudioDevicePropertyNominalSampleRate, Float64(0)) ?? was.device
+        let tapNow = read(tap, kAudioTapPropertyFormat, AudioStreamBasicDescription())?.mSampleRate ?? was.tap
+        if now != was.device || tapNow != was.tap {
+            stop(.restart, "the tap's rate changed (\(Int(was.device)) -> \(Int(now)) Hz, tap \(Int(was.tap)) -> \(Int(tapNow)) Hz)")
+        }
     }
 
     func pump(_ input: UnsafePointer<AudioBufferList>) {  // the IO queue: mix down to mono, write; only blocks on the pipe

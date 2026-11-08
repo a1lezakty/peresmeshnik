@@ -38,7 +38,8 @@ ALLOW = ('allow Peresmeshnik in System Settings > Privacy & Security > Screen & 
          'System Audio Recording Only, then turn translation on again')
 EXIT = {3: 'the call app is not running', 4: f'no permission to record the call app\'s sound: {ALLOW}',
         5: f'macOS {platform.mac_ver()[0]} has no process taps (14.4+): set the call app\'s speaker to {CALL_DEVICE}',
-        6: 'Core Audio could not tap the call app'}
+        6: 'Core Audio could not tap the call app', 7: 'the tap\'s sample rate changed'}
+RESTART = 7  # the helper's "start me again": the tapped app moved to a device at another rate (AirPods in a call)
 
 
 def helper() -> str:
@@ -125,6 +126,8 @@ class ProcessTap:
 
     def retarget(self, app: str) -> None:
         with self._lock:
+            if app and app == self.app and self._proc is not None and self._proc.poll() is None:
+                return  # tapping it already: a new helper would let the original through for a moment
             old, self._proc, self.app = self._proc, None, app
         if old:
             self._end(old)
@@ -160,6 +163,10 @@ class ProcessTap:
             ours = proc is self._proc  # not stopped or retargeted
             if ours:
                 self._proc = None
+        if ours and proc.returncode == RESTART and on_frames is self._on_frames:
+            log.info('call tap: %s; starting it again', self.status)
+            self._spawn()  # the new rate comes in the new header
+            return
         if ours:
             why = EXIT.get(proc.returncode) or f'the tap helper ended ({proc.returncode}): {self.status}'
             if proc.returncode == 3:
@@ -180,7 +187,7 @@ class BlackHoleIn:
     """`AudioIn` from BlackHole 16ch (the call app's speaker on macOS < 14.4): the channels that carry sound mixed to
     mono (a stereo app plays into 1-2, a mono one into the centre channel 3: CI), at `rate` (16 kHz for the
     translation). The stream runs at the device's own rate (coreaudio.rate), resampled here. `on_end(why)` when the
-    stream ends by itself."""
+    stream ends by itself. Registered with coreaudio while it runs (a PortAudio refresh suspends and resumes it)."""
 
     def __init__(self, device: str = CALL_DEVICE, on_end: Callable[[str], None] = lambda why: None, rate: int = SAMPLE_RATE):
         self.device, self.on_end, self.rate = device, on_end, rate
@@ -188,6 +195,11 @@ class BlackHoleIn:
         self._stopping = False
 
     def start(self, on_frames: Callable[[np.ndarray], None]) -> None:
+        from peresmeshnik.audio import coreaudio
+        with coreaudio.portaudio_lock:  # not while PortAudio is being refreshed
+            self._start(on_frames)
+
+    def _start(self, on_frames) -> None:
         import sounddevice as sd
 
         from peresmeshnik.audio import coreaudio
@@ -209,13 +221,16 @@ class BlackHoleIn:
         self._stream = sd.InputStream(device=index, channels=channels, dtype='float32', callback=callback,
                                       finished_callback=finished, **args)
         self._stream.start()
+        coreaudio.hold(self)
 
     def stop(self) -> None:
+        from peresmeshnik.audio import coreaudio
         self._stopping = True
-        if self._stream is not None:
-            self._stream.abort()  # nothing to drain on an input
-            self._stream.close()
-            self._stream = None
+        coreaudio.release(self)
+        stream, self._stream = self._stream, None
+        if stream is not None:
+            stream.abort()  # nothing to drain on an input
+            stream.close()
 
     def suspend(self) -> None:
         """PortAudio is about to be refreshed (coreaudio.refresh_portaudio): close the stream, resume() opens it again."""
@@ -227,44 +242,90 @@ class BlackHoleIn:
 
 
 class PassThrough:
-    """macOS < 14.4 with translation off: BlackHole 16ch (the call app's speaker) on to the headphones `output`, else the
-    call is not heard. A BlackHoleIn at the device's rate into a SoundDeviceOut (which watches its device).
-    `on_end(why)` once when the output goes or a stream ends by itself; the owner opens it again.
+    """macOS < 14.4 with translation off: BlackHole 16ch (the call app's speaker) on to the headphones, else the call is
+    not heard; only while a call app plays into it. Core Audio says when some process starts IO on BlackHole 16ch
+    (coreaudio.Running): then a BlackHoleIn at the device's rate feeds a SoundDeviceOut on `pick()` (the headphones).
+    ZERO_S of exact silence on the input closes both; when the device still runs (the call app's IO is on, nobody
+    talks) they open again and the next window is twice as long, up to MAX_ZERO_S. With no call app playing nothing
+    runs. `on_end(why)` once when the output goes or a stream ends by itself; `on_unknown(name)` when PortAudio does
+    not see the headphones (the owner refreshes it; another output plays meanwhile).
     ponytail: two device clocks, no drift correction: the queue is cut back to nothing past MAX_QUEUE_S (a click every
     ~30 min at 100 ppm); resample adaptively if that is heard."""
     MAX_QUEUE_S = 0.2
+    ZERO_S, MAX_ZERO_S = 5.0, 60.0
 
-    def __init__(self, output: str, on_end: Callable[[str], None] = lambda why: None):
-        self.output, self.on_end = output, on_end
-        self._in = self._out = None
-        self._ended = False
+    def __init__(self, pick: Callable[..., str], on_end: Callable[[str], None] = lambda why: None,
+                 on_unknown: Callable[[str], None] = lambda name: None):
+        self.pick, self.on_end, self.on_unknown = pick, on_end, on_unknown
+        self.output = ''  # the headphones while the streams are open
+        self.opened = 0  # how many times the streams opened (tests, BENCH)
+        self._in = self._out = self._running = None
+        self._lock = threading.RLock()
+        self._stopped = self._ended = False
+        self._zeros, self._window = 0.0, self.ZERO_S
 
     def start(self) -> None:
         from peresmeshnik.audio import coreaudio
-        from peresmeshnik.audio.out import SoundDeviceOut
-        rate = coreaudio.rate(CALL_DEVICE, output=False)
-        self._ended = False
-        self._out = out = SoundDeviceOut(rate, self.output, on_end=self._gone)
-        self._in = BlackHoleIn(on_end=self._gone, rate=rate)
+        self._running = coreaudio.Running(CALL_DEVICE, lambda running: running and self._open())
+        if self._running.running():
+            self._open()
 
-        def on_frames(pcm):
-            if out.queued_s() > self.MAX_QUEUE_S:
-                out.flush()
-            out.play(pcm, rate)
-        try:
-            self._in.start(on_frames)
-        except BaseException:
-            self.stop()
-            raise
+    def _open(self) -> None:
+        from peresmeshnik.audio import coreaudio
+        from peresmeshnik.audio.out import NotInPortAudio, SoundDeviceOut
+        with self._lock:
+            if self._stopped or self._in is not None:
+                return
+            rate = coreaudio.rate(CALL_DEVICE, output=False)
+            name = self.pick()
+            try:
+                out = SoundDeviceOut(rate, name, on_end=self._gone)
+            except NotInPortAudio:
+                self.on_unknown(name)
+                name = self.pick(exclude=name)
+                out = SoundDeviceOut(rate, name, on_end=self._gone)
+            self._out, self.output, self._zeros = out, name, 0.0
+            self._in = BlackHoleIn(on_end=self._gone, rate=rate)
+            try:
+                self._in.start(lambda pcm: self._on_frames(pcm, out, rate))
+            except BaseException:
+                self._close()
+                raise
+            self.opened += 1
+            log.info('call sound: %s -> %s while translation is off', CALL_DEVICE, name)
+
+    def _on_frames(self, pcm, out, rate) -> None:  # PortAudio's thread
+        if pcm.any():
+            self._zeros, self._window = 0.0, self.ZERO_S
+        else:
+            self._zeros += len(pcm) / rate
+            if self._zeros >= self._window:
+                self._zeros = -1e9  # once
+                threading.Thread(target=self._quiet, name='pass-through-quiet', daemon=True).start()
+        if out.queued_s() > self.MAX_QUEUE_S:
+            out.flush()
+        out.play(pcm, rate)
+
+    def _quiet(self) -> None:
+        """The call app plays silence: close; open again at once if it still runs IO on BlackHole 16ch."""
+        with self._lock:
+            if self._stopped:
+                return
+            self._close()
+            if self._running.running():
+                self._window = min(self._window * 2, self.MAX_ZERO_S)
+                self._open()
+            else:
+                self._window = self.ZERO_S
+                log.info('call sound: nothing plays into %s; the pass-through waits', CALL_DEVICE)
 
     def _gone(self, why: str) -> None:
-        if not self._ended:
+        if not self._ended and not self._stopped:
             self._ended = True
             self.on_end(why)
 
-    def stop(self) -> None:
-        self._ended = True
-        cap, out, self._in, self._out = self._in, self._out, None, None
+    def _close(self) -> None:
+        cap, out, self._in, self._out, self.output = self._in, self._out, None, None, ''
         if out is not None:
             out.flush()
         # both at once: PortAudio takes 0.1-0.25 s to stop each stream (it polls the unit with Pa_Sleep(100))
@@ -273,3 +334,11 @@ class PassThrough:
             t.start()
         for t in stops:
             t.join()
+
+    def stop(self) -> None:
+        with self._lock:
+            self._stopped = True
+            running, self._running = self._running, None
+            self._close()
+        if running is not None:
+            running.close()

@@ -427,19 +427,20 @@ def cli(argv=None) -> int:
                 import soundfile as sf
 
                 from peresmeshnik.audio.capture_macos import ProcessTap
-                wav = os.path.join(tempfile.mkdtemp(prefix='peresmeshnik-'), 'call.wav')  # afplay reads no Ogg
-                sf.write(wav, read_audio(a.inp), SAMPLE_RATE)
-                call = subprocess.Popen(['afplay', wav])  # stands in for the call app, on the default output
-                ended = []
-                cap = ProcessTap(pid=call.pid, on_end=ended.append)
-                cap.start(d.feed)
-                try:
-                    call.wait()
-                    time.sleep(1.0)
-                finally:
-                    cap.stop()
-                    call.kill()
-                    os.remove(wav)
+                with tempfile.TemporaryDirectory(prefix='peresmeshnik-') as tmp:
+                    wav = os.path.join(tmp, 'call.wav')  # afplay reads no Ogg
+                    sf.write(wav, read_audio(a.inp), SAMPLE_RATE)
+                    call = subprocess.Popen(['afplay', wav])  # stands in for the call app, on the default output
+                    ended = []
+                    cap = ProcessTap(pid=call.pid, on_end=ended.append)
+                    cap.start(d.feed)
+                    try:
+                        call.wait()
+                        time.sleep(1.0)
+                    finally:
+                        cap.stop()
+                        call.kill()
+                        call.wait()
                 print(f'tap: {cap.rate} Hz, {cap.status}', file=sys.stderr)
                 if ended and not ended[0].endswith('is not running'):  # the player's end ends the tap too
                     raise RuntimeError(ended[0])

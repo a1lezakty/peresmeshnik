@@ -4,7 +4,8 @@ headphones through PortAudio and their reopening. Needs BlackHole 2ch and 16ch (
 for the speakers / headphones (the runner has no real output), its input side is what they would play.
 
 PERESMESHNIK_TCC=denied|granted: the CI step wrote that answer for "System Audio Recording" into TCC.db of the runner's
-VM; unset, the tests that need one answer skip.
+VM; the tests that need the other answer skip. PERESMESHNIK_REQUIRE_MACOS=1 (CI): a missing BlackHole, tap helper or
+PERESMESHNIK_TCC fails the test instead of skipping it, so a green job means the tests ran.
 """
 import os
 import subprocess
@@ -29,7 +30,39 @@ def blackhole() -> bool:
     return {'BlackHole 2ch', 'BlackHole 16ch'} <= names
 
 
-needs_blackhole = pytest.mark.skipif(not blackhole(), reason='needs BlackHole 2ch and 16ch')
+REQUIRE = os.environ.get('PERESMESHNIK_REQUIRE_MACOS') == '1'
+
+
+def need(ok: bool, why: str) -> None:
+    if not ok:
+        (pytest.fail if REQUIRE else pytest.skip)(why)
+
+
+@pytest.fixture
+def bh():
+    need(blackhole(), 'needs BlackHole 2ch and 16ch')
+
+
+@pytest.fixture
+def helper_ok():
+    need(helper_built(), 'needs the tap helper: PERESMESHNIK_TAP or native/macos/tap/build (swiftc)')
+
+
+@pytest.fixture
+def granted():
+    need(TCC in ('denied', 'granted'), 'needs PERESMESHNIK_TCC (the TCC.db row of the CI step)')
+    if TCC != 'granted':
+        pytest.skip('PERESMESHNIK_TCC=granted: the runner allows System Audio Recording')
+
+
+@pytest.fixture
+def denied():
+    need(TCC in ('denied', 'granted'), 'needs PERESMESHNIK_TCC (the TCC.db row of the CI step)')
+    if TCC != 'denied':
+        pytest.skip('PERESMESHNIK_TCC=denied: the runner denies System Audio Recording')
+
+
+needs_blackhole = pytest.mark.usefixtures('bh')
 
 
 def helper_built() -> bool:
@@ -40,8 +73,7 @@ def helper_built() -> bool:
         return False
 
 
-needs_helper = pytest.mark.skipif(sys.platform != 'darwin' or not helper_built(),
-                                  reason='needs the tap helper: PERESMESHNIK_TAP or native/macos/tap/build (swiftc)')
+needs_helper = pytest.mark.usefixtures('helper_ok')
 
 
 def tone(seconds: float, hz: float = 440.0, sr: int = SR) -> np.ndarray:
@@ -91,6 +123,23 @@ def set_default_output(name: str) -> str:
     return before
 
 
+def until(cond, s: float = 5.0) -> bool:
+    end = time.monotonic() + s
+    while not (ok := bool(cond())) and time.monotonic() < end:
+        time.sleep(0.05)
+    return ok
+
+
+def set_rate(name: str, hz: int) -> None:
+    """The device's own rate, as Audio MIDI Setup sets it (tests only)."""
+    import ctypes
+
+    from peresmeshnik.audio import coreaudio as ca
+    v = ctypes.c_double(hz)
+    err = ca._lib().AudioObjectSetPropertyData(ca.device_id(name), ca.Address(ca.RATE, ca.GLOBAL, 0), 0, None, 8, ctypes.byref(v))
+    assert err == 0 and until(lambda: ca.rate(name) == hz), (err, ca.rate(name))
+
+
 @pytest.fixture
 def afplay(tmp_path):
     """A process playing a 440 Hz tone (60 s) on the default output, which is BlackHole 2ch (the 'speakers')."""
@@ -134,7 +183,7 @@ def test_helper_answers_check_and_lists_the_playing_process(afplay):
 
 @needs_helper
 @needs_blackhole
-@pytest.mark.skipif(TCC != 'denied', reason='PERESMESHNIK_TCC=denied: the runner denies System Audio Recording')
+@pytest.mark.usefixtures('denied')
 def test_without_permission_the_tap_says_why(afplay):
     from peresmeshnik.audio import capture_macos as cm
     ended = []
@@ -156,7 +205,7 @@ def test_without_permission_the_tap_says_why(afplay):
 
 @needs_helper
 @needs_blackhole
-@pytest.mark.skipif(TCC != 'granted', reason='PERESMESHNIK_TCC=granted: the runner allows System Audio Recording')
+@pytest.mark.usefixtures('granted')
 def test_tap_hears_the_process_and_mutes_it_for_the_speakers(afplay):
     from peresmeshnik.audio import capture_macos as cm
     from peresmeshnik.engines import SAMPLE_RATE
@@ -184,9 +233,68 @@ def test_tap_hears_the_process_and_mutes_it_for_the_speakers(afplay):
     assert rms(after[SR // 2:]) > 0.1, 'the original did not come back after the tap'
 
 
+@needs_helper
 @needs_blackhole
-def test_blackhole_16ch_capture_and_pass_through(tmp_path):
-    """macOS < 14.4: the call app plays into BlackHole 16ch; translating, the app records it; off, it passes it on."""
+@pytest.mark.usefixtures('granted')
+def test_a_killed_helper_lets_the_original_through(afplay):
+    """Core Audio removes a private tap and its aggregate device with the process that made them: the call is heard
+    again even when the helper could not clean up (SIGKILL), and the app is told."""
+    import signal
+
+    from peresmeshnik.audio import capture_macos as cm
+    frames, ended = Frames(), []
+    tap = cm.ProcessTap(pid=afplay.pid, on_end=ended.append)
+    tap.start(frames)
+    try:
+        assert until(lambda: len(frames.pcm()) > 8000), tap.status
+        during = record(SPEAKERS, 1.0)
+        os.kill(tap._proc.pid, signal.SIGKILL)
+        assert until(lambda: ended), 'no on_end'
+        after = record(SPEAKERS, 1.5)
+    finally:
+        tap.stop()
+    print(f'killed helper: speakers rms during {rms(during[SR // 2:]):.4f}, after {rms(after[SR // 2:]):.3f}; {ended}')
+    assert rms(during[SR // 2:]) < 0.01
+    assert rms(after[SR // 2:]) > 0.1, 'the original stayed muted after the helper was killed'
+    assert '-9' in ended[0], ended
+
+
+@needs_helper
+@needs_blackhole
+@pytest.mark.usefixtures('granted')
+def test_tap_follows_a_new_rate_of_the_device(afplay):
+    """m5: the call app's device changes its rate (speakers at 48 kHz -> AirPods in a call, 16/24 kHz): the helper
+    exits with 7 and is started again at the new rate, the voice keeps its pitch. Here BlackHole 2ch 48 -> 44.1 kHz."""
+    from peresmeshnik.audio import capture_macos as cm
+    from peresmeshnik.audio import coreaudio as ca
+    from peresmeshnik.engines import SAMPLE_RATE
+    frames, ended = Frames(), []
+    tap = cm.ProcessTap(pid=afplay.pid, on_end=ended.append)
+    old = ca.rate(SPEAKERS)
+    tap.start(frames)
+    try:
+        assert until(lambda: tap.rate), tap.status
+        first = tap.rate
+        set_rate(SPEAKERS, 44100 if old != 44100 else 48000)
+        new = ca.rate(SPEAKERS)
+        followed = until(lambda: tap.rate == new)
+        n = len(frames.pcm())
+        time.sleep(1.5)
+        got = frames.pcm()[n:]
+    finally:
+        tap.stop()
+        set_rate(SPEAKERS, old)
+    print(f'rate change: device {old} -> {new} Hz, tap {first} -> {tap.rate} Hz (followed: {followed}); after it '
+          f'{len(got) / SAMPLE_RATE:.2f} s, {peak_hz(got, SAMPLE_RATE):.0f} Hz, rms {rms(got):.3f}; {tap.status}')
+    assert not ended, ended
+    assert followed, 'the helper did not start again at the new rate'
+    assert len(got) > SAMPLE_RATE and rms(got) > 0.1 and abs(peak_hz(got, SAMPLE_RATE) - 440) <= 2
+
+
+@needs_blackhole
+def test_blackhole_16ch_capture_and_pass_through(tmp_path, monkeypatch):
+    """macOS < 14.4: the call app plays into BlackHole 16ch; translating, the app records it; off, it passes it on to
+    the headphones, and only while the call app plays (with no call nothing runs)."""
     import soundfile as sf
 
     from peresmeshnik.audio import capture_macos as cm
@@ -199,26 +307,47 @@ def test_blackhole_16ch_capture_and_pass_through(tmp_path):
     got = frames.pcm()
     assert rms(got) > 0.1 and abs(peak_hz(got[np.argmax(np.abs(got) > 0.1):], SAMPLE_RATE) - 440) <= 2
 
+    # off: the pass-through runs only while the call app plays into BlackHole 16ch (Core Audio says so)
     import psutil
-    before = set_default_output(cm.CALL_DEVICE)  # afplay is the call app with BlackHole 16ch as its speaker
-    sf.write(tmp_path / 'tone.wav', tone(15), SR)
-    call = subprocess.Popen(['afplay', str(tmp_path / 'tone.wav')])
-    through = cm.PassThrough(SPEAKERS, on_end=ended.append)
-    through.start()
-    try:
-        time.sleep(1.0)
-        heard = record(SPEAKERS, 1.0)
-        me = psutil.Process()
+    monkeypatch.setattr(cm.PassThrough, 'ZERO_S', 1.0)
+    me = psutil.Process()
+
+    def cpu_over(seconds: float) -> float:
         t0, c0 = time.monotonic(), sum(me.cpu_times()[:2])
-        time.sleep(10.0)
-        cpu = (sum(me.cpu_times()[:2]) - c0) / (time.monotonic() - t0)
+        time.sleep(seconds)
+        return (sum(me.cpu_times()[:2]) - c0) / (time.monotonic() - t0)
+    sf.write(tmp_path / 'tone.wav', tone(7), SR)
+    before = set_default_output(cm.CALL_DEVICE)  # afplay is the call app with BlackHole 16ch as its speaker
+    through = cm.PassThrough(lambda exclude='': SPEAKERS, on_end=ended.append)
+    calls = []
+    try:
+        through.start()
+        idle = cpu_over(3.0)
+        idle_opened = through.opened
+        calls.append(subprocess.Popen(['afplay', str(tmp_path / 'tone.wav')]))
+        assert until(lambda: through.opened == 1), 'the call app plays, the pass-through did not open'
+        time.sleep(0.5)
+        heard = record(SPEAKERS, 1.0)
+        busy = cpu_over(3.0)
+        calls[0].wait(10)
+        assert until(lambda: not through.output, 8), 'the call app stopped, the pass-through stayed open'
+        n = through.opened
+        calls.append(subprocess.Popen(['afplay', str(tmp_path / 'tone.wav')]))  # the next call
+        assert until(lambda: through.opened > n), 'the next call did not open it'
+        time.sleep(0.5)
+        again = record(SPEAKERS, 1.0)
     finally:
         through.stop()
-        call.kill()
+        for c in calls:
+            c.kill()
         if before:
             set_default_output(before)
-    print(f'pass-through: speakers rms {rms(heard):.3f}, {peak_hz(heard, SR):.0f} Hz; CPU {cpu * 100:.2f} % of a core')
+    print(f'pass-through: CPU {idle * 100:.2f} % of a core with no call (opened {idle_opened}), {busy * 100:.2f} % '
+          f'during one; speakers rms {rms(heard):.3f}, {peak_hz(heard, SR):.0f} Hz; next call rms {rms(again):.3f}; '
+          f'opened {through.opened} times')
+    assert idle_opened == 0 and idle < 0.005
     assert rms(heard) > 0.1 and abs(peak_hz(heard, SR) - 440) <= 2
+    assert rms(again) > 0.1
     assert not ended, ended
 
 
@@ -265,8 +394,7 @@ def tone_app(tmp_path_factory):
     """A call app with a helper, as Chrome or Electron apps are: Tone.app (TONE_APP) and Tone Helper.app (TONE_APP.helper)
     inside it, built from tests/macos/tone.swift. Returns {bundle id: its executable}."""
     import shutil
-    if not shutil.which('swiftc'):
-        pytest.skip('needs swiftc')
+    need(bool(shutil.which('swiftc')), 'needs swiftc')
     root = tmp_path_factory.mktemp('tone')
     apps = {TONE_APP: root / 'Tone.app', TONE_APP + '.helper': root / 'Tone.app' / 'Contents' / 'Frameworks' / 'Tone Helper.app'}
     exe = {}
@@ -282,7 +410,7 @@ def tone_app(tmp_path_factory):
 
 @needs_helper
 @needs_blackhole
-@pytest.mark.skipif(TCC != 'granted', reason='PERESMESHNIK_TCC=granted: the runner allows System Audio Recording')
+@pytest.mark.usefixtures('granted')
 def test_tap_by_bundle_waits_for_the_app_and_takes_its_helpers(tone_app):
     from peresmeshnik.audio import capture_macos as cm
     from peresmeshnik.engines import SAMPLE_RATE
@@ -355,8 +483,9 @@ def longest_quiet_s(x: np.ndarray, sr: int, level: float = 0.02) -> float:
 
 @needs_blackhole
 def test_devices_refresh_keeps_the_streams_with_a_short_gap(tmp_path):
-    """(Answer 19:40 (5)) the saved headphones are back while translating: PortAudio is refreshed with the streams
-    suspended and resumed, the engines untouched. A tone goes BlackHole 16ch -> BlackHoleIn -> Headphones (BlackHole 2ch)."""
+    """(Answer 19:40 (5)) the saved headphones are back while translating: PortAudio is refreshed with every stream
+    of the process suspended and resumed, the engines untouched. A tone goes BlackHole 16ch -> BlackHoleIn ->
+    Headphones (BlackHole 2ch); the controller owns neither stream (as the wizard's test phrase): the registry has them."""
     import soundfile as sf
 
     from peresmeshnik.app import Controller, Headphones
@@ -381,11 +510,11 @@ def test_devices_refresh_keeps_the_streams_with_a_short_gap(tmp_path):
         cap.start(q.put)
         rec = recorder(SPEAKERS, 6.0, tmp_path / 'heard.npy')
         time.sleep(3.0)
-        ctl.sides, ctl.on = [SimpleSide(cap, hp)], True
+        ctl.on = True
         phases = ctl.submit(ctl._refresh_devices).result()
         x, sr = recorded(rec, tmp_path / 'heard.npy')
     finally:
-        ctl.sides, ctl.on = [], False
+        ctl.on = False
         cap.stop()
         q.put(None)
         t_play.join(5)
@@ -395,13 +524,126 @@ def test_devices_refresh_keeps_the_streams_with_a_short_gap(tmp_path):
             set_default_output(before)
     gap = longest_quiet_s(x, sr)
     print(f'devices refresh: {phases} ms, longest gap heard {gap * 1000:.0f} ms; {states[-1:]}')
+    assert phases['streams'] >= 2 and not phases['failed'], phases
     assert rms(x) > 0.05, 'the tone did not come through'
-    assert gap <= 0.5, f'{gap:.2f} s of silence'
+    assert gap <= 0.8, f'{gap:.2f} s of silence'  # the aim is 0.5 s (BENCH); a stop is quantised by Pa_Sleep(100)
 
 
-class SimpleSide:
-    def __init__(self, inp, out):
-        self.inp, self.out, self.name = inp, out, 'them'
+FAKE = os.path.join(os.path.dirname(__file__), 'macos', 'fakedevice.swift')
+
+
+@pytest.fixture(scope='module')
+def fake_exe(tmp_path_factory):
+    import shutil
+    need(bool(shutil.which('swiftc')), 'needs swiftc')
+    exe = tmp_path_factory.mktemp('fake') / 'fakedevice'
+    subprocess.run(['swiftc', '-O', FAKE, '-o', str(exe)], check=True, timeout=300)
+    return exe
+
+
+@pytest.fixture
+def fakedevice(fake_exe):
+    """make(name, over) -> a public aggregate device `name` over `over`, made by another process (as headphones that
+    are plugged in); unplug(p) destroys it. Core Audio tells the app through its own notifications."""
+    from peresmeshnik.audio import coreaudio as ca
+    made = []
+
+    def make(name: str, over: str = SPEAKERS) -> subprocess.Popen:
+        p = subprocess.Popen([str(fake_exe), name, over], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        made.append(p)
+        assert p.stdout.readline().startswith('made '), p.wait(5)
+        assert until(lambda: ca.device_id(name) is not None), f'{name} did not appear'
+        return p
+    yield make
+    for p in made:
+        unplug(p)
+
+
+def unplug(p: subprocess.Popen) -> None:
+    if p.poll() is None:
+        p.stdin.close()
+        p.wait(10)
+
+
+PHONES, SPEAKERS2 = 'Test Phones', 'Test Speakers'
+
+
+@needs_blackhole
+def test_headphones_follow_the_saved_device_as_it_goes_and_comes_back(fakedevice):
+    """M6 through Core Audio's own notifications: the saved headphones (Test Phones, over BlackHole 2ch) are not there,
+    the default (Test Speakers, over BlackHole 16ch) plays; they come (Arrival, a PortAudio refresh, the output moves
+    there with the speech not played yet), they go (Watch: on_end, the default again)."""
+    from peresmeshnik.app import Controller, Headphones
+    from peresmeshnik.audio import coreaudio as ca
+    fakedevice(SPEAKERS2, 'BlackHole 16ch')
+    ca.refresh_portaudio()  # PortAudio sees the devices of its last refresh
+    before = set_default_output(SPEAKERS2)
+    states = []
+    ctl = Controller(overlay=None, on_state=print)
+    hp = Headphones(PHONES, states.append, on_back=lambda: ctl.submit(ctl._refresh_devices))
+    stop = threading.Event()
+
+    def speak():  # the translation's voice, chunk by chunk
+        x = tone(0.1, sr=22050)
+        while not stop.is_set():
+            hp.play(x, 22050)
+            time.sleep(0.1)
+    t = threading.Thread(target=speak, daemon=True)
+    t.start()
+    try:
+        assert until(lambda: hp._out is not None) and hp._out.device == SPEAKERS2, states
+        phones = fakedevice(PHONES)
+        t0 = time.monotonic()
+        assert until(lambda: hp._out is not None and hp._out.device == PHONES, 10), (hp._out and hp._out.device, states)
+        moved = time.monotonic() - t0
+        time.sleep(0.3)
+        heard = record(SPEAKERS, 1.0)  # what Test Phones plays
+        unplug(phones)
+        t0 = time.monotonic()
+        assert until(lambda: any('went away' in x for x in states)), states
+        noticed = time.monotonic() - t0
+        assert until(lambda: hp._out is not None and hp._out.device == SPEAKERS2), (hp._out and hp._out.device, states)
+    finally:
+        stop.set()
+        t.join(5)
+        hp.stop()
+        if before:
+            set_default_output(before)
+    print(f'saved headphones: back on them in {moved:.2f} s (rms {rms(heard):.3f}), unplugging noticed in '
+          f'{noticed:.2f} s; {states}')
+    assert rms(heard) > 0.05
+
+
+@needs_blackhole
+def test_headphones_unknown_to_portaudio_play_on_the_default_meanwhile(fakedevice):
+    """M2: Core Audio has the saved headphones, PortAudio does not see them even after the refresh it was asked for
+    (a Bluetooth profile settling), or nobody can refresh: the default plays meanwhile, not silence."""
+    from peresmeshnik.app import Headphones
+    from peresmeshnik.audio import coreaudio as ca
+    fakedevice(SPEAKERS2, 'BlackHole 16ch')
+    ca.refresh_portaudio()
+    before = set_default_output(SPEAKERS2)
+    fakedevice(PHONES)  # after PortAudio's refresh: unknown to it
+    asked, states = [], []
+    hp = Headphones(PHONES, states.append, on_back=lambda: asked.append(1))  # a refresh that does not help
+    hp.retry_s = 0.1
+    hp2 = Headphones(PHONES, states.append)
+    try:
+        hp.play(tone(0.3, sr=22050), 22050)
+        first = hp._out
+        time.sleep(0.2)
+        hp.play(tone(0.3, sr=22050), 22050)
+        hp2.play(tone(0.3, sr=22050), 22050)
+        devices = [h._out and h._out.device for h in (hp, hp2)]
+        waits = hp._arrival is not None
+    finally:
+        hp.stop()
+        hp2.stop()
+        if before:
+            set_default_output(before)
+    print(f'unknown to PortAudio: refresh asked {len(asked)}, then {devices}; {states}')
+    assert first is None and asked == [1]  # the first chunk: a refresh is asked, nothing plays yet
+    assert devices == [SPEAKERS2, SPEAKERS2] and waits  # then the default, and back to them when they change
 
 
 MODELS = os.environ.get('PERESMESHNIK_WORK_GATE') == '1'
@@ -450,7 +692,8 @@ def test_blackhole_16ch_path_gives_subtitles_and_voice(tmp_path):
 
 @needs_helper
 @needs_blackhole
-@pytest.mark.skipif(not MODELS or TCC != 'granted', reason='needs the models and System Audio Recording allowed')
+@pytest.mark.skipif(not MODELS, reason='needs the models: PERESMESHNIK_WORK_GATE=1')
+@pytest.mark.usefixtures('granted')
 def test_tap_path_gives_subtitles_and_voice(tmp_path):
     from peresmeshnik.audio.capture_macos import CALL_DEVICE
     before = set_default_output(CALL_DEVICE)  # afplay plays there: muted while tapped

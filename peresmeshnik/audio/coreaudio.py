@@ -2,15 +2,18 @@
 
 PortAudio (sounddevice) reads the device list once, at its initialisation: a device plugged in later (AirPods
 back) is not in it, and its default devices are the ones of that moment. So the names and the defaults come from
-here, and `refresh_portaudio()` (only while no PortAudio stream is open) makes PortAudio read the list again.
+here, and `refresh_portaudio()` makes PortAudio read the list again, with every registered stream closed around it.
 `Watch` calls back once when a device goes (unplugged, Bluetooth gone, the sound server restarted): Core Audio's
-property listeners, on its own notification thread; nothing polls.
+property listeners, on its own notification thread; nothing polls. `Arrival` says when a device is back, `Running`
+when a process starts or stops playing into a device.
 """
 from __future__ import annotations
 
 import ctypes
 import logging
 import threading
+import time
+import weakref
 from collections.abc import Callable
 
 log = logging.getLogger('peresmeshnik.coreaudio')
@@ -23,6 +26,7 @@ def _cc(s: str) -> int:
 SYSTEM = 1  # kAudioObjectSystemObject
 DEVICES, DEFAULT_OUTPUT, DEFAULT_INPUT, RUN_LOOP = _cc('dev#'), _cc('dOut'), _cc('dIn '), _cc('rnlp')
 NAME, ALIVE, STREAMS, TRANSPORT, RATE = _cc('lnam'), _cc('livn'), _cc('stm#'), _cc('tran'), _cc('nsrt')
+RUNNING_SOMEWHERE = _cc('gone')  # kAudioDevicePropertyDeviceIsRunningSomewhere
 GLOBAL, INPUT, OUTPUT = _cc('glob'), _cc('inpt'), _cc('outp')
 VIRTUAL, AGGREGATE = _cc('virt'), _cc('grup')  # kAudioDeviceTransportType…
 
@@ -127,41 +131,86 @@ def rate(name: str, output: bool = True) -> int:
     return int(r)
 
 
-def refresh_portaudio() -> None:
-    """Make PortAudio read the device list again. It closes every PortAudio stream of the process: call it only
-    while none is open (the app: at translation on, before the streams open)."""
+# Every object that owns PortAudio streams on macOS registers here (hold / release) and has suspend() / resume(): a
+# refresh closes every PortAudio stream of the process, so all of them are closed and opened again around it.
+_holders: weakref.WeakSet = weakref.WeakSet()
+# one refresh at a time, and no stream opens while one runs (opening takes it too; re-entrant: resume() opens)
+portaudio_lock = threading.RLock()
+
+
+def hold(x) -> None:
+    _holders.add(x)
+
+
+def release(x) -> None:
+    _holders.discard(x)
+
+
+def refresh_portaudio() -> dict:
+    """Make PortAudio read the device list again (a device plugged in since its start). It frees every PortAudio
+    stream of the process: every registered holder is suspended first, all at once (PortAudio takes 0.1-0.25 s to
+    stop each stream: pa_mac_core polls the unit with Pa_Sleep(100)), and resumed after, each on its own (a holder
+    that fails to resume is reported, the others go on). Returns the phases in ms and the failures."""
     import sounddevice as sd
-    sd._terminate()
-    sd._initialize()
+    with portaudio_lock:
+        held = list(_holders)
+        t = [time.perf_counter()]
+        failed: list[str] = []
+
+        def each(fn, x):
+            try:
+                fn()
+            except Exception as e:
+                log.exception('refresh: %s', x)
+                failed.append(f'{type(x).__name__}: {e}')
+        stops = [threading.Thread(target=each, args=(x.suspend, x), name='suspend') for x in held]
+        for th in stops:
+            th.start()
+        for th in stops:
+            th.join()
+        t.append(time.perf_counter())
+        sd._terminate()
+        sd._initialize()
+        t.append(time.perf_counter())
+        for x in held:
+            each(x.resume, x)
+        t.append(time.perf_counter())
+    ms = {k: round(1000 * (b - a)) for k, a, b in zip(('suspend', 'refresh', 'resume'), t, t[1:])}
+    return ms | {'streams': len(held), 'failed': failed}
 
 
-class Watch:
-    """`on_gone(why)` once (on a thread of its own) when the device `dev` goes: it leaves the system's device list or
-    stops being alive. close() removes the listeners; after it no call comes."""
+class _Listener:
+    """Core Audio property listeners on (object, selector, scope); `_check()` runs on Core Audio's notification thread
+    and returns what to report (or None). One-shot listeners fire once, on a thread of their own."""
+    once = True
 
-    def __init__(self, dev: int, name: str, on_gone: Callable[[str], None]):
-        self.dev, self.name, self.on_gone = dev, name, on_gone
+    def __init__(self, addrs: list[tuple[int, int, int]], what: str):
         self._done = False
         self._lock = threading.Lock()
         self._cb = LISTENER(self._changed)  # kept: Core Audio holds only the C pointer
-        self._addrs = [(SYSTEM, Address(DEVICES, GLOBAL, 0)), (dev, Address(ALIVE, GLOBAL, 0))]
+        self._addrs = [(obj, Address(sel, scope, 0)) for obj, sel, scope in addrs]
         for obj, a in self._addrs:
             if err := _lib().AudioObjectAddPropertyListener(obj, a, self._cb, None):
                 self.close()
-                raise RuntimeError(f'cannot watch {name}: Core Audio error {err}')
-        self._changed(0, 0, None, None)  # gone before the listeners were there
+                raise RuntimeError(f'cannot watch {what}: Core Audio error {err}')
 
     def _changed(self, obj, n, addrs, data) -> int:
         try:
-            if not self._done and (self.dev not in _ids(SYSTEM, DEVICES) or _get(self.dev, ALIVE, ctypes.c_uint32) == 0):
+            if not self._done and (why := self._check(obj)) is not None:
                 with self._lock:
                     if self._done:
                         return 0
-                    self._done = True
-                threading.Thread(target=self.on_gone, args=(f'{self.name} went away',), name='device-gone', daemon=True).start()
+                    self._done = self.once
+                threading.Thread(target=self._fire, args=(why,), name='coreaudio-event', daemon=True).start()
         except Exception:  # never into Core Audio's thread
-            log.exception('device watch')
+            log.exception('coreaudio listener')
         return 0
+
+    def _check(self, obj):
+        raise NotImplementedError
+
+    def _fire(self, why) -> None:
+        raise NotImplementedError
 
     def close(self) -> None:
         with self._lock:
@@ -170,32 +219,59 @@ class Watch:
             _lib().AudioObjectRemovePropertyListener(obj, a, self._cb, None)
 
 
-class Arrival:
-    """`on_arrive()` once (on a thread of its own) when an output (or input) device named `name` is in the system's
-    device list: the saved headphones are back. close() removes the listener."""
+class Watch(_Listener):
+    """`on_gone(why)` once (on a thread of its own) when the device `dev` goes: it leaves the system's device list or
+    stops being alive. close() removes the listeners; after it no call comes."""
+
+    def __init__(self, dev: int, name: str, on_gone: Callable[[str], None]):
+        self.dev, self.name, self.on_gone = dev, name, on_gone
+        super().__init__([(SYSTEM, DEVICES, GLOBAL), (dev, ALIVE, GLOBAL)], name)
+        self._changed(0, 0, None, None)  # gone before the listeners were there
+
+    def _check(self, obj):
+        gone = self.dev not in _ids(SYSTEM, DEVICES) or _get(self.dev, ALIVE, ctypes.c_uint32) == 0
+        return f'{self.name} went away' if gone else None
+
+    def _fire(self, why) -> None:
+        self.on_gone(why)
+
+
+class Arrival(_Listener):
+    """`on_arrive()` once (on a thread of its own) when an output (or input) device named `name` is there: it comes into
+    the system's device list, or, when Core Audio has it already (but PortAudio did not open it: a Bluetooth profile
+    still settling), when it changes (its streams, rate, aliveness) or the list does. close() removes the listeners."""
 
     def __init__(self, name: str, on_arrive: Callable[[], None], output: bool = True):
         self.name, self.on_arrive, self.output = name, on_arrive, output
-        self._done = False
-        self._lock = threading.Lock()
-        self._cb = LISTENER(self._changed)
-        self._addr = Address(DEVICES, GLOBAL, 0)
-        if err := _lib().AudioObjectAddPropertyListener(SYSTEM, self._addr, self._cb, None):
-            raise RuntimeError(f'cannot watch for {name}: Core Audio error {err}')
+        self.present = device_id(name, output)
+        scope = OUTPUT if output else INPUT
+        extra = [(self.present, STREAMS, scope), (self.present, RATE, GLOBAL), (self.present, ALIVE, GLOBAL)] if self.present else []
+        super().__init__([(SYSTEM, DEVICES, GLOBAL), *extra], name)
 
-    def _changed(self, obj, n, addrs, data) -> int:
-        try:
-            if not self._done and device_id(self.name, self.output) is not None:
-                with self._lock:
-                    if self._done:
-                        return 0
-                    self._done = True
-                threading.Thread(target=self.on_arrive, name='device-back', daemon=True).start()
-        except Exception:
-            log.exception('device arrival')
-        return 0
+    def _check(self, obj):
+        return True if device_id(self.name, self.output) is not None else None
 
-    def close(self) -> None:
-        with self._lock:
-            self._done = True
-        _lib().AudioObjectRemovePropertyListener(SYSTEM, self._addr, self._cb, None)
+    def _fire(self, why) -> None:
+        self.on_arrive()
+
+
+class Running(_Listener):
+    """`on_change(running)` (on a thread of its own) each time "some process runs IO on the device `name`" changes
+    (kAudioDevicePropertyDeviceIsRunningSomewhere): a call app started or stopped playing into BlackHole 16ch."""
+    once = False
+
+    def __init__(self, name: str, on_change: Callable[[bool], None]):
+        self.name, self.on_change = name, on_change
+        if (dev := device_id(name, output=False)) is None:
+            raise RuntimeError(f'no input device {name!r}')
+        self.dev = dev
+        super().__init__([(dev, RUNNING_SOMEWHERE, GLOBAL)], name)
+
+    def running(self) -> bool:
+        return bool(_get(self.dev, RUNNING_SOMEWHERE, ctypes.c_uint32))
+
+    def _check(self, obj):
+        return self.running()
+
+    def _fire(self, running) -> None:
+        self.on_change(running)

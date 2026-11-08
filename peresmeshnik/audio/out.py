@@ -196,45 +196,73 @@ def portaudio_index(name: str, output: bool = True) -> int:
     raise NotInPortAudio(f'no {"output" if output else "input"} device {name!r} for PortAudio (plugged in after its start)')
 
 
+def portaudio_names(output: bool = True) -> set[str]:
+    import sounddevice as sd
+    key = 'max_output_channels' if output else 'max_input_channels'
+    return {d['name'] for d in sd.query_devices() if d[key] > 0}
+
+
 class SoundDeviceOut:
     """macOS: the headphones through PortAudio on a device by name (None / '' = the system's default output now), at the
     device's own rate (`rate`; play() resamples from `sample_rate`). play() only enqueues; PortAudio's callback takes
-    from that queue (silence when it is empty). `on_end(why)` runs
-    once (on a thread of its own) when the device goes: Core Audio says it left the device list or is not alive
-    (coreaudio.Watch: PortAudio itself would only go quiet), or the stream ended by itself. stop() and flush() do
-    not call it. The owner reopens (app.Headphones)."""
+    from that queue (silence when it is empty). `on_end(why)` runs once (on a thread of its own) when the device goes:
+    Core Audio says it left the device list or is not alive (coreaudio.Watch: PortAudio itself would only go quiet),
+    the stream ended by itself, or it cannot be opened again after a PortAudio refresh. stop() and flush() do not call
+    it. The owner reopens (app.Headphones). Registered with coreaudio (hold): a refresh suspends it, the audio not
+    played yet waits, resume() opens the same device again."""
 
     def __init__(self, sample_rate: int, device: str | None = None, latency_ms: int = 40,
                  on_end: Callable[[str], None] = lambda why: None):
-        import sounddevice as sd
-
         from peresmeshnik.audio import coreaudio
+        from peresmeshnik.audio.resample import Resampler
         self.sample_rate, self.on_end = sample_rate, on_end
         self.device = device or coreaudio.default()
         dev = coreaudio.device_id(self.device)
         if dev is None:
             raise RuntimeError(f'no output device {self.device!r}')
-        index = portaudio_index(self.device)
-        self.channels = min(2, sd.query_devices(index)['max_output_channels'])  # mono on both ears
-        args = coreaudio.stream_args(self.device)
-        self.rate = args['samplerate']
-        from peresmeshnik.audio.resample import Resampler
+        self.rate = coreaudio.rate(self.device)
         self._rs = Resampler(sample_rate, self.rate)
         self.alive = True  # False once the device is gone
-        self._stopping = False
+        self._stopping = False  # stop() or suspend(): the stream's end is ours
         self._lock = threading.Lock()  # play() / flush() and the callback
         self._chunks: collections.deque[np.ndarray] = collections.deque()
         self._pos = 0  # samples of _chunks[0] already played
         self._empty = threading.Event()
         self._empty.set()
+        self._stream = None
         self._watch = coreaudio.Watch(dev, self.device, self._lost)
         try:
-            self._stream = sd.OutputStream(device=index, channels=self.channels, dtype='float32', callback=self._fill,
-                                           finished_callback=self._finished, **args)  # latency_ms: BLOCK on macOS
-            self._stream.start()
+            self._open()  # latency_ms: on macOS every stream has coreaudio.BLOCK
         except BaseException:
             self._watch.close()
             raise
+
+    def _open(self) -> None:
+        import sounddevice as sd
+
+        from peresmeshnik.audio import coreaudio
+        with coreaudio.portaudio_lock:
+            index = portaudio_index(self.device)
+            self.channels = min(2, sd.query_devices(index)['max_output_channels'])  # mono on both ears
+            args = coreaudio.stream_args(self.device)
+            if args['samplerate'] != self.rate:  # a Bluetooth profile switch: what is queued is at the old rate
+                raise RuntimeError(f'its rate changed ({self.rate} -> {args["samplerate"]} Hz)')
+            self._stream = sd.OutputStream(device=index, channels=self.channels, dtype='float32', callback=self._fill,
+                                           finished_callback=self._finished, **args)
+            self._stream.start()
+            self._stopping = False
+            coreaudio.hold(self)
+
+    def _close(self, drain: bool) -> None:
+        from peresmeshnik.audio import coreaudio
+        coreaudio.release(self)
+        stream, self._stream = self._stream, None
+        if stream is not None:
+            if drain:
+                stream.stop()  # returns once PortAudio's buffers have played
+            else:
+                stream.abort()
+            stream.close()
 
     def _fill(self, outdata, frames, time_info, status) -> None:  # PortAudio's thread
         n = 0
@@ -263,14 +291,14 @@ class SoundDeviceOut:
                 self._empty.clear()
 
     def flush(self) -> None:
-        """Drop the queued audio (what PortAudio holds, ~latency, still plays)."""
+        """Drop the queued audio (what PortAudio holds, ~2 blocks, still plays)."""
         with self._lock:
             self._chunks.clear()
             self._pos = 0
             self._empty.set()
 
     def take(self) -> list[np.ndarray]:
-        """The audio not played yet, taken out, at `rate` (suspend: it plays on the next device)."""
+        """The audio not played yet, taken out, at `rate` (it plays on another device)."""
         with self._lock:
             chunks = list(self._chunks)
             if chunks:
@@ -284,19 +312,29 @@ class SoundDeviceOut:
         with self._lock:
             return (sum(len(c) for c in self._chunks) - self._pos) / self.rate
 
+    def suspend(self) -> None:
+        """coreaudio.refresh_portaudio is about to free every stream: close ours; the queue stays for resume()."""
+        self._stopping = True
+        self._close(drain=False)
+
+    def resume(self) -> None:
+        if not self.alive:
+            return
+        try:
+            self._open()
+        except Exception as e:  # gone meanwhile, or PortAudio still does not see it: the owner opens another device
+            self._stopping = False
+            self._lost(f'{self.device} after the device refresh: {e}')
+
     def stop(self, drain: bool = True) -> None:
         """Play what is queued (drain), then close the device."""
         if self.alive and drain:
             self._empty.wait(self.queued_s() + 2.0)
         self._stopping = True
         self._watch.close()
-        if self.alive and drain:
-            self._stream.stop()  # returns once PortAudio's buffers have played
-        else:
-            self._stream.abort()
-        self._stream.close()
+        self._close(drain=self.alive and drain)
 
-    def _finished(self) -> None:  # PortAudio's thread: the stream stopped (ours: stop(); else it ended by itself)
+    def _finished(self) -> None:  # PortAudio's thread: the stream stopped (ours: stop(), suspend(); else by itself)
         if not self._stopping:
             threading.Thread(target=self._lost, args=(f'{self.device}: the output stream ended',), daemon=True).start()
 

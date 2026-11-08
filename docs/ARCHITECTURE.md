@@ -30,12 +30,15 @@ mic ─▶ capture ─▶ queue ─▶ VAD ─▶ ASR ─clause end─▶ MT ─
 ```
 
 - **Frames.** Capture delivers 16 kHz mono float32 in 20–32 ms frames. The device callback only
-  copies the frame into a queue; everything else runs on worker threads (one per direction for
-  VAD+ASR, one per direction for MT+TTS, one playback thread per output device).
-- **VAD first.** Silero VAD (32 ms frames; vendor figure < 1 ms CPU per frame, stage 1 measures it)
+  copies the frame into a queue; everything else runs on worker threads (per direction one for
+  VAD+ASR, one for MT, one for TTS, so captions never wait for speech; one playback thread per
+  output device).
+- **VAD first.** Silero VAD (32 ms frames, 0.1–0.3 ms per frame measured in stage 1: 0.3–1 % of a core)
   gates everything: on silence ASR, MT and TTS do not run at all.
 - **Clauses, not sentences.** A segment ends at a VAD pause ≥ 300 ms, at punctuation from the
-  ASR (GigaAM e2e and Parakeet emit it), or after 5 s of continuous speech. MT translates each
+  ASR (GigaAM e2e and Parakeet emit it), or after 5 s of continuous speech (then at a comma in
+  the clause's second half or between words; the next window keeps 1 s of the previous clause in
+  front, since Parakeet loses words on a window that starts mid-speech). MT translates each
   clause on its own (OPUS-MT has no context input; a context-aware LLM MT is a stage-5 option);
   TTS starts on the first clause while the speaker is still talking.
 - **Subtitles** show ASR partials of the current clause immediately and replace them with the
@@ -125,8 +128,9 @@ Requirement from day one (Zagon 0.1.2 burned 104 % CPU on a redraw loop):
 **Idle (app open, translation off):** ~0 CPU. No timers, no polling, no redraws. Audio streams
 are closed, `Direction.close()` has unloaded the engines or left them without busy threads. CI
 gate: `tests/test_idle_cpu.py` starts the app, waits 60 s and fails above **0.13 s CPU** (Linux,
-macOS, Windows on pushes to main and on PRs). Stage 1 adds the same gate in working mode on a recording
-(RTF and CPU per audio second; numbers in BENCH.md).
+macOS, Windows on pushes to main and on PRs). The working-mode gate (`tests/test_pipeline_cpu.py`,
+CI job `work-gate`, three OSes) runs `peresmeshnik run` on a 30 s recording and fails at RTF ≥ 1.0
+or ≥ 2.0 CPU s per audio s (0.27–0.54 and 0.55–1.09 on the runners, which vary up to 2× between runs; BENCH.md, stage 1).
 
 **Working:**
 - device callbacks only enqueue; heavy work on worker threads;
@@ -144,7 +148,7 @@ RAM = peak RSS of the model's own process):
 
 | Link | Threads | CPU s / audio s, M1 / x86 | RAM | Notes |
 |---|---|---|---|---|
-| Silero VAD | 1 | ~0.03 (vendor figure, stage 1 measures) | ~50 MB | runs on every frame while a direction is on |
+| Silero VAD | 1 | 0.003–0.01 (stage 1, BENCH `pipeline` vad_rtf) | ~50 MB | runs on every frame while a direction is on |
 | ASR Parakeet v3 int8 | 2 | 0.10 / 0.18 | 1.4–1.8 GB | partials: re-running every 300 ms on a window growing to 3 s costs ~0.5 (M1) – 0.9 (x86) core while someone speaks; a 500 ms refresh halves it for +100 ms subtitle latency |
 | ASR GigaAM v3 e2e (RU, ≥ 16 GB) | 2 | 0.16 / 0.15 | 1.7–1.8 GB | fp32; int8 to try in stage 1 |
 | ASR T-one (RU partials, ≥ 16 GB) | 1 | 0.21 / 0.19 | 0.7 GB | 12–19 ms per 300 ms chunk |
@@ -174,7 +178,7 @@ so the first switch-on shows "warming up".
 |---|---|---|---|
 | VAD | **Silero VAD** (ONNX) | tiny, MIT, 32 ms frames | — |
 | ASR, English | **Parakeet TDT 0.6B v3**, int8, via onnx-asr | WER 4.6–4.8 %, the same as Whisper large-v3-turbo, at 106–169 ms per 2 s window vs turbo's 5.4–10.4 s; RTF 0.04; also does Russian | Whisper: pads every window to 30 s, so a 2 s refresh costs 1.1 s (small) to 10 s (turbo) on CPU; on M1 CPU turbo is slower than real time (RTF 1.2). Whisper turbo stays for other languages on GPU (0.3 s per utterance). |
-| ASR, Russian | 8 GB: **Parakeet v3** (one model for both languages, WER 7.6–8.3 %). ≥ 16 GB: **GigaAM v3 e2e CTC** for final text (WER 5.6 %, punctuation) + **T-one** for partials (12–19 ms per 300 ms chunk) | memory vs accuracy | T-one alone: WER 13 % on FLEURS (it is an 8 kHz telephony model; real call audio may favour it — re-check in stage 2); Whisper medium/turbo: 3–10 s per window on CPU |
+| ASR, Russian | **GigaAM v3 e2e CTC** (WER 5.6 %, punctuation; streamed 6.6 % vs Parakeet's 10.8 %, 0.6 GB vs 1.7 GB; stage 1 default, since Parakeet has no language setting and drifts into Ukrainian on short windows — BENCH stage 1). Both directions on 8 GB: Parakeet (en) + GigaAM (ru) ≈ 2.3 GB. ≥ 16 GB: + **T-one** for partials (12–19 ms per 300 ms chunk) | memory vs accuracy | T-one alone: WER 13 % on FLEURS (it is an 8 kHz telephony model; real call audio may favour it — re-check in stage 2); Whisper medium/turbo: 3–10 s per window on CPU |
 | MT | **OPUS-MT** en-ru / ru-en, CTranslate2 int8 | chrF 59.5 / 59.9 at 57–67 ms per sentence, 0.17 GB, CC-BY | NLLB-600M: chrF 57.7 / 63.6 but 0.6–0.75 s and noncommercial. HY-MT1.5-1.8B: 54.8 / 62.2, 1.5–2 s on CPU. HY-MT1.5-7B: best ru-en (65.7) but 6–10 s on CPU, 0.5–1.1 s on GPU, 4.7 GB — optional "quality" MT on the NVIDIA tier for ru → en only. Gemini translate: 58–62. |
 | TTS, stock voice (them → me) | **Piper** in its own process (§10); voices **`en_US-john`** (public domain) and **`ru_RU-dmitri`** (CC0), `en_US-joe` (CC0) as a second English voice | chosen voices on the dev server (4 cores): TTFA 0.21–0.27 s, RTF 0.05–0.06, back-transcription CER 1.8 % (john), 3.0 % (joe), 5.9 % (dmitri), 0.3–0.37 GB; on that host they are within ~30 % of `lessac`/`irina`, the voices measured on M1 (0.23–0.27 s) and on the x86 host (0.13–0.17 s) | `ru_RU-denis` (CC0): CER 10.3 %; `lessac`/`irina`: research-only or unknown data licenses; Silero: TTFA 0.2–0.4 s, 1–1.3 GB with torch, CC-BY-NC-SA |
 | Clone TTS (me → them) | NVIDIA: **XTTS-v2** streaming with a length/tail guard (TTFA 0.14 s, RTF 0.17); **Chatterbox** as the "better likeness" option (speaker similarity 0.52–0.78 vs XTTS 0.35–0.68, cross-lingual ru → en 0.68–0.70 vs 0.40–0.44, but RTF 0.4 without streaming). CPU / M1: no live local clone — Gemini translate (keeps pitch and gender, F0 correlation 0.92–0.95, not a true clone) until stage 3 measures MPS on a real M1 Pro | similarity baseline: two different speakers 0.085, same speaker 0.90–0.93 | CosyVoice3: 8.4–8.8 GB RAM, RTF 1.2–2 even on the A4000, truncates Russian |

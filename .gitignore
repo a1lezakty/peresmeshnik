@@ -25,6 +25,7 @@ recordings/
 *.flac
 *.mp3
 *.ogg
+!tests/data/*.ogg
 
 # Secrets
 *.key

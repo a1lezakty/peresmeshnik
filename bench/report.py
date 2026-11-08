@@ -17,6 +17,8 @@ COLS = {
     'tts_clone': ['host', 'model', 'case', 'ref_lang', 'out_lang', 'device', 'stream', 'ttfa_s', 'ttfa_max_s', 'rtf', 'peak_rss_mb',
                   'gpu_peak_mb', 'spk_sim', 'spk_sim_min', 'cer', 'load_s'],
     'idle_loaded': ['host', 'model', 'threads', 'no_spin', 'omp_wait_policy', 'busy_cpu_s', 'busy_wall_s', 'idle_s', 'idle_cpu_s'],
+    'pipeline': ['host', 'model', 'lang', 'mode', 'max_clause_s', 'context_s', 'clauses', 'wer', 'wer_offline', 'chrf', 'rtf',
+                 'cpu_s_per_audio_s', 'vad_rtf', 'asr_partial_rtf', 'asr_final_rtf', 'mt_rtf', 'tts_rtf', 'peak_rss_mb'],
 }
 SKIP = {'family', 'time', 'samples', 'sample', 'n'}
 
@@ -28,7 +30,7 @@ def rows():
     latest = {}  # a rerun of the same case replaces the older row
     for r in out:
         key = tuple(r.get(k) for k in ('family', 'host', 'model', 'lang', 'direction', 'device', 'ref_lang', 'out_lang',
-                                         'case', 'no_spin', 'omp_wait_policy', 'mode', 'voice'))
+                                         'case', 'no_spin', 'omp_wait_policy', 'mode', 'voice', 'max_clause_s', 'context_s'))
         latest[key] = r
     return list(latest.values())
 

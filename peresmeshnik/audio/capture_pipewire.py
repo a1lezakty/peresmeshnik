@@ -26,12 +26,14 @@ CLIENT = 'Peresmeshnik'  # application.name of our own streams (headphones, virt
 LOW_PRIORITY = 'priority.session=-10 priority.driver=0'
 SETTLE_S = 1.0  # WirePlumber may still link a new stream to its default this long after our move: move it again
 # found by themselves when no call app is chosen yet (matched in application.process.binary / application.name)
-CALL_APPS = ('telegram', 'zoom', 'discord', 'skype', 'teams', 'slack', 'webex', 'signal', 'element', 'jitsi', 'whatsapp', 'viber')
+# and in the bundle ids on macOS (ru.keepcoder.Telegram, us.zoom.xos, Cisco-Systems.Spark is Webex)
+CALL_APPS = ('telegram', 'zoom', 'discord', 'skype', 'teams', 'slack', 'webex', 'cisco-systems.spark', 'signal', 'element',
+             'jitsi', 'whatsapp', 'viber')
 # one playback stream carries every tab: moving it moves YouTube in the next tab too, so never picked by itself
 # WirePlumber's restore-stream remembers a stream's target under the first of these the stream has
 RESTORE_KEYS = ('media.role', 'application.id', 'application.name', 'media.name', 'node.name')
 BROWSERS = ('chrome', 'chromium', 'firefox', 'brave', 'opera', 'vivaldi', 'edge', 'yandex', 'epiphany', 'librewolf', 'floorp',
-            'zen', 'falkon', 'midori', 'qutebrowser')
+            'zen', 'falkon', 'midori', 'qutebrowser', 'webkit', 'thebrowser')  # macOS: com.apple.WebKit (Safari), Arc
 
 
 def pactl(*args: str) -> str:

@@ -20,7 +20,7 @@ def default_sink() -> str:
 
 class PulseOut:
     def __init__(self, sample_rate: int, device: str | None = None, latency_ms: int = 40):
-        self.sample_rate = sample_rate
+        self.sample_rate, self.latency_s = sample_rate, latency_ms / 1000
         cmd = ['pacat', '--playback', '--raw', '--format=float32le', f'--rate={sample_rate}', '--channels=1',
                f'--latency-msec={latency_ms}', '--stream-name=Peresmeshnik translation',
                # PipeWire moves a stream to a newly created sink (ours!) despite its target unless told not to
@@ -54,5 +54,5 @@ class PulseOut:
             self._proc.stdin.write(pcm.astype('<f4').tobytes())
             self._proc.stdin.flush()
         # pacat spins a core draining after EOF (0.64 s CPU for a 0.7 s tail), so close only once it has played
-        time.sleep(max(0.0, self._end - time.monotonic()))
+        time.sleep(max(0.0, self._end - time.monotonic()) + self.latency_s)  # the last write still sits in the buffer
         self._proc.stdin.close()

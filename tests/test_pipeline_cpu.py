@@ -9,6 +9,7 @@ piper-ru_RU-dmitri-medium`, ~0.8 GB), so it runs only with PERESMESHNIK_WORK_GAT
 """
 import json
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -16,10 +17,22 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.skipif(os.environ.get('PERESMESHNIK_WORK_GATE') != '1', reason='needs models: PERESMESHNIK_WORK_GATE=1')
+GATE = os.environ.get('PERESMESHNIK_WORK_GATE') == '1'
+pytestmark = pytest.mark.skipif(not GATE and os.environ.get('GITHUB_JOB') != 'work-gate', reason='needs models: PERESMESHNIK_WORK_GATE=1')
 RTF_LIMIT = float(os.environ.get('WORK_RTF_LIMIT', 1.0))
 CPU_LIMIT = float(os.environ.get('WORK_CPU_LIMIT', 2.0))
 DATA = Path(__file__).parent / 'data'
+
+
+def cpu_model():  # runners of one label differ up to 2x: name the CPU next to the numbers
+    try:
+        if sys.platform == 'darwin':
+            return subprocess.run(['sysctl', '-n', 'machdep.cpu.brand_string'], capture_output=True, text=True).stdout.strip()
+        if sys.platform.startswith('linux'):
+            return next(ln.split(':', 1)[1].strip() for ln in open('/proc/cpuinfo') if ln.startswith('model name'))
+    except Exception:
+        pass
+    return platform.processor()
 
 
 def words(s):
@@ -27,6 +40,7 @@ def words(s):
 
 
 def test_work_cpu():
+    assert GATE, 'job work-gate without PERESMESHNIK_WORK_GATE=1: the gate would silently skip'
     r = subprocess.run([sys.executable, '-m', 'peresmeshnik', 'run', '--in', str(DATA / 'call-en.ogg'), '--from', 'en'],
                        capture_output=True, text=True, encoding='utf-8', timeout=900)
     assert r.returncode == 0, r.stderr[-3000:]
@@ -37,6 +51,7 @@ def test_work_cpu():
     ref = words((DATA / 'call-en.txt').read_text(encoding='utf-8'))
     hyp = set(words(original))
     s['word_recall'] = round(sum(w in hyp for w in ref) / len(ref), 2)
+    s['cpu'], s['cores'] = cpu_model(), os.cpu_count()
     print('\nwork gate:', json.dumps(s))  # ASCII only: the Windows console of pytest is not UTF-8
     assert s['word_recall'] > 0.6, original
     assert translation and all(re.search('[а-яА-Я]', t) for t in translation), translation

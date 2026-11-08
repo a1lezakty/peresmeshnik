@@ -25,7 +25,7 @@ def voice_path(voice_id: str) -> Path:
 
 def runner_cmd() -> list[str]:
     if os.environ.get('PERESMESHNIK_PIPER_CMD'):
-        return shlex.split(os.environ['PERESMESHNIK_PIPER_CMD'])
+        return shlex.split(os.environ['PERESMESHNIK_PIPER_CMD'], posix=os.name != 'nt')
     return [shutil.which('uv') or 'uv', 'run', '--no-project', '--with', 'piper-tts==1.8.0', 'python', str(RUNNER)]
 
 
@@ -50,8 +50,13 @@ class PiperTts:
     def synth(self, text: str, lang: str, voice: Voice | None = None) -> Iterator[np.ndarray]:
         self._p.stdin.write(json.dumps({'text': text}).encode() + b'\n')  # ASCII JSON: no console code page issues
         self._p.stdin.flush()
-        while n := self._u32():
-            yield np.frombuffer(self._read(n), '<f4')
+        try:
+            while n := self._u32():
+                yield np.frombuffer(self._read(n), '<f4')
+        except GeneratorExit:  # the caller stopped early: read the rest, or it would be the next request's audio
+            while n := self._u32():
+                self._read(n)
+            raise
 
     def close(self) -> None:
         self._p.stdin.close()

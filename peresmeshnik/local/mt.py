@@ -17,6 +17,10 @@ class OpusMt:
 
     def translate(self, text: str, src: str, tgt: str, context: tuple[str, ...] = ()) -> str:
         assert (src, tgt) == (self.src, self.tgt), f'model is {self.src}-{self.tgt}'
+        if self.src == 'ru':  # a lowercase fragment ending in "." makes ru-en invent UN boilerplate; en-ru loses chrF (BENCH stage 1)
+            text = text[:1].upper() + text[1:]
         toks = self._sp_src.encode(text, out_type=str)  # the converted model appends </s> itself
-        hyp = self._tr.translate_batch([toks], beam_size=1, max_decoding_length=256)[0].hypotheses[0]
+        # a clause fragment makes OPUS-MT ramble ("I'm not sure if I'm not sure..."): cap the length, no 3-gram twice
+        hyp = self._tr.translate_batch([toks], beam_size=1, max_decoding_length=min(256, 2 * len(toks) + 10),
+                                       no_repeat_ngram_size=3)[0].hypotheses[0]
         return self._sp_tgt.decode(hyp)

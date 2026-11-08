@@ -36,7 +36,8 @@ def data_dir() -> Path:  # voice profiles live here and are never uploaded
 @dataclass
 class Local:
     threads: int = 2  # per runtime: onnxruntime intra_op, CTranslate2 intra_threads, torch set_num_threads
-    asr: dict[str, str] = field(default_factory=lambda: {'en': 'parakeet-tdt-0.6b-v3', 'ru': 'parakeet-tdt-0.6b-v3'})
+    # ru: GigaAM, not Parakeet: Parakeet has no language setting and drifts into Ukrainian on short windows (BENCH stage 1)
+    asr: dict[str, str] = field(default_factory=lambda: {'en': 'parakeet-tdt-0.6b-v3', 'ru': 'gigaam-v3-e2e-ctc'})
     mt: dict[str, str] = field(default_factory=lambda: {'en-ru': 'opus-mt-en-ru', 'ru-en': 'opus-mt-ru-en'})
     tts: dict[str, str] = field(default_factory=lambda: {'en': 'piper-en_US-john-medium', 'ru': 'piper-ru_RU-dmitri-medium'})
     clone: str = 'xtts-v2'  # clone TTS for me -> them

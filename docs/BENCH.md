@@ -369,20 +369,25 @@ second of audio; `*_rtf` = busy time of one link per second of audio (`vad` ever
 | vast-b-pipeline | nemo-parakeet-tdt-0.6b-v3+opus-mt+piper | en | work | 7 | 0.296 | 0.605 | 0.0025 | 0.2914 | 0.0 | 0.0078 | 0.0234 | 1503 |
 | vast-b-pipeline | nemo-parakeet-tdt-0.6b-v3+opus-mt+piper | ru | work | 7 | 0.293 | 0.588 | 0.0026 | 0.2861 | 0.0 | 0.0073 | 0.0197 | 1476 |
 
-The working-mode gate in CI (`work-gate` job, run 42425353588, English recording; limits RTF < 1.0
-and < 2.0 CPU s per audio s) and the dev box:
+The working-mode gate in CI (`work-gate` job, run 42455602206 on 4f9e681, English recording;
+limits RTF < 1.0 and < 2.0 CPU s per audio s) and the dev box:
 
 | host | rtf | cpu_s_per_audio_s | vad_rtf | asr_partial_rtf | asr_final_rtf | mt_rtf | tts_rtf | word recall |
 |---|---|---|---|---|---|---|---|---|
-| ubuntu-latest | 0.572 | 1.137 | 0.0051 | 0.5607 | 0.0 | 0.0206 | 0.051 | 0.84 |
-| windows-latest | 0.674 | 1.317 | 0.008 | 0.659 | 0.0 | 0.0337 | 0.0734 | 0.84 |
-| macos-15 (M1, 3 cores) | 0.538 | 0.962 | 0.0076 | 0.5215 | 0.0 | 0.0282 | 0.0671 | 0.84 |
-| linux-x86_64-4c (shared) | 0.621 | 1.188 | 0.0048 | 0.6093 | 0.0 | 0.0285 | 0.0516 | 0.84 |
+| ubuntu-latest | 0.27 | 0.551 | 0.0028 | 0.2633 | 0.0 | 0.0148 | 0.0274 | 0.84 |
+| windows-latest | 0.535 | 1.088 | 0.0056 | 0.5234 | 0.0 | 0.023 | 0.054 | 0.84 |
+| macos-15 (M1, 3 cores) | 0.423 | 0.781 | 0.0055 | 0.4113 | 0.0 | 0.0238 | 0.0608 | 0.84 |
+| linux-x86_64-4c (shared) | 0.683 | 1.167 | 0.0059 | 0.6689 | 0.0 | 0.0242 | 0.0568 | 0.84 |
 
-In the same CI runs the idle gate stayed at 0.000 s CPU in 60 s on all three OSes.
+In the same CI run the idle gate stayed at 0.000 s CPU in 60 s on all three OSes. The run before
+(42425353588, the code before the move to the model registry) gave RTF 0.54–0.67 and 0.96–1.32 CPU
+s per audio s. Both runs used the same model files (same SHA-256) and the same 2 threads per
+engine, so the 2× (ubuntu 0.57 → 0.27) is the runner, not the code: one runner label covers
+different machines. The gate now prints the CPU model and core count next to its numbers; its
+margin rests on one run per OS so far.
 
 - ASR partials are ~90 % of the work: re-running Parakeet every 300 ms on a window of up to 6 s
-  (5 s clause + 1 s context) keeps 0.6–1.3 cores busy while someone speaks (0.6 on the 7950X3D).
+  (5 s clause + 1 s context) keeps 0.55–1.2 cores busy while someone speaks (0.6 on the 7950X3D).
   Everything else together is < 0.1 of real time; VAD costs 0.3–1 % of a core.
 - `asr_final_rtf` ≈ 0: at a pause the last partial already saw the whole clause and is reused;
   a cut clause takes its text from the partial's token timestamps.
@@ -420,23 +425,57 @@ comparison, MT from the gold source text: chrF 59.5 en-ru, 59.9 ru-en (MT table)
 - Short windows write numbers as words ("one thousand four hundred" for "1,400"): part of the
   English WER.
 
+After the review of stage 1 (2026-11-08, models from the registry, OPUS-MT output capped at
+`2 × source tokens + 10` with `no_repeat_ngram_size=3`; Russian MT input starts with a capital
+letter):
+
+| host | model | lang | mode | max_clause_s | context_s | clauses | wer | wer_offline | chrf | peak_rss_mb |
+|---|---|---|---|---|---|---|---|---|---|---|
+| vast-b-pipeline | parakeet-tdt-0.6b-v3+opus-mt | en | quality | 5.0 | 1.0 | 85 | 0.1119 | 0.0537 | 52.5 | 1697 |
+| vast-b-pipeline | parakeet-tdt-0.6b-v3+opus-mt | ru | quality | 5.0 | 1.0 | 93 | 0.1076 | 0.0844 | 53.9 | 1726 |
+| vast-b-pipeline | parakeet-tdt-0.6b-v3+opus-mt | ru | quality | 8.0 | 1.0 | 63 | 0.096 | 0.0844 | 56.4 | 1737 |
+| vast-b-pipeline | gigaam-v3-e2e-ctc+opus-mt | ru | quality | 5.0 | 1.0 | 92 | 0.0662 | 0.0579 | 53.5 | 623 |
+
+- Russian ASR is GigaAM v3 e2e by default now: Parakeet has no language setting in onnx-asr
+  (only Whisper and Canary take one) and on short windows drifts into Ukrainian ("примінив
+  слізоточий газ"), which OPUS-MT ru-en then turns into invented text. Streamed GigaAM: WER 6.6 %
+  against Parakeet's 10.8 % (offline 5.8 % against 8.4 %), at a third of the memory and 0.40
+  against 0.59 CPU s per audio s in real time on B; chrF 53.5 against 53.9.
+- The MT length cap and the repeat ban change chrF by 0–0.2 points: they stop loops ("I'm not
+  sure if I'm not sure…"), not every invention. OPUS-MT ru-en also invents on a clause fragment
+  that starts lowercase and ends with a full stop: "страдающим от глобального потепления для
+  борьбы с его последствиями." → "The Committee notes that the Committee has not yet considered
+  the report of the Secretary-General…" (UN boilerplate from its training data), within the cap.
+  With the first letter capitalised it translates the fragment, and ru-en chrF rises 0.5–1.4
+  (53.0 → 53.5 GigaAM, 53.3 → 53.9 and 55.0 → 56.4 Parakeet at 5 / 8 s). For en-ru the same costs
+  0.6 (52.5 → 51.9: "Cope with the impacts." becomes an imperative), so only Russian input is
+  capitalised. Captions keep the recognised text as it was.
+
 ### Latency per link
 
-From the per-clause log (`peresmeshnik run --log`), the 30 s recordings in real time. Times from
-the end of the clause's speech: `caption_lag_s` → translated caption on the event queue,
-`voice_lag_s` → first translated audio; both include the 300 ms VAD pause for clauses that end at
-a pause. A cut clause is decided ≥ 0.8 s after its end (the tail of the window is not trusted).
-Medians over both recordings:
+From the per-clause log (`peresmeshnik run --log`), the 30 s recordings in real time (ru with the
+default GigaAM). Times from the end of the clause's speech: `caption_lag_s` → translated caption
+on the event queue, `synth_lag_s` → first synthesized translated audio, `voice_lag_s` → estimated
+start of its playback: speech is played back to back, so a clause waits until the speech before it
+has played (`play_queue_s`). All include the 300 ms VAD pause for clauses that end at a pause. A
+cut clause is decided ≥ 0.8 s after its end (the tail of the window is not trusted). Medians over
+both recordings, measured 2026-11-08:
 
-| host | input | clause ends at | n | asr_final_ms | mt_ms | caption_lag_s | tts_first_ms | voice_lag_s | voice_lag_s max |
-|---|---|---|---|---|---|---|---|---|---|
-| vast-b-pipeline | file in real time | pause | 9 | 0 | 24 | 0.32 | 59 | 0.39 | 0.48 |
-| vast-b-pipeline | file in real time | 5 s cut / punctuation | 5 | 0 | 43 | 1.14 | 114 | 1.24 | 1.67 |
-| linux-x86_64-4c (shared) | file → `Peresmeshnik Call` sink → monitor | pause | 8 | 0 | 81 | 0.57 | 114 | 0.72 | 1.41 |
-| linux-x86_64-4c (shared) | file → `Peresmeshnik Call` sink → monitor | 5 s cut / punctuation | 7 | 0 | 129 | 1.75 | 296 | 1.88 | 2.37 |
+| host | input | clause ends at | n | asr_final_ms | mt_ms | caption_lag_s | tts_first_ms | synth_lag_s | play_queue_s | voice_lag_s | voice_lag_s max |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| vast-b-pipeline | file in real time | pause | 9 | 0 | 22 | 0.32 | 58 | 0.38 | 1.98 | 2.38 | 6.01 |
+| vast-b-pipeline | file in real time | 5 s cut / punctuation | 5 | 0 | 44 | 1.14 | 115 | 1.25 | 0.0 | 1.31 | 1.90 |
+| linux-x86_64-4c (shared) | file → `Peresmeshnik Call` sink → monitor | pause | 8 | 0 | 62 | 0.50 | 119 | 0.67 | 1.96 | 2.62 | 7.17 |
+| linux-x86_64-4c (shared) | file → `Peresmeshnik Call` sink → monitor | 5 s cut / punctuation | 7 | 0 | 116 | 1.66 | 277 | 2.03 | 0.0 | 2.03 | 4.70 |
 
-- Clause end → voice at a pause is 0.4–0.7 s, below the 0.65–0.95 s estimate of ARCHITECTURE §4,
-  because the final ASR run is skipped.
+- Clause end → synthesized translation at a pause is 0.4–0.7 s, below the 0.65–0.95 s estimate
+  of ARCHITECTURE §4, because the final ASR run is skipped.
+- The voice itself starts later: a median 1.8 s (B) / 2.1 s (here) over all clauses, up to 6–7 s.
+  These recordings are read speech with short pauses, and a translation can be longer than its
+  clause (4.7 s of English → 6.2 s of Russian for the first one), so the clause after it waits in
+  the play queue; the cut clauses open a long sentence and wait least. The queue has no cap and no
+  speed-up or drop policy yet (stage 2). The earlier version of this table called the synthesis
+  time `voice_lag_s` (0.39 s / 0.72 s at a pause); it never included the queue.
 - Original subtitles (partials) are not logged per update; from the cost above a partial takes
   0.08 s (7950X3D) – 0.2 s (CI runners) every 300 ms of audio, i.e. ≈ 0.25–0.35 s from a word to
   the screen.

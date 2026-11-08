@@ -1,6 +1,8 @@
 """LocalDirection on fake engines: clause segmentation, event order, latency log, silence skips ASR. No models."""
 import json
 import logging
+import threading
+import time
 
 import numpy as np
 import pytest
@@ -155,5 +157,97 @@ def test_dead_worker_does_not_hang():
 
     d = LocalDirection(EnergyVad(), WordAsr(), BrokenMt(), ToneTts(), 'en', 'ru')
     run(d, np.concatenate([tone(1.0), silence(0.6), tone(1.0), silence(0.6)]))
-    d.finish()  # returns although the translate worker died
+    with pytest.raises(RuntimeError, match='boom'):
+        d.finish()  # returns (no hang) and says why
     assert not [e for e in d.events() if isinstance(e, Caption) and e.final]
+    d.close()
+
+
+class SlowTts(ToneTts):
+    def synth(self, text, lang, voice=None):
+        for _ in text.split():
+            time.sleep(0.2)
+            yield np.zeros(800, np.float32)
+
+
+def two_clauses():
+    return np.concatenate([tone(1.5), silence(0.6), tone(1.5), silence(0.6)])
+
+
+def test_captions_do_not_wait_for_speech():
+    d = LocalDirection(EnergyVad(), WordAsr(), UpperMt(), SlowTts(), 'en', 'ru')
+    d.realtime = False
+    run(d, two_clauses())
+    threading.Thread(target=d.finish).start()
+    arrived = [(time.perf_counter(), e) for e in d.events()]
+    finals = [t for t, e in arrived if isinstance(e, Caption) and e.final]
+    words0 = len(next(e for _, e in arrived if isinstance(e, Caption) and e.final).original.split())
+    speech = [t for t, e in arrived if isinstance(e, Speech)]
+    assert [e.clause for _, e in arrived if isinstance(e, Caption) and e.final] == [0, 1]
+    assert finals[1] < speech[words0 - 1]  # the second caption is out before the first clause is spoken
+
+
+def test_close_drops_queued_speech():
+    d = LocalDirection(EnergyVad(), WordAsr(), UpperMt(), SlowTts(), 'en', 'ru')
+    d.realtime = False
+    run(d, np.concatenate([two_clauses(), two_clauses()]))
+    time.sleep(0.3)
+    t = time.perf_counter()
+    d.close()  # translation off: no more speech, at once
+    assert time.perf_counter() - t < 0.5
+    assert sum(isinstance(e, Speech) for e in d.events()) < 6  # of ~14 words, one chunk per 0.2 s
+
+
+# OnnxAsrStream (cuts, context, dedup, empty finals) on a fake model with fixed tokens and timestamps
+class Result:
+    def __init__(self, toks=(), ts=()):
+        self.tokens, self.timestamps, self.text = list(toks), list(ts), ''.join(toks).strip()
+
+
+class ScriptedAsr:
+    partial_every = SAMPLE_RATE // 10  # a partial every 0.1 s, so feed() returns one per chunk below
+
+    def __init__(self, *results):
+        self.results, self.calls = list(results), []
+
+    def recognize(self, pcm, lead=True):
+        self.calls.append((round(len(pcm) / SAMPLE_RATE, 2), lead))
+        return self.results.pop(0) if self.results else Result()
+
+
+def stream_of(asr, seconds):
+    from peresmeshnik.local.asr import OnnxAsrStream
+    s = OnnxAsrStream(asr, 'en')
+    s.feed(np.zeros(int(seconds * SAMPLE_RATE), np.float32))
+    return s
+
+
+def test_cut_at_sentence_end_and_context():
+    asr = ScriptedAsr(Result([' Hello', ' there', '.', ' How', ' are', ' you'], [0.2, 0.6, 0.9, 1.2, 1.6, 2.0]),
+                      # next window: 1 s of context in front; 'there.' (t < 1 s) belongs to the previous clause
+                      Result([' there', '.', ' How', ' are', ' you', ' today'], [0.3, 0.6, 1.0, 1.4, 1.8, 2.3]))
+    s = stream_of(asr, 3.0)
+    assert asr.calls == [(3.0, True)]  # an onset window gets the lead-in
+    assert s.cut() == 'Hello there.'
+    assert s.offset == int(1.05 * SAMPLE_RATE) and s.ctx == SAMPLE_RATE  # cut between '.' and 'How', 1 s kept
+    assert s.feed(np.zeros(SAMPLE_RATE // 10, np.float32)) == 'How are you today'
+    assert asr.calls[-1][1] is False  # mid-speech window: no lead-in
+
+
+def test_no_cut_inside_abbreviation_and_forced_cut():
+    asr = ScriptedAsr(Result([' The', ' U', '.', 'N', '.', ' also', ' hopes'], [0.2, 0.5, 0.6, 0.7, 0.8, 1.0, 1.4]))
+    assert stream_of(asr, 3.0).cut() is None  # "U.N. also" is not a sentence end
+    asr = ScriptedAsr(Result([' a', ' b', ',', ' c', ' d', ' e', ' f'], [0.2, 0.5, 0.8, 1.0, 3.0, 3.5, 4.6]))
+    s = stream_of(asr, 5.0)
+    assert s.cut(force=True) == 'a b, c d'  # the comma is in the first half; 'f' is too near the window end
+
+
+def test_dedup_across_cut_and_empty_final_retry():
+    asr = ScriptedAsr(Result([' one', ' two', ' three'], [0.2, 0.8, 1.5]),
+                      Result([' two', ' four'], [1.0, 1.5]),  # repeats 'two' right after the context
+                      Result(), Result(), Result([' five'], [0.2]))  # partial and final come back empty, the retry has it
+    s = stream_of(asr, 3.0)
+    assert s.cut(force=True) == 'one two'
+    assert s.finish() == 'four'
+    s = stream_of(asr, 1.0)
+    assert s.finish() == 'five' and asr.calls[-2:] == [(1.0, True), (1.0, False)]

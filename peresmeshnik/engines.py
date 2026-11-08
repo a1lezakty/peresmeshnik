@@ -20,10 +20,12 @@ SAMPLE_RATE = 16_000
 
 @dataclass
 class Caption:
-    """Subtitle update: original text from ASR, translation once MT has it."""
+    """Subtitle update: original text from ASR, translation once MT has it. `clause` numbers the
+    clauses of a direction (-1: not known): a partial of clause n + 1 can come before the final of n."""
     original: str
     translation: str = ''
     final: bool = False
+    clause: int = -1
 
 
 @dataclass

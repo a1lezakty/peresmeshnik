@@ -3,17 +3,18 @@
 Threads (ARCHITECTURE §2): feed() only enqueues; the "listen" worker runs VAD, ASR partials and
 clause segmentation, the "translate" worker runs MT and puts out the caption, the "speak" worker
 runs TTS, so captions never wait for speech (a clone TTS on CPU is slower than real time) and a
-clause is spoken while the next one is recognised. Generic over `Tts` and `Voice`: the stock Piper voice (them -> me) and the clone
-(me -> them) plug in the same way. On silence only the VAD runs.
+clause is spoken while the next one is recognised. Generic over `Tts` and `Voice`: the stock Piper
+voice (them -> me) and the clone (me -> them) plug in the same way. On silence only the VAD runs.
 
 A clause ends at a VAD pause (>= 300 ms), at sentence punctuation from the ASR with a word after
-it, or at `max_clause_s` (then at a comma or before the last word). Per clause one JSON line goes
-to the `peresmeshnik.latency` logger: time of each link and, when audio arrives in real time,
-the lag from the end of the clause to its translated caption and to its first translated audio.
+it, or at `max_clause_s` (then at a comma or between words). Per clause one JSON line goes to the
+`peresmeshnik.latency` logger: time of each link and, when audio arrives in real time, the lag
+from the end of the clause's speech to its caption, to its synthesized audio and to the estimated
+start of its playback (the output plays speech back to back, so a clause can wait behind the last).
 
     peresmeshnik models fetch silero-vad parakeet-tdt-0.6b-v3 opus-mt-en-ru piper-ru_RU-dmitri-medium
     peresmeshnik run --in call.wav [--from en] [--to ru] [--out speech.wav] [--log latency.jsonl]
-    peresmeshnik run --in call.wav --pipewire --play   # file -> "Peresmeshnik Call" sink -> monitor capture
+    peresmeshnik run --in call.wav --pipewire --play   # Linux: file -> "Peresmeshnik Call" sink -> monitor
 """
 import os
 
@@ -55,6 +56,9 @@ class LocalDirection:
         self._spoken: queue.Queue = queue.Queue()  # translated clauses waiting for TTS
         self._events: queue.Queue = queue.Queue()
         self._fed, self._fed_wall = 0, 0.0  # samples fed so far and when the last chunk arrived
+        self._play_end = 0.0  # when the speech put out so far has played, if played back to back
+        self._stop = threading.Event()  # close(): drop what is queued instead of saying it
+        self._error: BaseException | None = None  # the first worker that died
         self._threads = [threading.Thread(target=self._run, args=(work, out), name=work.__name__[1:], daemon=True)
                          for work, out in ((self._listen, self._clauses), (self._translate, self._spoken), (self._speak, self._events))]
         for t in self._threads:
@@ -62,7 +66,8 @@ class LocalDirection:
 
     # Direction
     def feed(self, pcm: np.ndarray) -> None:
-        self._in.put((time.perf_counter(), pcm))
+        if self._error is None:  # a dead pipeline drops audio; finish() reports why
+            self._in.put((time.perf_counter(), pcm))
 
     def events(self):
         while (e := self._events.get()) is not None:
@@ -77,24 +82,34 @@ class LocalDirection:
             pass
 
     def finish(self) -> None:
-        """End of input: recognise, translate and speak what is left, then stop the workers."""
-        self._in.put(None)
-        for t in self._threads:
-            t.join()
+        """End of input: recognise, translate and speak what is left, then stop the workers.
+        Raises if a worker died (its captions and speech are lost)."""
+        self._join()
+        if self._error is not None:
+            raise RuntimeError(f'pipeline worker died: {self._error!r}') from self._error
 
     def close(self) -> None:
-        """finish(), then free the engines (the TTS process too)."""
-        self.finish()
+        """Translation off: drop queued clauses and speech (nothing more is said), stop the workers,
+        free the engines (the TTS process too)."""
+        self._stop.set()
+        self._join()
         for engine in (self.tts, self.mt, self.asr, self.vad):
             if hasattr(engine, 'close'):
                 engine.close()
 
+    def _join(self) -> None:
+        self._in.put(None)
+        for t in self._threads:
+            t.join()
+
     # workers
-    @staticmethod
-    def _run(work, out: queue.Queue) -> None:
-        """A worker that dies still ends its output stream, so finish() and events() never hang."""
+    def _run(self, work, out: queue.Queue) -> None:
+        """A worker that dies records why and still ends its output stream, so nothing hangs."""
         try:
             work()
+        except Exception as e:
+            self._error = self._error or e
+            logging.getLogger('peresmeshnik').exception('pipeline worker %s died', work.__name__[1:])
         finally:
             out.put(None)
 
@@ -105,6 +120,8 @@ class LocalDirection:
     def _listen(self):
         stream, n, pos, seg0, partial_s = None, 0, 0, 0, 0.0
         while (item := self._in.get()) is not None:
+            if self._stop.is_set():
+                continue
             self._fed_wall, pcm = item
             self._fed += len(pcm)
             # behind the audio (slow or busy machine): skip partials until caught up; clause ends still count
@@ -117,7 +134,7 @@ class LocalDirection:
                 partial = stream.feed(x, partial=not catch_up)
                 partial_s += time.perf_counter() - t
                 if partial:
-                    self._events.put(Caption(partial))
+                    self._events.put(Caption(partial, clause=n))
                 if kind == 'end':
                     silence = self.vad.min_silence_frames * len(x)
                     n = self._clause(n, stream, None, 'pause', pos - silence, partial_s, settled_s=silence / SAMPLE_RATE)
@@ -129,7 +146,7 @@ class LocalDirection:
                         n = self._clause(n, stream, text, 'max' if force else 'punct', seg0 + stream.offset, partial_s,
                                          time.perf_counter() - t)
                         partial_s = 0.0
-        if stream is not None:
+        if stream is not None and not self._stop.is_set():
             self._clause(n, stream, None, 'eof', pos, partial_s)
         self.stats['audio_s'] = self._fed / SAMPLE_RATE
         self.stats['vad_s'] = self.vad.busy_s
@@ -149,31 +166,41 @@ class LocalDirection:
 
     def _translate(self):
         while (c := self._clauses.get()) is not None:
+            if self._stop.is_set():
+                continue
             t = time.perf_counter()
             c['translation'] = self.mt.translate(c['text'], self.src, self.tgt)
             self.stats['mt_s'] += (dt := time.perf_counter() - t)
-            self._events.put(Caption(c['text'], c['translation'], final=True))
+            self._events.put(Caption(c['text'], c['translation'], final=True, clause=c['clause']))
             c['mt_ms'] = round(1000 * dt)
             if self.realtime:
                 c['caption_lag_s'] = round(time.perf_counter() - c['end_wall'], 3)
             self._spoken.put(c)
 
     def _speak(self):
-        st = self.stats
+        st, sr = self.stats, self.tts.sample_rate
         while (c := self._spoken.get()) is not None:
+            if self._stop.is_set():
+                continue
             end_wall, translation = c.pop('end_wall'), c.pop('translation')
-            t, samples = time.perf_counter(), 0
+            t, samples, start = time.perf_counter(), 0, 0.0
             for chunk in self.tts.synth(translation, self.tgt, self.voice):
+                if self._stop.is_set():
+                    break  # closes synth(), which reads away the rest of the request
+                now = time.perf_counter()
                 if not samples:
-                    c['tts_first_ms'] = round(1000 * (time.perf_counter() - t))
+                    start = max(self._play_end, now)  # its playback starts after the speech before it
+                    c['tts_first_ms'] = round(1000 * (now - t))
                     if self.realtime:
-                        c['voice_lag_s'] = round(time.perf_counter() - end_wall, 3)
+                        c |= {'synth_lag_s': round(now - end_wall, 3), 'voice_lag_s': round(start - end_wall, 3),
+                              'play_queue_s': round(start - now, 3)}
+                self._play_end = max(self._play_end, now) + len(chunk) / sr
                 samples += len(chunk)
-                self._events.put(Speech(chunk, self.tts.sample_rate))
+                self._events.put(Speech(chunk, sr))
             st['tts_s'] += (dt := time.perf_counter() - t)
-            st['tts_audio_s'] += samples / self.tts.sample_rate
+            st['tts_audio_s'] += samples / sr
             st['clauses'] += 1
-            log.info(json.dumps(c | {'tts_ms': round(1000 * dt), 'speech_s': round(samples / self.tts.sample_rate, 2),
+            log.info(json.dumps(c | {'tts_ms': round(1000 * dt), 'speech_s': round(samples / sr, 2),
                                      'translation': translation}, ensure_ascii=False))
 
     def summary(self) -> dict:
@@ -234,26 +261,46 @@ def run(direction: LocalDirection, pcm: np.ndarray, realtime: bool = False, fram
 
 
 def cli(argv=None) -> int:
+    from peresmeshnik import models
+    from peresmeshnik.local.asr import ONNX_ASR
     ap = argparse.ArgumentParser(prog='peresmeshnik run', description='Translate a recording through the local pipeline.')
     ap.add_argument('--in', dest='inp', required=True, help='audio file (any rate, mixed to mono)')
     ap.add_argument('--from', dest='src', default='en', choices=sorted(OTHER))
     ap.add_argument('--to', dest='tgt', choices=sorted(OTHER), help='default: the other language')
-    ap.add_argument('--asr', help='ASR model id (default: settings [local] asr; gigaam-v3-e2e-ctc for Russian)')
+    ap.add_argument('--asr', choices=sorted(ONNX_ASR), help='ASR model (default: settings [local] asr for the language)')
     ap.add_argument('--threads', type=int, help='threads per engine (default: settings [local] threads)')
     ap.add_argument('--realtime', action='store_true', help='feed the file at its own pace (real lags in the log)')
-    ap.add_argument('--pipewire', action='store_true', help='play the file into the "Peresmeshnik Call" sink and capture its monitor')
-    ap.add_argument('--play', nargs='?', const='', metavar='SINK', help='play the translation (default sink if no name)')
+    ap.add_argument('--pipewire', action='store_true', help='Linux: play the file into the "Peresmeshnik Call" sink, capture its monitor')
+    ap.add_argument('--play', nargs='?', const='', metavar='SINK', help='Linux: play the translation (default sink if no name)')
     ap.add_argument('--out', help='write the translated speech here (wav)')
     ap.add_argument('--log', help='per-clause latency, JSON lines')
     ap.add_argument('--partials', action='store_true', help='print ASR partials too')
     a = ap.parse_args(argv)
-    sys.stdout.reconfigure(encoding='utf-8')  # captions are Cyrillic; a Windows pipe defaults to the ANSI code page
     tgt = a.tgt or OTHER[a.src]
+    if tgt == a.src:
+        ap.error('--from and --to are the same language')
+    if not os.path.isfile(a.inp):
+        ap.error(f'no such file: {a.inp}')
+    sink = None
+    if a.pipewire or a.play is not None:
+        if not sys.platform.startswith('linux'):
+            ap.error('--pipewire and --play need Linux (PipeWire or PulseAudio) for now')
+        from peresmeshnik.audio.capture_pipewire import CALL_SINK
+        from peresmeshnik.audio.out import default_sink
+        try:
+            default = default_sink()  # also checks that a sound server is up, before the engines load
+        except (OSError, subprocess.CalledProcessError) as e:
+            ap.error(f'no sound server (pactl: {e})')
+        if a.play is not None:
+            sink = a.play or default
+        if sink == CALL_SINK:  # e.g. left default by a crashed run on a box without a real output
+            ap.error(f'the output would be our own capture sink {CALL_SINK}: the translation would be translated again; '
+                     'pass --play <sink>')
+    sys.stdout.reconfigure(encoding='utf-8')  # captions are Cyrillic; a Windows pipe defaults to the ANSI code page
     if a.log:
         log.addHandler(logging.FileHandler(a.log, 'w', encoding='utf-8'))
         log.setLevel(logging.INFO)
 
-    from peresmeshnik import models
     t = time.perf_counter()
     try:
         d = make_local(a.src, tgt, a.asr, a.threads)
@@ -264,9 +311,9 @@ def cli(argv=None) -> int:
     d.realtime = a.realtime or a.pipewire
     print(f'engines loaded in {time.perf_counter() - t:.1f} s', file=sys.stderr)
     player = None
-    if a.play is not None:
-        from peresmeshnik.audio.out import PulseOut, default_sink
-        player = PulseOut(d.tts.sample_rate, a.play or default_sink())  # a named sink: it must not follow a new default
+    if sink:
+        from peresmeshnik.audio.out import PulseOut
+        player = PulseOut(d.tts.sample_rate, sink)  # a named sink: it must not follow a new default
     speech, t_start = [], time.perf_counter()
 
     def consume():
@@ -289,23 +336,30 @@ def cli(argv=None) -> int:
     consumer.start()
 
     cpu0, wall0 = cpu_s(d), time.perf_counter()
-    if a.pipewire:
-        from peresmeshnik.audio.capture_pipewire import PipeWireCapture
-        cap = PipeWireCapture()
-        cap.start(d.feed)
+    try:
         try:
-            subprocess.run(['paplay', f'--device={cap.sink}', a.inp], check=True)  # stands in for the call app
-            time.sleep(1.0)  # trailing silence closes the last clause
+            if a.pipewire:
+                from peresmeshnik.audio.capture_pipewire import PipeWireCapture
+                cap = PipeWireCapture()
+                cap.start(d.feed)
+                try:
+                    subprocess.run(['paplay', f'--device={cap.sink}', a.inp], check=True)  # stands in for the call app
+                    time.sleep(1.0)  # trailing silence closes the last clause
+                finally:
+                    cap.stop()  # removes the sink
+            else:
+                run(d, read_audio(a.inp), a.realtime)
         finally:
-            cap.stop()  # removes the sink
-    else:
-        run(d, read_audio(a.inp), a.realtime)
-    d.finish()
-    cpu, wall = cpu_s(d), time.perf_counter() - wall0  # before close(): the TTS process is still alive
-    d.close()
-    consumer.join()
-    if player:
-        player.stop()
+            d.finish()  # always: it ends the event stream, so the consumer and the process can exit
+        cpu, wall = cpu_s(d), time.perf_counter() - wall0  # before close(): the TTS process is still alive
+    except Exception as e:  # a failed device, file or pipeline worker: report it, exit non-zero
+        print(f'error: {e}', file=sys.stderr)
+        return 1
+    finally:
+        d.close()
+        consumer.join()
+        if player:
+            player.stop()
     if a.out:
         import soundfile as sf
         sf.write(a.out, np.concatenate(speech) if speech else np.zeros(1, np.float32), d.tts.sample_rate)

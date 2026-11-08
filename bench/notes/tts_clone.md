@@ -185,3 +185,18 @@ venvs/tts-eval/bin/python bench/tts_clone.py baseline
 
 `--n` limits the sentences per language (default 6). `--gpu-mem-frac` (default 0.6) caps CUDA memory. Wavs go to
 `$BENCH_OUT/tts_clone/` (default `$BENCH_DATA/../out`). `BENCH_HOST` overrides the results file tag.
+
+## The app's engine (stage 1)
+
+`--model xtts-engine` runs `peresmeshnik.local.clone.XttsClone` (voice profile, text split, pause cap, length guard)
+instead of the raw coqui API: `XTTS_DIR` = the XTTS-v2 folder (config.json, model.pth, vocab.json, speakers_xtts.pth),
+`XTTS_TEMPERATURE` / `XTTS_TOP_P` for the sampling grid, `--label` names the run (one output folder and result `model`
+per setting). Rows carry `cpu_per_audio_s` (process CPU per second of speech). Results: docs/BENCH.md, "Stage 1".
+
+```sh
+XTTS_DIR=... BENCH_HOST=rtx3060-laptop venvs/xtts/bin/python bench/tts_clone.py synth --model xtts-engine --device cuda --n 15 --label xtts-engine
+venvs/tts-eval/bin/python bench/tts_clone.py eval --model xtts-engine --label xtts-engine
+```
+
+End to end "me → them" (Linux with PipeWire): `bench/me_them.py` (see its docstring); the clone can run on a GPU box
+behind `$CLONE_SERVER`, a command that starts `bench/me_them.py serve` there (e.g. over ssh).

@@ -16,6 +16,7 @@ dependencies = [
     "ctranslate2>=4.5",
     "sentencepiece>=0.2",
     "soundfile>=0.13",
+    "sounddevice>=0.5",
     "psutil>=6",
 ]
 

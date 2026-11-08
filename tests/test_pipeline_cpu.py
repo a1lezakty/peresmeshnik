@@ -3,7 +3,8 @@ partials, OPUS-MT, Piper) on a 30 s English recording, fed as fast as it goes, i
 like the app. Fails when the pipeline is slower than real time or burns more CPU per second of
 audio than the limit, or when the captions are wrong.
 
-Needs the models (~0.8 GB on first run), so it runs only with PERESMESHNIK_WORK_GATE=1 (CI job
+Needs the models (`peresmeshnik models fetch silero-vad parakeet-tdt-0.6b-v3 opus-mt-en-ru
+piper-ru_RU-dmitri-medium`, ~0.8 GB), so it runs only with PERESMESHNIK_WORK_GATE=1 (CI job
 `work-gate`). Limits can be overridden: WORK_RTF_LIMIT, WORK_CPU_LIMIT.
 """
 import json

@@ -11,6 +11,7 @@ it, or at `max_clause_s` (then at a comma or before the last word). Per clause o
 to the `peresmeshnik.latency` logger: time of each link and, when audio arrives in real time,
 the lag from the end of the clause to its translated caption and to its first translated audio.
 
+    peresmeshnik models fetch silero-vad parakeet-tdt-0.6b-v3 opus-mt-en-ru piper-ru_RU-dmitri-medium
     peresmeshnik run --in call.wav [--from en] [--to ru] [--out speech.wav] [--log latency.jsonl]
     peresmeshnik run --in call.wav --pipewire --play   # file -> "Peresmeshnik Call" sink -> monitor capture
 """
@@ -182,14 +183,20 @@ class LocalDirection:
                 **{f'{k[:-2]}_rtf': round(s[k] / a, 4) for k in ('vad_s', 'asr_partial_s', 'asr_final_s', 'mt_s', 'tts_s')}}
 
 
-def make_local(src: str, tgt: str, asr: str = 'parakeet', threads: int = 2, tts=None, voice: Voice | None = None) -> LocalDirection:
-    """Default engines (ARCHITECTURE §6); S2 passes its clone `tts` and `voice`."""
+def make_local(src: str, tgt: str, asr: str | None = None, threads: int | None = None, tts=None, voice: Voice | None = None,
+               settings=None) -> LocalDirection:
+    """Engines and threads from the settings (`[local]`, ARCHITECTURE §6), models from the registry
+    (raises models.ModelMissing until fetched); S2 passes its clone `tts` and `voice`."""
+    from peresmeshnik import config
     from peresmeshnik.local.asr import OnnxAsr
     from peresmeshnik.local.mt import OpusMt
     from peresmeshnik.local.tts import PiperTts
     from peresmeshnik.local.vad import SileroVad
-    return LocalDirection(SileroVad(), OnnxAsr(asr, threads=threads), OpusMt(src, tgt, threads=threads),
-                          tts or PiperTts(tgt, threads=threads), src, tgt, voice)
+    loc = (settings or config.load()).local
+    threads = threads or loc.threads
+    return LocalDirection(SileroVad(), OnnxAsr(asr or loc.asr[src], threads=threads),
+                          OpusMt(src, tgt, loc.mt[f'{src}-{tgt}'], threads=threads),
+                          tts or PiperTts(loc.tts[tgt], threads=threads), src, tgt, voice)
 
 
 def cpu_s(direction: LocalDirection | None = None) -> float:
@@ -231,8 +238,8 @@ def cli(argv=None) -> int:
     ap.add_argument('--in', dest='inp', required=True, help='audio file (any rate, mixed to mono)')
     ap.add_argument('--from', dest='src', default='en', choices=sorted(OTHER))
     ap.add_argument('--to', dest='tgt', choices=sorted(OTHER), help='default: the other language')
-    ap.add_argument('--asr', default='parakeet', choices=['parakeet', 'gigaam'], help='gigaam: Russian only')
-    ap.add_argument('--threads', type=int, default=2, help='threads per engine')
+    ap.add_argument('--asr', help='ASR model id (default: settings [local] asr; gigaam-v3-e2e-ctc for Russian)')
+    ap.add_argument('--threads', type=int, help='threads per engine (default: settings [local] threads)')
     ap.add_argument('--realtime', action='store_true', help='feed the file at its own pace (real lags in the log)')
     ap.add_argument('--pipewire', action='store_true', help='play the file into the "Peresmeshnik Call" sink and capture its monitor')
     ap.add_argument('--play', nargs='?', const='', metavar='SINK', help='play the translation (default sink if no name)')
@@ -246,8 +253,13 @@ def cli(argv=None) -> int:
         log.addHandler(logging.FileHandler(a.log, 'w', encoding='utf-8'))
         log.setLevel(logging.INFO)
 
+    from peresmeshnik import models
     t = time.perf_counter()
-    d = make_local(a.src, tgt, a.asr, a.threads)
+    try:
+        d = make_local(a.src, tgt, a.asr, a.threads)
+    except models.ModelMissing as e:
+        print(e, file=sys.stderr)
+        return 2
     d.warm_up()
     d.realtime = a.realtime or a.pipewire
     print(f'engines loaded in {time.perf_counter() - t:.1f} s', file=sys.stderr)

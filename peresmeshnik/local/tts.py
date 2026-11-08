@@ -14,17 +14,13 @@ import numpy as np
 
 from peresmeshnik.engines import Voice
 
-VOICES = {'en': 'en/en_US/john/medium/en_US-john-medium',  # public domain
-          'ru': 'ru/ru_RU/dmitri/medium/ru_RU-dmitri-medium'}  # CC0
-PIPER_VOICES = ('rhasspy/piper-voices', 'e7229f7d33a10e145e109b886d661984201ac3c4')
 RUNNER = Path(__file__).resolve().parents[2] / 'piper-runner' / 'piper_runner.py'
 
 
-def voice_path(lang: str) -> Path:
-    from huggingface_hub import hf_hub_download
-    repo, rev = PIPER_VOICES
-    hf_hub_download(repo, VOICES[lang] + '.onnx.json', revision=rev)
-    return Path(hf_hub_download(repo, VOICES[lang] + '.onnx', revision=rev))
+def voice_path(voice_id: str) -> Path:
+    """The .onnx of a registry voice `piper-<name>` (its .onnx.json sits next to it)."""
+    from peresmeshnik import models
+    return models.path(voice_id) / f"{voice_id.removeprefix('piper-')}.onnx"
 
 
 def runner_cmd() -> list[str]:
@@ -36,9 +32,9 @@ def runner_cmd() -> list[str]:
 class PiperTts:
     """One runner process per voice; synth() yields one float32 chunk per sentence."""
 
-    def __init__(self, lang: str, voice_onnx: str | Path | None = None, threads: int = 2):
-        self.lang = lang
-        onnx = voice_onnx or voice_path(lang)
+    def __init__(self, voice_id: str = 'piper-ru_RU-dmitri-medium', threads: int = 2):
+        self.voice_id = voice_id
+        onnx = voice_path(voice_id)
         self._p = subprocess.Popen([*runner_cmd(), str(onnx), '--threads', str(threads)], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         self.sample_rate = self._u32()
 

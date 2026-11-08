@@ -129,8 +129,8 @@ Requirement from day one (Zagon 0.1.2 burned 104 % CPU on a redraw loop):
 are closed, `Direction.close()` has unloaded the engines or left them without busy threads. CI
 gate: `tests/test_idle_cpu.py` starts the app, waits 60 s and fails above **0.13 s CPU** (Linux,
 macOS, Windows on pushes to main and on PRs). The working-mode gate (`tests/test_pipeline_cpu.py`,
-CI job `work-gate`, three OSes) runs `peresmeshnik run` on a 30 s recording and fails at RTF ≥ 1.0 or ≥ 2.0 CPU s per audio s (now
-0.54–0.67 and 0.96–1.32 on the runners; BENCH.md, stage 1).
+CI job `work-gate`, three OSes) runs `peresmeshnik run` on a 30 s recording and fails at RTF ≥ 1.0
+or ≥ 2.0 CPU s per audio s (now 0.54–0.67 and 0.96–1.32 on the runners; BENCH.md, stage 1).
 
 **Working:**
 - device callbacks only enqueue; heavy work on worker threads;

@@ -14,7 +14,8 @@ import numpy as np
 from peresmeshnik.engines import SAMPLE_RATE
 from peresmeshnik.local.vad import ort_options
 
-MODELS = {'parakeet': ('nemo-parakeet-tdt-0.6b-v3', 'int8'), 'gigaam': ('gigaam-v3-e2e-ctc', 'int8')}
+ONNX_ASR = {'parakeet-tdt-0.6b-v3': ('nemo-parakeet-tdt-0.6b-v3', 'int8'),  # registry id -> onnx-asr model, quantization
+            'gigaam-v3-e2e-ctc': ('gigaam-v3-e2e-ctc', 'int8')}
 SENTENCE_END = tuple('.?!;')
 LEAD_S = 0.5
 TAIL_S = 0.8  # timestamps of the last ~0.8 s of a window run ahead of the audio
@@ -29,15 +30,17 @@ def _key(word: str) -> str:
 
 
 class OnnxAsr:
-    def __init__(self, model: str = 'parakeet', path: str | None = None, threads: int = 2, partial_every_s: float = 0.3,
+    def __init__(self, model_id: str = 'parakeet-tdt-0.6b-v3', threads: int = 2, partial_every_s: float = 0.3,
                  context_s: float = 1.0):
         import onnx_asr
-        name, quant = MODELS.get(model, (model, None))
-        self.name = name
+
+        from peresmeshnik import models
+        name, quant = ONNX_ASR[model_id]
+        self.name = model_id
         self.partial_every = int(partial_every_s * SAMPLE_RATE)
         self.context_s = context_s
         self._lead = np.zeros(int(LEAD_S * SAMPLE_RATE), np.float32)
-        self.model = onnx_asr.load_model(name, path, quantization=quant, sess_options=ort_options(threads),
+        self.model = onnx_asr.load_model(name, models.path(model_id), quantization=quant, sess_options=ort_options(threads),
                                          providers=['CPUExecutionProvider']).with_timestamps()
 
     def stream(self, lang: str) -> OnnxAsrStream:

@@ -85,7 +85,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('mode', choices=['quality', 'work'])
     ap.add_argument('lang', choices=['en', 'ru'])
-    ap.add_argument('--asr', default='parakeet', choices=['parakeet', 'gigaam'])
+    ap.add_argument('--asr', help='ASR model id (default: settings)')
     ap.add_argument('--threads', type=int, default=2)
     ap.add_argument('--n', type=int, default=30)
     ap.add_argument('--max-clause', type=float, default=5.0, help='hard clause limit, s')

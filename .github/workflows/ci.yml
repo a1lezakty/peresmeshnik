@@ -62,11 +62,14 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/models
-          key: models-${{ runner.os }}-1
+          key: models-${{ runner.os }}-${{ hashFiles('peresmeshnik/models.toml') }}
       - run: uv sync --locked --group dev
+      - name: Models (registry, SHA-256 checked)
+        env:
+          PERESMESHNIK_MODELS: ${{ runner.temp }}/models
+        run: uv run peresmeshnik models fetch silero-vad parakeet-tdt-0.6b-v3 opus-mt-en-ru piper-ru_RU-dmitri-medium
       - name: Working-mode CPU gate
         env:
           PERESMESHNIK_WORK_GATE: '1'
-          HF_HOME: ${{ runner.temp }}/models/hf
           PERESMESHNIK_MODELS: ${{ runner.temp }}/models
         run: uv run pytest -q -s tests/test_pipeline_cpu.py

@@ -25,8 +25,8 @@ def ort_options(threads: int):
 
 
 def silero_path() -> Path:
-    from huggingface_hub import hf_hub_download
-    return Path(hf_hub_download('istupakov/silero-vad-onnx', 'silero_vad.onnx', revision='b3e3ee3cce4c11ceb63b1a0b229d916069c1ddf6'))
+    from peresmeshnik import models
+    return models.path('silero-vad') / 'silero_vad.onnx'
 
 
 class SileroVad:

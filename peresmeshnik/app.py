@@ -28,6 +28,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -89,19 +90,32 @@ class FileIn:
 
 
 class Headphones:
-    """`AudioOut` to a PipeWire/PulseAudio sink at the first chunk's rate (Piper 22.05 kHz, Gemini 24 kHz);
-    chunks at another rate (the live pass-through, 16 kHz) are resampled. `sink` '' = the default.
-    pacat ends when its device goes (Bluetooth profile switch, USB unplugged: it does not follow another
-    device): PulseOut's `on_end` tells the tray at once, the next chunk opens the saved sink again, else the
-    current default."""
+    """`AudioOut` to a PipeWire/PulseAudio sink (Linux) or a Core Audio device (macOS) at the first chunk's rate
+    (Piper 22.05 kHz, Gemini 24 kHz); chunks at another rate (the live pass-through, 16 kHz) are resampled. `sink`
+    '' = the default. The output ends when its device goes (Bluetooth profile switch, USB unplugged: it does not
+    follow another device): its `on_end` tells the tray at once, the next chunk opens the saved device again, else
+    the current default. macOS: PortAudio opens only the devices of its last refresh, so `on_back()` (the controller
+    refreshes it) is called once when the saved device is back, or there but unknown to PortAudio; suspend() and
+    resume() close and reopen around that refresh, the speech not played yet plays on the new device."""
     retry_s = 2.0
 
-    def __init__(self, sink: str = '', on_state=lambda text: None):
-        self.sink, self.on_state = sink, on_state
+    def __init__(self, sink: str = '', on_state=lambda text: None, on_back=None):
+        self.sink, self.on_state, self.on_back = sink, on_state, on_back
         self._out, self._rs, self._retry_at, self._failing = None, {}, 0.0, False
+        self._arrival = None  # macOS: waiting for the saved device while another one plays
+        self._suspended, self._pending, self._asked = False, [], set()  # _asked: refreshes asked for, per device
         self._lock = threading.Lock()  # capture (live), events (speech) and control (switch, stop) threads
 
     def resolve(self) -> str:
+        if sys.platform == 'darwin':
+            from peresmeshnik.audio import capture_macos, coreaudio
+            name = self.sink if self.sink in {d['name'] for d in coreaudio.devices() if d['outputs']} else coreaudio.default()
+            if not name:
+                raise RuntimeError('no output device')
+            if name == capture_macos.CALL_DEVICE and capture_macos.path() == 'blackhole':  # the call would hear itself
+                raise RuntimeError(f'the headphones are {name}, the call app\'s speaker: choose your real headphones in the '
+                                   'settings or the system')
+            return name
         names = [line.split('\t')[1] for line in pactl('list', 'short', 'sinks').splitlines() if '\t' in line]
         if self.sink in names:
             return self.sink
@@ -109,6 +123,9 @@ class Headphones:
 
     def play(self, pcm: np.ndarray, sample_rate: int) -> None:
         with self._lock:
+            if self._suspended:  # PortAudio is being refreshed: played after it
+                self._pending.append((pcm, sample_rate))
+                return
             out = self._out
             if out is not None and not out.alive:  # died just now (its on_end may come before or after this)
                 self._drop()
@@ -117,18 +134,55 @@ class Headphones:
                 if time.monotonic() < self._retry_at:
                     return  # no device for now: this audio is dropped
                 try:
-                    from peresmeshnik.audio.out import PulseOut
+                    from peresmeshnik.audio.out import Output
                     sink = self.resolve()
-                    self._out = out = PulseOut(sample_rate, sink, on_end=self._gone)
+                    self._out = out = Output(sample_rate, sink, on_end=self._gone)
                     if self._failing:  # the tray still shows the error: put it back
                         self.on_state(f'translating (the headphones are back: {sink})')
                     self._rs, self._failing = {}, False
+                    self._await(sink)
                 except Exception as e:
+                    from peresmeshnik.audio.out import NotInPortAudio
+                    if isinstance(e, NotInPortAudio):  # there, but plugged in after PortAudio's last refresh
+                        self._ask_back(sink)
                     self._retry_at = time.monotonic() + self.retry_s
                     self._fail(f'no headphones: {e}')
                     return
             rs = self._rs.get(sample_rate) or self._rs.setdefault(sample_rate, Resampler(sample_rate, out.sample_rate))
             out.play(rs(pcm), out.sample_rate)
+
+    def _await(self, opened: str) -> None:  # under the lock
+        """macOS, another device than the saved one opened: wait for the saved one to come back."""
+        if sys.platform == 'darwin' and self.on_back and self.sink and opened != self.sink and self._arrival is None:
+            from peresmeshnik.audio.coreaudio import Arrival
+            self._asked.discard(self.sink)  # it went away since: its coming back is worth a refresh again
+            self._arrival = Arrival(self.sink, lambda: self._ask_back(self.sink))
+
+    def _ask_back(self, name: str) -> None:
+        """Once per device: a refresh that did not make PortAudio see it would only be repeated every retry."""
+        if self.on_back and name not in self._asked:
+            self._asked.add(name)
+            log.info('headphones: %s is there: refreshing the devices', name)
+            self.on_back()
+
+    def suspend(self) -> None:
+        """macOS, before PortAudio's refresh: close the output; what it has not played yet waits for resume()."""
+        with self._lock:
+            self._suspended = True
+            out, self._out = self._out, None
+            arrival, self._arrival = self._arrival, None
+        if arrival:
+            arrival.close()
+        if out:
+            self._pending[:0] = [(c, out.rate) for c in out.take()]
+            out.stop(drain=False)
+
+    def resume(self) -> None:
+        with self._lock:
+            self._suspended, self._retry_at = False, 0.0
+            pending, self._pending = self._pending, []
+        for pcm, sr in pending:  # the first chunk opens the device (the saved one, if it is back)
+            self.play(pcm, sr)
 
     def _gone(self, why: str) -> None:
         """PulseOut's on_end, on its own thread: the tray hears it now; the next chunk reopens."""
@@ -156,6 +210,9 @@ class Headphones:
     def stop(self) -> None:
         with self._lock:
             out, self._out = self._out, None
+            arrival, self._arrival = self._arrival, None
+        if arrival:
+            arrival.close()
         if out:
             out.flush()
             out.stop()  # plays out what pacat holds: outside the lock
@@ -484,6 +541,7 @@ class Controller:
         self.startup_error = ''
         self._pool = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix='control')  # no thread until first use
         self._vmic = self._call = self._router = None
+        self._through = self._through_arrival = None  # macOS < 14.4, translation off: the call app's speaker on to the headphones
         self._mic = ''  # the default input as it was before our devices existed
 
     def submit(self, fn, *args):
@@ -509,6 +567,17 @@ class Controller:
     def startup(self) -> None:
         """The devices are there from the start, so the call app can pick the microphone and S1 can move the
         call's sound once; until translation is on, the real microphone is looped into the virtual one."""
+        if self.devices and sys.platform == 'darwin':
+            from peresmeshnik.audio import capture_macos
+            if capture_macos.path() == 'tap':  # no permission yet: say so now, not at the first call
+                try:
+                    code, why = capture_macos.check()
+                except Exception as e:
+                    code, why = 1, str(e)
+                self.startup_error = why if code else ''
+            else:
+                self._through_start()
+            return
         if not (self.devices and sys.platform.startswith('linux')):
             return
         errors = []
@@ -557,6 +626,7 @@ class Controller:
         if self.on:
             return
         self.on_state('warming up')
+        self._refresh_devices()  # macOS: devices plugged in since (AirPods back) become visible to PortAudio
         s = self.settings or config.load()
         files = {'them': self.them_file, 'me': self.me_file}
         t, failed = time.perf_counter(), []
@@ -574,6 +644,7 @@ class Controller:
         for x in self.sides:
             if x.name == 'me' and them is not None:
                 x.on_talk = them.interrupt
+        self._through_stop()  # BlackHole 16ch goes to the translation now
         for side in self.sides:
             side.set_live(self.live)
             side.start()
@@ -588,15 +659,27 @@ class Controller:
             self.on_state('error: choose the call app in the tray menu (Call app): until then the call is not translated')
 
     def _route(self, s: config.Settings) -> str:
-        """The call app's sound into the call sink while translating: the app chosen, else the one known call app
-        playing now (remembered; a browser only by hand: all of its tabs would move)."""
+        """The call app's sound into the call sink (Linux) or a tap of it (macOS 14.4+) while translating: the app
+        chosen, else the one known call app playing now (remembered; a browser only by hand: all of its tabs would
+        move)."""
         from peresmeshnik.audio.capture_pipewire import CallRouter, guess_call_app
         try:
+            tap = None
+            if sys.platform == 'darwin':
+                from peresmeshnik.audio import capture_macos
+                tap = next(x for x in self.sides if x.name == 'them').inp
+                if not isinstance(tap, capture_macos.ProcessTap):  # BlackHole 16ch: the call app's own speaker setting
+                    return f'call sound: {tap.device} (the call app\'s speaker); '
+                guess_call_app = capture_macos.guess_call_app
             app = s.ui.call_app
             if not app and (app := guess_call_app()):
                 self._save_call_app(app)
             if not app:
                 return 'call app: none; '
+            if tap is not None:
+                tap.retarget(app)
+                self._router = SimpleNamespace(stop=lambda: tap.retarget(''))  # off: no tap, the call is heard as usual
+                return f'call sound: {app}; '
             self._router = CallRouter(app, self._call.name)
             self._router.start()
             return f'call sound: {app}{"" if self._router.moved else " (not playing yet)"}; '
@@ -629,12 +712,21 @@ class Controller:
 
     def _set_call_app(self, app: str) -> None:
         self._save_call_app(app)
-        if self.on and self._call and any(x.name == 'them' for x in self.sides):
+        if self.on and (self._call or sys.platform == 'darwin') and any(x.name == 'them' for x in self.sides):
             self._unroute()
             self.on_state(f'translating ({self._route(self.settings or config.load()).rstrip("; ")})')
 
     def _input(self, name: str, s: config.Settings | None = None):
         s = s or self.settings or config.load()
+        if name == 'them' and sys.platform == 'darwin':
+            from peresmeshnik.audio import capture_macos
+            on_end = lambda why: self.on_state(f'error: the call sound capture stopped: {why}')  # noqa: E731
+            if capture_macos.path() == 'blackhole':
+                return capture_macos.BlackHoleIn(on_end=on_end)
+            code, why = capture_macos.check()
+            if code:
+                raise RuntimeError(why)
+            return capture_macos.ProcessTap(on_end=on_end)  # the app is chosen in _route, after the start
         if name == 'them':
             if self._call is None:
                 raise RuntimeError(f'no call sink ({self.startup_error or "no sound server"})')
@@ -645,12 +737,15 @@ class Controller:
         return Microphone(s.ui.mic, self.on_state, self._mic)
 
     def _output(self, name: str, s: config.Settings):
-        if not sys.platform.startswith('linux'):
-            raise RuntimeError('audio routing on this OS comes in a later version (macOS: stage 3, Windows: stage 4)')
+        if sys.platform == 'win32':
+            raise RuntimeError('audio routing on Windows comes in a later version (stage 4)')
         if name == 'them' or self.test:
-            out = Headphones(s.ui.headphones, self.on_state)
+            back = (lambda: self.submit(self._refresh_devices)) if self.devices and sys.platform == 'darwin' else None
+            out = Headphones(s.ui.headphones, self.on_state, on_back=back)
             out.resolve()  # a missing device or our own as the default: say so now, not at the first word
             return out
+        if not sys.platform.startswith('linux'):
+            raise RuntimeError('the virtual microphone on macOS comes in a later version (stage 3)')
         return self.virtual_mic()
 
     def _off(self) -> None:
@@ -665,9 +760,86 @@ class Controller:
         if not self.test:  # the test phrase's subtitles stay until the wizard closes
             self.overlay.side('them').hide()
         self._loopback(True)
+        self._through_start()
         if self.on or sides:
             self.on = False
             self.on_state('idle, translation off')
+
+    def _refresh_devices(self) -> dict:
+        """macOS: PortAudio opens only the devices of its last refresh, and a refresh closes every PortAudio stream of
+        the process. So the streams that hold PortAudio (`suspend()` / `resume()`) are closed around it; the engines and
+        the process tap stay (BENCH: the gap). The control thread; at translation on (nothing open yet) and when the
+        saved headphones are back."""
+        if not (self.devices and sys.platform == 'darwin'):
+            return {}
+        t = [time.perf_counter()]
+        held = [x for side in self.sides for x in (side.inp, side.out) if hasattr(x, 'suspend')]
+        # at once: PortAudio stops each stream in 0.1-0.25 s (pa_mac_core polls the unit with Pa_Sleep(100))
+        stops = [threading.Thread(target=self._quietly, args=(x.suspend,), name='suspend') for x in held]
+        for th in stops:
+            th.start()
+        self._through_stop()
+        for th in stops:
+            th.join()
+        t.append(time.perf_counter())
+        from peresmeshnik.audio.coreaudio import refresh_portaudio
+        refresh_portaudio()
+        t.append(time.perf_counter())
+        for x in held:
+            x.resume()
+        self._through_start()  # translation off (or still warming up): the call heard on macOS < 14.4
+        t.append(time.perf_counter())
+        ms = {k: round(1000 * (b - a)) for k, a, b in zip(('suspend', 'refresh', 'resume'), t, t[1:])}
+        log.info('devices refreshed: %s ms (%d streams reopened)', ms, len(held))
+        if held:
+            self.on_state(f'translating (devices changed: reopened in {sum(ms.values())} ms)')
+        return ms
+
+    @staticmethod
+    def _quietly(fn) -> None:
+        try:
+            fn()
+        except Exception:
+            log.exception('suspending a stream')
+
+    def _through_start(self) -> None:
+        """macOS < 14.4 with translation off: the call app's speaker (BlackHole 16ch) on to the headphones, else the
+        call is not heard. Reopened on the saved headphones or the default when the device goes."""
+        from peresmeshnik.audio import capture_macos
+        if not (self.devices and sys.platform == 'darwin') or capture_macos.path() != 'blackhole' or self._through or self.sides:
+            return
+        try:
+            saved = (self.settings or config.load()).ui.headphones
+            out = Headphones(saved).resolve()
+            if saved and out != saved:  # the saved headphones are gone: back to them when they are back
+                from peresmeshnik.audio.coreaudio import Arrival
+                self._through_arrival = Arrival(saved, lambda: self.submit(self._refresh_devices))
+            self._through = through = capture_macos.PassThrough(out, on_end=lambda why: self.submit(self._through_lost, through, why))
+            through.start()
+            log.info('call sound: %s -> %s while translation is off', capture_macos.CALL_DEVICE, out)
+        except Exception as e:
+            self._through = None
+            log.warning('pass-through: %s', e)
+            self.on_state(f'error: the call is not heard while translation is off: {e}')
+
+    def _through_lost(self, through, why: str) -> None:  # the control thread
+        if through is not self._through:
+            return
+        log.warning('pass-through: %s', why)
+        self._through_stop()
+        if not self.on:
+            self.on_state(f'error: the headphones went away ({why}); reopening')  # once: a failed reopen says its own
+            self._through_start()
+            if self._through:
+                self.on_state(f'idle, translation off (the call plays on {self._through.output})')
+
+    def _through_stop(self) -> None:
+        arrival, self._through_arrival = self._through_arrival, None
+        if arrival:
+            arrival.close()
+        through, self._through = self._through, None
+        if through:
+            through.stop()
 
     def set_live(self, on: bool) -> None:
         self.live = on  # the menu shows it at once; the sides switch on the control thread, after a start in progress
@@ -680,6 +852,7 @@ class Controller:
     def quit(self) -> None:
         self.submit(self._off).result()
         self._pool.shutdown()
+        self._through_stop()
         self._loopback(False)
         if self._vmic:
             self._vmic.remove()  # the devices go with the app

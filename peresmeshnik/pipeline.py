@@ -24,6 +24,8 @@ start of its playback (the output plays speech back to back, so a clause can wai
     peresmeshnik models fetch silero-vad parakeet-tdt-0.6b-v3 opus-mt-en-ru piper-ru_RU-dmitri-medium
     peresmeshnik run --in call.wav [--from en] [--to ru] [--out speech.wav] [--log latency.jsonl]
     peresmeshnik run --in call.wav --pipewire --play   # Linux: file -> "Peresmeshnik Call" sink -> monitor
+    peresmeshnik run --in call.wav --blackhole --play "BlackHole 2ch"   # macOS: file -> BlackHole 16ch -> capture
+    peresmeshnik run --in call.wav --tap --play        # macOS 14.4+: afplay plays the file, a process tap of it
 """
 import argparse
 import inspect
@@ -312,7 +314,10 @@ def cli(argv=None) -> int:
     ap.add_argument('--threads', type=int, help='threads per engine (default: settings [local] threads)')
     ap.add_argument('--realtime', action='store_true', help='feed the file at its own pace (real lags in the log)')
     ap.add_argument('--pipewire', action='store_true', help='Linux: play the file into the "Peresmeshnik Call" sink, capture its monitor')
-    ap.add_argument('--play', nargs='?', const='', metavar='SINK', help='Linux: play the translation (default sink if no name)')
+    ap.add_argument('--blackhole', action='store_true', help='macOS: play the file into BlackHole 16ch, capture it back')
+    ap.add_argument('--tap', action='store_true', help='macOS 14.4+: afplay plays the file, a process tap of it is the input')
+    ap.add_argument('--play', nargs='?', const='', metavar='SINK',
+                    help='play the translation (Linux: a sink, macOS: an output device; the default if no name)')
     ap.add_argument('--out', help='write the translated speech here (wav)')
     ap.add_argument('--log', help='per-clause latency, JSON lines')
     ap.add_argument('--partials', action='store_true', help='print ASR partials too')
@@ -326,7 +331,16 @@ def cli(argv=None) -> int:
     if not os.path.isfile(a.inp):
         ap.error(f'no such file: {a.inp}')
     sink = None
-    if a.pipewire or a.play is not None:
+    mac = sys.platform == 'darwin'
+    if (a.blackhole or a.tap) and not mac:
+        ap.error('--blackhole and --tap need macOS')
+    if mac and a.play is not None:
+        from peresmeshnik.audio import coreaudio
+        from peresmeshnik.audio.capture_macos import CALL_DEVICE
+        sink = a.play or coreaudio.default()
+        if a.blackhole and sink == CALL_DEVICE:
+            ap.error(f'the output would be {CALL_DEVICE}, the capture: the translation would be translated again; pass --play <device>')
+    elif a.pipewire or a.play is not None:
         if not sys.platform.startswith('linux'):
             ap.error('--pipewire and --play need Linux (PipeWire or PulseAudio) for now')
         from peresmeshnik.audio.capture_pipewire import CALL_SINK
@@ -352,12 +366,13 @@ def cli(argv=None) -> int:
         print(e, file=sys.stderr)
         return 2
     d.warm_up()
-    d.realtime = a.realtime or a.pipewire
+    live = a.pipewire or a.blackhole or a.tap  # audio from a device, at its own pace
+    d.realtime = a.realtime or live
     print(f'engines loaded in {time.perf_counter() - t:.1f} s', file=sys.stderr)
     player = None
     if sink:
-        from peresmeshnik.audio.out import PulseOut
-        player = PulseOut(d.tts.sample_rate, sink)  # a named sink: it must not follow a new default
+        from peresmeshnik.audio.out import Output
+        player = Output(d.tts.sample_rate, sink)  # a named device: it must not follow a new default
     speech, t_start = [], time.perf_counter()
 
     def consume():
@@ -367,7 +382,7 @@ def cli(argv=None) -> int:
                 if player:
                     player.play(e.pcm, e.sample_rate)
                 if a.out:  # real-time runs keep the timeline: a chunk starts when it was produced
-                    gap = int((time.perf_counter() - t_start) * e.sample_rate) - at if (a.realtime or a.pipewire) else 0
+                    gap = int((time.perf_counter() - t_start) * e.sample_rate) - at if d.realtime else 0
                     if gap > 0:
                         speech.append(np.zeros(gap, np.float32))
                     speech.append(e.pcm)
@@ -391,6 +406,43 @@ def cli(argv=None) -> int:
                     time.sleep(1.0)  # trailing silence closes the last clause
                 finally:
                     cap.stop()  # removes the sink
+            elif a.blackhole:
+                import sounddevice as sd
+
+                from peresmeshnik.audio.capture_macos import CALL_DEVICE, BlackHoleIn
+                from peresmeshnik.audio.coreaudio import stream_args
+                from peresmeshnik.audio.resample import Resampler
+                cap = BlackHoleIn()
+                cap.start(d.feed)
+                try:
+                    args = stream_args(CALL_DEVICE)  # as the capture's: another buffer size on one device stops the other
+                    sr = args.pop('samplerate')
+                    sd.play(Resampler(SAMPLE_RATE, sr)(read_audio(a.inp)), sr, device=CALL_DEVICE, blocking=True, **args)
+                    time.sleep(1.0)
+                finally:
+                    cap.stop()
+            elif a.tap:
+                import tempfile
+
+                import soundfile as sf
+
+                from peresmeshnik.audio.capture_macos import ProcessTap
+                wav = os.path.join(tempfile.mkdtemp(prefix='peresmeshnik-'), 'call.wav')  # afplay reads no Ogg
+                sf.write(wav, read_audio(a.inp), SAMPLE_RATE)
+                call = subprocess.Popen(['afplay', wav])  # stands in for the call app, on the default output
+                ended = []
+                cap = ProcessTap(pid=call.pid, on_end=ended.append)
+                cap.start(d.feed)
+                try:
+                    call.wait()
+                    time.sleep(1.0)
+                finally:
+                    cap.stop()
+                    call.kill()
+                    os.remove(wav)
+                print(f'tap: {cap.rate} Hz, {cap.status}', file=sys.stderr)
+                if ended and not ended[0].endswith('is not running'):  # the player's end ends the tap too
+                    raise RuntimeError(ended[0])
             else:
                 run(d, read_audio(a.inp), a.realtime)
         finally:

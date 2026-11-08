@@ -34,7 +34,7 @@ from peresmeshnik import config
 log = logging.getLogger('peresmeshnik.ui')
 ICONS = Path(__file__).resolve().parents[2] / 'assets' / 'icons'  # ponytail: repo path; packaging (stage 3) bundles them
 LANGS = {'en': 'English', 'ru': 'Русский'}
-MIC_LABEL = 'Microphone (self-test;\ntranslation: system default for now)'  # S2's Mic takes a PipeWire source in stage 2
+MIC_LABEL = 'Microphone'  # me -> them and the loopback while translation is off
 SIDES = {'them_to_me': 'Them → me', 'me_to_them': 'Me → them'}
 
 

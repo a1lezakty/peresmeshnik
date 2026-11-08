@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 import psutil
-from PySide6.QtCore import QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -36,6 +36,8 @@ from peresmeshnik import config, models
 from peresmeshnik.ui.tray import LANGS, MIC_LABEL, SIDES, device_combo, save_key
 
 LINUX = sys.platform.startswith('linux')
+MACOS = sys.platform == 'darwin'
+VMIC = 'BlackHole 2ch' if MACOS else 'Peresmeshnik Mic'  # what the call app takes as its microphone
 SAMPLES = Path(__file__).parent / 'samples'
 
 
@@ -55,7 +57,8 @@ def needed_models(s: config.Settings) -> list[str]:
         if local or not s.cloud.subtitles:  # local voice, or local subtitles next to the cloud voice
             ids += [s.local.asr[src], s.local.mt[f'{src}-{tgt}']]
         if local:
-            ids.append(s.local.tts[tgt] if side == 'them_to_me' else s.local.clone)
+            stock = side == 'them_to_me' or s.local.clone == 'piper'  # voice.STOCK: me -> them in a stock voice
+            ids.append(s.local.tts[tgt] if stock else s.local.clone)
     return list(dict.fromkeys(ids))
 
 
@@ -127,7 +130,7 @@ class DevicesPage(QWizardPage):
         self.w = w
         self.setTitle('Sound devices')
         self.setSubTitle('Translated speech goes to your headphones; your translated voice goes to the virtual microphone '
-                         '"Peresmeshnik Mic", which you choose in the call app.')
+                         f'"{VMIC}", which you choose in the call app.')
         self.f = QFormLayout(self)
         self.warn = QLabel()
         self.warn.setWordWrap(True)
@@ -144,6 +147,37 @@ class DevicesPage(QWizardPage):
         self.warn.setWordWrap(True)
         self.f.addRow(self.warn)
         self._echo()
+        if MACOS:
+            self.blackhole = QLabel()
+            self.blackhole.setWordWrap(True)
+            self.blackhole.setOpenExternalLinks(True)
+            self.blackhole.setTextInteractionFlags(Qt.TextBrowserInteraction)  # the brew command can be copied
+            self.recheck = QPushButton('Check again')
+            self.recheck.clicked.connect(self.check_blackhole)
+            self.f.addRow('Virtual microphone', self.blackhole)
+            self.f.addRow('', self.recheck)
+            self.check_blackhole()
+
+    def check_blackhole(self) -> bool:
+        """macOS: BlackHole 2ch is the user's to install; missing -> how to, and "Check again". The microphone permission
+        too: denied, macOS hands the app silence."""
+        from peresmeshnik.audio import macos
+        try:
+            macos.blackhole()
+            text, ok = '✔ BlackHole 2ch is installed: in the call app choose the microphone <b>BlackHole 2ch</b>.', True
+        except macos.BlackHoleMissing:
+            text, ok = ('<b>✘ BlackHole 2ch is not installed.</b> It is the virtual microphone that carries your translated '
+                        'voice to the call app (them → me works without it).<br>Install it: in the Terminal run '
+                        '<code>brew install blackhole-2ch</code>, or download the installer from '
+                        '<a href="https://existential.audio/blackhole/">existential.audio/blackhole</a>. Then press '
+                        '<b>Check again</b> (still not found: restart the Mac).'), False
+        except Exception as e:  # the helper is missing (a broken install)
+            text, ok = f'✘ Cannot list the sound devices: {e}', False
+        if ok and macos.permission() in ('denied', 'restricted'):
+            text += f'<br>✘ {macos.NO_PERMISSION}.'
+        self.blackhole.setText(text)
+        self.recheck.setVisible(not ok)
+        return ok
 
     def _echo(self) -> None:
         name = self.headphones.currentText().lower()
@@ -154,6 +188,90 @@ class DevicesPage(QWizardPage):
     def validatePage(self) -> bool:  # noqa: N802
         self.w.s.ui.headphones, self.w.s.ui.mic = self.headphones.currentData(), self.mic.currentData()
         return True
+
+
+class CallSoundPage(QWizardPage):
+    """macOS: how the app hears the call (audio/capture_macos): a process tap of the call app (14.4+; macOS asks for
+    "System Audio Recording" once, `request()` waits for that answer, so not on the GUI thread), or before 14.4 the call
+    app's speaker set to BlackHole 16ch. Either way the page can be left: them -> me says why when it cannot start."""
+    answered = Signal(int, str)
+
+    def __init__(self, w: SetupWizard):
+        super().__init__()
+        self.w = w
+        self.setTitle("The call's sound")
+        lay = QVBoxLayout(self)
+        self.text, self.state = QLabel(), QLabel()
+        for x in (self.text, self.state):
+            x.setWordWrap(True)
+        self.state.setTextInteractionFlags(Qt.TextBrowserInteraction)  # the brew command can be copied
+        self.state.setOpenExternalLinks(True)
+        self.button = QPushButton()
+        self.button.clicked.connect(self.act)
+        for x in (self.text, self.button, self.state):
+            lay.addWidget(x)
+        self.answered.connect(self._answered)
+        self.running, self.path = False, ''
+
+    def initializePage(self) -> None:  # noqa: N802
+        from peresmeshnik.audio import capture_macos as cm
+        self.path = cm.path()
+        if self.path == 'tap':
+            self.text.setText('Peresmeshnik hears your call app through macOS (System Audio Recording) and mutes it on your '
+                              'speakers while translating.')
+            self.button.setText('Allow')
+            self._show(*self._safe(cm.check))
+        else:
+            self.text.setText(f'In your call app choose the speaker <b>{cm.CALL_DEVICE}</b>. Peresmeshnik plays the call to your '
+                              'headphones itself; while translating you hear only the translation.')
+            self.button.setText('Check again')
+            self.check_blackhole()
+
+    @staticmethod
+    def _safe(fn) -> tuple[int, str]:
+        try:
+            return fn()
+        except Exception as e:  # no tap helper (a broken install), the helper crashed
+            return -1, str(e)
+
+    def act(self) -> None:
+        if self.path != 'tap':
+            self.check_blackhole()
+            return
+        from peresmeshnik.audio import capture_macos as cm
+        self.running = True
+        self.button.setEnabled(False)
+        self.state.setText('Answer the macOS dialog: allow Peresmeshnik to record the call app\'s sound…')
+        self.completeChanged.emit()
+        threading.Thread(target=lambda: self.answered.emit(*self._safe(cm.request)), name='tap-permission', daemon=True).start()
+
+    def _answered(self, code: int, why: str) -> None:
+        self.running = False
+        self.button.setEnabled(True)
+        self._show(code, why)
+        self.completeChanged.emit()
+
+    def _show(self, code: int, why: str) -> None:
+        self.state.setText('✔ Allowed: while translating, the call app is heard through macOS.' if code == 0 else f'✘ {why}')
+        self.button.setVisible(code != 0)
+
+    def check_blackhole(self) -> bool:
+        from peresmeshnik.audio import capture_macos as cm
+        from peresmeshnik.audio import macos
+        try:
+            ok = cm.CALL_DEVICE in {d['name'] for d in macos.devices()}
+        except Exception as e:
+            self.state.setText(f'✘ Cannot list the sound devices: {e}')
+            return False
+        self.state.setText(f'✔ {cm.CALL_DEVICE} is installed.' if ok else
+                           f'<b>✘ {cm.CALL_DEVICE} is not installed.</b> In the Terminal run <code>brew install --cask '
+                           'blackhole-16ch</code>, or download the installer from <a href="https://existential.audio/blackhole/">'
+                           'existential.audio/blackhole</a>; then press <b>Check again</b> (still not found: restart the Mac).')
+        self.button.setVisible(not ok)
+        return ok
+
+    def isComplete(self) -> bool:  # noqa: N802
+        return not self.running
 
 
 class ModelsPage(QWizardPage):
@@ -316,6 +434,8 @@ class VoicePage(QWizardPage):
         self.record_button.clicked.connect(self.record)
         self.import_button = QPushButton('Import a recording…')
         self.import_button.clicked.connect(lambda: self.import_file())
+        self.stock = QCheckBox('Speak with a stock voice (Piper), not mine: it keeps up on this computer')
+        self.stock.toggled.connect(self._stock)
         self.check_button = QPushButton('Check the clone')
         self.check_button.clicked.connect(self.check_clone)
         for b in (self.record_button, self.import_button, self.check_button):
@@ -325,6 +445,7 @@ class VoicePage(QWizardPage):
         self.out, self.clone_out = QLabel(), QLabel()
         for x in (self.out, self.clone_out):
             x.setWordWrap(True)
+        lay.addWidget(self.stock)
         lay.addWidget(self.prompt)
         lay.addLayout(row)
         for x in (self.bar, self.out, self.clone_out):
@@ -347,8 +468,13 @@ class VoicePage(QWizardPage):
                          'voice. The recording stays on this computer.' if self.local() else
                          'Optional: "me → them" runs in the cloud, in Gemini\'s voice. Your recording is only needed for the '
                          'local clone.')
+        if self.local() and MACOS:  # no Apple GPU for torch in CI: the clone ran on the CPU there (BENCH)
+            self.setSubTitle(self.subTitle() + ' On this Mac the clone of your voice runs on the CPU and falls behind the '
+                             'conversation: choose cloud for "me → them", or a stock voice.')
         self.prompt.setText(voice.PROMPTS.get(s.my_lang, 'Read any text in your language aloud, at your normal pace.'))
-        self.check_button.setVisible(self.local())
+        self.stock.setVisible(self.local())
+        self.stock.setChecked(s.local.clone == voice.STOCK)
+        self.check_button.setVisible(self.local() and not self.stock.isChecked())
         if self.voice is None and s.local.voice and (voice.voices_dir() / s.local.voice / 'voice.json').exists():
             self.voice = voice.load(s.local.voice)
             q = self.voice.meta.get('quality', {})
@@ -357,7 +483,19 @@ class VoicePage(QWizardPage):
         self._buttons()
 
     def isComplete(self) -> bool:  # noqa: N802
-        return not self.running and (not self.local() or self.voice is not None)
+        return not self.running and (not self.local() or self.stock.isChecked() or self.voice is not None)
+
+    def _stock(self, on: bool) -> None:
+        """The stock voice instead of the clone; its model (~60 MB) is fetched here when the models page took the clone."""
+        from peresmeshnik import voice
+        s = self.w.s
+        s.local.clone = voice.STOCK if on else config.Local().clone
+        self.check_button.setVisible(self.local() and not on)
+        vid = s.local.tts[s.their_lang]
+        if on and not models.is_fetched(models.get(vid), models.root()):
+            self.out.setText(f'Downloading the stock voice {vid}…')
+            self._run(lambda: (models.fetch(vid), self.result.emit(f'The stock voice {vid} is here.')))
+        self.completeChanged.emit()
 
     def translating(self) -> bool:
         """Translation on: a local me -> them already holds the clone; the check would load a second one (~3 GB)."""
@@ -582,8 +720,10 @@ class SetupWizard(QWizard):
         super().__init__()
         self.tray, self.s, self.key = tray, config.load(), ''
         self.setWindowTitle('Peresmeshnik setup')
-        self.pages = [LanguagesPage(self)] + ([DevicesPage(self)] if LINUX else []) + [ModelsPage(self)] \
-            + ([SelfTestPage(self)] if LINUX else []) + [VoicePage(self), HotkeyPage(self), DonePage()]
+        routed = LINUX or MACOS
+        self.pages = [LanguagesPage(self)] + ([DevicesPage(self)] if routed else []) + ([CallSoundPage(self)] if MACOS else []) \
+            + [ModelsPage(self)] \
+            + ([SelfTestPage(self)] if routed else []) + [VoicePage(self), HotkeyPage(self), DonePage()]
         self.voice_page = next(p for p in self.pages if isinstance(p, VoicePage))
         for p in self.pages:
             self.addPage(p)

@@ -686,3 +686,135 @@ not cut pauses inside a sentence (no 3.8–7.4 s outliers of the final text).
 
 "Done after the end" is shorter with the energy gate because its end comes later (the last block above
 its threshold, trailing noise included); Silero ends at the voice.
+
+## Stage 2: me → them live (microphone, live voice, voice checks)
+
+Measured 2026-11-08 on `linux-x86_64-4c` (own PipeWire session, Xvfb 1280×800 + `stalonetray`, shared
+with other work, `nice`), the clone on `rtx3060-laptop` (as in stage 1).
+
+### Translation ⇄ live voice
+
+`audio/mic.py` `LiveSwitch` wraps the me → them direction (local or cloud): its output is clocked by the
+microphone's frames, so the queued translation stays in the process and can be faded instead of being
+cut in the device buffer. Each switch is an equal-power crossfade (cos / sin). The click measure: the
+biggest sample-to-sample jump at the seam against the two signals' own biggest jumps around it, and the
+energy above 4 kHz in 10 ms windows along the seam against the signals' own there.
+
+**Crossfade length on speech** (`bench/live_switch.py`: four clone sentences as the translation, a
+LibriVox reader as the live microphone, 300 seams at random moments where both talk):
+
+| fade | jump / own: median | p95 | max | seams > 2× | energy > 4 kHz / own: p95 | seams > +6 dB |
+|---|---|---|---|---|---|---|
+| 0 ms (hard switch) | 0.74 | 2.77 | 5.60 | 12 % | +12.9 dB | 18 % |
+| 2 ms | 0.52 | 0.98 | 1.04 | 0 % | −0.6 dB | 0 % |
+| 5 ms | 0.54 | 0.98 | 1.00 | 0 % | −0.2 dB | 0 % |
+| 10 ms | 0.56 | 0.98 | 1.01 | 0 % | 0.0 dB | 0 % |
+| 30 ms (chosen) | 0.59 | 0.99 | 1.07 | 0 % | 0.0 dB | 0 % |
+| 50 ms | 0.62 | 1.00 | 1.01 | 0 % | 0.0 dB | 0 % |
+
+Any fade from 2 ms removes the click by both measures. 30 ms keeps a margin: two periods of a low voice
+(85 Hz), so the level change is slower than the voice itself, about 1.5 frames of the 20 ms input clock,
+and well under a syllable (the live voice is at full level 30 ms after the key).
+
+**Tests** (`tests/test_virtual_mic_live.py`): tones on a DC offset, where a hard cut always jumps: 101.6×
+without a crossfade (the test asserts > 5), 1.2× with 30 ms (asserts < 5). End to end under Xvfb: the app
+with a fake translation (a 220 Hz tone) and a PipeWire test microphone (300 Hz), `xdotool key` toggles,
+"Peresmeshnik Mic" is recorded as a call app would: translation → live voice → translation, jumps at the
+seams 1.3× and 0.9× the tones' own with 30 ms (asserts < 3); with the fade at 0, 2.5–14.9× over runs (the
+phases at the seam are random). It needs no models, so it runs in the `ubuntu-latest` test job: there
+1.3× / 0.9× with the crossfade, 10.8× / 4.4× without (0be061c).
+
+**Cost**: 0.012 CPU s per second of sound while translation or the live voice plays (one events thread,
+20 ms frames), ~0 while the direction is silent (the frames do not wake it); the output starts each
+stretch with 60 ms of silence as a cushion against scheduling jitter (on top of the device's 40 ms).
+
+### Microphone by name
+
+`Mic` on Linux records a PipeWire source by its `pactl` name through `parec` (20 ms frames, the same
+`s.ui.mic` for the translation and for the loopback while translation is off; our own devices and sink
+monitors are refused). 0.0096 CPU s per second of audio (reader thread 0.005 + parec 0.0045). While it runs,
+one `pactl subscribe` watches PipeWire's events: the source's removal (or the end of the stream) makes the
+app reopen on the saved source if it is back, else on the default input: 0.06–0.09 s from removal to the
+new stream, one tray message; with no microphone at all the next new source is taken, no polling. The
+event is needed: here (PipeWire 1.0.5, WirePlumber 0.4.17) a `node.dont-reconnect` recording ends with
+"Entity killed" when its source goes, on `ubuntu-latest` (PipeWire 1.6.2, WirePlumber 0.5.13) it did not
+end, and the first version of the test, which waited for that end, failed there.
+
+"Peresmeshnik Mic" now has `priority.session=-10` on its sink and source: WirePlumber 0.4.17 counts a
+device without a priority as −1, so the 0 asked for first won the default over such devices (measured
+with null sinks; real ALSA and Bluetooth devices have ~1000–2000 and win either way).
+
+### Through a microphone by name, end to end
+
+`bench/me_them.py run --remote --mic test_me_mic`: the stage-1 input (33 s of the enrolled LibriVox reader,
+other lines than the reference) is played into a test PipeWire microphone; the app's path takes it from
+there by name (`app.Microphone` → `LiveSwitch` → `LocalDirection`: Silero VAD, GigaAM ru, OPUS-MT ru-en here;
+the clone XTTS-v2 on `rtx3060-laptop` over a pipe) → "Peresmeshnik Mic", recorded the way a call app records
+it, transcribed by Whisper small.
+
+| | value |
+|---|---|
+| clauses | 9 (all closed by a pause) |
+| WER of the recording vs the MT text | **0.024** (of the TTS output itself: 0.012) |
+| clone, first audio on the GPU host / RTF | 0.17–0.21 s / 0.21 |
+| virtual mic link (play → source) | 20–42 ms |
+| caption after the clause end | 0.37–2.81 s (median 0.61) |
+| first new sound at the call app after the caption | 0.39–3.46 s (median 1.17) |
+| CPU here (VAD, ASR, MT, microphone, switch), per audio s | 1.69 (`nice 19`, the box shared) |
+| after the input ended, the last speech done in | 2.0 s |
+
+The lag after the caption is the playback queue (speech of a clause waits for the one before, as in
+stage 1) plus the 60 ms cushion of the switch; S1's queue policy works on it. With `LiveSwitch` the speech
+is re-chunked, so the per-clause lag is taken from the first new onset after the caption, not from the
+clause's own first chunk (approximate when clauses run back to back).
+
+### Voice checks
+
+**The recording** (`voice.check`): length 30–60 s, speech ≥ 15 s, level, clipping, speech above the
+background, and now the band: speech energy at 4–8 kHz against 0.1–4 kHz — microphones −27…−9 dB,
+telephone band (300–3400 Hz) −74…−80 dB; below −45 dB the verdict warns that the clone will sound muffled.
+
+**The clone** (`voice.check_clone`): it says two test phrases (~4 s each) in the language it will speak;
+the app's ASR (GigaAM ru / Parakeet en) gives the WER; similarity = cosine of XTTS's own speaker
+embeddings, clone against the recording (no extra model). Calibration (`bench/voice_check.py`): 8 voices
+(4 LibriSpeech test-clean speakers, 4 chapters of the Russian LibriVox book) × 5 recordings, cloned into
+the other language on `rtx3060-laptop`; ECAPA (`speechbrain/spkrec-ecapa-voxceleb`) as an independent
+judge against the clean recording. "noise14" = pink noise 14 dB below speech; "babble14" = another speaker
+at 14 dB; "reverb" = RT60 ~0.7 s; "phone" = 300–3400 Hz.
+
+| recording | recording check (SNR dB) | clone WER: median / max | similarity, app (vs own recording): min / median | XTTS vs clean: min / median | ECAPA vs clean: min / median |
+|---|---|---|---|---|---|
+| clean | 8/8 pass (13–48) | 0.03 / 0.05 | 0.49 / 0.54 | 0.49 / 0.54 | 0.36 / 0.41 |
+| noise14 | 8/8 pass (13–17) | 0.02 / 0.28 | 0.39 / 0.56 | 0.32 / 0.54 | 0.14 / 0.37 |
+| babble14 | 8/8 pass (13–23) | 0.02 / 0.03 | 0.53 / 0.57 | 0.50 / 0.55 | 0.25 / 0.39 |
+| reverb | 8/8 pass (14–31) | 0.00 / 0.07 | 0.46 / 0.55 | 0.34 / 0.42 | 0.20 / 0.31 |
+| phone | 8/8 pass (27–41; now with the band warning) | 0.02 / 0.14 | 0.37 / 0.49 | 0.18 / 0.30 | 0.12 / 0.21 |
+
+Another speaker's recording against the clone (English pairs): XTTS median 0.11, p90 0.28, max 0.45 (the
+babble partner), ECAPA median 0.05, max 0.17. The Russian chapters are probably one reader (ECAPA between
+chapters up to 0.42), so they are not used as other speakers.
+
+Thresholds (`voice.py`): WER fail > 0.25, warn > 0.10; similarity fail < 0.25, warn < 0.35. On the 40
+clones: 1 fail (noise14, WER 0.28), 3 warnings (phone, WER 0.14), 36 good; 80 % of the other-speaker
+pairs fall under 0.25. XTTS copies the channel too: noise, reverb and a phone band leave the clone
+understandable and close to the recording in XTTS's own space, but further from the clean voice
+(ECAPA 0.12–0.21 for the phone band), so the similarity check catches a clone that sounds like someone
+else, not a poor microphone; the band check and the background check cover those before cloning.
+
+### CPU gates
+
+| Gate | linux-x86_64-4c | ubuntu-latest | macos-15 | windows-latest |
+|---|---|---|---|---|
+| idle, `tests/test_idle_cpu.py` (limit 0.13 s / 60 s) | 0.000 | 0.000 | 0.008 (first 15 s after "idle", not gated: 0.120) | 0.000 |
+| idle with the overlay and the wizard (`tests/test_ui.py`) | 0.000 | 0.000 | 0.080 (0.072 in the first quarter) | 0.000 |
+| work-gate, RTF / CPU s per audio s (limits 1.0 / 2.0) | 0.58 / 1.13 (`nice 19`) | 0.58 / 1.20 | 0.37 / 0.69 | 0.66 / 1.31 |
+
+On macOS the idle gate now starts its 60 s window 15 s after the idle line: on one and the same code it had
+given 0.066–0.156 s against the 0.13 s limit, nearly all in the first seconds (AppKit's one-off work after
+the windows are first shown, seen by the stage-2 shell too), so it flaked; that work is printed instead.
+
+**Wizard** (`ui/wizard.py` `VoicePage`, `tests/test_clone_wizard.py` under Xvfb): record from the chosen
+PipeWire source or import a file; the verdict ("Good …" / "Good enough: …" / "Record again: …") with the
+numbers; a bad take is not saved and does not replace a saved one (a 3 s take of a steady tone: "Record
+again: 3 s recorded, need 30-60 s; only 0 s of speech …"); "Check the clone" runs `check_clone` (the voice
+pack and the clone model are needed: on this server without the voice pack the button says so).

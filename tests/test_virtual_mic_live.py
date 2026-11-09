@@ -7,7 +7,7 @@ import time
 import numpy as np
 import pytest
 
-from peresmeshnik.audio.mic import LiveSwitch, click_ratio
+from peresmeshnik.audio.mic import MATCH_DB, PEAK, LiveSwitch, click_ratio
 from peresmeshnik.engines import Caption, Speech
 
 SR = 24_000
@@ -135,6 +135,46 @@ def test_stalled_input_says_the_rest():
         time.sleep(0.01)
     assert sum(len(e.pcm) for e in out) == pytest.approx(round(SR * 0.06) + 2 * SR, abs=2)  # lead + all of it
     sw.close()
+
+
+def db(x):
+    return 10 * np.log10(np.mean(x ** 2))
+
+
+@pytest.mark.parametrize('mic_db,tts_db', [(-36, -14), (-26, -17), (-10, -30), (-60, -10)])
+def test_translation_comes_at_the_live_voice_level(mic_db, tts_db):
+    """The clone spoke ~9 dB louder than a microphone at a call's level, peaks near full scale (BENCH stage 5): the
+    switch brings the translation to my live voice's level (its pauses do not count), never above PEAK."""
+    rng = np.random.default_rng(0)
+    inner = FakeDirection()
+    sw = LiveSwitch(inner, SR)
+    out = []
+    threading.Thread(target=lambda: out.extend(sw.events()), daemon=True).start()
+    mic = (10 ** (mic_db / 20) * rng.standard_normal(FRAME * 150)).astype(np.float32)
+    mic[FRAME * 50:FRAME * 100] = 0  # a pause in my speech
+    for i in range(150):
+        sw.feed(mic[i * FRAME:(i + 1) * FRAME])
+    tts = (10 ** (tts_db / 20) * rng.standard_normal(2 * SR)).astype(np.float32)
+    tts[SR // 2] = 0.99  # a peak
+    inner.say.put(Speech(tts[:SR], SR))
+    inner.say.put(Speech(np.zeros(SR // 4, np.float32), SR))  # the clone's pause after a sentence: exact zeros
+    inner.say.put(Speech(tts[SR:], SR))
+    while sw._quiet:
+        time.sleep(0.001)
+    end = time.monotonic() + 5
+    while sum(len(e.pcm) for e in out) < 2 * SR + SR // 4 and time.monotonic() < end:
+        sw.feed(np.zeros(FRAME, np.float32))  # the input clocks the output (my side is quiet now)
+        time.sleep(0.005)
+    sw.close()
+    x = np.concatenate([e.pcm for e in out if isinstance(e, Speech)])
+    assert len(x) >= 2 * SR + SR // 4  # all of it went out, the pause too
+    said = np.r_[x[round(SR * 0.06):][SR // 4:SR], x[round(SR * 0.06):][SR + SR // 4:2 * SR + SR // 4]]  # not the pause
+    said = said[said != 0]  # nor a lead of silence: a slow runner feeds slower than real time, each frame a new stretch
+    want = tts_db + float(np.clip(mic_db - tts_db, *MATCH_DB))
+    print(f'mic {mic_db} dB, TTS {tts_db} dB -> {db(said):.1f} dB, peak {np.abs(x).max():.2f}')
+    assert np.abs(x).max() <= PEAK + 1e-6
+    if 10 ** (want / 20) * 0.99 / 10 ** (tts_db / 20) <= PEAK:  # the peak does not hold it back
+        assert db(said) == pytest.approx(want, abs=1.0)
 
 
 def test_live_voice_feeds_only_the_switch(monkeypatch):

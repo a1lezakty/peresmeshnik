@@ -32,6 +32,29 @@ OURS = 'peresmeshnik_'  # every PipeWire device the app makes starts with this
 FADE_MS = 30  # crossfade of the live switch: >= 2 periods of a low voice (85 Hz), well under a syllable (BENCH)
 LEAD_MS = 60  # output kept ahead of the input clock: room for scheduling jitter on top of the device's 40 ms
 START_S = 5.0  # record(): how much longer than asked it waits for the microphone's sound
+LEVEL_DB = -26.0  # LiveSwitch: my speech level assumed until the microphone has carried some (a call's usual level)
+MATCH_DB = (-30.0, 10.0)  # the gain that brings the translation to the live voice's level stays within this
+PEAK = 0.95  # ... and never takes it above this
+
+
+class Level:
+    """Speech level of a stream (dBFS): the mean of its 32 ms frames that are within `RANGE_DB` of it, so pauses and
+    background do not count; a plain mean over the first `1 / alpha` such frames, then it follows a change over as
+    many. None until a frame above `FLOOR_DB`."""
+    RANGE_DB, FLOOR_DB = 15.0, -60.0
+
+    def __init__(self, sample_rate: int, alpha: float):
+        self.frame, self.alpha, self.db, self._n = round(sample_rate * 0.032), alpha, None, 0
+        self._rest = np.zeros(0, np.float32)
+
+    def __call__(self, x: np.ndarray) -> None:
+        x = np.concatenate([self._rest, x])
+        k = len(x) // self.frame
+        self._rest = x[k * self.frame:]
+        for d in 10 * np.log10(np.mean(x[:k * self.frame].reshape(k, self.frame) ** 2, axis=1) + 1e-12):
+            if d > self.FLOOR_DB and (self.db is None or d > self.db - self.RANGE_DB):
+                self._n += 1
+                self.db = float(d) if self.db is None else self.db + max(self.alpha, 1 / self._n) * (float(d) - self.db)
 
 
 def _pactl(*args: str) -> str:
@@ -249,6 +272,10 @@ class LiveSwitch:
     against scheduling jitter. So the queue of translated speech stays here, where it can be faded, not in the device's
     buffer. With nothing to say nothing goes out; when the input stalls or ends (a file, a microphone being reopened)
     the queued speech goes out unpaced after `STALL_S`, as without the switch.
+
+    The translation is brought to the level of my live voice (`Level` of the microphone's frames against that of the
+    speech, ~3 s and ~1 s of speech to follow), so the switch does not jump in loudness either: the clone spoke ~9 dB
+    louder than a microphone at a call's level, with peaks near full scale (BENCH, stage 5).
     ponytail: the microphone's clock drives the output: in live voice a ~100 ppm drift against the virtual mic adds
     ~6 ms of latency per minute; resample against the sink's clock if live stretches get long.
     """
@@ -269,10 +296,12 @@ class LiveSwitch:
         self._out_end = 0.0  # monotonic time when the output put out so far has played
         self._quiet = True  # nothing to put out: feed() does not wake the events thread
         self._closing = False
+        self._mic, self._tts, self._gain = Level(SAMPLE_RATE, 0.01), Level(sample_rate, 0.03), None  # mic: feed()'s thread
         threading.Thread(target=self._pump, name='me-live-pump', daemon=True).start()
 
     # Direction
     def feed(self, pcm: np.ndarray) -> None:
+        self._mic(pcm)
         if not self.live:
             self.inner.feed(pcm)
         if self.live or not self._quiet:
@@ -308,7 +337,7 @@ class LiveSwitch:
             elif kind == 'speech':
                 if self._to == 0:  # translation that comes while live (or going live) is not said
                     rs = self._rs.get(x.sample_rate) or self._rs.setdefault(x.sample_rate, Resampler(x.sample_rate, self.sample_rate))
-                    self._buf = np.concatenate([self._buf, rs(x.pcm)])
+                    self._buf = np.concatenate([self._buf, self._match(rs(x.pcm))])
                     self._quiet = False
             elif kind == 'live':
                 self._to = 1.0 if x else 0.0
@@ -328,6 +357,21 @@ class LiveSwitch:
         except Exception as e:  # a dead session: the app's consumer reports it
             self._q.put(('error', e))
         self._q.put(None)
+
+    def _match(self, x: np.ndarray) -> np.ndarray:
+        """Translated speech at the live voice's level; a new gain ramps in over the first 50 ms of a chunk."""
+        self._tts(x)
+        if self._tts.db is None or not (peak := float(np.abs(x).max()) if len(x) else 0.0):
+            return x  # silence (the clone's pause after a sentence) stays as it is
+        g = 10 ** (float(np.clip((self._mic.db or LEVEL_DB) - self._tts.db, *MATCH_DB)) / 20)
+        if peak * g > PEAK:
+            g = PEAK / peak
+        g0 = g if self._gain is None else min(self._gain, PEAK / peak)
+        self._gain = g
+        ramp = np.full(len(x), g, np.float32)
+        n = min(len(x), self.sample_rate // 20)
+        ramp[:n] = np.linspace(g0, g, n, dtype=np.float32)
+        return x * ramp
 
     def _step(self, pcm: np.ndarray) -> np.ndarray | None:
         """One input frame -> the same duration of output, after the lead when the output starts from silence."""

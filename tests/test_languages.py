@@ -126,6 +126,12 @@ def test_a_gpu_model_is_not_offered_where_its_engine_has_no_cuda(monkeypatch):
     with pytest.raises(RuntimeError, match='only on CUDA'):
         asr.OnnxAsr('whisper-large-v3-turbo')
 
+    def loaded(*a, **k):
+        raise LookupError('past the CUDA check')
+    monkeypatch.setattr(models, 'path', loaded)
+    with pytest.raises(LookupError):  # an offline check (the wizard's clone check): slow on the CPU is fine
+        asr.OnnxAsr('whisper-large-v3-turbo', live=False)
+
 
 def test_star_is_one_model_for_every_pair_it_has(monkeypatch):
     """`'*'` in a [local] table: the model for every language or pair its registry langs have; an own key wins."""

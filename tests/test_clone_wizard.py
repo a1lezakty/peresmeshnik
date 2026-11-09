@@ -138,6 +138,33 @@ def test_clone_check(page, tmp_path, monkeypatch, hears, sim, verdict):
     assert page.clone_out.text().startswith(verdict), page.clone_out.text()
 
 
+def test_clone_check_runs_a_gpu_only_asr_offline(page, tmp_path, monkeypatch):
+    """Turkish on an NVIDIA GPU without CUDA in onnxruntime (the .exe): Whisper turbo is not offered live, yet the check's
+    two phrases run it offline on the CPU (slow is fine there)."""
+    import types
+
+    from peresmeshnik import languages, models
+    from peresmeshnik.local import asr, device
+    good = tmp_path / 'me.wav'
+    sf.write(good, speech_like(45), 24_000)
+    page.import_file(str(good))
+    pump(lambda: not page.running)
+    monkeypatch.setattr(languages.shutil, 'which', lambda name: '/usr/bin/nvidia-smi')
+    monkeypatch.setattr(device, 'onnx_cuda', lambda: False)
+    page.w.s.their_lang = 'tr'
+    assert languages.direction(page.w.s, 'them_to_me').asr == ''  # not live
+    phrases = ['bir iki üç dört', 'yarın görüşürüz']
+    monkeypatch.setitem(voice.TEST_PHRASES, 'tr', phrases)  # voice.py has en / ru only
+    made = []
+    monkeypatch.setitem(sys.modules, 'peresmeshnik.local.clone', types.SimpleNamespace(make_clone=lambda *a, **k: FakeClone(0.6)))
+    monkeypatch.setattr(asr, 'OnnxAsr', lambda *a, **k: made.append((a, k)) or FakeAsr(list(phrases)))
+    monkeypatch.setattr(models, 'path', lambda model_id: tmp_path)
+    page.check_clone()
+    pump(lambda: not page.running)
+    assert made[0][0][0] == 'whisper-large-v3-turbo' and made[0][1] == {'live': False}
+    assert page.clone_out.text().startswith('Good'), page.clone_out.text()
+
+
 def test_no_clone_check_while_translating(page, tmp_path):
     """A local me -> them already holds the clone: a second one for the check would not fit on 8 GB."""
     good = tmp_path / 'me.wav'

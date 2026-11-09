@@ -124,6 +124,12 @@ def settings_path() -> Path:
     return Path(os.environ.get('PERESMESHNIK_CONFIG') or config_dir() / 'settings.toml')
 
 
+# defaults that changed since a release that saved its [local] tables whole (0.2.0, bac8639): such a value goes on
+# load, so the new default comes in. A whole table is told by a key equal to today's default (save() no longer writes
+# those), so a value chosen again since is kept
+OLD_DEFAULTS = {'local.mt': {'en-ru': 'opus-mt-en-ru'}}
+
+
 def _fill(obj, data: dict, where: str = ''):
     for k, v in data.items():
         if not hasattr(obj, k):
@@ -139,6 +145,8 @@ def _fill(obj, data: dict, where: str = ''):
             v = float(v)
         if type(v) is not type(cur) or (isinstance(v, dict) and not all(isinstance(x, str) for x in v.values())):
             raise ValueError(f'settings: {where}{k} must be {type(cur).__name__}, got {v!r}')
+        if isinstance(cur, dict) and any(cur.get(x) == y for x, y in v.items()):  # a table saved whole
+            v = {x: y for x, y in v.items() if OLD_DEFAULTS.get(f'{where}{k}', {}).get(x) != y}
         setattr(obj, k, {**cur, **v} if isinstance(cur, dict) else v)
 
 

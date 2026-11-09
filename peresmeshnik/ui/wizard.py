@@ -947,7 +947,8 @@ class VoicePage(QWizardPage):
             tts = None
             try:
                 tts = make_clone(models.path(s.local.clone), threads=s.local.threads)
-                asr = OnnxAsr(languages.direction(s, 'them_to_me').asr, s.local.threads)  # their language's ASR
+                # their language's ASR, also where it does not keep up live (Whisper turbo without CUDA): two phrases
+                asr = OnnxAsr(languages.pick(s.local.asr, s.their_lang), s.local.threads, live=False)
                 self.checked.emit(voice.clone_verdict(voice.check_clone(tts, v, s.their_lang, asr)))
             except Exception as e:  # no voice pack or GPU, a model not downloaded yet, out of memory
                 self.checked.emit(f'error: {e}')

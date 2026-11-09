@@ -140,6 +140,18 @@ def test_saved_settings_take_a_new_default(tmp_path, monkeypatch):
     assert (loc.mt['fr-ru'], loc.mt['de-ru']) == ('mt-fr-ru-via-en', 'mt-de-ru-via-en')
 
 
+def test_settings_of_0_2_0_get_the_new_en_ru(tmp_path):
+    """0.2.0 saved the [local] tables whole: its en-ru (OPUS-MT) gives way to today's default (quickmt); the same value
+    chosen since (a table of changed keys only) stays."""
+    p = tmp_path / 'settings.toml'
+    p.write_text('[local]\nasr = { "en" = "parakeet-tdt-0.6b-v3", "ru" = "gigaam-v3-e2e-ctc" }\n'
+                 'mt = { "en-ru" = "opus-mt-en-ru", "ru-en" = "opus-mt-ru-en" }\n', 'utf-8')
+    assert config.load(p).local.mt['en-ru'] == config.Local().mt['en-ru'] == 'quickmt-en-ru'
+    s = config.Settings()
+    s.local.mt['en-ru'] = 'opus-mt-en-ru'  # chosen again: an 8 GB Mac's smaller MT
+    assert config.load(config.save(s, p)).local.mt['en-ru'] == 'opus-mt-en-ru'
+
+
 def test_the_default_engines_cover_the_14_languages():
     """Settings' defaults: MT for every direction, ASR and a stock voice where the registry has one (BENCH stage 6)."""
     from peresmeshnik.languages import LANGS

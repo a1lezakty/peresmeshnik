@@ -87,7 +87,7 @@ def _starts_sentence(tok: str) -> bool:
 
 class OnnxAsr:
     def __init__(self, model_id: str = 'parakeet-tdt-0.6b-v3', threads: int = 2, partial_every_s: float = 0.3,
-                 context_s: float = 1.0):
+                 context_s: float = 1.0, live: bool = True):
         import onnx_asr
 
         from peresmeshnik import models
@@ -99,7 +99,8 @@ class OnnxAsr:
         self._lead = np.zeros(int(LEAD_S * SAMPLE_RATE), np.float32)
         providers = device.onnx_providers()
         self.device = 'cuda' if providers[0] == 'CUDAExecutionProvider' else 'cpu'
-        gpu_only = models.get(model_id).needs == 'gpu'  # Whisper turbo on the CPU: 4.6 s per 1 s window (BENCH stage 6)
+        # Whisper turbo on the CPU: 4.6 s per 1 s window (BENCH stage 6); `live` False (an offline check): slow is fine
+        gpu_only = live and models.get(model_id).needs == 'gpu'
         if gpu_only and self.device == 'cpu':
             raise RuntimeError(f'{model_id} keeps up only on CUDA, and onnxruntime here has none: '
                                'switch "Them → me" to cloud')

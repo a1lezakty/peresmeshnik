@@ -44,7 +44,8 @@ ERROR_HOTKEY_ALREADY_REGISTERED = 1409
 VK = {'space': 0x20, 'Return': 0x0D, 'Tab': 0x09, 'Escape': 0x1B, 'BackSpace': 0x08, 'Insert': 0x2D, 'Delete': 0x2E,
       'Home': 0x24, 'End': 0x23, 'Prior': 0x21, 'Next': 0x22, 'Left': 0x25, 'Up': 0x26, 'Right': 0x27, 'Down': 0x28,
       'Print': 0x2C, 'Pause': 0x13} | {f'F{i}': 0x6F + i for i in range(1, 25)}
-TAB, ESC, SPACE, DEL, F4 = 0x09, 0x1B, 0x20, 0x2E, 0x73
+TAB, ESC, SPACE, DEL, F4, PAUSE = 0x09, 0x1B, 0x20, 0x2E, 0x73, 0x13
+F_KEYS = range(0x70, 0x88)  # F1..F24
 # what Windows itself does with these: RegisterHotKey takes some of them and they never arrive, or it takes them from everyone
 WINDOWS_KEYS = {
     (MOD_ALT, TAB): 'switches windows', (MOD_ALT | MOD_SHIFT, TAB): 'switches windows', (MOD_CONTROL | MOD_ALT, TAB): 'switches windows',
@@ -115,8 +116,10 @@ class Host(QObject):
         self.window.create()  # a native window, never shown
         self.hwnd = int(self.window.winId())
         self.hotkeys: dict[int, Callable[[], None]] = {}
+        self.last_id = 0  # RegisterHotKey ids: unique per window, so per process (any number of WinHotkey)
         self._filter = _Filter(self)
         QCoreApplication.instance().installNativeEventFilter(self._filter)
+        QCoreApplication.instance().aboutToQuit.connect(unhook)  # quitting with subtitles on screen
 
     def handle(self, message: int, wparam: int, lparam: int) -> bool:
         """True: the message is ours, Qt does not see it. WM_HOTKEY comes once per press: posted, it reaches the
@@ -149,25 +152,26 @@ class WinHotkey:
     def __init__(self):
         self.host = host()
         self._ids: dict[str, int] = {}
-        self._next = 0
 
     def register(self, combo: str, callback: Callable[[], None]) -> None:
         mods, vk = key_code(combo)
-        if not mods & ~MOD_SHIFT and (vk == SPACE or 0x30 <= vk <= 0x5A or vk >= 0xBA):
-            raise HotkeyError(f'{combo} would take the key from typing in every app: add Ctrl, Alt or Win')
-        if not mods:
-            raise HotkeyError(f'{combo} alone would take the key from every app: add Ctrl, Alt, Shift or Win')
         if what := WINDOWS_KEYS.get((mods, vk)):
             raise HotkeyError(f'{combo} {what} in Windows')
+        if mods == MOD_SHIFT and vk not in F_KEYS and vk != PAUSE or not mods and (vk == SPACE or 0x30 <= vk <= 0x5A or vk >= 0xBA):
+            # Shift with a letter, an arrow, Home, Tab...: typing and selecting text everywhere
+            raise HotkeyError(f'{combo} would take the key from typing in every app: add Ctrl, Alt or Win')
+        if not mods:
+            raise HotkeyError(f'{combo} alone would take the key from every app: add Ctrl, Alt or Win')
         self.unregister(combo)  # the same combo again (a settings save): its old registration goes
-        self._next += 1
-        if not user32.RegisterHotKey(self.host.hwnd, self._next, mods | MOD_NOREPEAT, vk):  # no repeats while held
+        self.host.last_id += 1
+        i = self.host.last_id
+        if not user32.RegisterHotKey(self.host.hwnd, i, mods | MOD_NOREPEAT, vk):  # no repeats while held
             err = ctypes.get_last_error()
             if err == ERROR_HOTKEY_ALREADY_REGISTERED:
                 raise HotkeyError(f'{combo} is already taken by another application or by Windows')
             raise HotkeyError(f'cannot register {combo} (Windows error {err})')
-        self._ids[combo] = self._next
-        self.host.hotkeys[self._next] = callback
+        self._ids[combo] = i
+        self.host.hotkeys[i] = callback
 
     def unregister(self, combo: str) -> None:
         if (i := self._ids.pop(combo, None)) is not None:
@@ -202,6 +206,7 @@ class OnTop:
 
     def start(self, hwnd: int) -> None:
         global _hook
+        host()  # unhooks when the app quits
         self.hwnd = hwnd
         _shown.add(self)
         if _hook is None:
@@ -210,11 +215,9 @@ class OnTop:
         self.raise_()
 
     def stop(self) -> None:
-        global _hook
         _shown.discard(self)
-        if _hook and not _shown:
-            user32.UnhookWinEvent(_hook)
-            _hook = None
+        if not _shown:
+            unhook()
 
     def raise_(self) -> None:
         user32.SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER)
@@ -226,6 +229,13 @@ _hook = None
 # one callback for the process, alive as long as the module: Windows calls it as long as the hook lives (a callback
 # owned by a collected overlay was freed memory to Windows: an access violation at the next foreground change)
 _PROC = WINEVENTPROC(lambda *_: [t.raise_() for t in list(_shown)] and None)
+
+
+def unhook() -> None:
+    global _hook
+    if _hook:
+        user32.UnhookWinEvent(_hook)
+        _hook = None
 
 
 # tray icon theme --------------------------------------------------------------------------------------------

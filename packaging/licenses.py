@@ -7,7 +7,8 @@
   not run);
 - OUT_DIR gets the license files of every package in this environment that the app ships, ours, the runner's, and
   where the runner's sources are (RUNNER: its path in the build, e.g. Contents/MacOS/piper-runner). A package that
-  only names its license gets the full text from packaging/licenses/; an unknown one fails the build.
+  only names its license gets the full text from packaging/licenses/; an unknown one fails the build. So do the
+  libraries a wheel carries under their own terms (BUNDLED) and Python's own license (with OpenSSL, libffi, sqlite...).
 """
 import re
 import shutil
@@ -21,6 +22,11 @@ TOOLS = {'pyinstaller', 'pyinstaller-hooks-contrib', 'pytest', 'ruff', 'pluggy',
 LICENSE_WORDS = ('license', 'licence', 'copying', 'notice', 'authors', 'thirdparty')
 ROOT = Path(__file__).resolve().parents[1]
 TEXTS = ROOT / 'packaging' / 'licenses'  # full texts for packages that only name their license
+BUNDLED = {  # file name start -> its texts: libraries inside a wheel that its own license file does not cover
+    'libiomp5md': ['libiomp5md-LICENSE.txt', 'libiomp5md-third-party-programs.txt'],  # Intel OpenMP in ctranslate2 (Windows;
+    # from the intel-openmp 2025.3.0 wheel, the DLL's build of 2025-09-10)
+    'libportaudio': ['PortAudio-LICENSE.txt'],  # in sounddevice (PortAudio v19.7.0 LICENSE.txt)
+}
 
 out, warn, runner = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
 if not warn.is_file() or not warn.stat().st_size:
@@ -36,10 +42,13 @@ for dist in metadata.distributions():
     if name.lower() in TOOLS or name == 'peresmeshnik':  # ours: below
         continue
     files = [f for f in dist.files or [] if any(w in f.name.lower() for w in LICENSE_WORDS)
-             and (len(f.parts) <= 2 or f.parts[1] == 'licenses')]  # <pkg>/LICENSE, *.dist-info/licenses/* (PEP 639)
+             and (len(f.parts) <= 2 or f.parts[1] == 'licenses')  # <pkg>/LICENSE, *.dist-info/licenses/* (PEP 639)
+             and not f.name.startswith('LicenseRef-')]  # a commercial option we do not take (Qt): its open license below
     (out / name).mkdir(exist_ok=True)
     for f in files:
         shutil.copyfile(f.locate(), out / name / '-'.join(f.parts[2:] or [f.name]))
+    for text in {t for f in dist.files or [] for start, ts in BUNDLED.items() if f.name.lower().startswith(start) for t in ts}:
+        shutil.copyfile(TEXTS / text, out / name / text)
     if files:
         continue
     # the wheel names its license only: that, where the source is, and the full text
@@ -58,9 +67,12 @@ for dist in metadata.distributions():
     for text in texts:
         shutil.copyfile(TEXTS / text, out / name / text.replace(f'{name}.txt', 'LICENSE'))
     print(f'licenses: {name} {dist.version} ships no license file ({said}): added {", ".join(texts)}')
-python_license = Path(sysconfig.get_paths()['stdlib']) / 'LICENSE.txt'
-if python_license.exists():
-    shutil.copyfile(python_license, out / 'Python-LICENSE.txt')
+# Python's, with the libraries of its build: in the stdlib (macOS, Linux), in the installation's root (Windows)
+python_license = next((p for p in (Path(sysconfig.get_paths()['stdlib']) / 'LICENSE.txt', Path(sys.base_prefix) / 'LICENSE.txt')
+                       if p.is_file()), None)
+if not python_license:
+    sys.exit(f"licenses: no LICENSE.txt of Python in {sysconfig.get_paths()['stdlib']} or {sys.base_prefix}")
+shutil.copyfile(python_license, out / 'Python-LICENSE.txt')
 if missing:
     sys.exit('licenses: no license text for ' + '; '.join(missing))
 

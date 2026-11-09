@@ -7,7 +7,8 @@
 - an update over the running app and the uninstaller both close it cleanly first; the uninstaller removes it all;
 - the frozen CLI (from the .zip unpacked to a folder with spaces) fetches a model over HTTPS and translates a
   recording with the bundled engines and the bundled Piper runner (needs the work-gate models in
-  $PERESMESHNIK_MODELS); the frozen cloud direction gets as far as Google refusing a fake key.
+  $PERESMESHNIK_MODELS), with a voice pack installed whose packages lose to the bundle's; the frozen cloud direction
+  gets as far as Google refusing a fake key.
 
     PERESMESHNIK_SETUP=dist\\Peresmeshnik-0.2.0-windows-x64-setup.exe PERESMESHNIK_ZIP=dist\\...zip pytest -s tests/test_app_windows.py
 """
@@ -53,7 +54,7 @@ def cpu_s(proc) -> float:
 
 
 def setup(*args: str) -> None:
-    r = subprocess.run([SETUP, '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', *args], timeout=300)
+    r = subprocess.run([SETUP, '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', *args], timeout=300)
     assert r.returncode == 0, f'setup exited {r.returncode}'
 
 
@@ -86,10 +87,18 @@ def tkill(pid: int) -> None:
 def test_installed_files_shortcut_and_uninstall_entry(installed):
     import peresmeshnik
     for f in ('Peresmeshnik.exe', 'piper-runner.exe', 'unins000.exe', 'licenses/Peresmeshnik-LICENSE.txt',
-              'licenses/piper-runner-LICENSE.txt'):
+              'licenses/piper-runner-LICENSE.txt',
+              'licenses/Python-LICENSE.txt',  # Python's, with OpenSSL, libffi, sqlite of its build
+              'licenses/PySide6_Essentials/LGPL-3.0.txt', 'licenses/PySide6_Essentials/GPL-3.0.txt',  # Qt: its wheel has
+              'licenses/shiboken6/LGPL-3.0.txt',  # only the commercial option's text
+              'licenses/ctranslate2/libiomp5md-LICENSE.txt', 'licenses/sounddevice/PortAudio-LICENSE.txt'):
         assert (installed / f).exists(), f
+    if os.environ.get('REQUIRE_LOOPBACK') == '1':  # a release: the call's sound helper (test_zip_holds_the_same_folder: the .zip too)
+        assert (installed / 'peresmeshnik-loopback.exe').exists(), 'no peresmeshnik-loopback.exe'
     assert 'espeak-ng' in (installed / 'licenses' / 'piper-runner-SOURCE.txt').read_text()
     assert not list(installed.rglob('torch')), 'torch in the base app'
+    dropped = [f.name for f in installed.rglob('*.dll') if f.name.lower() == 'opengl32sw.dll' or '-asio' in f.name.lower()]
+    assert not dropped, dropped  # Mesa's software OpenGL, PortAudio with ASIO: not shipped (Peresmeshnik.spec)
     assert SHORTCUT.exists(), 'no Start menu shortcut'
     assert not STARTUP.exists(), 'starts at sign-in without being asked'
     k = uninstall_key()
@@ -237,7 +246,25 @@ def test_frozen_cloud_direction_reaches_google(installed, tmp_path):
     assert 'API key not valid' in err, err[-2000:]  # Google's answer
 
 
-def test_frozen_cli_fetches_and_translates(tmp_path):
+@pytest.fixture
+def voice_pack(tmp_path):
+    """A complete voice pack (packaging/entry.py) that breaks the app if it comes before the bundle: its numpy fails to
+    import. An empty torch\\lib goes on the DLL path. Moved away afterwards, not removed."""
+    from peresmeshnik import config
+    pack = config.data_dir() / 'voice-pack'  # the same folder for the frozen app: platformdirs
+    assert not pack.exists(), f'{pack} is there already'
+    try:
+        (pack / 'numpy').mkdir(parents=True)
+        (pack / 'numpy' / '__init__.py').write_text("raise ImportError('the voice pack came before the bundle')\n")
+        (pack / 'torch' / 'lib').mkdir(parents=True)
+        (pack / '.complete').write_text('')
+        yield pack
+    finally:
+        if pack.exists():
+            pack.rename(tmp_path / 'voice-pack')
+
+
+def test_frozen_cli_fetches_and_translates(tmp_path, voice_pack):
     """From the .zip, unpacked to a folder with spaces in its path (the app starts piper-runner.exe beside it)."""
     models = os.environ.get('PERESMESHNIK_MODELS')
     if not models:

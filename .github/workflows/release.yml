@@ -78,6 +78,8 @@ jobs:
     defaults:
       run:
         shell: bash  # Git Bash, -eo pipefail
+    env:  # the build fails without the loopback helper, the check wants it in the folder, the .zip and the install
+      REQUIRE_LOOPBACK: ${{ startsWith(github.ref, 'refs/tags/v') && '1' || '' }}  # a release needs the call's sound
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -94,8 +96,6 @@ jobs:
       - name: Inno Setup 6
         run: test -x "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" || choco install innosetup --version=6.7.1 -y --no-progress
       - name: Build the folder, the .zip and the installer (PyInstaller, the loopback helper, Inno Setup)
-        env:
-          REQUIRE_LOOPBACK: ${{ startsWith(github.ref, 'refs/tags/v') && '1' || '' }}  # a release needs the call's sound
         run: packaging/windows/build.sh
       - uses: actions/cache@v4
         with:

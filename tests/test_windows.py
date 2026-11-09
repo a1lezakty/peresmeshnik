@@ -4,6 +4,7 @@ focus taken, above full-screen windows) and the app closed by Ctrl+Break and by 
 goes through SendInput; when the runner drops it, the press tests skip and say so
 (PERESMESHNIK_REQUIRE_SYNTHETIC=1: they fail)."""
 import ctypes
+import gc
 import os
 import queue
 import signal
@@ -214,7 +215,8 @@ def test_hotkey_refuses_windows_keys_a_bare_key_and_a_taken_combo():
     hk = windows.WinHotkey()
     try:
         for combo, why in (('Alt+Tab', 'switches windows'), ('Ctrl+Space', 'input method'), ('Meta+Space', 'input language'),
-                           ('F9', 'alone'), ('K', 'typing'), ('Shift+K', 'typing')):
+                           ('F9', 'alone'), ('K', 'typing'), ('Shift+K', 'typing'), ('Shift+Left', 'typing'),
+                           ('Shift+Home', 'typing'), ('Shift+Space', 'input method')):
             with pytest.raises(HotkeyError, match=why):
                 hk.register(combo, lambda: None)
         mods, vk = windows.key_code(COMBO)
@@ -231,6 +233,7 @@ sys.stdin.read()'''], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
             other.stdin.close()
             other.wait(10)
         hk.register(COMBO, lambda: None)  # free again once the other app is gone
+        hk.register('Shift+F9', lambda: None)  # Shift alone: with a function key it types nothing
     finally:
         hk.close()
 
@@ -266,6 +269,23 @@ def test_hotkey_fires_once_per_press():
     if got != [1, 1] and not synthetic_keys_arrive():
         no_synthetic('key events')
     assert got == [1, 1]
+
+
+def test_two_hotkey_objects_on_the_one_window():
+    """RegisterHotKey ids are per window, and the window is the app's one: each object's combo calls its own callback."""
+    a, b, hits = windows.WinHotkey(), windows.WinHotkey(), []
+    try:
+        a.register(COMBO, lambda: hits.append('a'))
+        b.register('Ctrl+Alt+Shift+J', lambda: hits.append('b'))
+        press(*windows.key_code(COMBO))
+        settle(0.5)
+        got = list(hits)
+    finally:
+        a.close()
+        b.close()
+    if got != ['a'] and not synthetic_keys_arrive():
+        no_synthetic('key events')
+    assert got == ['a']
 
 
 def test_tray_icon_follows_the_taskbar_theme(tmp_path, monkeypatch):
@@ -385,12 +405,16 @@ def test_overlay_stays_above_a_full_screen_window(kind):
         print(f'{kind} full screen {describe(full)} {scr}; overlay at {order.index(hwnd)}, it at {order.index(full)}; '
               f'foreground is it: {user32.GetForegroundWindow() == full}; re-raised {o.on_top.raises} times')
         assert order.index(hwnd) < order.index(full), 'the full-screen window covers the subtitles'
+        if kind == 'topmost':  # it came to the front above ours: the hook put ours back
+            assert o.on_top.raises > 1
     finally:
         other.terminate()
         other.wait(10)
         o.clear.emit()
         settle(0.1)
         o.close()
+    gc.collect()  # overlays of earlier tests, gone
+    assert windows._hook is None, f'the hook stays while no subtitles are shown ({len(windows._shown)} shown)'
 
 
 def _lines(p) -> queue.Queue:
@@ -502,7 +526,7 @@ def test_closing_the_wizard_by_its_x_keeps_the_app(tmp_path):
 
 
 def test_wizard_pages_show_all_their_text(tmp_path, monkeypatch):
-    """QWizard's Windows style sized the first page without its wrapped text: the last lines were cut off."""
+    """QWizard's Windows style sized the pages without their wrapped text: the last lines were cut off. Every page."""
     from PySide6.QtWidgets import QLabel
 
     from peresmeshnik.ui.wizard import SetupWizard
@@ -514,15 +538,21 @@ def test_wizard_pages_show_all_their_text(tmp_path, monkeypatch):
     class Tray:
         ctl, hotkey_why = Ctl(), ''
         reload_hotkey = staticmethod(lambda combo: '')
+    monkeypatch.setattr('peresmeshnik.ui.wizard.has_key', lambda s: True)  # the default cloud direction asks for a key
     w = SetupWizard(Tray())
     try:
         w.show()
-        settle(0.5)
-        page = w.currentPage()
-        cut = [(lab.text()[:40], lab.height(), lab.heightForWidth(lab.width())) for lab in page.findChildren(QLabel)
-               if lab.wordWrap() and lab.isVisible() and lab.height() < lab.heightForWidth(lab.width())]
-        print(f'wizard {w.width()}x{w.height()}, page {page.width()}x{page.height()}, style {w.wizardStyle()}')
-        assert not cut, cut
+        seen = []
+        for _ in w.pageIds():
+            settle(0.5)
+            page = w.currentPage()
+            seen.append(type(page).__name__)
+            cut = [(lab.text()[:40], lab.height(), lab.heightForWidth(lab.width())) for lab in page.findChildren(QLabel)
+                   if lab.wordWrap() and lab.isVisible() and lab.height() < lab.heightForWidth(lab.width())]
+            print(f'wizard {seen[-1]} {w.width()}x{w.height()}, page {page.width()}x{page.height()}, style {w.wizardStyle()}')
+            assert not cut, (seen[-1], cut)
+            w.next()  # as the Next button, without waiting for a download or a recording
+        assert len(set(seen)) == len(w.pageIds()), f'stopped on a page: {seen}'
     finally:
         w.close()
 

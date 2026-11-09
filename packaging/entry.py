@@ -3,8 +3,8 @@
 Beside the executable (Contents/MacOS on macOS, the install folder on Windows): piper-runner (the Piper TTS runner,
 its own GPL-3.0 program: the app talks to it over a pipe, ARCHITECTURE §10) and the call app's sound helper:
 peresmeshnik-tap (macOS, the Core Audio process tap), peresmeshnik-loopback.exe (Windows, WASAPI process loopback).
-A voice pack in <data dir>/voice-pack (torch with CUDA for the local voice clone, when one is installed) is importable
-after the bundle's own packages.
+A voice pack in <data dir>/voice-pack (torch with CUDA for the local voice clone) is importable after the bundle's own
+packages, once complete: whatever installs it writes voice-pack/.complete last, so a half-installed one is ignored.
 """
 import os
 import shlex
@@ -30,7 +30,7 @@ for name in ('stdout', 'stderr'):  # no stdio (None): print() and logging write 
 from peresmeshnik import config  # noqa: E402
 
 pack = config.data_dir() / 'voice-pack'
-if pack.is_dir():  # the voice pack (CUDA) the wizard installs: after the bundle's own packages, its DLLs found
+if (pack / '.complete').is_file():  # the voice pack: after the bundle's own packages (they win), its DLLs found
     sys.path.append(str(pack))
     if hasattr(os, 'add_dll_directory'):
         dll_dirs = [os.add_dll_directory(str(d)) for d in [pack / 'torch' / 'lib', *pack.glob('nvidia/*/bin')] if d.is_dir()]

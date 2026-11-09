@@ -39,6 +39,10 @@ piper = Analysis(
     datas=collect_data_files('piper', excludes=['train/**', 'img/**', 'templates/**']),
     excludes=EXCLUDES + ['PySide6', 'peresmeshnik'],
 )
+# not shipped: Mesa's software OpenGL (20 MB; the app draws with QWidget's raster engine, never OpenGL); PortAudio for other
+# CPUs and with ASIO (the Steinberg SDK's own terms): sounddevice loads libportaudio64bit.dll unless SD_ENABLE_ASIO is set
+DROP = ('opengl32sw.dll', 'libportaudio32bit', 'libportaudioarm64', 'libportaudio64bit-asio', 'libportaudio.dylib')
+app.binaries, app.datas = ([e for e in toc if not Path(e[0]).name.lower().startswith(DROP)] for toc in (app.binaries, app.datas))
 icon = str(ROOT / 'assets' / 'icons' / 'app.ico')
 # both windowed: no console window opens with the app, nor when it starts the runner (its pipes are the runner's stdio)
 app_exe = EXE(PYZ(app.pure), app.scripts, [], exclude_binaries=True, name='Peresmeshnik', console=False, icon=icon)

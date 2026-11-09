@@ -17,7 +17,6 @@ AppSupportURL=https://github.com/a1lezakty/peresmeshnik/issues
 DefaultDirName={autopf}\Peresmeshnik
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=commandline
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ; Windows 10 2004: the call app's sound is captured by process loopback

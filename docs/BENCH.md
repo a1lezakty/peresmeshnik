@@ -1015,7 +1015,6 @@ measured: a real Mac (CoreML / Metal / MPS: no Apple GPU in CI), real headphones
 | idle CPU of the .app, 60 s after the same 15 s as `tests/test_idle_cpu.py` (limit 0.13 s) | 0.010, 0.004, 0.009, 0.005 s (the 15 s before, not gated: 0.057–0.129 s); `tests/test_idle_cpu.py` from Python: 0.007, 0.026 s |
 | SIGTERM | exit code 0 |
 | frozen cloud direction with a fake key | Google's refusal ("API key not valid"), exit code 1: google-genai is in the bundle |
-| `piper-runner.exe` (windowed) on an error (a missing voice) | its traceback, exit code 1: no dialog left waiting |
 | frozen CLI: `models fetch silero-vad` over HTTPS from the bundle; `run` on the 30 s call (Parakeet + OPUS-MT + the bundled Piper runner), RTF / CPU s per audio s | 0.67 / 1.27, 0.56 / 1.01, 0.66 / 1.17, 0.70 / 1.20, 0.68 / 1.17; from Python in the same job as the last two: 0.67 / 1.24, 0.64 / 1.16 (the frozen app costs the same; runners of this type vary: the work gate gave 0.37–0.44 / 0.69–0.83) |
 
 The base app is torch-free (ARCHITECTURE §10): a local me → them clone needs the voice pack, which is not
@@ -1132,7 +1131,7 @@ unplugged there) it is called directly while a tone goes BlackHole 16ch → `Bla
 
 ## Stage 4: the Windows shell and the installer (S3)
 
-Measured 2026-11-08 on the GitHub runner `windows-latest` (Windows Server 2025, build 26100, in a VM: 4 cores,
+Measured 2026-11-08/09 on the GitHub runner `windows-latest` (Windows Server 2025, build 26100, in a VM: 4 cores,
 16 GB, no GPU, no sound devices; its own desktop at 1024×768 with a light taskbar; `tests/test_windows.py` in
 ci.yml, `tests/test_app_windows.py` in release.yml, several runs). Not measured: a desktop Windows 10 / 11
 (SmartScreen, a user's own theme switch, high DPI), a real call, VB-Cable, CUDA under Windows (USER-CHECKS).
@@ -1142,16 +1141,17 @@ ci.yml, `tests/test_app_windows.py` in release.yml, several runs). Not measured:
 | | windows-latest |
 |---|---|
 | build (`packaging/windows/build.sh`: PyInstaller 6.22, the Piper runner, licenses, `zipfile`, Inno Setup 6.7 `ISCC`, lzma2/max) | 185 s (PyInstaller ≈ 100 s) |
-| installed folder / installer / `.zip` (no models, no torch) | 339 MB / 109 MB / 150 MB; without the rest of the standard library (it is there for the voice pack, ARCHITECTURE §10): 336 / 108 / 149 MB |
-| silent install for the current user (`/VERYSILENT /CURRENTUSER`): the files, a Start menu shortcut, an uninstall entry, no start at sign-in | 12.7, 14.1, 12.2, 11.7, 9.4 s |
-| installed app → "idle" (its first start: the wizard and a sample subtitle on screen) | 0.92, 0.90, 0.78, 0.64, 0.59 s; RSS 93–94 MB |
-| idle CPU of the installed app, 60 s (limit 0.13 s) | 0.000, 0.000, 0.000, 0.016, 0.000 s |
+| installed folder / installer / `.zip` (no models, no torch) | 317 MB / 104 MB / 142 MB; before Mesa's software OpenGL (`opengl32sw.dll`, 20 MB: the app never draws with OpenGL) and PortAudio's builds for other CPUs and with ASIO left the bundle: 339 / 105 / 144 MB; the rest of the standard library (it is there for the voice pack, ARCHITECTURE §10) adds 3 / 1 / 1 MB |
+| silent install (`/VERYSILENT`; for the current user only): the files, a Start menu shortcut, an uninstall entry, no start at sign-in | 13.2, 12.7, 14.1, 12.2, 11.7, 9.4 s |
+| installed app → "idle" (its first start: the wizard and a sample subtitle on screen) | 0.91, 0.92, 0.90, 0.78, 0.64, 0.59 s; RSS 93–94 MB |
+| idle CPU of the installed app, 60 s (limit 0.13 s) | 0.000, 0.000, 0.000, 0.000, 0.016, 0.000 s |
 | taskkill (a posted WM_CLOSE) of the installed app, and of the app started from its Start menu shortcut | exit code 0 |
-| update over the running app (the installer asks it to quit first) | 11.2, 12.9, 11.3, 10.0, 8.5 s; the app exits with code 0 |
+| update over the running app (the installer asks it to quit first) | 11.1, 11.2, 12.9, 11.3, 10.0, 8.5 s; the app exits with code 0 |
 | silent uninstall with the app running | the app exits with code 0; the folder, shortcut and uninstall entry are gone |
-| frozen CLI from the `.zip` in a folder with spaces: `models fetch` over HTTPS; `run` on the 30 s call (Parakeet + OPUS-MT + the bundled `piper-runner.exe`), RTF / CPU s per audio s | 0.635 / 1.288, 0.633 / 1.281, 0.525 / 1.056, 0.274 / 0.537, 0.280 / 0.557; from Python in the same jobs 0.636 / 1.284, 0.631 / 1.276, 0.525 / 1.059, 0.278 / 0.544, 0.282 / 0.560: the frozen app costs the same (runners of this type vary 2×) |
+| frozen CLI from the `.zip` in a folder with spaces: `models fetch` over HTTPS; `run` on the 30 s call (Parakeet + OPUS-MT + the bundled `piper-runner.exe`), RTF / CPU s per audio s; the first run with a complete voice pack installed whose numpy fails to import (the bundle's packages come first) | 0.633 / 1.276, 0.635 / 1.288, 0.633 / 1.281, 0.525 / 1.056, 0.274 / 0.537, 0.280 / 0.557; from Python in the same jobs 0.631 / 1.293, 0.636 / 1.284, 0.631 / 1.276, 0.525 / 1.059, 0.278 / 0.544, 0.282 / 0.560: the frozen app costs the same (runners of this type vary 2×) |
 | frozen cloud direction with a fake key | Google's refusal ("API key not valid"), exit code 1: google-genai is in the bundle |
 | `piper-runner.exe` (windowed) on an error (a missing voice) | its traceback, exit code 1: no dialog left waiting |
+| `licenses` folder | ours, the runner's and its sources; every package's; Python's (with OpenSSL, libffi, sqlite); Qt's LGPL-3.0 / GPL-3.0 (its wheels carry only the commercial option's file); Intel OpenMP (in ctranslate2) and PortAudio (in sounddevice) |
 
 ### Tray, overlay, hotkey (what the runner can show)
 

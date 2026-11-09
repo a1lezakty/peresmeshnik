@@ -230,7 +230,7 @@ def test_a_peak_eases_the_gain_down_and_it_comes_back_slowly():
 @pytest.mark.parametrize('to_db', [-8, -36])
 def test_a_new_voice_mid_session_comes_to_my_level(to_db):
     """The cloud fails and a local voice goes on in the same LiveSwitch at another level (cloud/fallback.py): how soon
-    the translation is back within 2 dB of my level. Louder: the level follows it (~1 s for 12 dB); quieter by more
+    the translation is back within 2 dB of my level. Louder: the level follows it (~2.6 s for 12 dB); quieter by more
     than RANGE_DB: 1 s of it starts the level over, then the gain comes up at RISE_DB."""
     rng = np.random.default_rng(2)
     sw = LiveSwitch(FakeDirection(), SR)
@@ -245,7 +245,7 @@ def test_a_new_voice_mid_session_comes_to_my_level(to_db):
     back = (np.nonzero(np.abs(w + 26) > 2)[0].max() + 1) / 10
     print(f'{to_db} dB after -20: back at my level after {back:.1f} s; the cloud {db(y[2 * SR:len(cloud)]):.1f} dB')
     assert db(y[2 * SR:len(cloud)]) == pytest.approx(-26, abs=1)
-    assert back <= 2.5
+    assert back <= 3.0
 
 
 def test_live_voice_feeds_only_the_switch(monkeypatch):

@@ -42,12 +42,12 @@ RISE_DB = 20.0  # ... and goes back up at most this fast (dB a second) after a p
 class Level:
     """Speech level of a stream (dBFS): the power mean of its 32 ms frames of clear speech, so pauses, breaths and room
     noise do not count (a power mean, as BS.1770: a mean of dB moved with where the quiet frames were cut off, and the
-    microphone's cut is not the speech's). A frame counts when it is above `FLOOR_DB` and within `RANGE_DB` of the level; with `noise_s` (a
-    microphone) also `SPEECH_DB` above the noise floor, the quietest frame of the last `noise_s` (else a minute of room
-    noise before my first word was learnt as my level: the first clauses went out 13-18 dB quiet). A plain mean over the
-    first `1 / alpha` such frames, then it follows a change over as many. None until `hold_s` of them; with `follow_s`
-    (the translation's side, where the cloud's voice gives way to a local one) that much of a voice all under the range
-    starts it over."""
+    microphone's cut is not the speech's). A frame counts when it is above `FLOOR_DB` and within `RANGE_DB` of the level;
+    with `noise_s` (a microphone) also `SPEECH_DB` above the noise floor, the quietest frame of the last `noise_s` (else a
+    minute of room noise before my first word was learnt as my level: the first clauses went out 13-18 dB quiet). A plain
+    mean over the first `1 / alpha` such frames, then it follows a change over as many. None until `hold_s` of them; with
+    `follow_s` (the translation's side, where the cloud's voice gives way to a local one) that much of a voice all under
+    the range starts it over."""
     FLOOR_DB, SPEECH_DB, RANGE_DB, FRAME_S = -60.0, 12.0, 15.0, 0.032
 
     def __init__(self, sample_rate: int, alpha: float, noise_s: float = 0.0, hold_s: float = 0.0,
@@ -297,7 +297,7 @@ class LiveSwitch:
     the queued speech goes out unpaced after `STALL_S`, as without the switch.
 
     The translation is brought to the level of my live voice (`Level` of the microphone's frames against that of the
-    speech, ~3 s and ~1 s of speech to follow; LEVEL_DB until the microphone has carried 1 s of clear speech), so the
+    speech, ~3 s of speech each to follow; LEVEL_DB until the microphone has carried 1 s of clear speech), so the
     switch does not jump in loudness either: the clone spoke ~9 dB louder than a microphone at a call's level, with
     peaks near full scale (BENCH, stage 5).
     ponytail: the microphone's clock drives the output: in live voice a ~100 ppm drift against the virtual mic adds
@@ -321,7 +321,7 @@ class LiveSwitch:
         self._quiet = True  # nothing to put out: feed() does not wake the events thread
         self._closing = False
         self._mic = Level(SAMPLE_RATE, 0.01, noise_s=3.0, hold_s=1.0)  # feed()'s thread
-        self._tts, self._gain = Level(sample_rate, 0.03, follow_s=1.0), None  # the clone: soft runs to 0.45 s
+        self._tts, self._gain = Level(sample_rate, 0.01, follow_s=1.0), None
         threading.Thread(target=self._pump, name='me-live-pump', daemon=True).start()
 
     # Direction

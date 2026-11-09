@@ -1339,7 +1339,9 @@ else ran on it), so it includes the CUDA context and cuDNN/cuBLAS (~0.3 GB).
   CPU, so there are host↔device copies): CUDA still wins, but an fp16/CUDA-native build would win more. Not pursued —
   the int8 models are shared with the CPU path and the registry.
 - A CUDA that cannot start (no driver, too little VRAM) falls back to CPU with one logged message
-  (`peresmeshnik.device`), and translation goes on. **Windows + CUDA is unproven** (no Windows GPU in CI): USER-CHECKS.
+  (`peresmeshnik.device`), and translation goes on. The built Windows `.exe` bundles CPU-only onnxruntime / CTranslate2
+  and ships no CUDA runtime, so them -> me there is always CPU; **Windows + CUDA** (a from-source install) is unproven
+  (no Windows GPU in CI): USER-CHECKS.
 
 ### Windows process loopback and the mute spike (the runner)
 

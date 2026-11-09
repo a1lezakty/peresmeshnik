@@ -6,7 +6,7 @@
 //   peresmeshnik-loopback list             the audio sessions, one JSON object per line: pid, name, playing, exe
 //   peresmeshnik-loopback tap --pid N [--tree]   process loopback of pid (and, with --tree, its process tree)
 //   peresmeshnik-loopback volume --pid N [--set L] [--tree]   get or set the sessions' volume (one-shot)
-//   peresmeshnik-loopback mute --pid N [--tree]   hold pid's (tree's) sessions at 0, new ones too; restore on exit
+//   peresmeshnik-loopback mute --pid N [--tree]   hold pid's (tree's) sessions at 0, new ones too (mute-only; the
 //   peresmeshnik-loopback watch            device-change notifications, one JSON line each (default-device change)
 //
 // tap: a WASAPI loopback that captures only what process `pid` (with --tree, it and its children) plays, mixed to
@@ -370,18 +370,18 @@ static int run_volume(DWORD pid, bool tree, bool set, float level) {
     return OK;
 }
 
-// ---- the mute spike helper (mute): hold the call app's sessions at 0, new ones too, restore on exit --------------
+// ---- the mute spike helper (mute): hold the call app's sessions at 0, new ones too ------------------------------
 // `volume --set 0` is a one-shot: a session that starts after it (a call beginning, a new browser tab) plays at full
 // volume. `mute` stays: it sets every session of the target's tree to 0, registers IAudioSessionNotification and
-// mutes new ones as they appear, each session's original level saved. On stdin close it restores them all and exits.
-// A line "{"event":"muted","pid":P,"level":L}" per session lets the Python side save the levels for a crash.
+// mutes new ones as they appear. It is mute-only: a line "{"event":"muted","pid":P,"level":L}" per session lets the
+// Python side keep the original level (per app) and own the restore, so neither this helper dying nor a Windows
+// restart (which persists the muted 0) can lose it. On stdin close it stops muting and exits (no restore here).
 
-struct MutedSession { ComPtr<ISimpleAudioVolume> vol; float original; };
 static std::mutex g_mute_lock;
-static std::vector<MutedSession> g_muted;
 static std::set<std::wstring> g_mute_seen;  // session instance ids already handled (dedupe enumeration vs. callback)
 static DWORD g_mute_target = 0;
 static bool g_mute_tree = false;
+static bool g_mute_stopping = false;  // set under the lock before unregister: a late OnSessionCreated then no-ops
 
 static void mute_session(ComPtr<IAudioSessionControl2>& ctl2) {
     DWORD spid = 0; ctl2->GetProcessId(&spid);
@@ -395,11 +395,11 @@ static void mute_session(ComPtr<IAudioSessionControl2>& ctl2) {
     float original = 1.0f; vol->GetMasterVolume(&original);
     {
         std::lock_guard<std::mutex> lk(g_mute_lock);
+        if (g_mute_stopping) return;  // stopping: do not mute a session created as we tear down
         if (!key.empty()) {
             if (g_mute_seen.count(key)) return;
             g_mute_seen.insert(key);
         }
-        g_muted.push_back({ vol, original });
     }
     vol->SetMasterVolume(0.0f, nullptr);
     printf("{\"event\": \"muted\", \"pid\": %lu, \"level\": %.4f}\n", (unsigned long)spid, original);
@@ -445,14 +445,9 @@ static int run_mute(DWORD pid, bool tree) {
     say("muting %lu (tree)", (unsigned long)pid);
     CreateThread(nullptr, 0, watch_stdin, nullptr, 0, nullptr);
     WaitForSingleObject(g_stdin_event, INFINITE);  // the MTA delivers OnSessionCreated on its own threads meanwhile
-    {
-        std::lock_guard<std::mutex> lk(g_mute_lock);
-        for (auto& m : g_muted) if (m.vol) m.vol->SetMasterVolume(m.original, nullptr);
-    }
+    { std::lock_guard<std::mutex> lk(g_mute_lock); g_mute_stopping = true; }  // stop muting first, then unregister
     for (size_t i = 0; i < mgrs.size(); i++) mgrs[i]->UnregisterSessionNotification(notifs[i].Get());
-    printf("{\"event\": \"restored\"}\n");
-    fflush(stdout);
-    return OK;
+    return OK;  // mute-only: the Python side restores from its saved per-app level
 }
 
 // ---- device-change notifications (watch) --------------------------------------------------------

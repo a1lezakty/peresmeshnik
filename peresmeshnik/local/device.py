@@ -2,8 +2,9 @@
 
 Auto by default: CUDA when the GPU build and a device are both there, else CPU. `PERESMESHNIK_DEVICE=cpu|cuda|auto`
 overrides. CUDA is used only for them -> me (ASR, MT); the clone (me -> them) is S2's. A CUDA that fails to start
-falls back to CPU with one logged message (the caller rebuilds on CPU). On Windows the CUDA runtime comes with the
-voice pack (S2) and is unproven there -> USER-CHECKS.
+falls back to CPU with one logged message (the caller rebuilds on CPU). The built .exe (installer / .zip) bundles
+CPU-only onnxruntime / CTranslate2 and ships no CUDA runtime, so them -> me there is always CPU; CUDA on Windows
+needs a from-source install with a CUDA runtime (unproven, no Windows GPU in CI -> USER-CHECKS).
 """
 from __future__ import annotations
 

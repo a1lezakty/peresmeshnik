@@ -100,12 +100,13 @@ def play_tone(device: str | None = None, hz: float = 440.0) -> subprocess.Popen:
 
 
 def set_default_output(name: str) -> None:
-    """Make `name` the default output (CI uses nircmd / SoundVolumeView if present; else skip the tests that need it)."""
+    """Best-effort: make `name` the default output if a tool is present (SoundVolumeView / nircmd). The tests name the
+    device explicitly (loopback by pid, output by name), so none of them depends on the system default; VB-Cable's
+    installer makes CABLE Input the default on its own, and CI no longer sets it."""
     for tool, args in (('SoundVolumeView.exe', ['/SetDefault', name, '0']), ('nircmd.exe', ['setdefaultsounddevice', name])):
         if subprocess.run(['where', tool], capture_output=True).returncode == 0:
             subprocess.run([tool, *args], capture_output=True)
             return
-    # no tool: the CI step set CABLE Input as the default already (the common case)
 
 
 # ---- device-independent: the helper's capability check ------------------------------------------
@@ -261,35 +262,64 @@ def test_headphones_play_without_error():
         out.stop()
 
 
+def _pwsh(cmd: str) -> subprocess.CompletedProcess:
+    return subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', cmd], capture_output=True, text=True)
+
+
+def cable_input_instance() -> str:
+    r = _pwsh("(Get-PnpDevice -Class AudioEndpoint | Where-Object FriendlyName -like '*CABLE Input*' "
+              "| Select-Object -First 1).InstanceId")
+    return r.stdout.strip()
+
+
 @pytest.mark.usefixtures('cable')
 def test_headphones_reopen_when_the_device_goes(monkeypatch):
-    """A device-change event refreshes PortAudio (its list is cached at init) before deciding, then a device gone
-    from the refreshed list cannot be reopened, so the output reports it and the owner reopens. The unplug is
-    simulated by hiding CABLE Input from PortAudio's query (so the refresh's reopen fails), no real unplug needed."""
+    """A device change refreshes PortAudio (its list is cached at init) before deciding; a device gone from the
+    refreshed list cannot be reopened, so the output reports it and the owner reopens. Real path: disable the CABLE
+    Input endpoint (Disable-PnpDevice), re-enabled after. If the runner has no admin PnP control, the gone device is
+    simulated by hiding CABLE Input from PortAudio's query instead."""
     import sounddevice as sd
 
-    from peresmeshnik.audio import coreaudio
     from peresmeshnik.audio.out import WasapiOut
     ended = []
     out = WasapiOut(SR, CABLE_IN, on_end=ended.append)
-    real_query = sd.query_devices
-    real_refresh = coreaudio.refresh_portaudio
-    refreshed = []
-
-    def spy_refresh(*a, **k):
-        refreshed.append(1)
-        return real_refresh(*a, **k)
-
-    def fake_query(device=None, **k):
-        if device is None:  # the full list the refresh re-reads: CABLE Input is gone now
-            return [d for d in real_query() if not d['name'].startswith('CABLE Input')]
-        return real_query(device, **k)
+    inst = cable_input_instance()
+    disabled = bool(inst) and _pwsh(f"Disable-PnpDevice -InstanceId '{inst}' -Confirm:$false").returncode == 0
     try:
-        monkeypatch.setattr(coreaudio, 'refresh_portaudio', spy_refresh)
-        monkeypatch.setattr(sd, 'query_devices', fake_query)
+        if disabled:  # real unplug: the helper's watch fires on the state change, the output reopens
+            assert until(lambda: bool(ended), 25), 'the output did not report the disabled endpoint'
+        else:  # no PnP control on this runner: simulate the gone device at PortAudio's query
+            real_query = sd.query_devices
+            monkeypatch.setattr(sd, 'query_devices',
+                                lambda device=None, **k: ([d for d in real_query() if not d['name'].startswith('CABLE Input')]
+                                                          if device is None else real_query(device, **k)))
+            out._on_device_event()
+            assert until(lambda: bool(ended), 5), 'the output did not report the device going away'
+        assert not out.alive
+    finally:
+        monkeypatch.undo()
+        if disabled:
+            _pwsh(f"Enable-PnpDevice -InstanceId '{inst}' -Confirm:$false")
+            until(lambda: has_cable(), 25)  # back for any later test
+        out.stop()
+
+
+@pytest.mark.usefixtures('cable')
+def test_headphones_follow_the_default_when_it_moves(monkeypatch):
+    """Opened as the system default, the output follows the default when it moves to another device (out.py's
+    _was_default branch): after the refresh the default is no longer ours -> reported -> the owner reopens on the new
+    default. The runner has one render device, so the moved default is simulated at default_output()."""
+    from peresmeshnik.audio import coreaudio, winaudio
+    from peresmeshnik.audio.out import WasapiOut
+    ended = []
+    out = WasapiOut(SR, CABLE_IN, on_end=ended.append)
+    out._was_default = True  # as if opened as the default, to exercise the follow-the-default branch
+    try:
+        monkeypatch.setattr(coreaudio, 'refresh_portaudio', lambda *a, **k: None)  # keep our stream; test the branch only
+        monkeypatch.setattr(winaudio, 'output_names', lambda: {out.device, 'Another Output'})  # ours still present
+        monkeypatch.setattr(winaudio, 'default_output', lambda: 'Another Output')  # the default moved away
         out._on_device_event()
-        assert until(lambda: bool(ended), 5), 'the output did not report the device going away'
-        assert refreshed, 'the device event did not refresh PortAudio before deciding'
+        assert until(lambda: bool(ended), 4), 'the output did not follow the moved default'
         assert not out.alive
     finally:
         monkeypatch.undo()
@@ -310,3 +340,69 @@ def test_app_wires_them_me_on_windows(helper_ok):
         assert callable(getattr(tap, m)), m
     for fn in ('mute_call', 'restore_call'):  # _route calls these (mute spike + restore on off/crash)
         assert callable(getattr(capture_windows, fn)), fn
+
+
+# ---- round 2: no console window everywhere, microphone in the PortAudio registry ----------------
+
+def test_every_helper_spawn_suppresses_the_console_window(monkeypatch):
+    """Every place that starts the helper or the Piper runner passes CREATE_NO_WINDOW, so a windowed app flashes no
+    console: capture_windows._run and the tap/mute Popens, winaudio's watch, and the Piper runner."""
+    import io
+    import subprocess as sp
+
+    from peresmeshnik.audio import capture_windows as cw
+    from peresmeshnik.audio import winaudio
+    from peresmeshnik.local import tts
+    seen = []
+
+    class FakeProc:
+        def __init__(self, *a, **k):
+            seen.append(k.get('creationflags', 0))
+            self.stdin, self.stdout, self.stderr = io.BytesIO(), io.BytesIO(b''), io.BytesIO(b'')
+            self.returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, *a, **k):
+            return 0
+
+        def kill(self):
+            pass
+
+    def fake_run(*a, **k):
+        seen.append(k.get('creationflags', 0))
+        return type('R', (), {'returncode': 0, 'stdout': '', 'stderr': ''})()
+
+    monkeypatch.setattr(sp, 'Popen', FakeProc)
+    monkeypatch.setattr(cw.subprocess, 'run', fake_run)
+    monkeypatch.setattr(cw, 'helper', lambda: 'helper.exe')
+    monkeypatch.setattr(cw, 'tree_root', lambda app: 123)
+    monkeypatch.setattr(tts, 'runner_cmd', lambda: ['runner.exe'])
+    monkeypatch.setattr(tts, 'voice_path', lambda v: 'voice.onnx')
+
+    cw._run(['check'])                       # subprocess.run
+    for spawn in (lambda: winaudio.DeviceWatch(lambda: None),   # watch Popen
+                  lambda: cw.mute_call('X.exe'),                # mute Popen
+                  lambda: cw.ProcessLoopback(pid=1).start(lambda pcm: None),  # tap Popen
+                  lambda: tts.PiperTts('piper-ru_RU-dmitri-medium')):         # piper Popen
+        try:
+            spawn()
+        except Exception:
+            pass
+    assert seen, 'no spawns recorded'
+    assert all(f & subprocess.CREATE_NO_WINDOW for f in seen), seen
+
+
+def test_microphone_is_held_in_the_portaudio_registry_on_windows(monkeypatch):
+    """N1: the me -> them microphone stream is registered in the shared PortAudio holder registry on Windows (as on
+    macOS), so a device refresh suspends/resumes it instead of freeing a live, unmanaged stream."""
+    from peresmeshnik.audio import coreaudio
+    from peresmeshnik.audio.mic import Mic
+    m = Mic(device='whatever', sample_rate=SR)
+    monkeypatch.setattr(Mic, '_open', lambda self, on_frames: setattr(self, '_stream', object()))  # no real device
+    m.start(lambda pcm: None)
+    try:
+        assert m in coreaudio._holders, 'the microphone is not in the PortAudio registry (a refresh would free it)'
+    finally:
+        coreaudio.release(m)

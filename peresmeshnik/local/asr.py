@@ -23,23 +23,20 @@ TAIL_S = 0.8  # timestamps of the last ~0.8 s of a window run ahead of the audio
 
 def _on_cuda(model) -> bool:
     """Whether the loaded onnx-asr model's onnxruntime sessions actually run on CUDA (not a silent CPU fallback).
-    Walks the model for InferenceSessions; if none are found (a layout we do not know), trusts the request."""
-    try:
-        import onnxruntime as rt
-    except Exception:
-        return True
+    Walks the model for objects with get_providers() (an InferenceSession, however onnx-asr wraps it); if none are
+    found (a layout we do not know), reports CPU — it does not claim CUDA it cannot confirm."""
     seen = []
 
     def walk(o, depth=0):
         if depth > 3 or len(seen) > 30:
             return
         for v in vars(o).values() if hasattr(o, '__dict__') else ():
-            if isinstance(v, rt.InferenceSession):
+            if callable(getattr(v, 'get_providers', None)):
                 seen.append(v)
             else:
                 walk(v, depth + 1)
     walk(model)
-    return not seen or any('CUDAExecutionProvider' in s.get_providers() for s in seen)
+    return bool(seen) and any('CUDAExecutionProvider' in s.get_providers() for s in seen)
 
 
 def _text(tokens: list[str]) -> str:

@@ -838,6 +838,10 @@ class Controller:
                 log.exception('call routing')
                 self.on_state(f'error: give the call sound back by hand (pavucontrol): {e}')
 
+    def _them_loopback_ended(self, why: str) -> None:  # the control thread (from the loopback's on_end)
+        self._unroute()  # router.stop un-mutes the call app (restore_call), so the call is heard as usual
+        self.on_state(f'error: the call sound capture stopped: {why}')
+
     def _save_call_app(self, app: str) -> None:
         if self.settings is not None:
             self.settings.ui.call_app = app
@@ -860,9 +864,8 @@ class Controller:
         s = s or self.settings or config.load()
         if name == 'them' and sys.platform == 'win32':
             from peresmeshnik.audio import capture_windows
-            # the loopback ended (the helper exited, the call app restarted): un-mute, so the call is heard as usual
-            on_end = lambda why: (capture_windows.restore_call(),  # noqa: E731
-                                  self.on_state(f'error: the call sound capture stopped: {why}'))
+            # the loopback ended (helper exited, call app restarted): hand it to the control thread to un-mute and report
+            on_end = lambda why: self.submit(self._them_loopback_ended, why)  # noqa: E731
             code, why = capture_windows.check()
             if code:
                 raise RuntimeError(why)

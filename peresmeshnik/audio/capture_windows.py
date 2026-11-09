@@ -242,11 +242,13 @@ class ProcessLoopback:
 
 
 # ---- the mute spike: hold the call app's sessions at 0 (variant A), new ones too -------------------------------
-# A persistent `mute` helper sets every session of the call app's tree to 0 and mutes new ones as they appear (a call
-# that starts, a new browser tab), each session's original level saved. On a clean stop (restore_call) it restores
-# them and exits. A crash leaves the saved levels in a file, so the next start (or the next translation) puts them
-# back: the file is kept until the app is there to restore, and a fresh mute restores a leftover first (so it never
-# saves the 0 a previous crash left as the "original").
+# A `mute` helper sets every session of the call app's tree to 0 and mutes new ones as they appear (a call that
+# starts, a new browser tab). It is mute-only: Python owns the restore, from a per-app original level in a file. So a
+# crash (either side) never loses the original: the helper dying leaves the sessions at 0, the file still has the
+# level, and the next restore_call (translation off, loopback end, or the next start) puts it back. The saved level
+# is the app's non-zero original and is never overwritten by a near-zero (Windows persists a muted 0 across a
+# restart, and a fresh helper would read that 0 — the file, not the live reading, is the source of truth).
+# ponytail: one level per app restored to the whole tree, so a second window's tab volumes are flattened on restore.
 
 _muter: subprocess.Popen | None = None
 _muter_lock = threading.Lock()
@@ -257,19 +259,34 @@ def _mute_state() -> Path:
     return config.config_dir() / 'muted-session.json'
 
 
-def _save_state(app: str, levels: dict[int, float]) -> None:
+def _load_state() -> dict:
     try:
-        _mute_state().parent.mkdir(parents=True, exist_ok=True)
-        _mute_state().write_text(json.dumps({'app': app, 'levels': {str(p): v for p, v in levels.items()}}))
+        d = json.loads(_mute_state().read_text())
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_state(d: dict) -> None:
+    try:
+        if d:
+            _mute_state().parent.mkdir(parents=True, exist_ok=True)
+            _mute_state().write_text(json.dumps(d))
+        elif _mute_state().exists():
+            _mute_state().unlink()
     except OSError as e:
         log.warning('mute: could not save the call volume: %s', e)
 
 
-def _clear_state() -> None:
-    try:
-        _mute_state().unlink()
-    except OSError:
-        pass
+def _remember(app: str, level: float) -> None:
+    """Record the call app's original level. Never overwrite a saved non-zero with a near-zero: a crash leaves the
+    app at 0 and Windows persists it, so a fresh helper reads 0 — the saved non-zero is the true original."""
+    if level < 0.01:
+        return
+    d = _load_state()
+    if d.get(app, 0.0) < 0.01 or level > d[app]:  # first non-zero, or a louder original (keep the max)
+        d[app] = level
+        _write_state(d)
 
 
 def session_volume(app: str) -> float | None:
@@ -291,17 +308,17 @@ def set_session_volume(app: str, level: float) -> bool:
 
 
 def mute_call(app: str) -> None:
-    """Start the mute helper: hold the call app's sessions (and new ones) at 0, each original level saved so
-    restore_call / the next start can put it back. A leftover crash mute of any app is restored first."""
+    """Start the mute helper on the call app's tree (and new sessions), remembering each session's original level. A
+    leftover (another app, or a crash) is restored first, so the helper reads true originals and other apps keep
+    theirs."""
     global _muter
-    restore_call()  # clear a leftover crash mute first, so the helper reads the true original levels, not a saved 0
+    restore_call()  # restore any leftover first: the helper then reads real levels, not a crash's persisted 0
     pid = tree_root(app)
     if pid is None:
         log.warning('mute: %s is not running', app)
         return
     proc = subprocess.Popen([helper(), 'mute', '--pid', str(pid), '--tree'], stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW)
-    levels: dict[int, float] = {}
 
     def pump() -> None:
         for line in proc.stdout:  # one {"event":"muted","pid","level"} per session, as they are muted
@@ -310,9 +327,8 @@ def mute_call(app: str) -> None:
             except ValueError:
                 continue
             if ev.get('event') == 'muted':
-                levels[int(ev['pid'])] = float(ev['level'])
-                _save_state(app, levels)
-                log.info('mute: %s session %s volume %.2f -> 0', app, ev['pid'], ev['level'])
+                _remember(app, float(ev['level']))
+                log.info('mute: %s session %s volume %.2f -> 0', app, ev.get('pid'), ev['level'])
 
     with _muter_lock:
         _muter = proc
@@ -320,31 +336,22 @@ def mute_call(app: str) -> None:
 
 
 def restore_call() -> None:
-    """Put the call app's sessions back: stop the live mute helper (it restores each session to its own level), or,
-    after a crash, the saved levels from the file. The file is kept if the app is not running yet, so a later
-    restore can still apply it."""
+    """Stop the mute helper (mute-only; Python owns restore) and put each saved app's level back, clearing an entry
+    only when it was actually applied (returncode 0). A level that cannot be applied yet (the app is not running) is
+    kept for a later restore, so nothing is lost if the helper died or the app is gone."""
     global _muter
     with _muter_lock:
         proc, _muter = _muter, None
     if proc is not None:
         try:
-            proc.stdin.close()  # the helper restores every session it muted and exits
+            proc.stdin.close()  # the helper stops muting new sessions and exits (it does not restore)
             proc.wait(5)
         except Exception:
             proc.kill()
-        _clear_state()
-        return
-    try:
-        state = json.loads(_mute_state().read_text())
-    except (OSError, ValueError):
-        return
-    app = state.get('app', '')
-    levels = [float(v) for v in state.get('levels', {}).values()]
-    if not (app and levels):
-        _clear_state()
-        return
-    # ponytail: crash recovery puts the max original back on the whole tree (per-session levels only on the live
-    # path), so a second window's tab levels are flattened. Keep the file until the app is back to restore.
-    if set_session_volume(app, max(levels)):
-        _clear_state()
-        log.info('mute: %s sessions restored to %.2f after a crash', app, max(levels))
+    d = _load_state()
+    for app, level in list(d.items()):
+        level = float(level)
+        if level < 0.01 or set_session_volume(app, level):  # applied (or nothing to restore): drop it
+            d.pop(app)
+            log.info('mute: %s sessions restored to %.2f', app, level)
+    _write_state(d)

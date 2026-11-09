@@ -41,3 +41,16 @@ def test_cpu_forced_is_cpu(monkeypatch):
     assert device.onnx_cuda() is False
     assert device.ct2_cuda() is False
     assert device.onnx_providers() == ['CPUExecutionProvider']
+
+
+def test_on_cuda_reflects_the_sessions_real_providers():
+    """asr._on_cuda reports the truth from the session's get_providers(): a CPU session is not CUDA, a CUDA session
+    is, and a model with no discoverable session is not claimed as CUDA (do not trust what cannot be confirmed)."""
+    from peresmeshnik.local.asr import _on_cuda
+
+    class Holder:
+        def __init__(self, providers):
+            self.sess = type('S', (), {'get_providers': lambda self: providers})()
+    assert _on_cuda(Holder(['CPUExecutionProvider'])) is False
+    assert _on_cuda(Holder(['CUDAExecutionProvider', 'CPUExecutionProvider'])) is True
+    assert _on_cuda(object()) is False

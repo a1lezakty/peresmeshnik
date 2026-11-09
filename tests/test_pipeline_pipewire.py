@@ -210,7 +210,7 @@ def test_app_moves_the_call_on_and_back_off_and_on_exit(speakers, procs, monkeyp
     monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
 
     class Side:
-        def __init__(self, name, s, inp, out, overlay, on_error):
+        def __init__(self, name, s, inp, out, overlay, on_error, echo=None):
             self.name, self.engine = name, 'local'
 
         def start(self):

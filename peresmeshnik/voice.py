@@ -39,7 +39,8 @@ NOISY_DB, FAIR_DB = 12.0, 20.0  # speech above the background, dB: fail / warn b
 TARGET_DB = -20.0  # saved reference: speech level, peak kept under -1 dBFS
 BAND_DB = -45.0  # speech energy at 4-8 kHz vs 0.1-4 kHz: below = a telephone-band mic (BENCH: phone -74..-80, mics -27..-9)
 
-PROMPTS = {  # read aloud for about 45 s; varied sounds, natural pauses at punctuation
+PROMPTS = {  # read aloud for 30-45 s; ru, en: written for the app (varied sounds, natural pauses at punctuation);
+    # the others: public-domain prose, verbatim from the source (author, work, year; docs/MODELS.md "Texts")
     'ru': 'Привет! Я записываю этот короткий текст, чтобы приложение узнало, как звучит мой голос. '
           'Неделя выдалась насыщенной. В понедельник шёл дождь, и весь день пришлось работать дома. '
           'Во вторник мы встретились с друзьями, пили чай с вареньем и спорили о кино. '
@@ -52,6 +53,87 @@ PROMPTS = {  # read aloud for about 45 s; varied sounds, natural pauses at punct
           'On Wednesday I drove out of town: it was quiet, the air smelled of pine, and birds sang by the lake. '
           'Thursday and Friday flew by with emails, phone calls and quick meetings. '
           'At the weekend I finally slept in, cooked a proper dinner and called my parents. Thanks for listening!',
+    # Михайло Коцюбинський (1913), Intermezzo, 1909
+    # https://uk.wikisource.org/w/index.php?title=Твори_(Коцюбинський,_1955)/2/Intermezzo&action=render
+    'uk': "Ніколи перше не почував я так ясно зв'язку з землею, як тут. В городах земля одягнена в камінь і залізо і "
+          'недоступна. Тут я став близький до неї. Свіжими ранками я перший будив сонну ще воду криниці. Коли порожнє відро '
+          'плескалось денцем об її груди, вона ухала гучно спросоння у глибині й ліниво вливалась у нього. Потому тремтіла, '
+          'сиза на сонці. Я пив її свіжу, холодну, ще повну снів, і хлюпав нею собі в лице. Після того було молоко.',
+    # Franz Kafka (1924), Die Verwandlung, 1915
+    # https://www.gutenberg.org/cache/epub/22367/pg22367.txt
+    'de': 'Als Gregor Samsa eines Morgens aus unruhigen Träumen erwachte, fand er sich in seinem Bett zu einem ungeheueren '
+          'Ungeziefer verwandelt. Er lag auf seinem panzerartig harten Rücken und sah, wenn er den Kopf ein wenig hob, seinen '
+          'gewölbten, braunen, von bogenförmigen Versteifungen geteilten Bauch, auf dessen Höhe sich die Bettdecke, zum '
+          'gänzlichen Niedergleiten bereit, kaum noch erhalten konnte. Seine vielen, im Vergleich zu seinem sonstigen Umfang '
+          'kläglich dünnen Beine flimmerten ihm hilflos vor den Augen. »Was ist mit mir geschehen?« dachte er. Es war kein '
+          'Traum.',
+    # Alphonse Daudet (1897), Lettres de mon moulin (Installation), 1869
+    # https://www.gutenberg.org/cache/epub/36780/pg36780.txt
+    'fr': "C'est de là que je vous écris, ma porte grande ouverte, au bon soleil. Un joli bois de pins tout étincelant de "
+          "lumière dégringole devant moi jusqu'au bas de la côte. A l'horizon, les Alpilles découpent leurs crêtes fines... "
+          'Pas de bruit... A peine, de loin en loin, un son de fifre, un courlis dans les lavandes, un grelot de mules sur la '
+          'route... Tout ce beau paysage provençal ne vit que par la lumière. Et maintenant, comment voulez-vous que je le '
+          'regrette, votre Paris bruyant et noir? Je suis si bien dans mon moulin!',
+    # Horacio Quiroga (1937), Cuentos de la selva: La tortuga gigante, 1918
+    # https://es.wikisource.org/w/index.php?title=La_tortuga_gigante&action=render
+    'es': 'Vivía solo en el bosque, y él mismo se cocinaba. Comía pájaros y bichos del monte, que cazaba con la escopeta, y '
+          'después comía frutas. Dormía bajo los árboles, y cuando hacía mal tiempo construía en cinco minutos una ramada con '
+          'hojas de palmera, y allí pasaba sentado y fumando, muy contento en medio del bosque que bramaba con el viento y la '
+          'lluvia. Había hecho un atado con los cueros de los animales, y lo llevaba al hombro.',
+    # Carlo Collodi (1890), Le avventure di Pinocchio, 1883
+    # https://www.gutenberg.org/cache/epub/52484/pg52484.txt
+    'it': "C'era una volta un pezzo di legno. Non era un legno di lusso, ma un semplice pezzo da catasta, di quelli che "
+          "d'inverno si mettono nelle stufe e nei caminetti per accendere il fuoco e per riscaldare le stanze. Non so come "
+          'andasse, ma il fatto gli è che un bel giorno questo pezzo di legno capitò nella bottega di un vecchio falegname, il '
+          "quale aveva nome mastr'Antonio, se non che tutti lo chiamavano maestro Ciliegia, per via della punta del suo naso, "
+          'che era sempre lustra e paonazza, come una ciliegia matura.',
+    # Machado de Assis (1908), Conto de Escola (Várias Histórias), 1884
+    # https://pt.wikisource.org/w/index.php?title=Conto_de_Escola&action=render
+    'pt': 'Com franqueza, estava arrependido de ter vindo. Agora que ficava preso, ardia por andar lá fora, e recapitulava o '
+          'campo e o morro, pensava nos outros meninos vadios, o Chico Telha, o Américo, o Carlos das Escadinhas, a fina flor '
+          'do bairro e do gênero humano. Para cúmulo de desespero, vi através das vidraças da escola, no claro azul do céu, '
+          'por cima do morro do Livramento, um papagaio de papel, alto e largo, preso de uma corda imensa, que bojava no ar, '
+          'uma cousa soberba.',
+    # Henryk Sienkiewicz (1916), Latarnik, 1881
+    # https://wolnelektury.pl/media/book/txt/latarnik.txt
+    'pl': 'Tegoż samego jeszcze wieczora, gdy słońce stoczyło się na drugą stronę międzymorza, a po dniu promiennym nastąpiła '
+          'noc bez zmierzchu, nowy latarnik widocznie był już na miejscu, bo latarnia rzuciła jak zwykle na wody swoje snopy '
+          'jaskrawego światła. Noc była zupełnie spokojna, cicha, prawdziwie podzwrotnikowa, przesycona jasną mgłą, tworzącą '
+          'koło księżyca wielki, zabarwiony tęczowo krąg o miękkich, nieujętych brzegach. Morze tylko burzyło się, ponieważ '
+          'przypływ wzbierał. Skawiński stał na balkonie, tuż koło olbrzymich ognisk, podobny z dołu do małego, czarnego '
+          'punkciku.',
+    # Ömer Seyfettin (1920), Kaşağı, 1919
+    # https://tr.wikisource.org/w/index.php?title=Kaşağı&action=raw
+    'tr': 'Ahırın avlusunda oynarken aşağıda, gümüş söğütler altında görünmeyen derenin hazin şırıltısını işitirdik. Evimiz iç '
+          "çitin büyük kestane ağaçları arkasında kaybolmuş gibiydi. Annem, İstanbul'a gittiği için benden bir yaş küçük olan "
+          "kardeşim Hasan'la artık Dadaruh'un yanından hiç ayrılmıyorduk. Bu, babamın seyisi, ihtiyar bir adamdı. Sabahleyin "
+          "erkenden ahıra koşuyorduk. En sevdiğimiz şey atlardı. Dadaruh'la beraber onları suya götürmek, çıplak sırtlarına "
+          'binmek, ne doyulmaz bir zevkti. Hasan korkar, yalnız binemezdi. Dadaruh onu kendi önüne alırdı. Torbalara arpa '
+          'koymak, yemliklere ot doldurmak, gübreleri kaldırmak eğlenceli bir oyundan ziyade, bizim hoşumuza gidiyordu.',
+    # 鲁迅 (1936), 从百草园到三味书屋（朝花夕拾）, 1926
+    # https://www.marxists.org/chinese/reference-books/luxun/06/008.htm
+    'zh': '我家的后面有一个很大的园，相传叫作百草园。现在是早已并屋子一起卖给朱文公的子孙了，连那最末次的相见也已经隔了七八年，'
+          '其中似乎确凿只有一些野草；但那时却是我的乐园。不必说碧绿的菜畦，光滑的石井栏，高大的皂荚树，紫红的桑椹；也不必说鸣蝉'
+          '在树叶里长吟，肥胖的黄蜂伏在菜花上，轻捷的叫天子（云雀）忽然从草间直窜向云霄里去了。单是周围的短短的泥墙根一带，就有'
+          '无限趣味。',
+    # 芥川龍之介 (1927), トロッコ, 1922
+    # https://www.aozora.gr.jp/cards/000879/files/43016_16836.html
+    'ja': '或夕方、――それは二月の初旬だった。良平は二つ下の弟や、弟と同じ年の隣の子供と、トロッコの置いてある村外れへ行った。ト'
+          'ロッコは泥だらけになったまま、薄明るい中に並んでいる。が、その外は何処を見ても、土工たちの姿は見えなかった。三人の子'
+          '供は恐る恐る、一番端にあるトロッコを押した。トロッコは三人の力が揃うと、突然ごろりと車輪をまわした。良平はこの音にひ'
+          'やりとした。しかし二度目の車輪の音は、もう彼を驚かさなかった。',
+    # 이효석 (1942), 메밀꽃 필 무렵, 1936
+    # https://ko.wikisource.org/w/index.php?title=메밀꽃_필_무렵&action=raw
+    'ko': '밤중을 지난 무렵인지 죽은 듯이 고요한 속에서 짐승 같은 달의 숨소리가 손에 잡힐 듯이 들리며, 콩 포기와 옥수수 잎새가 '
+          '한층 달에 푸르게 젖었다. 산허리는 온통 메밀 밭이어서 피기 시작한 꽃이 소금을 뿌린 듯이 흐붓한 달빛에 숨이 막힐 '
+          '지경이다. 붉은 대공이 향기같이 애잔하고 나귀들의 걸음도 시원하다. 길이 좁은 까닭에 세 사람은 나귀를 타고 외줄로 '
+          '늘어섰다. 방울소리가 시원스럽게 딸랑딸랑 메밀 밭께로 흘러간다.',
+    # جبران خليل جبران (1931), الأجنحة المتكسرة — في باب الهيكل, 1912
+    # https://ar.wikisource.org/w/index.php?title=الأجنحة_المتكسرة/في_باب_الهيكل&action=raw
+    'ar': 'وبعد أيام وقد مللت الوحدة، وتعبت أجفاني من النظر إلى أوجه الكتب العابسة علوت مركبة طالباً منزل فارس كرامة، حتى إذا '
+          'ما بلغت بي غابة الصنوبر حيث يذهب القوم للتنزه، حول السائق وجهة فرسيه عن الطريق العمومية فسار خبباً على ممر تظلله '
+          'أشجار الصفصاف وتتمايل على جانبيه الأعشاب والدوالي المتعرشة وأزاهر نيسان المبتسمة بثغور حمراء كالياقوت وزرقاء '
+          'كالزمرد وصفراء كالذهب.',
 }
 
 
@@ -156,6 +238,26 @@ TEST_PHRASES = {  # what the clone says in the check: everyday words, numbers sp
            'Thank you for waiting. Let us start with the first question on the list.'],
     'ru': ['Добрый день, вы меня хорошо слышите? Я буду минут через десять.',
            'Спасибо, что подождали. Давайте начнём с первого вопроса в списке.'],
+    'uk': ['Добрий день, ви мене добре чуєте? Я буду хвилин за десять.',
+           'Дякую, що зачекали. Почнімо з першого питання у списку.'],
+    'de': ['Guten Tag, können Sie mich gut hören? Ich bin in etwa zehn Minuten da.',
+           'Danke fürs Warten. Fangen wir mit der ersten Frage auf der Liste an.'],
+    'fr': ["Bonjour, vous m'entendez bien ? Je serai là dans une dizaine de minutes.",
+           "Merci d'avoir attendu. Commençons par la première question de la liste."],
+    'es': ['Buenos días, ¿me oye bien? Llegaré en unos diez minutos.',
+           'Gracias por esperar. Empecemos con la primera pregunta de la lista.'],
+    'it': ['Buongiorno, mi sente bene? Arrivo tra una decina di minuti.',
+           'Grazie per aver aspettato. Cominciamo dalla prima domanda della lista.'],
+    'pt': ['Bom dia, você está me ouvindo bem? Chego em uns dez minutos.',
+           'Obrigado por esperar. Vamos começar pela primeira pergunta da lista.'],
+    'pl': ['Dzień dobry, czy dobrze mnie słychać? Będę za jakieś dziesięć minut.',
+           'Dziękuję za cierpliwość. Zacznijmy od pierwszego pytania na liście.'],
+    'tr': ['İyi günler, beni iyi duyabiliyor musunuz? Yaklaşık on dakika içinde orada olurum.',
+           'Beklediğiniz için teşekkürler. Listedeki ilk soruyla başlayalım.'],
+    'zh': ['你好，你能听清楚我说话吗？我大概十分钟后到。', '谢谢你的耐心等待。我们从列表上的第一个问题开始吧。'],
+    'ja': ['こんにちは、私の声はよく聞こえますか？十分ほどで着きます。', 'お待たせしました。リストの最初の質問から始めましょう。'],
+    'ko': ['안녕하세요, 제 목소리 잘 들리세요? 십 분쯤 후에 도착해요.', '기다려 주셔서 감사합니다. 목록의 첫 번째 질문부터 시작하죠.'],
+    'ar': ['مرحبًا، هل تسمعني جيدًا؟ سأصل بعد عشر دقائق تقريبًا.', 'شكرًا على الانتظار. لنبدأ بالسؤال الأول في القائمة.'],
 }
 MAX_WER, WARN_WER = 0.25, 0.10  # word error rate of the app's ASR on the clone's test phrases: fail / warn above
 # speaker similarity of the clone to the recording (XTTS's own encoder, cross-lingual): fail / warn below. BENCH: the
@@ -177,8 +279,12 @@ class CloneReport:
 
 
 def _words(text: str) -> list[str]:
+    """Words; in Chinese and Japanese (no spaces) each Han or kana character is one, so WER is a character error rate.
+    Arabic vowel marks (tanwin in the test phrases) are dropped: an ASR writes none, and they would split a word."""
     import re
-    return re.sub(r'[^\w\s]', ' ', text.lower().replace('ё', 'е')).split()
+    han = '\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff'
+    text = re.sub('[\u064b-\u0652\u0670]', '', text.lower().replace('ё', 'е'))
+    return re.findall(rf'[{han}]|[^\W{han}]+', re.sub(r'[^\w\s]', ' ', text))
 
 
 def wer(ref: str, hyp: str) -> float:

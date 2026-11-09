@@ -4,6 +4,8 @@
 
 NAME (default windows) reads DIR/requirements-NAME.in and writes DIR/requirements-NAME.txt and DIR/pack-NAME.json;
 tests/data/pack-tiny.json (numpy and soundfile) is how the Windows CI test installs a real pack in a minute.
+A package in DATA has no wheel, only a source archive with its data (unidic-lite: the Japanese dictionary of XTTS's
+text cleaning, through cutlet and fugashi): it goes to `archives` with the folder the installer unpacks from it.
 
 pack-windows.json is what the app's installer (peresmeshnik/local/voicepack.py) reads: the embeddable CPython zip from
 python.org, a pip wheel and one wheel per package for cp312 win_amd64, each with its URL, SHA-256 and size, and the
@@ -18,6 +20,7 @@ import json
 import re
 import shutil
 import subprocess
+import tarfile
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -25,6 +28,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 TORCH_INDEX = 'https://download.pytorch.org/whl/cu128'
 SKIP = ('docopt',)
+DATA = {'unidic-lite': 'unidic_lite'}  # package -> its folder in the source archive
 
 
 class Remote(io.RawIOBase):
@@ -84,6 +88,21 @@ def wheel(name: str, version: str) -> dict:
     return {'name': name, 'url': ws[0]['url'], 'sha256': ws[0]['digests']['sha256'], 'size': ws[0]['size']}
 
 
+def archive(name: str, version: str, hashes: str) -> tuple[dict, int]:
+    """The source archive of a data-only package and the bytes its folder takes unpacked (it is downloaded: ~50 MB)."""
+    d = json.load(urllib.request.urlopen(f'https://pypi.org/pypi/{name}/{version}/json', timeout=60))
+    u = next(u for u in d['urls'] if u['packagetype'] == 'sdist')
+    if u['digests']['sha256'] not in hashes:
+        raise SystemExit(f'{name}=={version}: {u["url"]} is not one of the locked hashes')
+    body = urllib.request.urlopen(u['url'], timeout=300).read()
+    if hashlib.sha256(body).hexdigest() != u['digests']['sha256']:
+        raise SystemExit(f'{name}=={version}: the download does not match its SHA-256')
+    with tarfile.open(fileobj=io.BytesIO(body)) as t:
+        top = t.getmembers()[0].name.split('/')[0] + '/' + DATA[name]
+        size = sum(m.size for m in t.getmembers() if (m.name + '/').startswith(top + '/'))
+    return {'name': name, 'url': u['url'], 'sha256': u['digests']['sha256'], 'size': u['size'], 'folder': top}, size
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     ap.add_argument('--python', default='3.12.10', help='the last 3.12 with Windows binaries')
@@ -100,9 +119,15 @@ def main():
     url = f'https://www.python.org/ftp/python/{a.python}/python-{a.python}-embed-amd64.zip'
     body = urllib.request.urlopen(url, timeout=120).read()
     lock = {'python': {'name': 'python', 'url': url, 'sha256': hashlib.sha256(body).hexdigest(), 'size': len(body)},
-            'pip': wheel('pip', a.pip), 'wheels': []}
+            'pip': wheel('pip', a.pip), 'wheels': [], 'archives': []}
     total = sum(i.file_size for i in zipfile.ZipFile(io.BytesIO(body)).infolist())
     for name, version, hashes in pins:
+        if name in DATA:
+            arc, size = archive(name, version, hashes)
+            lock['archives'].append(arc)
+            total += size
+            print(f'{name}=={version}: {arc["size"] / 1e6:.1f} MB (source archive, {DATA[name]}/ unpacked)', flush=True)
+            continue
         w = wheel(name, version)
         if w['sha256'] not in hashes:
             raise SystemExit(f'{name}=={version}: {w["url"]} is not one of the locked hashes')
@@ -111,7 +136,7 @@ def main():
         print(f'{name}=={version}: {w["size"] / 1e6:.1f} MB', flush=True)
     lock['installed_bytes'] = total
     (a.dir / f'pack-{a.name}.json').write_text(json.dumps(lock, indent=1) + '\n')
-    dl = lock['python']['size'] + lock['pip']['size'] + sum(w['size'] for w in lock['wheels'])
+    dl = lock['python']['size'] + lock['pip']['size'] + sum(w['size'] for w in lock['wheels'] + lock['archives'])
     print(f'{len(lock["wheels"])} wheels: download {dl / 1e9:.2f} GB, installed {total / 1e9:.2f} GB')
 
 

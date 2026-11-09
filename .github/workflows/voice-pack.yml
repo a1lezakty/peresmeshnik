@@ -3,7 +3,10 @@ name: voice-pack
 # Manual only (Actions → voice-pack → Run workflow; the file has to be on the default branch, or run it with
 # `gh workflow run voice-pack.yml --ref <branch>` once it is there): the real Windows voice pack
 # (voice-runner/pack-windows.json, ~3.7 GB of downloads, ~8 GB installed) installed by local/voicepack.py as the wizard
-# does, into this runner's fresh data folder. No GPU here: torch sees no CUDA, which is expected.
+# does, into this runner's fresh data folder. No GPU here: torch sees no CUDA, which is expected. Then the clone with the
+# real XTTS-v2 on that pack's Python (CPU): every language's text tools and a de -> ja pair (tests/test_clone_langs.py).
+# The job linux: the same test in the Linux clone's venv (voice-runner/requirements-linux.in, CPU torch). The model
+# (1.9 GB) is cached.
 on:
   workflow_dispatch:
 
@@ -11,9 +14,41 @@ permissions:
   contents: read
 
 jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+          enable-cache: true
+      - run: uv sync --locked
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/models
+          key: xtts-v2-${{ hashFiles('peresmeshnik/models.toml') }}
+          restore-keys: xtts-v2-
+      - name: XTTS-v2 (from the registry, verified)
+        env:
+          PERESMESHNIK_MODELS: ${{ runner.temp }}/models
+        run: uv run python -m peresmeshnik models fetch xtts-v2 --accept-licenses
+      - name: The clone's venv (voice-runner/requirements-linux.in, CPU torch)
+        run: |
+          uv venv -q -p 3.12 "$RUNNER_TEMP/clone"
+          uv pip install -q -p "$RUNNER_TEMP/clone/bin/python" --extra-index-url https://download.pytorch.org/whl/cpu \
+            --index-strategy unsafe-best-match -r voice-runner/requirements-linux.in
+      - name: The clone in the new languages (text tools of each, a de -> ja pair through the runner)
+        env:
+          PERESMESHNIK_CLONE_MODEL: ${{ runner.temp }}/models/xtts-v2
+          PERESMESHNIK_REQUIRE_CLONE: '1'
+        run: |
+          PERESMESHNIK_CLONE_PY="$RUNNER_TEMP/clone/bin/python" \
+            uv run --with num2words==0.5.14 pytest -q -s -rA tests/test_clone_langs.py tests/test_clone.py
+
   install:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -66,7 +101,7 @@ jobs:
           end = time.perf_counter()
           last = list(at)[-1]
           print(f'== {last}: {end - at[last]:.0f} s; all: {end - t0:.0f} s')
-          files = [spec['python'], spec['pip'], *spec['wheels']]
+          files = [spec['python'], spec['pip'], *spec['wheels'], *spec.get('archives', [])]
           print(f'downloaded: {downloaded[0] / GB:.2f} GB (the lock: {sum(f["size"] for f in files) / GB:.2f} GB)')
           print(f'installed: {size(where) / GB:.2f} GB (the lock: {spec["installed_bytes"] / GB:.2f} GB)')
           longest = max((str(p) for p in where.rglob('*')), key=len)
@@ -91,3 +126,21 @@ jobs:
           print('state:', st)
           assert st == 'ready', st
           EOF
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/models
+          key: xtts-v2-${{ hashFiles('peresmeshnik/models.toml') }}
+          restore-keys: xtts-v2-
+      - name: XTTS-v2 (from the registry, verified)
+        env:
+          PERESMESHNIK_MODELS: ${{ runner.temp }}/models
+        run: uv run python -m peresmeshnik models fetch xtts-v2 --accept-licenses
+      - name: The clone in the new languages on the installed pack (CPU)
+        shell: bash
+        env:
+          PERESMESHNIK_CLONE_MODEL: ${{ runner.temp }}/models/xtts-v2
+          PERESMESHNIK_REQUIRE_CLONE: '1'
+          PYTHONIOENCODING: utf-8
+        run: |
+          PERESMESHNIK_CLONE_PY="$(uv run python -c 'from peresmeshnik.local import voicepack; print(voicepack.python())')" \
+            uv run --with num2words==0.5.14 pytest -q -s -rA tests/test_clone_langs.py

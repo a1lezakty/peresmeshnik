@@ -121,6 +121,12 @@
    "size": 54968
   },
   {
+   "name": "cutlet",
+   "url": "https://files.pythonhosted.org/packages/be/15/90bdc2301f115774cfbec19b8c97bc16a5551dbdc7a32ee5d94cbef80050/cutlet-0.5.2-py3-none-any.whl",
+   "sha256": "a4b0b750854dd007a8691be6db20bb696dd175e92357cfde55a0fd450ab4caff",
+   "size": 12780
+  },
+  {
    "name": "cycler",
    "url": "https://files.pythonhosted.org/packages/e7/05/c19819d5e3d95294a6f5947fb9b9629efb316b96de511b418c53d245aae6/cycler-0.12.1-py3-none-any.whl",
    "sha256": "85cef7cff222d8644161529808465972e51340599459b8ac3ccbac5a854e0d30",
@@ -161,6 +167,12 @@
    "url": "https://files.pythonhosted.org/packages/6c/c0/a98505f18594f1bce828bb159cec0fcf9860562f1a2c85913409fc8f3d9e/fsspec-2026.9.0-py3-none-any.whl",
    "sha256": "8dd6e646e99ea382bd85f97a45e6b526a442d79423a7dc673f1e2756d05fcb5f",
    "size": 221738
+  },
+  {
+   "name": "fugashi",
+   "url": "https://files.pythonhosted.org/packages/d7/ce/b18879c94c6267981a65792045321a1d71b849893b40d7e8356e0b55542c/fugashi-1.5.2-cp312-cp312-win_amd64.whl",
+   "sha256": "936d710166c5b05064ec2ce0eb347fff7a0cf102c33989012fad205346943402",
+   "size": 508407
   },
   {
    "name": "grpcio",
@@ -209,6 +221,12 @@
    "url": "https://files.pythonhosted.org/packages/d6/b1/819d4158942c33d7eaa241c5d2e49ece9825dc4a8d0c72e8edd2813c0dd1/inflect-7.6.0-py3-none-any.whl",
    "sha256": "9fefad5c0c174d8a38f8c33d3033817e38fca8475f7f226c62efc39d46c83e8a",
    "size": 37777
+  },
+  {
+   "name": "jaconv",
+   "url": "https://files.pythonhosted.org/packages/3b/da/9657d637bcacdbaf6a914ce504000da5639f9d945f8d3552a940f021d6c0/jaconv-0.5.0-py3-none-any.whl",
+   "sha256": "2914114fe761ca49fc7089e25e6ad4a400c26f262ffce84e13b176916b71610a",
+   "size": 16831
   },
   {
    "name": "jaraco-functools",
@@ -287,6 +305,12 @@
    "url": "https://files.pythonhosted.org/packages/b3/38/89ba8ad64ae25be8de66a6d463314cf1eb366222074cfda9ee839c56a4b4/mdurl-0.1.2-py3-none-any.whl",
    "sha256": "84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8",
    "size": 9979
+  },
+  {
+   "name": "mojimoji",
+   "url": "https://files.pythonhosted.org/packages/e0/da/aa46aa90ddeab3a00b8c36d5f3d64b630a0a1fa8ad6468f10365ffbb80a2/mojimoji-0.0.13-cp312-cp312-win_amd64.whl",
+   "sha256": "6e442d6dcfb2fc1a08eea86da80ebe71ad63fbc4217fa4faede7023c0b51d055",
+   "size": 42280
   },
   {
    "name": "monotonic-alignment-search",
@@ -407,6 +431,12 @@
    "url": "https://files.pythonhosted.org/packages/38/bb/d215ee7c73b61497b28a5503f9f53523f294fcc936762b7caf90e0c1c2b5/pyparsing-3.3.3-py3-none-any.whl",
    "sha256": "ece8c00a69cf01b45d0b1dedabb469c90d8caf996d4fda40f147627a122849a4",
    "size": 126420
+  },
+  {
+   "name": "pypinyin",
+   "url": "https://files.pythonhosted.org/packages/b9/7b/4cabc76fcc21c3c7d5c671d8783984d30ac9d3bb387c4ba784fca3cdfa3a/pypinyin-0.55.0-py2.py3-none-any.whl",
+   "sha256": "d53b1e8ad2cdb815fb2cb604ed3123372f5a28c6f447571244aca36fc62a286f",
+   "size": 840203
   },
   {
    "name": "pysbd",
@@ -595,5 +625,14 @@
    "size": 102593
   }
  ],
- "installed_bytes": 7973107919
+ "archives": [
+  {
+   "name": "unidic-lite",
+   "url": "https://files.pythonhosted.org/packages/55/2b/8cf7514cb57d028abcef625afa847d60ff1ffbf0049c36b78faa7c35046f/unidic-lite-1.0.8.tar.gz",
+   "sha256": "db9d4572d9fdd4d00a97949d4b0741ec480ee05a7e7e2e32f547500dae27b245",
+   "size": 47356746,
+   "folder": "unidic-lite-1.0.8/unidic_lite"
+  }
+ ],
+ "installed_bytes": 8239294578
 }

@@ -50,7 +50,8 @@ def test_a_pair_without_local_models_says_why_and_goes_to_the_cloud():
 
 def test_a_pair_on_stand_in_models_needs_only_its_own(monkeypatch):
     fake_registry(monkeypatch, stub('asr-de', 'asr', 'de'), stub('asr-ja', 'asr', 'ja'), stub('mt-many', 'mt', 'de', 'ja'),
-                  stub('tts-de', 'tts', 'de'), stub('tts-ja', 'tts', 'ja'), stub('clone-ja', 'clone', 'ja'))
+                  stub('tts-de', 'tts', 'de'), stub('tts-ja', 'tts', 'ja'), stub('clone-ja', 'clone', 'ja'),
+                  stub('clone-de', 'clone', 'de'))
     s = config.Settings(my_lang='de', their_lang='ja', them_to_me='local', me_to_them='local')
     s.local.asr.update(de='asr-de', ja='asr-ja')
     s.local.mt.update({'de-ja': 'mt-many', 'ja-de': 'mt-many'})  # a multilingual model: both languages in its langs
@@ -59,7 +60,7 @@ def test_a_pair_on_stand_in_models_needs_only_its_own(monkeypatch):
     assert all(languages.direction(s, side, has_gpu=True).local for side in languages.SIDES)
     assert languages.needed_models(s) == ['silero-vad', 'asr-ja', 'mt-many', 'tts-de', 'asr-de', 'clone-ja',
                                           'tts-ja']  # the stock voice: the clone's fallback (S2)
-    s.local.clone = 'xtts-v2'  # a clone without Japanese: the stock voice, said so
+    s.local.clone = 'clone-de'  # a clone without Japanese: the stock voice, said so
     me = languages.direction(s, 'me_to_them', has_gpu=True)
     assert me.local and me.voice == 'stock' and me.tts == 'tts-ja' and 'cannot speak Japanese' in me.notes[0]
 

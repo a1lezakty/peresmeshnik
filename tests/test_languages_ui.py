@@ -46,13 +46,15 @@ def before_stage6(reg: dict) -> dict:
 
 
 def stand_ins(monkeypatch, url='https://example.invalid/', files=None, consent=()):
-    """German and Japanese on stand-in models (served by `url`); `wire(s)` puts them into settings. Silero VAD counts as
-    downloaded: a test never fetches a real model."""
+    """German and Japanese on stand-in models (served by `url`); `wire(s)` puts them into settings, with a stand-in clone
+    that speaks English only (XTTS speaks both: a test must not fetch its 1.9 GB). Silero VAD counts as downloaded: a test
+    never fetches a real model."""
     reg = before_stage6(REGISTRY)
     for role, ids in STAND_INS.items():
         for mid in ids:
             reg[mid] = models.Model(mid, role, (mid.split('-', 1)[1],), 'CPML' if mid in consent else 'MIT',
                                     'https://example.invalid/lic', url, dict(files or {}), consent=mid in consent)
+    reg['clone-en'] = models.Model('clone-en', 'clone', ('en',), 'CPML', 'https://example.invalid/lic', url, {}, consent=True)
     monkeypatch.setattr(models, 'registry', lambda: reg)
     vad = models.root() / 'silero-vad'
     vad.mkdir(parents=True, exist_ok=True)
@@ -63,6 +65,7 @@ def wire(s: config.Settings) -> config.Settings:
     s.local.asr.update(de='asr-de', ja='asr-ja')
     s.local.mt.update({'de-ja': 'mt-de-ja', 'ja-de': 'mt-ja-de'})
     s.local.tts.update(de='tts-de', ja='tts-ja')
+    s.local.clone = 'clone-en'
     return s
 
 
@@ -91,7 +94,7 @@ def test_languages_page_says_before_the_download_what_runs_where(tmp_path, monke
     page = wizard.LanguagesPage(type('W', (), {'s': s})())
     for key in languages.SIDES:
         assert page.engine[key].model().item(local).isEnabled() and page.engine[key].currentText() == 'local'
-    assert 'cannot speak Japanese: a stock voice speaks instead' in page.why['me_to_them'].text()  # XTTS has no ja here
+    assert 'cannot speak Japanese: a stock voice speaks instead' in page.why['me_to_them'].text()  # the clone: en only
     text = page.download.text()
     assert text.startswith('300 MB for this pair (6 of 7 models')  # only the pair's: 6 stand-ins + Silero VAD
     assert 'CPML</a> (noncommercial' in text and 'MIT' in text
@@ -231,7 +234,7 @@ def test_tray_pair_switch_details(tmp_path, monkeypatch):
     saved = config.load()
     assert (saved.them_to_me, saved.me_to_them) == ('cloud', 'cloud')
     s = wire(config.Settings(my_lang='ru', their_lang='en', them_to_me='cloud', me_to_them='local'))
-    s.local.clone = 'xtts-v2'  # the clone, which has no Japanese
+    s.local.clone = 'clone-en'  # the clone, which has no Japanese
     config.save(s)
     t.switch_pair('de', 'ja')
     assert wait_for(lambda: len(calls) == 3)
@@ -382,7 +385,7 @@ def test_while_a_side_is_made_again_the_call_and_i_hear_each_other(tmp_path, mon
 
     log.clear()
     fail.add(('ja', 'de'))  # them -> me cannot be made in ja <-> de any more; me -> them can
-    s.local.clone = 'xtts-v2'  # chosen, but it has no Japanese: the stock voice
+    s.local.clone = 'clone-en'  # chosen, but it has no Japanese: the stock voice
     n = len(states)
     ctl.set_languages().result(30)
     assert [x.name for x in ctl.sides] == ['me'] and ctl.on
@@ -449,7 +452,7 @@ def test_voice_page_needs_no_recording_where_the_clone_cannot_speak(tmp_path, mo
     from peresmeshnik.ui import wizard
     monkeypatch.setenv('PERESMESHNIK_MODELS', str(tmp_path / 'models'))
     stand_ins(monkeypatch)
-    s = wire(config.Settings(my_lang='de', their_lang='ja', me_to_them='local'))  # the clone (XTTS) has no Japanese
+    s = wire(config.Settings(my_lang='de', their_lang='ja', me_to_them='local'))  # the clone (stand-in) has no Japanese
     page = wizard.VoicePage(type('W', (), {'s': s})())
     page.initializePage()
     assert page.isComplete() and page.record_button.isHidden() and page.check_button.isHidden()

@@ -16,6 +16,12 @@ Chinese, Japanese, Korean, Arabic — both ways.
   are downloaded first (restricted licenses are asked) while translation goes on with the old pair, then both
   directions start again in the new one (meanwhile the call and you hear each other untranslated).
 - Where your cloned voice does not speak the language, a stock voice speaks instead, and the app says so.
+- **Your cloned voice in 13 of the 14 languages** (all but Ukrainian) with an NVIDIA GPU: first audio in ~0.2 s, about
+  5 times faster than real time, in each of them; numbers, money and clock times are said right (Japanese digits,
+  Turkish and Arabic decimals, a currency sign apart from its number), Chinese and Japanese sentences are no longer
+  cut short. The voice pack for Windows brings the text tools for Chinese and Japanese (it is a new download).
+- A text to read for your voice recording in each of the 14 languages: public-domain prose (Kafka, Daudet, Collodi,
+  Lu Xun, Akutagawa and others).
 - Subtitles in Chinese, Japanese, Korean and Arabic (right to left). Without a font for the script (some Linux
   installs) the wizard and the tray say what to install.
 - A test phrase in each of the 14 languages for the wizard's "Test" buttons (FLEURS, CC-BY-4.0).

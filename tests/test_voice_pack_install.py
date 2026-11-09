@@ -201,12 +201,40 @@ def test_a_user_folder_outside_the_ansi_code_page(pack):
     assert voicepack.state(lock, where) == 'ready'
 
 
+def test_a_data_archive_unpacks_its_folder_and_licenses(pack):
+    """A package without a wheel (unidic-lite: an sdist with the dictionary): its folder from the verified archive into
+    site-packages, with the archive's LICENSE files; nothing else of the archive."""
+    import tarfile
+    lock, where, _, publish = pack
+    b = io.BytesIO()
+    with tarfile.open(fileobj=b, mode='w:gz') as t:
+        for name, body in {'dic-1.0/dic_lite/__init__.py': b'DICDIR = 1\n', 'dic-1.0/dic_lite/dicdir/sys.dic': bytes(1000),
+                           'dic-1.0/LICENSE': b'MIT', 'dic-1.0/LICENSE.dic': b'BSD', 'dic-1.0/setup.py': b'',
+                           'dic-1.0/dic_lite.egg-info/PKG-INFO': b''}.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(body)
+            t.addfile(info, io.BytesIO(body))
+    spec = json.loads(lock.read_text())
+    without = voicepack.need_bytes(lock, where)
+    spec['archives'] = [publish('dic-1.0.tar.gz', b.getvalue()) | {'folder': 'dic-1.0/dic_lite'}]
+    lock.write_text(json.dumps(spec))
+    assert voicepack.need_bytes(lock, where) == without + len(b.getvalue())  # counted with the rest
+    run(lock, where)
+    site = where / 'Lib' / 'site-packages'
+    assert (site / 'dic_lite' / 'dicdir' / 'sys.dic').stat().st_size == 1000
+    assert sorted(p.name for p in (site / 'dic_lite').iterdir()) == ['LICENSE', 'LICENSE.dic', '__init__.py', 'dicdir']
+    assert not (site / 'setup.py').exists() and not list(site.glob('*.egg-info'))
+
+
 def test_need_bytes_of_the_real_lock():
     spec = json.loads(voicepack.lock_file().read_text())
     names = {w['name'] for w in spec['wheels']}
     assert {'torch', 'torchaudio', 'coqui-tts', 'transformers', 'six', 'soundfile'} <= names
     assert all('win_amd64' in w['url'] or w['url'].endswith('-any.whl') for w in spec['wheels'])
     assert 3e9 < sum(w['size'] for w in spec['wheels']) < 5e9 and 7e9 < spec['installed_bytes'] < 10e9
+    # XTTS's text cleaning for zh and ja (BENCH stage 6): pinyin, romaji through MeCab and its dictionary
+    assert {'pypinyin', 'cutlet', 'fugashi', 'ko-speech-tools', 'num2words'} <= names
+    assert [(a['name'], a['folder']) for a in spec['archives']] == [('unidic-lite', 'unidic-lite-1.0.8/unidic_lite')]
 
 
 PIP = sorted(glob.glob('/usr/share/python-wheels/pip-*.whl'))

@@ -179,6 +179,22 @@ def test_no_clone_check_while_translating(page, tmp_path):
     assert page.clone_out.text().startswith('Turn translation off first') and not page.running
 
 
+def test_no_clone_check_without_an_asr_model_of_their_language(page, tmp_path):
+    """The check hears the clone with an ASR model of their language: without one (none set for German here) the button
+    says why instead of failing with "unknown model ''"."""
+    good = tmp_path / 'me.wav'
+    sf.write(good, speech_like(45), 24_000)
+    page.import_file(str(good))
+    pump(lambda: not page.running)
+    page.w.s.their_lang = 'de'
+    assert page.check_button.isEnabled()  # stage 6: Parakeet hears German
+    page.w.s.local.asr = {'en': page.w.s.local.asr['en']}
+    page._buttons()
+    assert not page.check_button.isEnabled() and 'No speech recognition model for German' in page.check_button.toolTip()
+    page.check_clone()
+    assert page.clone_out.text().startswith('No speech recognition model for German') and not page.running
+
+
 @pytest.mark.skipif(not SOUND, reason='needs PipeWire / PulseAudio')
 def test_recorded_voice_from_a_bad_microphone_is_rejected_with_the_reason(page):
     """Recorded from a PipeWire source by name (a steady tone, no speech): not saved, and the page says why."""

@@ -879,12 +879,12 @@ class VoicePage(QWizardPage):
     def _buttons(self) -> None:
         for b in (self.record_button, self.import_button):
             b.setEnabled(not self.running)
-        self.check_button.setEnabled(not self.running and self.voice is not None and not self.translating()
-                                     and self.pack() in ('', 'ready'))
+        why = ('Turn translation off first: the check loads a second clone (~3 GB)' if self.translating() else
+               self.no_check())
+        self.check_button.setEnabled(not self.running and self.voice is not None and not why and self.pack() in ('', 'ready'))
         self.pack_button.setEnabled(not self.running and self.pack_consent.isChecked())
         self.stock.setEnabled(not self.packing)
-        self.check_button.setToolTip('Turn translation off first: the check loads a second clone (~3 GB)'
-                                     if self.translating() else '')
+        self.check_button.setToolTip(why)
         self.completeChanged.emit()
 
     def _run(self, work) -> None:
@@ -932,12 +932,24 @@ class VoicePage(QWizardPage):
                 self.voice, self.w.s.local.voice = v, v.name
         self._buttons()
 
+    def no_check(self) -> str:
+        """Why the clone cannot be checked here ('' = it can): the check hears it with an ASR model of their language
+        (offline: also one that does not keep up live)."""
+        s = self.w.s
+        if languages.pick(s.local.asr, s.their_lang):
+            return ''
+        return (f'No speech recognition model for {languages.name(s.their_lang)} to check the clone with: listen to it in '
+                'a test call')
+
     def check_clone(self) -> None:
         """The clone says the test phrases in their language; the app's ASR must understand them (voice.check_clone)."""
         from peresmeshnik import models, voice
         s, v = self.w.s, self.voice
         if self.translating():
             self.clone_out.setText('Turn translation off first: the check loads a second clone (~3 GB).')
+            return
+        if why := self.no_check():
+            self.clone_out.setText(why + '.')
             return
         self.clone_out.setText('Checking the clone: it says two test phrases… (first time: loading the voice pack)')
 

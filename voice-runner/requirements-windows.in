@@ -6,3 +6,9 @@ coqui-tts==0.28.0
 transformers==5.22.2
 six==1.17.0  # imported by TTS.tts.utils.text.punctuation but not declared by coqui-tts 0.28.0
 soundfile==0.14.0
+# XTTS's text cleaning for Chinese (pinyin) and Japanese (romaji: cutlet, fugashi's MeCab, the unidic-lite dictionary);
+# Korean's (ko-speech-tools) comes with coqui-tts itself
+pypinyin==0.55.0
+cutlet==0.5.2
+fugashi==1.5.2
+unidic-lite==1.0.8

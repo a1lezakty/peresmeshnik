@@ -185,17 +185,29 @@ def test_tray_pair_switch_details(tmp_path, monkeypatch):
 
     gate = th.Event()
     real_fetch = models_mod.fetch
+    monkeypatch.setattr(models_mod, 'fetch', lambda mid, *a, **k: gate.wait(10))  # lands nothing: the next part fetches
+    t.set_state('translating (them: local, me: local; languages ru ⇄ en)')
+    t.switch_pair('de', 'ja')
+    settle(0.3)
+    assert t._pair is not None and t.status.text().startswith('downloading')
+    t.switch_pair('ru', 'en')  # back to the saved pair while de -> ja is on its way
+    assert t._pair is None and t.status.text().startswith('translating') and calls == []  # nothing made again
+    gate.set()
+    settle(0.5)
+    assert calls == [] and config.load().my_lang == 'ru'  # the download let go: it ends unused
+
+    gate = th.Event()
     monkeypatch.setattr(models_mod, 'fetch', lambda mid, *a, **k: gate.wait(10) and real_fetch(mid, *a, **k))
     t.switch_pair('ja', 'de')  # both sides local in ja <-> de: its stand-ins are fetched (the gate holds them)
     settle(0.3)
     assert t._pair is not None and calls == [] and any('downloading' in m for m in t.said)
     saved = config.load()
-    saved.cloud.subtitles = True  # a change elsewhere while it downloads
+    saved.cloud.subtitles, saved.me_to_them = True, 'cloud'  # changes elsewhere while it downloads (a side it left alone)
     config.save(saved)
     gate.set()
     assert wait_for(lambda: calls)
     got = config.load()
-    assert (got.my_lang, got.their_lang, got.cloud.subtitles) == ('ja', 'de', True)  # the pair, and the change kept
+    assert (got.my_lang, got.their_lang, got.cloud.subtitles, got.me_to_them) == ('ja', 'de', True, 'cloud')  # all kept
     assert len(calls) == 1  # translation off: the controller still hears of it (its thread knows when it is on)
 
     s = wire(config.Settings(my_lang='de', their_lang='en', them_to_me='local', me_to_them='cloud'))
@@ -306,8 +318,9 @@ def test_while_a_side_is_made_again_the_call_and_i_hear_each_other(tmp_path, mon
     """_drop / _make (a new pair, a restart after an error): me -> them — the microphone loop on before the old side
     stops, off once the new one is made, before it starts (the call hears me meanwhile, as in _on); them -> me — the
     route undone first, the pass-through (macOS < 14.4) on once the old input let go, off before the new one starts. A
-    side that cannot start leaves its stand-in on, the other side runs; none: translation off. A clone that cannot
-    speak the language: said."""
+    side that cannot be made or started leaves its stand-in on, the other side runs; none: translation off. Each side's
+    rows take the new languages once it is made again. A clone that cannot speak the language: said at the start (a new
+    pair: by the tray), once."""
     from peresmeshnik import app, pipeline
     monkeypatch.setenv('PERESMESHNIK_MODELS', str(tmp_path / 'models'))
     stand_ins(monkeypatch)
@@ -332,25 +345,44 @@ def test_while_a_side_is_made_again_the_call_and_i_hear_each_other(tmp_path, mon
     s = wire(config.Settings(them_to_me='local', me_to_them='local'))
     s.local.clone = 'piper'
     states = []
-    overlay = type('O', (), {'side': lambda self, name: type('S', (), {'show': lambda *a: None, 'hide': lambda *a: None})()})()
+    overlay = type('O', (), {'side': lambda self, name: type('S', (), {'show': lambda *a: None, 'hide': lambda *a: None})(),
+                             'set_pair': lambda self, my, their, side=None: log.append(('pair', side, my, their))})()
     ctl = app.Controller(overlay, states.append, sample, sample, settings=s, test=True)
     ctl.set_translation(True).result(30)
     log.clear()
     s.my_lang, s.their_lang = 'de', 'ja'
     ctl.set_languages().result(30)
     assert log == [('_unroute',), ('closed', 'en'), ('_through_start',), ('made', 'ja'), ('_through_stop',),
-                   ('_loopback', True), ('closed', 'ru'), ('made', 'de'), ('_loopback', False)], log
+                   ('pair', 'them', 'de', 'ja'), ('_loopback', True), ('closed', 'ru'), ('made', 'de'), ('_loopback', False),
+                   ('pair', 'me', 'de', 'ja')], log
+
+    real_start = app.Side.start
+    monkeypatch.setattr(app.Side, 'start', lambda self: (_ for _ in ()).throw(RuntimeError('the microphone is gone'))
+                        if self.name == 'me' else real_start(self))
     log.clear()
-    fail.add(('ja', 'de'))  # them -> me cannot start in ja <-> de any more; me -> them can
-    s.local.clone = 'xtts-v2'  # chosen, but it has no Japanese: the stock voice, said
+    ctl.set_languages().result(30)  # me -> them made, but its start fails: closed, the loop stays on
+    assert [x.name for x in ctl.sides] == ['them'] and ctl.on
+    assert log[-5:] == [('_loopback', True), ('closed', 'de'), ('made', 'de'), ('closed', 'de'), ('pair', 'me', 'de', 'ja')], log
+    assert ('_loopback', False) not in log and any('me → them cannot start for de ⇄ ja: the microphone is gone' in x for x in states)
+    monkeypatch.setattr(app.Side, 'start', real_start)
+
+    log.clear()
+    fail.add(('ja', 'de'))  # them -> me cannot be made in ja <-> de any more; me -> them can
+    s.local.clone = 'xtts-v2'  # chosen, but it has no Japanese: the stock voice
+    n = len(states)
     ctl.set_languages().result(30)
     assert [x.name for x in ctl.sides] == ['me'] and ctl.on
     assert ('_through_stop',) not in log and any(st.startswith('error: them → me cannot start for de ⇄ ja: no ja-de') for st in states)
-    assert states[-1] == 'note: me → them: your cloned voice cannot speak Japanese: a stock voice speaks instead', states
+    note = 'note: me → them: your cloned voice cannot speak Japanese: a stock voice speaks instead'
+    assert note not in states[n:]  # the tray said it with the pair
+    ctl.set_translation(False).result(30)
+    n = len(states)
+    ctl.set_translation(True).result(30)
+    assert states[n:].count(note) == 1, states[n:]
     fail.add(('de', 'ja'))  # and neither side now: translation off
     log.clear()
     ctl.set_languages().result(30)
-    assert not ctl.on and not ctl.sides and log[:2] == [('_loopback', True), ('closed', 'de')], log
+    assert not ctl.on and not ctl.sides and [x for x in log if x[0] != 'pair'][:2] == [('_loopback', True), ('closed', 'de')], log
     ctl.quit()
 
 
@@ -419,8 +451,8 @@ def test_pair_size_and_download_go_through_the_registry_functions(tmp_path, monk
     size from models.size and download it with models.fetch, which unfold it."""
     from peresmeshnik import models as models_mod
     from peresmeshnik.ui import wizard
+    t, calls = tray_with(monkeypatch, tmp_path, wire(config.Settings(them_to_me='local', me_to_them='cloud')))  # ru / en
     s = wire(config.Settings(my_lang='de', their_lang='ja', them_to_me='local', me_to_them='cloud'))
-    t, calls = tray_with(monkeypatch, tmp_path, s)
     reg = models_mod.registry()
     reg['mt-ja-de'] = models.Model('mt-ja-de', 'mt', ('ja-de',), 'MIT', 'u', 'u', {})  # no files: it is two others
     monkeypatch.setattr(models_mod, 'size', lambda m: 123_000_000 if m.id == 'mt-ja-de' else m.size)
@@ -502,3 +534,43 @@ def test_arabic_from_the_cloud_is_said_to_be_egyptian(tmp_path, monkeypatch):
     page = wizard.LanguagesPage(type('W', (), {'s': config.Settings()})())
     page.their_lang.setCurrentIndex(page.their_lang.findData('ar'))
     assert 'Egyptian Arabic' in page.why['them_to_me'].text() and 'Egyptian' not in page.why['me_to_them'].text()
+
+
+def test_a_star_model_reaches_the_side(tmp_path, monkeypatch):
+    """'*' in `[local]` asr and mt (one model for every language or pair): the app's local side, the cloud's local
+    fallback and make_local's own defaults are built on it (languages.direction's ids), no KeyError."""
+    from types import SimpleNamespace
+
+    from peresmeshnik import app, pipeline
+    from peresmeshnik.cloud import fallback, gemini
+    from peresmeshnik.local import asr, mt, tts, vad
+    reg = dict(models.registry())
+    for mid, role, langs in (('asr-many', 'asr', ('de', 'ja')), ('mt-many', 'mt', ('de', 'ja')), ('tts-de', 'tts', ('de',)),
+                             ('tts-ja', 'tts', ('ja',))):
+        reg[mid] = models.Model(mid, role, langs, 'MIT', 'u', 'u', {})
+    monkeypatch.setattr(models, 'registry', lambda: reg)
+    made = []
+    monkeypatch.setattr(asr, 'OnnxAsr', lambda mid, threads=None: made.append(mid))
+    monkeypatch.setattr(mt, 'OpusMt', lambda src, tgt, mid, threads=None: made.append(mid))
+    monkeypatch.setattr(tts, 'PiperTts', lambda mid, threads=None: made.append(mid))
+    monkeypatch.setattr(vad, 'SileroVad', lambda: None)
+    monkeypatch.setattr(pipeline, 'LocalDirection', lambda *a, **k: SimpleNamespace(
+        tts=None, mt=None, warm_up=lambda: None, close=lambda: None))
+    monkeypatch.setattr(gemini, 'GeminiDirection', lambda src, tgt, *a, **k: Direction(src, tgt))
+    s = config.Settings(my_lang='de', their_lang='ja', them_to_me='local', me_to_them='local')
+    s.local.asr, s.local.mt, s.local.tts, s.local.clone = {'*': 'asr-many'}, {'*': 'mt-many'}, {'de': 'tts-de', 'ja': 'tts-ja'}, 'piper'
+    pipeline.make_local('ja', 'de', settings=s)
+    assert sorted(made) == ['asr-many', 'mt-many', 'tts-de']
+    for name, src, tgt, voice in (('them', 'ja', 'de', 'tts-de'), ('me', 'de', 'ja', 'tts-ja')):
+        made.clear()
+        side = app.Side.__new__(app.Side)
+        side.name, side.src, side.tgt = name, src, tgt
+        side._local(s)
+        assert sorted(made) == ['asr-many', 'mt-many', voice]
+    s.them_to_me = 'cloud'
+    made.clear()
+    fb = fallback.make('them', s, 'a-key')  # local subtitles beside the cloud voice: the '*' models
+    try:
+        assert sorted(made) == ['asr-many', 'mt-many']
+    finally:
+        fb.close()

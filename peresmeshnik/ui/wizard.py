@@ -865,8 +865,8 @@ class VoicePage(QWizardPage):
         s.local.clone = voice.STOCK if on else config.Local().clone
         self.check_button.setVisible(self.local() and not on)
         self._show_pack()
-        vid = s.local.tts[s.their_lang]
-        if on and not models.is_fetched(models.get(vid), models.root()):
+        vid = languages.direction(s, 'me_to_them').tts  # the stock voice now ('' = none for the language)
+        if on and vid and not models.is_fetched(models.get(vid), models.root()):
             self.out.setText(f'Downloading the stock voice {vid}…')
             self._run(lambda: (models.fetch(vid), self.result.emit(f'The stock voice {vid} is here.')))
         self.completeChanged.emit()
@@ -946,7 +946,7 @@ class VoicePage(QWizardPage):
             tts = None
             try:
                 tts = make_clone(models.path(s.local.clone), threads=s.local.threads)
-                asr = OnnxAsr(s.local.asr[s.their_lang], s.local.threads)
+                asr = OnnxAsr(languages.direction(s, 'them_to_me').asr, s.local.threads)  # their language's ASR
                 self.checked.emit(voice.clone_verdict(voice.check_clone(tts, v, s.their_lang, asr)))
             except Exception as e:  # no voice pack or GPU, a model not downloaded yet, out of memory
                 self.checked.emit(f'error: {e}')

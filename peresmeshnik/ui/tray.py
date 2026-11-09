@@ -295,6 +295,11 @@ class Tray(QObject):
         from peresmeshnik.ui.overlay import font_note
         from peresmeshnik.ui.wizard import has_key
         s = config.load()
+        if (my, their) == (s.my_lang, s.their_lang):  # back to the pair it runs in: another's download is let go (unused)
+            self._pair = None
+            self.status.setText(self.icon.toolTip().removeprefix('Peresmeshnik: ')[:120])  # the last state, as before it
+            self.sync()
+            return
         s.my_lang, s.their_lang = my, their
         name = f'{languages.name(my)} ⇄ {languages.name(their)}'
         notes, moved = [], []

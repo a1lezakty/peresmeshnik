@@ -186,7 +186,9 @@ def test_stock_voice_instead_of_the_clone(page, monkeypatch):
     side = app.Side.__new__(app.Side)
     side.name, side.src, side.tgt = 'me', s.my_lang, s.their_lang
     side._local(s)
-    assert made == [((s.my_lang, s.their_lang), {'settings': s})]  # no clone, no voice profile
+    # no clone, no voice profile: the stock voice and the ids languages.direction picked
+    assert made == [((s.my_lang, s.their_lang), {'tts': s.local.tts[s.their_lang], 'asr': s.local.asr[s.my_lang],
+                                                  'mt': s.local.mt[f'{s.my_lang}-{s.their_lang}'], 'settings': s})]
     page.stock.setChecked(False)
     assert s.local.clone == 'xtts-v2' and not page.isComplete()
 

@@ -458,7 +458,8 @@ def make(name: str, s, key: str, on_state=lambda text: None, on_respawn=lambda e
     def local(t):  # no local path for this pair (models.toml langs): the reason, not a KeyError
         if not d.subtitles:
             raise RuntimeError('; '.join(d.why))
-        return make_local(src, tgt, tts=t, settings=s, voice=voice, max_lag_s=MAX_LAG_S if name == 'them' else None)
+        return make_local(src, tgt, asr=d.asr, mt=d.mt, tts=t, settings=s, voice=voice,  # languages.direction's ids
+                          max_lag_s=MAX_LAG_S if name == 'them' else None)
     return Fallback(
         name, tgt, languages.cloud_subtitles(s, d.side),
         make_cloud=lambda: GeminiDirection(src, tgt, key, s.cloud, fail_fast=True),

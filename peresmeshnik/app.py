@@ -488,11 +488,12 @@ class Side:
         pair = languages.direction(s, 'them_to_me' if self.name == 'them' else 'me_to_them')
         if not pair.local:  # the wizard and the tray say so before; settings edited by hand land here
             raise RuntimeError(f'{"; ".join(pair.why)}: switch "{ARROW[self.name].capitalize()}" to cloud')
+        kw = {'asr': pair.asr, 'mt': pair.mt, 'settings': s}  # languages.direction's ids: its '*' and NVIDIA GPU rules
         if self.name == 'them':
             from peresmeshnik.pipeline import MAX_LAG_S
-            d = make_local(self.src, self.tgt, settings=s, max_lag_s=MAX_LAG_S)  # the queue policy: subtitles keep the rest
+            d = make_local(self.src, self.tgt, tts=pair.tts, max_lag_s=MAX_LAG_S, **kw)  # the queue policy: subtitles keep the rest
         elif pair.voice == 'stock':  # a stock voice: chosen where the clone falls behind (an 8 GB Mac, BENCH), or the
-            d = make_local(self.src, self.tgt, settings=s)  # clone cannot speak the language
+            d = make_local(self.src, self.tgt, tts=pair.tts, **kw)  # clone cannot speak the language
         else:
             if not s.local.voice:
                 raise RuntimeError('me -> them local needs your voice: enroll it first (python -m peresmeshnik.voice enroll), '
@@ -504,7 +505,7 @@ class Side:
                 tts = make_clone(model_dir, threads=s.local.threads)
             except RuntimeError as e:  # no voice pack, no CUDA, its runner did not start
                 return self._fallback(s, e)
-            d = make_local(self.src, self.tgt, settings=s, tts=tts, voice=v)
+            d = make_local(self.src, self.tgt, tts=tts, voice=v, **kw)
             try:
                 d.warm_up()
                 rtf = clone_rtf(tts, self.tgt, v)
@@ -522,7 +523,7 @@ class Side:
         if (tts := getattr(d, 'tts', None)) is not None:
             from peresmeshnik import languages
             from peresmeshnik.local.tts import PiperTts
-            vid = languages.pick(s.local.tts, self.tgt)  # the language's stock voice (languages.direction's)
+            vid = languages.pick(s.local.tts, self.tgt)  # the language's stock voice (its '*' too)
             d.tts = crash.Respawn(lambda: PiperTts(vid, threads=s.local.threads), self._tts_respawned, tts)
         d.warm_up()
         return d
@@ -1043,6 +1044,7 @@ class Controller:
             self._unroute()
         else:
             self._loopback(True)
+            self._watch_call(False)  # Windows: no translation into CABLE Input meanwhile
         try:
             side.stop()
         except Exception:
@@ -1052,13 +1054,21 @@ class Controller:
 
     def _make(self, name: str, s: config.Settings) -> Side:
         new = self._side(name, s)  # raises: the caller says why (the loop / the pass-through then stay)
+        new.set_live(self.live)
+        try:
+            new.start()
+        except Exception:
+            try:
+                new.stop()
+            except Exception:
+                log.exception('stopping %s', name)
+            raise
         if name == 'me':
             self._loopback(False)  # the call heard me through the loop until the translation was ready (as in _on)
+            self._watch_call(True)
         else:
             self._through_stop()  # BlackHole 16ch goes to the translation now
         self.sides.append(new)
-        new.set_live(self.live)
-        new.start()
         if new.name == 'them' and self.devices:  # the call app's sound to the new input (a tap, a loopback, the sink)
             self._route(s)
         return new
@@ -1068,16 +1078,15 @@ class Controller:
         `_make`: meanwhile the call and I hear each other as with translation off); off, the next start takes it."""
         return self.submit(self._relanguage)
 
-    def _pair_to_overlay(self, s: config.Settings) -> None:
+    def _pair_to_overlay(self, s: config.Settings, side: str | None = None) -> None:
         if hasattr(self.overlay, 'set_pair'):  # the rows' fonts (Han in Chinese, Japanese, Korean forms)
-            self.overlay.set_pair(s.my_lang, s.their_lang)
+            self.overlay.set_pair(s.my_lang, s.their_lang, side)
 
     def _relanguage(self) -> None:
         s = self.settings or config.load()
         if not self.on:
             self.on_state(f'idle, translation off (languages {s.my_lang} ⇄ {s.their_lang})')
             return
-        self._pair_to_overlay(s)
         files = {'them': self.them_file, 'me': self.me_file}
         for name in ('them', 'me'):
             if not (self.devices or files[name]):
@@ -1089,17 +1098,17 @@ class Controller:
             except Exception as e:
                 log.exception('%s', name)
                 self.on_state(f'error: {ARROW[name]} cannot start for {s.my_lang} ⇄ {s.their_lang}: {e}')
+            self._pair_to_overlay(s, name)  # its rows in the new languages now (the other side's still in the old)
         if not self.sides:
             self._off()
             return
         self.on_state(f'translating ({", ".join(f"{x.name}: {x.engine}" for x in self.sides)}; '
                       f'languages {s.my_lang} ⇄ {s.their_lang})')
-        self._stock_note(s)
-        self._fonts(s)
+        self._fonts(s)  # a stock voice instead of the clone: the tray said it with the pair (switch_pair)
 
     def _stock_note(self, s: config.Settings) -> None:
         """Me -> them local speaks in a stock voice though the clone is chosen (it cannot speak the language, or needs an
-        NVIDIA GPU here): said at each start and new pair."""
+        NVIDIA GPU here): said at each start (a new pair: by the tray)."""
         from peresmeshnik import languages
         from peresmeshnik.voice import STOCK
         if s.local.clone != STOCK and any(x.name == 'me' and x.engine == 'local' for x in self.sides) and (

@@ -124,9 +124,10 @@ def direction(s, side: str, has_gpu: bool | None = None) -> Direction:
     asr = usable(pick(loc.asr, src), f'no local speech recognition for {name(src)}', f'speech recognition for {name(src)}')
     mt = usable(pick(loc.mt, f'{src}-{tgt}'), f'no local translation from {name(src)} to {name(tgt)}',
                 f'translation from {name(src)} to {name(tgt)}')
-    stock = pick(loc.tts, tgt)
-    stock = '' if stock and needs_gpu(stock) and not has_gpu else stock
-    tts, voice, no_voice = stock, 'stock' if stock else '', f'no local voice for {name(tgt)}'
+    stock, no_voice = pick(loc.tts, tgt), f'no local voice for {name(tgt)}'
+    if stock and needs_gpu(stock) and not has_gpu:
+        stock, no_voice = '', f'the voice for {name(tgt)} needs an NVIDIA GPU ({stock})'
+    tts, voice = stock, 'stock' if stock else ''
     if side == 'me_to_them' and loc.clone != STOCK:
         if not covers(loc.clone, tgt):
             instead = f'your cloned voice cannot speak {name(tgt)}'

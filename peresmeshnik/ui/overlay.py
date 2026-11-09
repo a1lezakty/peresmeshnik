@@ -118,10 +118,11 @@ class SubtitleOverlay(QWidget):
     def side(self, name: str) -> OverlaySide:
         return OverlaySide(self, name)
 
-    def set_pair(self, my: str, their: str) -> None:
-        """Any thread (the controller's, at translation on and a new pair): the languages of each side's rows, for
-        their fonts at the next paint."""
-        self.langs = {'them': (their, my), 'me': (my, their)}
+    def set_pair(self, my: str, their: str, side: str | None = None) -> None:
+        """Any thread (the controller's, at translation on and a new pair): the languages of each side's new rows, for
+        their fonts at the next paint; `side`: only its (made again for the pair, the other still in the old one)."""
+        pair = {'them': (their, my), 'me': (my, their)}
+        self.langs = pair if side is None else {**self.langs, side: pair[side]}
         self.pair.emit(my, their)
 
     def _warm(self, my: str, their: str) -> None:

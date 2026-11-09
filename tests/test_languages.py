@@ -57,7 +57,8 @@ def test_a_pair_on_stand_in_models_needs_only_its_own(monkeypatch):
     s.local.tts.update(de='tts-de', ja='tts-ja')
     s.local.clone = 'clone-ja'
     assert all(languages.direction(s, side, has_gpu=True).local for side in languages.SIDES)
-    assert languages.needed_models(s) == ['silero-vad', 'asr-ja', 'mt-many', 'tts-de', 'asr-de', 'clone-ja']
+    assert languages.needed_models(s) == ['silero-vad', 'asr-ja', 'mt-many', 'tts-de', 'asr-de', 'clone-ja',
+                                          'tts-ja']  # the stock voice: the clone's fallback (S2)
     s.local.clone = 'xtts-v2'  # a clone without Japanese: the stock voice, said so
     me = languages.direction(s, 'me_to_them', has_gpu=True)
     assert me.local and me.voice == 'stock' and me.tts == 'tts-ja' and 'cannot speak Japanese' in me.notes[0]
@@ -103,6 +104,10 @@ def test_a_model_that_needs_a_gpu_is_not_offered_without_one(monkeypatch):
     s.local.tts = {'de': 'tts-de'}  # and no stock voice for Japanese: no local voice, and why
     assert languages.direction(s, 'me_to_them', has_gpu=False).why == ('your cloned voice needs an NVIDIA GPU',)
     assert '| 日本語 (Japanese) | asr-ja (NVIDIA GPU) |' in languages.table(s)
+    fake_registry(monkeypatch, stub('asr-de', 'asr', 'de'), stub('mt-many', 'mt', 'de', 'ja'), stub('tts-ja', 'tts', 'ja', needs='gpu'))
+    s.local.clone, s.local.tts = 'piper', {'ja': 'tts-ja'}  # a stock voice that needs one: said so, not "no voice"
+    assert languages.direction(s, 'me_to_them', has_gpu=False).why == ('the voice for Japanese needs an NVIDIA GPU (tts-ja)',)
+    assert languages.direction(s, 'me_to_them', has_gpu=True).tts == 'tts-ja'
 
 
 def test_star_is_one_model_for_every_pair_it_has(monkeypatch):

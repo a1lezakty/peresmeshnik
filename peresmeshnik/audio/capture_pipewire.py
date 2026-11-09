@@ -173,12 +173,18 @@ def send_back(index: str, sink: str) -> None:
 
 def return_strays(sink: str = CALL_SINK) -> list[str]:
     """Streams of other apps sitting in our call sink while nothing moved them there (a killed run, or
-    WirePlumber restoring an old move): back to the default output. Returns the apps moved."""
-    moved = []
+    WirePlumber restoring an old move): back to the default output. Returns the apps moved; a stream that does not
+    move does not keep the others: the errors are raised after."""
+    moved, errors = [], []
     for p in players():
         if p['sink'] == sink:
-            send_back(p['index'], '')
-            moved.append(p['name'])
+            try:
+                send_back(p['index'], '')
+                moved.append(p['name'])
+            except RuntimeError as e:
+                errors.append(f'{p["name"]}: {e}')
+    if errors:
+        raise RuntimeError('; '.join(errors) + f' (given back: {", ".join(moved) or "none"})')
     return moved
 
 
@@ -252,8 +258,12 @@ class CallRouter:
                     continue
                 if p['key'] != self.app:
                     if p['sink'] == self.sink:  # WirePlumber restored our move under a shared name (Electron apps and the
-                        send_back(p['index'], '')  # Chromium browser are all "Chromium"): not the call app, back it goes
-                        log.info('call sound: %s stream %s is not %s: back to the default output', p['name'], p['index'], self.app)
+                        try:  # Chromium browser are all "Chromium"): not the call app, back it goes
+                            send_back(p['index'], '')
+                            log.info('call sound: %s stream %s is not %s: back to the default output', p['name'], p['index'],
+                                     self.app)
+                        except RuntimeError as e:  # one stream that does not move does not stop the call's
+                            log.warning('call sound: %s', e)
                     continue
                 again = p['index'] in self.moved
                 if again and p['sink'] == self.sink:

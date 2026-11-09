@@ -75,9 +75,10 @@ def registry() -> dict[str, Model]:
         for b, second in from_en.items():
             if a != b and not any(f'{a}-{b}' in m.langs for m in reg.values()):
                 rid = f'mt-{a}-{b}-via-en'
-                strict = second if second.consent and not first.consent else first  # the strictest license of the two
+                strict = second if second.consent and not first.consent else first  # its link: the stricter license's
                 note = 'through English: ' + ' + '.join(dict.fromkeys((first.note, second.note)))
-                reg[rid] = Model(rid, 'mt', (f'{a}-{b}',), strict.license, strict.license_url, '', {},
+                lic = ' + '.join(dict.fromkeys((first.license, second.license)))  # both bind (CC-BY: credit the author)
+                reg[rid] = Model(rid, 'mt', (f'{a}-{b}',), lic, strict.license_url, '', {},
                                  first.consent or second.consent, note, (first.id, second.id))
     return reg
 
@@ -91,6 +92,11 @@ def get(model_id: str) -> Model:
         return registry()[model_id]
     except KeyError:
         raise ModelMissing(f'unknown model {model_id!r}; known: {", ".join(registry())}') from None
+
+
+def parts(m: Model) -> list[Model]:
+    """The rows a model runs on: a `via` pair's two, else itself; their licenses are what the user gets."""
+    return [get(i) for i in m.via] or [m]
 
 
 def size(m: Model) -> int:

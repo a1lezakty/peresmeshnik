@@ -26,7 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # isort: off
-from peresmeshnik.pipeline import OTHER, LocalDirection, make_local, read_audio, run  # noqa: E402  first: it pins BLAS threads
+from peresmeshnik.pipeline import LocalDirection, make_local, read_audio, run  # noqa: E402  first: it pins BLAS threads
 import numpy as np  # noqa: E402
 # isort: on
 
@@ -283,7 +283,7 @@ def overlap(a):
 
 def target(a) -> str:
     """The language they are translated into: --to, else Russian (English for Russian speech), as the app's them -> me."""
-    return a.to or OTHER.get(a.lang, 'ru')
+    return a.to or ('en' if a.lang == 'ru' else 'ru')
 
 
 def repeats(rows, lang: str = 'en') -> int:
@@ -342,7 +342,8 @@ def long(a):
     from asr import lid  # bench/asr.py: letter trigrams against FLEURS test text of the 14
     classify, long_enough = lid(), [x['text'] for x in rows if len(asr.units(x['text'], a.lang)) >= (6 if a.lang in asr.NO_SPACES else 4)]
     other = [t for t in long_enough if classify(t) != a.lang]  # a clause in another language: Parakeet drifting
-    record('call', a.variant, scenario='long', lang=a.lang, to=target(a), n=a.n, seed=a.seed, clauses=len(rows), clause_s_p50=pct(dur, 50),
+    record('call', a.variant, scenario='long', lang=a.lang, to=target(a), clauses=len(rows), clause_s_p50=pct(dur, 50),
+           asr=base.asr.name, n=a.n, seed=a.seed,
            clause_s_p90=pct(dur, 90), caption_span_s_p50=pct(caption, 50), caption_span_s_p90=pct(caption, 90),
            subtitle_span_s_p50=pct(sub, 50), subtitle_span_s_p90=pct(sub, 90), early_s=a.early, partial_mt=not a.no_partial_mt,
            max_clause_s=a.max_clause, mt_rtf=round(float(np.mean([x['mt_rtf'] for x in sums])), 4),
@@ -387,7 +388,8 @@ def links(a):
     by_reason = {k: {'n': len(v), 'vad_p50': pct(v, 50), 'vad_p90': pct(v, 90)}
                  for k in ('pause', 'punct', 'max') if (v := [r['vad_lag_s'] for r in rows if r['reason'] == k and 'vad_lag_s' in r])}
     record('call', a.variant, scenario='links', lang=a.lang, to=target(a), n=a.n, seed=a.seed, clauses=len(rows),
-           dropped=sum('dropped' in r for r in rows), asr_device=base.asr.device, mt_device=getattr(base.mt, 'device', 'cpu'),
+           dropped=sum('dropped' in r for r in rows), asr=base.asr.name, asr_device=base.asr.device,
+           mt_device=getattr(base.mt, 'device', 'cpu'),
            cuda=device.want(), cpu=platform.processor(),
            links=out, vad_by_reason=by_reason,
            rtf={k: round(float(np.mean([x[k] for x in sums])), 4) for k in sums[0] if k.endswith('_rtf')},

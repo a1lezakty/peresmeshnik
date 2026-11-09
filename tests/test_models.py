@@ -3,7 +3,7 @@ import hashlib
 
 import pytest
 
-from peresmeshnik import config, models
+from peresmeshnik import config, models, pipeline
 
 
 def test_registry_pins():
@@ -29,6 +29,8 @@ def test_registry_pins():
     pairs = {p for m in reg.values() if m.role == 'mt' for p in m.langs}
     assert {f'{a}-{b}' for a in LANGS for b in LANGS if a != b} <= pairs
     assert reg['mt-tr-ja-via-en'].via == ('opus-mt-tr-en', 'quickmt-en-ja') and 'mt-de-ru-via-en' not in reg  # de-ru: direct
+    assert reg['mt-tr-ja-via-en'].license == 'Apache-2.0 + CC-BY-4.0'  # both bind: CC-BY's credit too
+    assert [m.license for m in models.parts(reg['mt-tr-ja-via-en'])] == ['Apache-2.0', 'CC-BY-4.0']
     # one pivot per language and way; X->en: OPUS-MT where quickmt makes up a continuation of a one-word reply (config)
     to_en = sorted(m.langs[0][:2] for m in reg.values() if m.pivot and m.langs[0].endswith('-en'))
     from_en = sorted(m.langs[0][3:] for m in reg.values() if m.pivot and m.langs[0].startswith('en-'))
@@ -126,11 +128,23 @@ def test_settings_round_trip(tmp_path):
         config.load(p)
 
 
+def test_saved_settings_take_a_new_default(tmp_path, monkeypatch):
+    """Saved [local] tables keep only what the user changed: a default changed later (fr's ASR, a new MT) reaches them."""
+    s = config.Settings()
+    s.local.mt['de-ru'] = 'mt-de-ru-via-en'
+    p = config.save(s, tmp_path / 'settings.toml')
+    assert 'fr-ru' not in p.read_text('utf-8') and config.load(p) == s
+    new = {**config._mt(), 'fr-ru': 'mt-fr-ru-via-en', 'de-ru': 'opus-mt-de-ru'}
+    monkeypatch.setattr(config, '_mt', lambda: new)
+    loc = config.load(p).local
+    assert (loc.mt['fr-ru'], loc.mt['de-ru']) == ('mt-fr-ru-via-en', 'mt-de-ru-via-en')
+
+
 def test_the_default_engines_cover_the_14_languages():
     """Settings' defaults: MT for every direction, ASR and a stock voice where the registry has one (BENCH stage 6)."""
     from peresmeshnik.languages import LANGS
     loc, reg = config.Local(), models.registry()
-    assert config.LANGS == LANGS
+    assert config.LANGS == LANGS and set(pipeline.HELLO) == set(LANGS)  # every language has its warm-up phrase
     assert set(loc.mt) == {f'{a}-{b}' for a in LANGS for b in LANGS if a != b}
     assert all(k in reg[i].langs for k, i in loc.mt.items()) and set(loc.asr) == set(LANGS)
     assert all(k in reg[i].langs for d in (loc.asr, loc.tts) for k, i in d.items())

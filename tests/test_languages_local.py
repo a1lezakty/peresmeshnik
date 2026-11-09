@@ -62,8 +62,8 @@ def cer(ref, hyp):
 
 def sample(lang):
     import soundfile as sf
-    if not (SAMPLES / f'{lang}.ogg').exists():  # the wizard's samples come with the shell stream's #16
-        pytest.skip(f'no {lang}.ogg in {SAMPLES}')
+    if not (SAMPLES / f'{lang}.ogg').exists():  # the wizard's samples (#16): in the work gate they are there, or a failure
+        (pytest.fail if GATE else pytest.skip)(f'no {lang}.ogg in {SAMPLES}')
     x, sr = sf.read(SAMPLES / f'{lang}.ogg', dtype='float32')
     assert sr == 16000
     return x if x.ndim == 1 else x.mean(axis=1)

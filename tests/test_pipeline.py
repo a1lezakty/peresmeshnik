@@ -489,3 +489,27 @@ def test_whisper_decodes_a_capped_number_of_tokens():
     model.asr = Inner()
     cap_whisper(model)
     assert model.asr._decoding(None, None) == WHISPER_MAX_TOKENS and model.asr._decoding(None, None, 3) == 3
+
+
+def test_a_stream_that_will_not_move_back_stops_nothing(monkeypatch):
+    """send_back() raises when the sound server drops the move three times: the router still moves the call's stream,
+    return_strays() still gives the others back and says which failed."""
+    from peresmeshnik.audio import capture_pipewire as cp
+    ps = [{'index': '1', 'key': 'chromium', 'name': 'Chromium', 'sink': cp.CALL_SINK, 'restore': {}},
+          {'index': '2', 'key': 'zoom', 'name': 'Zoom', 'sink': 'alsa', 'restore': {'k': 'v'}},
+          {'index': '3', 'key': 'player', 'name': 'Player', 'sink': cp.CALL_SINK, 'restore': {}}]
+    back = []
+
+    def send_back(index, sink):
+        if index == '1':
+            raise RuntimeError('stream 1 never reached alsa')
+        back.append(index)
+    monkeypatch.setattr(cp, 'players', lambda: ps)
+    monkeypatch.setattr(cp, 'send_back', send_back)
+    monkeypatch.setattr(cp, 'move', lambda index, sink: True)
+    r = cp.CallRouter('zoom')
+    r._proc = object()  # started
+    r._move()
+    assert r.moved == {'2': 'alsa'} and back == ['3']
+    with pytest.raises(RuntimeError, match=r'Chromium: stream 1 never.*\(given back: Player\)'):
+        cp.return_strays()

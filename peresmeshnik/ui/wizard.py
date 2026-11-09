@@ -186,7 +186,8 @@ class LanguagesPage(QWizardPage):
             self.why[key].setWordWrap(True)
             f.addRow(title, c)
             f.addRow('', self.why[key])
-        self.subtitles = QCheckBox('Subtitles from the cloud (else from the local ASR: faster, needs ~1 GB of models)')
+        self.subtitles = QCheckBox('Subtitles from the cloud (else from the local ASR: faster, needs 0.7–2.2 GB of models; '
+                                   'this pair\'s below)')
         self.subtitles.setChecked(s.cloud.subtitles)
         f.addRow('Cloud', self.subtitles)
         self.download = QLabel()
@@ -250,7 +251,7 @@ class LanguagesPage(QWizardPage):
         ms, base = [models.get(i) for i in needed_models(s)], models.root()
         todo = [m for m in ms if not models.is_fetched(m, base)]
         lic = {}  # one link per license
-        for m in ms:
+        for m in [p for x in ms for p in models.parts(x)]:  # a pair through English: both of its models' licenses
             lic.setdefault(m.license, f'<a href="{m.license_url}">{m.license}</a>'
                            + (' (noncommercial: you accept it on the models page)' if m.consent else ''))
         self.download.setText((f'{sum(map(models.size, todo)) / 1e6:,.0f} MB for this pair ({len(todo)} of {len(ms)} models '
@@ -539,9 +540,9 @@ class ModelsPage(QWizardPage):
     def initializePage(self) -> None:  # noqa: N802
         self.ms = [models.get(i) for i in needed_models(self.w.s)]
         base = models.root()
+        lic = {m.id: ' + '.join(f'<a href="{p.license_url}">{p.license}</a>' for p in models.parts(m)) for m in self.ms}
         rows = [f'<tr><td>{"✔" if models.is_fetched(m, base) else "·"}</td><td>{m.id}</td>'
-                f'<td align=right>{models.size(m) / 1e6:.0f} MB</td>'
-                f'<td><a href="{m.license_url}">{m.license}</a></td></tr>' for m in self.ms]
+                f'<td align=right>{models.size(m) / 1e6:.0f} MB</td><td>{lic[m.id]}</td></tr>' for m in self.ms]
         self.list.setText(f'<table cellspacing=6>{"".join(rows)}</table><p>Folder: {base}</p>')
         restricted = [m for m in self.ms if m.consent and not models.is_fetched(m, base)]
         self.consent.setVisible(bool(restricted))

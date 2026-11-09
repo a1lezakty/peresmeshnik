@@ -52,7 +52,6 @@ from peresmeshnik.engines import SAMPLE_RATE, Caption, Latency, Speech, Voice
 from peresmeshnik.local.asr import NO_SPACES, _key, join, units
 
 log = logging.getLogger('peresmeshnik.latency')
-OTHER = {'en': 'ru', 'ru': 'en'}
 # the warm-up phrase of each of the 14 languages (languages.LANGS)
 HELLO = {'en': 'Hello.', 'ru': 'Привет.', 'uk': 'Привіт.', 'de': 'Hallo.', 'fr': 'Bonjour.', 'es': 'Hola.', 'it': 'Ciao.',
          'pt': 'Olá.', 'pl': 'Cześć.', 'tr': 'Merhaba.', 'zh': '你好。', 'ja': 'こんにちは。', 'ko': '안녕하세요.', 'ar': 'مرحبا.'}
@@ -356,8 +355,8 @@ def cli(argv=None) -> int:
     from peresmeshnik.local.asr import ONNX_ASR
     ap = argparse.ArgumentParser(prog='peresmeshnik run', description='Translate a recording through the local pipeline.')
     ap.add_argument('--in', dest='inp', required=True, help='audio file (any rate, mixed to mono)')
-    ap.add_argument('--from', dest='src', default='en', choices=sorted(OTHER))
-    ap.add_argument('--to', dest='tgt', choices=sorted(OTHER), help='default: the other language')
+    ap.add_argument('--from', dest='src', default='en', choices=sorted(HELLO), help='one of the 14 languages (default en)')
+    ap.add_argument('--to', dest='tgt', choices=sorted(HELLO), help='default: ru, or en from ru')
     ap.add_argument('--asr', choices=sorted(ONNX_ASR), help='ASR model (default: settings [local] asr for the language)')
     ap.add_argument('--threads', type=int, help='threads per engine (default: settings [local] threads)')
     ap.add_argument('--realtime', action='store_true', help='feed the file at its own pace (real lags in the log)')
@@ -373,7 +372,7 @@ def cli(argv=None) -> int:
                     help=f'with --realtime / --pipewire: drop speech that would start later than this after its clause, s '
                          f'(0 = say everything; default {MAX_LAG_S:g})')
     a = ap.parse_args(argv)
-    tgt = a.tgt or OTHER[a.src]
+    tgt = a.tgt or ('en' if a.src == 'ru' else 'ru')
     if tgt == a.src:
         ap.error('--from and --to are the same language')
     if not os.path.isfile(a.inp):

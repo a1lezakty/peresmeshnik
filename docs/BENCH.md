@@ -1945,7 +1945,7 @@ against FLEURS test text; a model without a language setting drifting).
 | uk | Parakeet TDT 0.6B v3 (CPU) | 0.095 / 0.026 | 0 / 0.14 | 155 / 209 / 451 | 1.45 GB |
 | de | Parakeet v3 (CPU) | 0.078 / 0.029 | 0 / 0.18 | 142 / 221 / 476 | 1.49 GB |
 | fr | Parakeet v3 (CPU) | 0.083 / 0.022 | 0.02 / 0.04 | 145 / 220 / 450 | 1.41 GB |
-| fr | FastConformer French (CPU; the default: Parakeet drifts into English in a call, "Calls" below; 4-core EPYC VM, Parakeet there 0.080 / 0.021, 127 ms) | 0.148 / 0.067 | 0.02 / 0.10 | 46 / 67 / 176 (EPYC VM) | |
+| fr | FastConformer French (CPU; the default: Parakeet drifts into English in a call, "Calls" below; `linux-x86_64-4c`, Parakeet there 0.080 / 0.021, 127 ms) | 0.148 / 0.067 | 0.02 / 0.10 | 46 / 67 / 176 (EPYC VM) | |
 | es | Parakeet v3 (CPU) | 0.035 / 0.013 | 0.02 / 0.06 | 127 / 200 / 466 | 1.43 GB |
 | it | Parakeet v3 (CPU) | 0.040 / 0.013 | 0 / 0.12 | 118 / 173 / 329 | 1.55 GB |
 | pt | Parakeet v3 (CPU) | 0.053 / 0.023 | 0 / 0.18 | 110 / 189 / 345 | 1.45 GB |
@@ -2161,10 +2161,10 @@ than the CPU for some languages (pl → ru 1.45 s against 0.57 s), so tr / zh / 
 - **Parakeet drifts into English — in French.** In the monologue Parakeet v3 (no language setting) wrote clauses after a
   5 s cut in English ("The repas romains à l'antiquité…", "and republicanism, the nationalism and the conviction that
   the pay", "The force of Lord never present…"): fr WER 0.32, CER 0.164, chrF 57.8 on the i7-13700 (0.31 / 0.176 / 59.0
-  on a 4-core EPYC VM). NVIDIA's FastConformer French (`fastconformer-fr-pc`) does not: 0.156 / 0.054 / 67.3, the fr
-  default now. Its price: on whole FLEURS dev utterances Parakeet is better (WER 0.080 against 0.148, CER 0.021 against
-  0.067, the EPYC VM, n = 50), and in the talk with pauses too (0.126 / 0.038 / 72.2 against 0.156 / 0.064 / 68.5, EPYC
-  VM) — but it drifted there once as well; a drifted clause is nonsense in Russian, not a word wrong. FastConformer's
+  on `linux-x86_64-4c`; the rows say their ASR in `asr`). NVIDIA's FastConformer French (`fastconformer-fr-pc`) does
+  not: 0.156 / 0.054 / 67.3, the fr default now. Its price: on whole FLEURS dev utterances Parakeet is better (WER 0.080
+  against 0.148, CER 0.021 against 0.067, `linux-x86_64-4c`, n = 50), and in the talk with pauses too (0.126 / 0.038 /
+  72.2 against 0.156 / 0.064 / 68.5, `linux-x86_64-4c`) — but it drifted there once as well; a drifted clause is nonsense in Russian, not a word wrong. FastConformer's
   1 s window: 46 ms against 127 ms. In the other languages the clauses show one such drift in German per run ("Your
   primary leaves raum is in Flusmündungen") and none in uk / es / it / pt / pl: they stay on Parakeet; their higher WER
   in the monologue than offline (de 0.157 against 0.078) comes from the 5 s cuts (names and numbers split).

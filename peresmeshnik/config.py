@@ -168,13 +168,19 @@ def _toml(v) -> str:
     raise TypeError(f'cannot write {v!r} to TOML')
 
 
+def _changed(v, default):
+    return {k: x for k, x in v.items() if default.get(k) != x} if isinstance(v, dict) else v
+
+
 def save(s: Settings, path: Path | None = None) -> Path:
     path = path or settings_path()
     top, tables = [], []
     for f in fields(s):
         v = getattr(s, f.name)
-        if is_dataclass(v):
-            tables.append(f'\n[{f.name}]\n' + ''.join(f'{g.name} = {_toml(getattr(v, g.name))}\n' for g in fields(v)))
+        if is_dataclass(v):  # a table's dict: only its keys that differ from the default, so a new default reaches
+            base = type(v)()  # saved settings too (load merges the saved keys over the defaults)
+            tables.append(f'\n[{f.name}]\n' + ''.join(f'{g.name} = {_toml(_changed(getattr(v, g.name), getattr(base, g.name)))}\n'
+                                                     for g in fields(v)))
         else:
             top.append(f'{f.name} = {_toml(v)}\n')
     path.parent.mkdir(parents=True, exist_ok=True)

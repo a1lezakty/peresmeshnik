@@ -7,6 +7,8 @@ import re
 
 # a sentence ends at . ! ? ; and a space (not "U.N. also": no space, or a lowercase word after), or at 。！？ alone
 _END = re.compile(r'[.!?;؟…]+\s+|[。！？；]+\s*')
+# ponytail: titles before a name only ("Mr. Smith said"); add one when a clause shows it cut
+_TITLES = {'mr', 'mrs', 'ms', 'dr', 'prof', 'st', 'jr', 'sr', 'sra', 'srta', 'hr', 'fr', 'mme', 'mlle', 'sig', 'д-р'}
 
 
 def sentences(text: str) -> list[str]:
@@ -14,7 +16,9 @@ def sentences(text: str) -> list[str]:
     from peresmeshnik.local.asr import _starts_sentence
     out, start = [], 0
     for m in _END.finditer(text):
-        if m.end() < len(text) and _starts_sentence(text[m.end():]):
+        word = text[start:m.start()].rsplit(None, 1)[-1:] or ['']
+        if m.end() < len(text) and _starts_sentence(text[m.end():]) and \
+                not (m.group().strip() == '.' and word[0].lower() in _TITLES):
             out.append(text[start:m.end()].strip())
             start = m.end()
     out.append(text[start:].strip())

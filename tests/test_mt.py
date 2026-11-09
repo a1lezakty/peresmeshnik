@@ -56,3 +56,4 @@ def test_a_clause_is_translated_sentence_by_sentence():
     assert sentences('Привет, как дела? Я позвоню завтра.') == ['Привет, как дела?', 'Я позвоню завтра.']
     assert sentences('The U.N. also hopes. then') == ['The U.N. also hopes. then']
     assert sentences('今日は晴れです。明日も') == ['今日は晴れです。', '明日も'] and sentences('مرحبا. كيف') == ['مرحبا.', 'كيف']
+    assert sentences('Mr. Smith said yes. No. Fine.') == ['Mr. Smith said yes.', 'No.', 'Fine.']  # a title, not an end

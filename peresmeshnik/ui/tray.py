@@ -317,8 +317,9 @@ class Tray(QObject):
             self.sync()
             return
         todo = [m for m in map(models.get, languages.needed_models(s)) if not models.is_fetched(m)]
-        lic = ', '.join(dict.fromkeys(m.license for m in todo))
-        restricted = [f'{m.id} ({m.license}, {m.license_url})' for m in todo if m.consent]
+        lic = ', '.join(dict.fromkeys(p.license for m in todo for p in models.parts(m)))  # a pair through English: both
+        restricted = list(dict.fromkeys(f'{p.id} ({p.license}, {p.license_url})' for m in todo for p in models.parts(m)
+                                        if p.consent))
         if restricted and not self.confirm(f'{name} needs models under restricted licenses (noncommercial use only, they bind '
                                            f'you as the user): {", ".join(restricted)}. Download and accept them?'):
             self.sync()

@@ -54,11 +54,12 @@ def _on_cuda(model) -> bool:
 
 
 def cap_whisper(model, max_tokens: int = WHISPER_MAX_TOKENS) -> None:
-    """Cap the tokens an onnx-asr Whisper decodes per window (its language guess asks for 3: kept)."""
+    """Cap the tokens an onnx-asr Whisper decodes per window (its language guess asks for 3: kept). `_decoding` is
+    onnx-asr 0.12.0's private method (uv.lock): another version without it stops here, not decodes 448 tokens unseen."""
     w = getattr(model, 'asr', None)
-    dec = getattr(w, '_decoding', None)
-    if dec is not None:
-        w._decoding = lambda enc, toks, max_length=448: dec(enc, toks, min(max_length, max_tokens))
+    assert hasattr(w, '_decoding'), 'onnx-asr: no Whisper _decoding to cap (a version other than 0.12.0?)'
+    dec = w._decoding
+    w._decoding = lambda enc, toks, max_length=448: dec(enc, toks, min(max_length, max_tokens))
 
 
 def _text(tokens: list[str]) -> str:
@@ -96,13 +97,17 @@ class OnnxAsr:
         self.partial_every = int(partial_every_s * SAMPLE_RATE)
         self.context_s = context_s
         self._lead = np.zeros(int(LEAD_S * SAMPLE_RATE), np.float32)
-        path, opts = models.path(model_id), ort_options(threads)
         providers = device.onnx_providers()
         self.device = 'cuda' if providers[0] == 'CUDAExecutionProvider' else 'cpu'
+        gpu_only = models.get(model_id).needs == 'gpu'  # Whisper turbo on the CPU: 4.6 s per 1 s window (BENCH stage 6)
+        if gpu_only and self.device == 'cpu':
+            raise RuntimeError(f'{model_id} keeps up only on CUDA, and onnxruntime here has none: '
+                               'switch "Them → me" to cloud')
+        path, opts = models.path(model_id), ort_options(threads)
         try:
             model = onnx_asr.load_model(name, path, quantization=quant, sess_options=opts, providers=providers)
         except Exception as e:  # CUDA listed but could not start (driver, VRAM): them -> me falls back to CPU
-            if self.device != 'cuda':
+            if self.device != 'cuda' or gpu_only:
                 raise
             import logging
             logging.getLogger('peresmeshnik.device').warning('ASR on CUDA failed (%s); using CPU', e)
@@ -113,6 +118,9 @@ class OnnxAsr:
             import logging
             logging.getLogger('peresmeshnik.device').warning('ASR: onnxruntime has no usable CUDA; running on CPU')
             self.device = 'cpu'
+            if gpu_only:
+                raise RuntimeError(f'{model_id} keeps up only on CUDA, and onnxruntime could not start it: '
+                                   'switch "Them → me" to cloud')
         self.model = model.with_timestamps()
         self.timed = name != 'whisper'  # Whisper through onnx-asr: text only
         if not self.timed:

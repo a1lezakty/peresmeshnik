@@ -16,6 +16,7 @@ from pathlib import Path
 HELPER = 'peresmeshnik-audio'
 BLACKHOLE = 'BlackHole 2ch'
 BLACKHOLE_UID = 'BlackHole2ch_UID'
+CALL = ('BlackHole 16ch', 'BlackHole16ch_UID')  # the call app's speaker below macOS 14.4 (capture_macos.CALL_DEVICE)
 INSTALL = ('BlackHole 2ch is not installed. It is the virtual microphone that carries your voice to the call app. '
            'Install it with "brew install blackhole-2ch" in the Terminal, or with the installer from '
            'https://existential.audio/blackhole/ — then check again (still not found: restart the Mac).')
@@ -59,11 +60,19 @@ def blackhole(devs: list[dict] | None = None) -> dict:
     raise BlackHoleMissing
 
 
+def stand_in_mic() -> str:
+    """$PERESMESHNIK_TEST_MIC: a virtual device the tests take as the microphone (BlackHole 16ch on the CI runner)."""
+    return os.environ.get('PERESMESHNIK_TEST_MIC', '')
+
+
 def not_blackhole(key: str, what: str = 'microphone') -> str:
-    """BlackHole 2ch carries our own output: as the microphone (or the headphones) the app would hear itself."""
+    """BlackHole 2ch carries our own output: as the microphone (or the headphones) the app would hear itself. BlackHole
+    16ch carries the call (below macOS 14.4): as the microphone, me -> them would translate the other side back."""
     if key and is_blackhole(key):
         raise ValueError(f'{BLACKHOLE} is the virtual microphone for the call app, not your {what}: choose your real '
                          f'{what} in the settings')
+    if key and what == 'microphone' and key in CALL and key != stand_in_mic():
+        raise ValueError(f'{CALL[0]} carries the call\'s sound, not your microphone: choose your real microphone in the settings')
     return key
 
 

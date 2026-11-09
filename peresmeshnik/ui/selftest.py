@@ -34,11 +34,13 @@ def pactl(*args: str) -> str:
 
 def devices(kind: str) -> list[tuple[str, str]]:
     """[(name, description)] of 'sinks' or 'sources' (monitors of sinks left out); default first.
-    macOS: [(Core Audio UID, name)] of outputs or inputs, BlackHole 2ch left out (it is ours: the virtual mic)."""
+    macOS: [(Core Audio UID, name)] of outputs or inputs, BlackHole 2ch left out (it is ours: the virtual mic); as inputs
+    no virtual device (BlackHole, Zoom's, Teams') and no aggregate either: none of them is the user's voice."""
     if MACOS:
         from peresmeshnik.audio import macos
         side, default = ('outputs', 'default_output') if kind == 'sinks' else ('inputs', 'default_input')
-        out = [d for d in macos.devices() if d[side] and not macos.is_blackhole(d['uid']) and not macos.is_blackhole(d['name'])]
+        out = [d for d in macos.devices() if d[side] and not macos.is_blackhole(d['uid']) and not macos.is_blackhole(d['name'])
+               and (kind == 'sinks' or d['transport'] not in ('virt', 'grup') or d['uid'] == macos.stand_in_mic())]
         return [(d['uid'], d['name']) for d in sorted(out, key=lambda d: not d[default])]
     items = json.loads(pactl('-f', 'json', 'list', kind) or '[]')
     default = pactl('get-default-sink' if kind == 'sinks' else 'get-default-source').strip()

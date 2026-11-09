@@ -90,8 +90,15 @@ def covers(model_id: str, key: str) -> bool:
 
 
 def _pick(table: dict[str, str], key: str) -> str:
-    i = table.get(key, '')
-    return i if covers(i, key) else ''
+    """The table's model for `key` (a language, or 'src-tgt' for MT), else its '*' entry (one model for every language
+    or pair, e.g. a multilingual MT), when the registry's `langs` of that model have it."""
+    return next((i for i in (table.get(key, ''), table.get('*', '')) if i and covers(i, key)), '')
+
+
+def needs_gpu(model_id: str) -> bool:
+    from peresmeshnik import models
+    m = models.registry().get(model_id)
+    return bool(m and m.needs == 'gpu')
 
 
 def gpu() -> bool:
@@ -99,26 +106,41 @@ def gpu() -> bool:
 
 
 def direction(s, side: str, has_gpu: bool | None = None) -> Direction:
-    """What `side` of the pair in settings `s` runs on locally, and why not. `has_gpu` None: look for nvidia-smi."""
+    """What `side` of the pair in settings `s` runs on locally, and why not. A model with `needs = "gpu"` in the
+    registry is not offered without an NVIDIA GPU (`has_gpu` None: look for nvidia-smi): for the ASR, the MT and a stock
+    voice the side is then not local (`why`); for the clone the stock voice speaks instead (`notes`), if there is one."""
     from peresmeshnik.voice import STOCK
     src, tgt = (s.their_lang, s.my_lang) if side == 'them_to_me' else (s.my_lang, s.their_lang)
     loc, why, notes = s.local, [], []
-    asr, mt, stock = _pick(loc.asr, src), _pick(loc.mt, f'{src}-{tgt}'), _pick(loc.tts, tgt)
-    if not asr:
-        why.append(f'no local speech recognition for {name(src)}')
-    if not mt:
-        why.append(f'no local translation from {name(src)} to {name(tgt)}')
-    tts, voice = stock, 'stock' if stock else ''
+    has_gpu = gpu() if has_gpu is None else has_gpu
+
+    def usable(i: str, missing: str, what: str) -> str:
+        if not i:
+            why.append(missing)
+        elif needs_gpu(i) and not has_gpu:
+            why.append(f'{what} needs an NVIDIA GPU ({i})')
+            return ''
+        return i
+    asr = usable(_pick(loc.asr, src), f'no local speech recognition for {name(src)}', f'speech recognition for {name(src)}')
+    mt = usable(_pick(loc.mt, f'{src}-{tgt}'), f'no local translation from {name(src)} to {name(tgt)}',
+                f'translation from {name(src)} to {name(tgt)}')
+    stock = _pick(loc.tts, tgt)
+    stock = '' if stock and needs_gpu(stock) and not has_gpu else stock
+    tts, voice, no_voice = stock, 'stock' if stock else '', f'no local voice for {name(tgt)}'
     if side == 'me_to_them' and loc.clone != STOCK:
-        if covers(loc.clone, tgt):
-            tts, voice = loc.clone, 'clone'
-            if not (gpu() if has_gpu is None else has_gpu):
+        if not covers(loc.clone, tgt):
+            instead = f'your cloned voice cannot speak {name(tgt)}'
+        elif needs_gpu(loc.clone) and not has_gpu:
+            instead = no_voice = 'your cloned voice needs an NVIDIA GPU'
+        else:
+            instead, tts, voice = '', loc.clone, 'clone'
+            if not has_gpu:
                 notes.append('your cloned voice falls behind the conversation without an NVIDIA GPU: '
                              'the cloud or a stock voice keeps up')
-        elif stock:
-            notes.append(f'your cloned voice cannot speak {name(tgt)}: a stock voice speaks instead')
+        if instead and stock:
+            notes.append(f'{instead}: a stock voice speaks instead')
     if not tts:
-        why.append(f'no local voice for {name(tgt)}')
+        why.append(no_voice)
     return Direction(side, src, tgt, asr, mt, tts, voice, tuple(why), tuple(notes), src in CLOUD and tgt in CLOUD)
 
 
@@ -150,15 +172,18 @@ def table(s=None) -> str:
     reg = models.registry()
 
     def cell(i: str) -> str:
-        return i or '— (cloud)'
+        return f'{i} (NVIDIA GPU)' if needs_gpu(i) else i or '— (cloud)'
     rows = ['| Language | Speech recognition | Stock voice | Your cloned voice | Cloud (Gemini Live) |', '|---|---|---|---|---|']
     for c in LANGS:
         clone = loc.clone if covers(loc.clone, c) and reg[loc.clone].role == 'clone' else ''
         rows.append(f'| {label(c)} | {cell(_pick(loc.asr, c))} | {cell(_pick(loc.tts, c))} | '
                     f'{clone + " (NVIDIA GPU)" if clone else "— (cloud or a stock voice)"} | {"✔" if c in CLOUD else "—"} |')
-    pairs = sorted(k for k in loc.mt if _pick(loc.mt, k))
-    rows.append(f'\nTranslation on this computer: {", ".join(p.replace("-", " → ") for p in pairs) or "none"}; every other '
-                'pair of the 14 is translated in the cloud.')
+    gpu_mark = {True: ' (NVIDIA GPU)', False: ''}
+    pairs = [k.replace('-', ' → ') + gpu_mark[needs_gpu(loc.mt[k])] for k in sorted(loc.mt) if k != '*' and _pick(loc.mt, k)]
+    if (any_pair := loc.mt.get('*', '')) in reg:  # one model for every pair of its languages
+        pairs.append(f'any other pair of {", ".join(c for c in LANGS if covers(any_pair, c))}{gpu_mark[needs_gpu(any_pair)]}')
+    rows.append(f'\nTranslation on this computer: {", ".join(pairs) or "none"}; every other pair of the 14 is translated in '
+                'the cloud.')
     return '\n'.join(rows)
 
 

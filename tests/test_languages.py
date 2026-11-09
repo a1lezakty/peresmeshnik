@@ -10,8 +10,8 @@ def fake_registry(monkeypatch, *extra: models.Model) -> None:
     monkeypatch.setattr(models, 'registry', lambda: reg)
 
 
-def stub(mid: str, role: str, *langs: str) -> models.Model:
-    return models.Model(mid, role, langs, 'MIT', 'https://example.invalid', 'https://example.invalid/', {})
+def stub(mid: str, role: str, *langs: str, needs: str = '') -> models.Model:
+    return models.Model(mid, role, langs, 'MIT', 'https://example.invalid', 'https://example.invalid/', {}, needs=needs)
 
 
 def test_fourteen_languages_with_names_and_cloud_codes():
@@ -78,3 +78,76 @@ def test_readme_table_is_the_generated_one():
     readme = (Path(__file__).parents[1] / 'README.md').read_text('utf-8')
     block = readme.split('<!-- languages:begin', 1)[1].split('\n', 1)[1].split('<!-- languages:end -->')[0].strip()
     assert block == languages.table(), 'README is stale: python -m peresmeshnik.languages, into README.md'
+
+
+def test_a_model_that_needs_a_gpu_is_not_offered_without_one(monkeypatch):
+    """`needs = "gpu"` (models.toml): without an NVIDIA GPU the ASR / MT / stock voice make the side cloud-only, said why;
+    the clone gives way to the stock voice, said; with a GPU all of it is local. The README table marks them."""
+    import tomllib
+    row = tomllib.loads('role = "asr"\nlangs = ["ja"]\nlicense = "MIT"\nlicense_url = "u"\nurl = "u"\nneeds = "gpu"\n[files]\n')
+    assert models.Model(id='asr-ja', langs=tuple(row.pop('langs')), **row).needs == 'gpu'  # as registry() reads a row
+    fake_registry(monkeypatch, stub('asr-ja', 'asr', 'ja', needs='gpu'), stub('asr-de', 'asr', 'de'),
+                  stub('mt-many', 'mt', 'de', 'ja'), stub('tts-de', 'tts', 'de'), stub('tts-ja', 'tts', 'ja'),
+                  stub('clone-big', 'clone', 'de', 'ja', needs='gpu'))
+    s = config.Settings(my_lang='de', their_lang='ja')
+    s.local.asr, s.local.mt, s.local.tts = {'ja': 'asr-ja', 'de': 'asr-de'}, {'*': 'mt-many'}, {'de': 'tts-de', 'ja': 'tts-ja'}
+    s.local.clone = 'clone-big'
+    them = languages.direction(s, 'them_to_me', has_gpu=False)
+    assert not them.local and them.why == ('speech recognition for Japanese needs an NVIDIA GPU (asr-ja)',)
+    assert not them.subtitles and languages.cloud_subtitles(s, 'them_to_me')  # no local ASR here: the cloud's subtitles
+    assert languages.direction(s, 'them_to_me', has_gpu=True).local
+    me = languages.direction(s, 'me_to_them', has_gpu=False)
+    assert me.local and (me.tts, me.voice) == ('tts-ja', 'stock')
+    assert me.notes == ('your cloned voice needs an NVIDIA GPU: a stock voice speaks instead',)
+    assert languages.direction(s, 'me_to_them', has_gpu=True).voice == 'clone'
+    s.local.tts = {'de': 'tts-de'}  # and no stock voice for Japanese: no local voice, and why
+    assert languages.direction(s, 'me_to_them', has_gpu=False).why == ('your cloned voice needs an NVIDIA GPU',)
+    assert '| 日本語 (Japanese) | asr-ja (NVIDIA GPU) |' in languages.table(s)
+
+
+def test_star_is_one_model_for_every_pair_it_has(monkeypatch):
+    """`'*'` in a [local] table: the model for every language or pair its registry langs have; an own key wins."""
+    fake_registry(monkeypatch, stub('mt-many', 'mt', 'de', 'ja', 'en'), stub('mt-de-ja', 'mt', 'de-ja'))
+    s = config.Settings(my_lang='de', their_lang='ja')
+    s.local.mt = {'*': 'mt-many', 'de-ja': 'mt-de-ja'}
+    assert languages.direction(s, 'them_to_me').mt == 'mt-many' and languages.direction(s, 'me_to_them').mt == 'mt-de-ja'
+    s.their_lang = 'ko'  # not among its languages
+    assert languages.direction(s, 'them_to_me').mt == '' and 'no local translation from Korean to German' in \
+        languages.direction(s, 'them_to_me').why
+    assert 'de → ja, any other pair of en, de, ja' in languages.table(s)
+
+
+def test_one_download_of_a_model_at_a_time(server, tmp_path, monkeypatch):
+    """The wizard and the tray (or two pair switches) fetching one model together: one download, both get it."""
+    import hashlib
+    import threading
+    httpd, url = server
+    httpd.slow = 0.3
+    blob = b'x' * 100_000
+    (httpd.root / 'a.bin').write_bytes(blob)
+    m = models.Model('m', 'mt', ('de-ja',), 'MIT', 'u', url, {'a.bin': {'sha256': hashlib.sha256(blob).hexdigest(), 'size': len(blob)}})
+    monkeypatch.setattr(models, 'registry', lambda: {'m': m})
+    got = []
+    ts = [threading.Thread(target=lambda: got.append(models.fetch('m', tmp_path / 'models'))) for _ in range(2)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join(10)
+    assert len(got) == 2 and models.is_fetched(m, tmp_path / 'models')
+    assert [p for p, _ in httpd.ranges] == ['/a.bin']  # the second waited and found it there
+
+
+def test_the_cloud_gets_the_mapped_codes():
+    """GeminiDirection's connections: the translator's target and the transcriber's language in Gemini's own codes."""
+    from types import SimpleNamespace
+
+    from peresmeshnik.cloud.gemini import _Link
+    for src in languages.LANGS:
+        d = SimpleNamespace(src=src, tgt=src, cfg=config.Cloud())
+        assert _Link(d, 'translate').config().translation_config.target_language_code == languages.CLOUD_TRANSLATE[src]
+        assert _Link(d, 'transcribe').config().input_audio_transcription.language_codes == [languages.CLOUD_TRANSCRIBE[src]]
+    d = SimpleNamespace(src='ar', tgt='pt', cfg=config.Cloud())
+    assert _Link(d, 'translate').config().translation_config.target_language_code == 'pt-BR'
+    assert _Link(d, 'transcribe').config().input_audio_transcription.language_codes == ['ar-EG']
+    assert (languages.CLOUD_TRANSLATE['zh'], languages.CLOUD_TRANSCRIBE['zh'], languages.CLOUD_TRANSCRIBE['es']) == \
+        ('zh-Hans', 'cmn-Hans-CN', 'es-419')

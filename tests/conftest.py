@@ -3,6 +3,7 @@ import http.server
 import os
 import sys
 import threading
+import time
 
 import pytest
 
@@ -16,7 +17,8 @@ if sys.platform == 'darwin':
 
 class Range(http.server.BaseHTTPRequestHandler):
     """Static files with HTTP Range, like Hugging Face and GitHub release downloads. Records every
-    request's Range header; a path in `cut` gets half of its body once, then the connection closes."""
+    request's Range header; a path in `cut` gets half of its body once, then the connection closes; `slow`: seconds
+    before each body."""
     def do_GET(self):
         srv = self.server
         body = (srv.root / self.path.lstrip('/')).read_bytes()
@@ -27,6 +29,7 @@ class Range(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(body) - start))
         self.end_headers()
         out = body[start:]
+        time.sleep(srv.slow)  # a slow server: two downloads of one model overlap
         if self.path in srv.cut:
             srv.cut.discard(self.path)
             out = out[:len(out) // 2]  # HTTP/1.0: the socket closes after this, short of Content-Length
@@ -40,7 +43,7 @@ class Range(http.server.BaseHTTPRequestHandler):
 def server(tmp_path, monkeypatch):
     monkeypatch.setattr(models, 'RETRY_PAUSE_S', 0.0)
     httpd = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Range)
-    httpd.root, httpd.ranges, httpd.cut = tmp_path / 'srv', [], set()
+    httpd.root, httpd.ranges, httpd.cut, httpd.slow = tmp_path / 'srv', [], set(), 0.0
     httpd.root.mkdir()
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     yield httpd, f'http://127.0.0.1:{httpd.server_port}/'

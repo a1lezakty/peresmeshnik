@@ -55,8 +55,11 @@ class XttsClone(xtts.Engine):
 def voice_cmd() -> list[str] | None:
     """How to start the voice pack's runner: $PERESMESHNIK_VOICE_CMD, else the installed pack of this app version in
     <data dir>/voice-pack (local/voicepack.py) with its own python.exe; None: no such pack here."""
-    if os.environ.get('PERESMESHNIK_VOICE_CMD'):
-        return shlex.split(os.environ['PERESMESHNIK_VOICE_CMD'], posix=os.name != 'nt')
+    if cmd := os.environ.get('PERESMESHNIK_VOICE_CMD'):
+        if os.name != 'nt':
+            return shlex.split(cmd)
+        # Windows: backslashes stay (posix=False), and so do the quotes around "C:\Program Files\...": one pair goes
+        return [t[1:-1] if len(t) > 1 and t[0] == t[-1] == '"' else t for t in shlex.split(cmd, posix=False)]
     if voicepack.state() == 'ready':
         return [str(voicepack.python()), str(RUNNER)]
     return None

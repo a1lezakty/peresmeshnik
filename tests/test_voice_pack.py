@@ -201,6 +201,12 @@ def test_make_clone_chooses(monkeypatch, tmp_path):
         p.close()
 
 
+def test_voice_cmd_on_windows_drops_the_quotes(monkeypatch):
+    cmd = r'"C:\Program Files\py\python.exe" C:\vr\voice_runner.py --device cpu'
+    monkeypatch.setattr(clone, 'os', types.SimpleNamespace(name='nt', environ={'PERESMESHNIK_VOICE_CMD': cmd}))
+    assert voice_cmd() == [r'C:\Program Files\py\python.exe', r'C:\vr\voice_runner.py', '--device', 'cpu']
+
+
 # --- the app: the clone cannot speak -> the stock voice (never the cloud: local was chosen)
 
 class FakeDirection:

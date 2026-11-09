@@ -14,6 +14,7 @@ exists only between start() and stop(), so when translation is off no device is 
 """
 from __future__ import annotations
 
+import collections
 import math
 import queue
 import shutil
@@ -35,26 +36,48 @@ START_S = 5.0  # record(): how much longer than asked it waits for the microphon
 LEVEL_DB = -26.0  # LiveSwitch: my speech level assumed until the microphone has carried some (a call's usual level)
 MATCH_DB = (-30.0, 10.0)  # the gain that brings the translation to the live voice's level stays within this
 PEAK = 0.95  # ... and never takes it above this
+RISE_DB = 20.0  # ... and goes back up at most this fast (dB a second) after a peak or a louder level held it down
 
 
 class Level:
-    """Speech level of a stream (dBFS): the mean of its 32 ms frames that are within `RANGE_DB` of it, so pauses and
-    background do not count; a plain mean over the first `1 / alpha` such frames, then it follows a change over as
-    many. None until a frame above `FLOOR_DB`."""
-    RANGE_DB, FLOOR_DB = 15.0, -60.0
+    """Speech level of a stream (dBFS): the power mean of its 32 ms frames of clear speech, so pauses, breaths and room
+    noise do not count (a power mean, as BS.1770: a mean of dB moved with where the quiet frames were cut off, and the
+    microphone's cut is not the speech's). A frame counts when it is above `FLOOR_DB` and within `RANGE_DB` of the level; with `noise_s` (a
+    microphone) also `SPEECH_DB` above the noise floor, the quietest frame of the last `noise_s` (else a minute of room
+    noise before my first word was learnt as my level: the first clauses went out 13-18 dB quiet). A plain mean over the
+    first `1 / alpha` such frames, then it follows a change over as many. None until `hold_s` of them; with `follow_s`
+    (the translation's side, where the cloud's voice gives way to a local one) that much of a voice all under the range
+    starts it over."""
+    FLOOR_DB, SPEECH_DB, RANGE_DB, FRAME_S = -60.0, 12.0, 15.0, 0.032
 
-    def __init__(self, sample_rate: int, alpha: float):
-        self.frame, self.alpha, self.db, self._n = round(sample_rate * 0.032), alpha, None, 0
+    def __init__(self, sample_rate: int, alpha: float, noise_s: float = 0.0, hold_s: float = 0.0,
+                 follow_s: float = math.inf):
+        self.frame, self.alpha = round(sample_rate * self.FRAME_S), alpha
+        self.hold, self.follow = hold_s / self.FRAME_S, follow_s / self.FRAME_S
+        self._noise = collections.deque(maxlen=round(noise_s / self.FRAME_S)) if noise_s else None
+        self._p, self._n, self._low = 0.0, 0, 0  # the power mean, frames in it, frames under the range in a row
         self._rest = np.zeros(0, np.float32)
+
+    @property
+    def db(self) -> float | None:
+        return 10 * math.log10(self._p) if self._n and self._n >= self.hold else None
 
     def __call__(self, x: np.ndarray) -> None:
         x = np.concatenate([self._rest, x])
         k = len(x) // self.frame
         self._rest = x[k * self.frame:]
-        for d in 10 * np.log10(np.mean(x[:k * self.frame].reshape(k, self.frame) ** 2, axis=1) + 1e-12):
-            if d > self.FLOOR_DB and (self.db is None or d > self.db - self.RANGE_DB):
-                self._n += 1
-                self.db = float(d) if self.db is None else self.db + max(self.alpha, 1 / self._n) * (float(d) - self.db)
+        for d in (10 * np.log10(np.mean(x[:k * self.frame].reshape(k, self.frame) ** 2, axis=1) + 1e-12)).tolist():
+            if self._noise is not None:
+                self._noise.append(d)
+            if d <= (self.FLOOR_DB if self._noise is None else max(min(self._noise), self.FLOOR_DB) + self.SPEECH_DB):
+                continue
+            if self._n and d < 10 * math.log10(self._p) - self.RANGE_DB:
+                self._low += 1
+                if self._low < self.follow:
+                    continue
+                self._n = 0  # a new, quieter voice: start over from this frame
+            self._n, self._low = self._n + 1, 0
+            self._p += max(self.alpha, 1 / self._n) * (10 ** (d / 10) - self._p)
 
 
 def _pactl(*args: str) -> str:
@@ -274,8 +297,9 @@ class LiveSwitch:
     the queued speech goes out unpaced after `STALL_S`, as without the switch.
 
     The translation is brought to the level of my live voice (`Level` of the microphone's frames against that of the
-    speech, ~3 s and ~1 s of speech to follow), so the switch does not jump in loudness either: the clone spoke ~9 dB
-    louder than a microphone at a call's level, with peaks near full scale (BENCH, stage 5).
+    speech, ~3 s and ~1 s of speech to follow; LEVEL_DB until the microphone has carried 1 s of clear speech), so the
+    switch does not jump in loudness either: the clone spoke ~9 dB louder than a microphone at a call's level, with
+    peaks near full scale (BENCH, stage 5).
     ponytail: the microphone's clock drives the output: in live voice a ~100 ppm drift against the virtual mic adds
     ~6 ms of latency per minute; resample against the sink's clock if live stretches get long.
     """
@@ -296,7 +320,8 @@ class LiveSwitch:
         self._out_end = 0.0  # monotonic time when the output put out so far has played
         self._quiet = True  # nothing to put out: feed() does not wake the events thread
         self._closing = False
-        self._mic, self._tts, self._gain = Level(SAMPLE_RATE, 0.01), Level(sample_rate, 0.03), None  # mic: feed()'s thread
+        self._mic = Level(SAMPLE_RATE, 0.01, noise_s=3.0, hold_s=1.0)  # feed()'s thread
+        self._tts, self._gain = Level(sample_rate, 0.03, follow_s=1.0), None  # the clone: soft runs to 0.45 s
         threading.Thread(target=self._pump, name='me-live-pump', daemon=True).start()
 
     # Direction
@@ -337,7 +362,7 @@ class LiveSwitch:
             elif kind == 'speech':
                 if self._to == 0:  # translation that comes while live (or going live) is not said
                     rs = self._rs.get(x.sample_rate) or self._rs.setdefault(x.sample_rate, Resampler(x.sample_rate, self.sample_rate))
-                    self._buf = np.concatenate([self._buf, self._match(rs(x.pcm))])
+                    self._buf = self._match(self._buf, rs(x.pcm))
                     self._quiet = False
             elif kind == 'live':
                 self._to = 1.0 if x else 0.0
@@ -358,20 +383,26 @@ class LiveSwitch:
             self._q.put(('error', e))
         self._q.put(None)
 
-    def _match(self, x: np.ndarray) -> np.ndarray:
-        """Translated speech at the live voice's level; a new gain ramps in over the first 50 ms of a chunk."""
+    def _match(self, buf: np.ndarray, x: np.ndarray) -> np.ndarray:
+        """`buf` (queued, not put out yet) + `x`, translated speech, at the live voice's level and under PEAK. A lower
+        gain (a louder peak or level) ramps the end of `buf` down over up to 5 ms; a higher one comes back at RISE_DB,
+        a limiter's release, so the cloud's short chunks, each with its own peak, do not pump the level."""
         self._tts(x)
-        if self._tts.db is None or not (peak := float(np.abs(x).max()) if len(x) else 0.0):
-            return x  # silence (the clone's pause after a sentence) stays as it is
-        g = 10 ** (float(np.clip((self._mic.db or LEVEL_DB) - self._tts.db, *MATCH_DB)) / 20)
-        if peak * g > PEAK:
-            g = PEAK / peak
-        g0 = g if self._gain is None else min(self._gain, PEAK / peak)
+        if not (peak := float(np.abs(x).max()) if len(x) else 0.0):
+            return np.concatenate([buf, x])  # silence (the clone's pause after a sentence) stays as it is
+        tts = self._tts.db if self._tts.db is not None else 10 * math.log10(float(np.mean(x ** 2)))  # < 1 frame yet
+        g = min(10 ** (float(np.clip((self._mic.db or LEVEL_DB) - tts, *MATCH_DB)) / 20), PEAK / peak)
+        g0 = g if self._gain is None else self._gain
+        if g > g0:
+            ramp = (10 ** np.minimum(math.log10(g), math.log10(g0) + RISE_DB / 20 / self.sample_rate
+                                     * np.arange(1, len(x) + 1))).astype(np.float32)
+            g = float(ramp[-1])
+        else:
+            ramp = np.float32(g)
+            if g < g0 and (n := min(len(buf), self.sample_rate // 200)):
+                buf = np.concatenate([buf[:-n], buf[-n:] * np.linspace(1, g / g0, n + 1, dtype=np.float32)[1:]])
         self._gain = g
-        ramp = np.full(len(x), g, np.float32)
-        n = min(len(x), self.sample_rate // 20)
-        ramp[:n] = np.linspace(g0, g, n, dtype=np.float32)
-        return x * ramp
+        return np.concatenate([buf, x * ramp])
 
     def _step(self, pcm: np.ndarray) -> np.ndarray | None:
         """One input frame -> the same duration of output, after the lead when the output starts from silence."""

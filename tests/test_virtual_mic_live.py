@@ -7,7 +7,7 @@ import time
 import numpy as np
 import pytest
 
-from peresmeshnik.audio.mic import MATCH_DB, PEAK, LiveSwitch, click_ratio
+from peresmeshnik.audio.mic import MATCH_DB, PEAK, RISE_DB, LiveSwitch, click_ratio
 from peresmeshnik.engines import Caption, Speech
 
 SR = 24_000
@@ -113,8 +113,8 @@ def test_back_to_translation_and_speech_while_live():
     sw.close()
     time.sleep(0.05)
     x = np.concatenate([e.pcm for e in out])
-    assert np.sum(x > 0.3) == SR // 10  # only the new clause, in full
-    first = np.argmax(x > 0.3)
+    assert np.sum(x > 0.01) == SR // 10  # only the new clause, in full (at LEVEL_DB: a flat microphone is no speech)
+    first = np.argmax(x > 0.01)
     assert np.max(np.abs(np.diff(x[:first - 1]))) < 0.01  # live faded in from silence and out again
     assert np.all(np.abs(x[first - 100:first]) < 1e-6)  # the live voice had faded out to silence
 
@@ -141,7 +141,20 @@ def db(x):
     return 10 * np.log10(np.mean(x ** 2))
 
 
-@pytest.mark.parametrize('mic_db,tts_db', [(-36, -14), (-26, -17), (-10, -30), (-60, -10)])
+def talk(rng, level_db, seconds, noise_db=-70.0):
+    """My speech as the microphone's level sees it: 0.6 s syllables at `level_db`, 0.16 s pauses down to the room's
+    noise at `noise_db` (whole 32 ms frames at 16 kHz)."""
+    n = int(16_000 * seconds)
+    on = np.arange(n) // 512 % 24 < 19
+    return ((np.where(on, 10 ** (level_db / 20), 0) + 10 ** (noise_db / 20)) * rng.standard_normal(n)).astype(np.float32)
+
+
+def feed(sw, mic):
+    for i in range(0, len(mic), FRAME):
+        sw.feed(mic[i:i + FRAME])
+
+
+@pytest.mark.parametrize('mic_db,tts_db', [(-36, -14), (-26, -17), (-10, -30), (-44, -10)])
 def test_translation_comes_at_the_live_voice_level(mic_db, tts_db):
     """The clone spoke ~9 dB louder than a microphone at a call's level, peaks near full scale (BENCH stage 5): the
     switch brings the translation to my live voice's level (its pauses do not count), never above PEAK."""
@@ -150,10 +163,9 @@ def test_translation_comes_at_the_live_voice_level(mic_db, tts_db):
     sw = LiveSwitch(inner, SR)
     out = []
     threading.Thread(target=lambda: out.extend(sw.events()), daemon=True).start()
-    mic = (10 ** (mic_db / 20) * rng.standard_normal(FRAME * 150)).astype(np.float32)
+    mic = talk(rng, mic_db, 4)
     mic[FRAME * 50:FRAME * 100] = 0  # a pause in my speech
-    for i in range(150):
-        sw.feed(mic[i * FRAME:(i + 1) * FRAME])
+    feed(sw, mic)
     tts = (10 ** (tts_db / 20) * rng.standard_normal(2 * SR)).astype(np.float32)
     tts[SR // 2] = 0.99  # a peak
     inner.say.put(Speech(tts[:SR], SR))
@@ -175,6 +187,65 @@ def test_translation_comes_at_the_live_voice_level(mic_db, tts_db):
     assert np.abs(x).max() <= PEAK + 1e-6
     if 10 ** (want / 20) * 0.99 / 10 ** (tts_db / 20) <= PEAK:  # the peak does not hold it back
         assert db(said) == pytest.approx(want, abs=1.0)
+
+
+@pytest.mark.parametrize('noise_db', [-55, -50])
+@pytest.mark.parametrize('mic_db', [-26, -18])
+def test_the_first_clause_after_a_minute_of_listening_is_not_quiet(noise_db, mic_db):
+    """Translation on, the other side speaks first: a minute of my room's noise, then 2 s of my speech, then its first
+    clause. The noise is not my level (it was learnt as such: the first clauses went out 13-18 dB quiet)."""
+    rng = np.random.default_rng(0)
+    sw = LiveSwitch(FakeDirection(), SR)
+    feed(sw, (10 ** (noise_db / 20) * rng.standard_normal(16_000 * 60)).astype(np.float32))
+    feed(sw, talk(rng, mic_db, 2, noise_db))
+    y = sw._match(np.zeros(0, np.float32), (10 ** (-17 / 20) * rng.standard_normal(SR)).astype(np.float32))
+    sw.close()
+    print(f'noise {noise_db} dB, me {mic_db} dB -> my level {sw._mic.db:.1f} dB, the first clause {db(y):.1f} dB')
+    assert db(y) == pytest.approx(mic_db, abs=3)
+
+
+def test_a_peak_eases_the_gain_down_and_it_comes_back_slowly():
+    """The cloud says 20-40 ms chunks, each with its own peak. A peak that holds the gain down eases it over up to 5 ms
+    of the speech queued before it (the gain stepped down at the seam, up to ~9 dB), and the gain comes back at RISE_DB,
+    so the chunks' peaks do not pump the level from one chunk to the next."""
+    rng = np.random.default_rng(1)
+    sw = LiveSwitch(FakeDirection(), SR)
+    feed(sw, talk(rng, -16, 2))  # 14 dB above the speech: the gain is at MATCH_DB's top, +10 dB
+    sizes = rng.integers(SR // 50, SR // 25, 150)
+    starts = np.r_[0, np.cumsum(sizes)[:-1]]
+    x = (10 ** (-30 / 20) * rng.standard_normal(int(sizes.sum()))).astype(np.float32)
+    x[starts[1::3] + 2] = 0.6  # 2 samples into every third chunk: PEAK holds the gain at +4 dB
+    y = np.zeros(0, np.float32)
+    for a, n in zip(starts, sizes, strict=True):
+        y = sw._match(y, x[a:a + n])
+    sw.close()
+    g = 20 * np.log10(np.abs(y / x)[np.abs(x) > 1e-4])
+    step, swing = np.abs(np.diff(g)).max(), np.ptp(g[len(g) // 4:])
+    print(f'gain {g.min():.1f}..{g.max():.1f} dB, biggest step {step:.3f} dB, swing after the start {swing:.1f} dB')
+    assert np.abs(y).max() <= PEAK + 1e-6
+    assert step < 0.2  # dB from one sample to the next
+    assert swing < 2 * RISE_DB * 0.1  # comes back up ~1.8 dB between two peaks ~90 ms apart; it pumped 6 dB
+
+
+@pytest.mark.parametrize('to_db', [-8, -36])
+def test_a_new_voice_mid_session_comes_to_my_level(to_db):
+    """The cloud fails and a local voice goes on in the same LiveSwitch at another level (cloud/fallback.py): how soon
+    the translation is back within 2 dB of my level. Louder: the level follows it (~1 s for 12 dB); quieter by more
+    than RANGE_DB: 1 s of it starts the level over, then the gain comes up at RISE_DB."""
+    rng = np.random.default_rng(2)
+    sw = LiveSwitch(FakeDirection(), SR)
+    feed(sw, talk(rng, -26, 2))
+    cloud = (10 ** (-20 / 20) * rng.standard_normal(3 * SR)).astype(np.float32)
+    local = (10 ** (to_db / 20) * rng.standard_normal(4 * SR)).astype(np.float32)
+    y = np.zeros(0, np.float32)
+    for c in [*np.split(cloud, 75), *np.split(local, 8)]:  # the cloud's 40 ms chunks, then Piper's clauses
+        y = sw._match(y, c)
+    sw.close()
+    w = 10 * np.log10(np.mean(y[len(cloud):].reshape(-1, SR // 10) ** 2, axis=1))  # 100 ms windows
+    back = (np.nonzero(np.abs(w + 26) > 2)[0].max() + 1) / 10
+    print(f'{to_db} dB after -20: back at my level after {back:.1f} s; the cloud {db(y[2 * SR:len(cloud)]):.1f} dB')
+    assert db(y[2 * SR:len(cloud)]) == pytest.approx(-26, abs=1)
+    assert back <= 2.5
 
 
 def test_live_voice_feeds_only_the_switch(monkeypatch):

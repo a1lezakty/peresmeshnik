@@ -24,7 +24,7 @@ from collections.abc import Callable
 import numpy as np
 
 from peresmeshnik.audio.resample import Resampler
-from peresmeshnik.engines import SAMPLE_RATE, Caption, Speech
+from peresmeshnik.engines import SAMPLE_RATE, Speech
 
 OURS = 'peresmeshnik_'  # every PipeWire device the app makes starts with this
 FADE_MS = 30  # crossfade of the live switch: >= 2 periods of a low voice (85 Hz), well under a syllable (BENCH)
@@ -324,7 +324,7 @@ class LiveSwitch:
     def _pump(self) -> None:
         try:
             for e in self.inner.events():
-                self._q.put(('caption' if isinstance(e, Caption) else 'speech', e))
+                self._q.put(('speech' if isinstance(e, Speech) else 'caption', e))  # captions, Latency: passed on
         except Exception as e:  # a dead session: the app's consumer reports it
             self._q.put(('error', e))
         self._q.put(None)

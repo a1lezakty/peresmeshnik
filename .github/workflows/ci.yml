@@ -154,7 +154,11 @@ jobs:
         run: |
           ids=$(uv run python -c "from peresmeshnik import config, languages as l; s = config.Settings(my_lang='de', their_lang='ja', them_to_me='local', me_to_them='local'); s.local.clone = 'piper'; print(*(l.needed_models(s) if all(l.direction(s, k).local for k in l.SIDES) else ['silero-vad', 'parakeet-tdt-0.6b-v3', 'opus-mt-en-ru', 'opus-mt-ru-en', 'piper-ru_RU-dmitri-medium', 'piper-en_US-john-medium']))")
           echo "$ids"
-          uv run peresmeshnik models fetch $ids --accept-licenses
+          for i in 1 2 3; do  # GitHub / Hugging Face answer 504 at times: fetch resumes where it stopped
+            uv run peresmeshnik models fetch $ids --accept-licenses && break
+            [ $i = 3 ] && exit 1
+            sleep 30
+          done
       # includes the idle-CPU watchdogs: the app (tray, overlay, first-run wizard) 60 s idle, and again with
       # the overlay on screen; each fails above 0.13 s of CPU. Linux: Xvfb; macOS, Windows: the runner's desktop
       - run: uv run pytest -q -s -rs --deselect tests/test_macos_audio.py::test_a_killed_helper_lets_the_original_through  # -rs: what was skipped and why

@@ -95,7 +95,7 @@ class SubtitleOverlay(QWidget):
         w, h = int(scr.width() * 0.7), rows * (self.h_orig + self.h_tr) + 2 * self.pad
         self.setGeometry(scr.x() + (scr.width() - w) // 2, scr.y() + scr.height() - h - 60, w, h)
         self.show_latency = False
-        self.langs = {}  # side -> (language of its originals, of its translations): set_pair
+        self.langs = {}  # side -> (language of its originals, of its translations): set_pair; a row keeps its own
         self._fonts: dict[str, tuple[QFont, QFont]] = {}  # language -> (original, translation) fonts: own_fonts
         self._rows: OrderedDict[tuple, list] = OrderedDict()  # (side, n) -> [original, translation, {kind: s}]
         self._open: dict[str, int] = {}  # side -> number of its open row, for captions without a clause number
@@ -103,7 +103,7 @@ class SubtitleOverlay(QWidget):
         self._final_at: dict = {}  # row -> when its final caption came (a cloud phrase's numbers find their row by it)
         self.clock = time.monotonic
         self._shown: tuple = ()
-        self._sides: tuple = ()  # the side of each row shown
+        self._langs: tuple = ()  # (language of the original, of the translation) of each row shown
         self.paints, self.updates = 0, 0  # repaints / changes of the visible text
         self.paint_ms: deque[float] = deque(maxlen=10_000)
         self.caption.connect(self._on_caption)
@@ -151,7 +151,7 @@ class SubtitleOverlay(QWidget):
         if c.clause >= 0:
             return side, 'c', c.clause
         if c.translation and c.final:  # a cloud translation: give it to the oldest row still without one
-            for k, (_, tr, _) in self._rows.items():
+            for k, (_, tr, *_) in self._rows.items():
                 if k[0] == side and not tr:
                     return k
         if side not in self._open:
@@ -163,7 +163,7 @@ class SubtitleOverlay(QWidget):
 
     def _on_caption(self, side: str, c: Caption) -> None:
         k = self._key(side, c)
-        row = self._rows.setdefault(k, ['', '', {}])
+        row = self._rows.setdefault(k, ['', '', {}, self.langs.get(side, ('', ''))])  # its languages: as it came
         row[0] = c.original or row[0]
         row[1] = c.translation or row[1]
         if c.final:
@@ -201,7 +201,7 @@ class SubtitleOverlay(QWidget):
         shown = tuple((ME_PREFIX if k[0] == 'me' else '', v[0], v[1], self._lat(v[2])) for k, v in self._rows.items())
         if shown == self._shown:
             return False
-        self._shown, self._sides = shown, tuple(k[0] for k in self._rows)
+        self._shown, self._langs = shown, tuple(v[3] for v in self._rows.values())
         self.updates += 1
         if not self.isVisible():
             self.show()
@@ -230,9 +230,8 @@ class SubtitleOverlay(QWidget):
         p.setBrush(BACK)
         p.drawRoundedRect(self.rect(), self.pad, self.pad)
         w, y = self.width() - 2 * self.pad, self.pad + (self.rows - len(self._shown)) * (self.h_orig + self.h_tr)
-        for side, (prefix, orig, tr, lat) in zip(self._sides, self._shown):  # newest at the bottom; long lines keep
-            src, tgt = self.langs.get(side, ('', ''))  # their end (the latest words)
-            f_orig, f_tr = self.own_fonts(src)[0], self.own_fonts(tgt)[1]
+        for (src, tgt), (prefix, orig, tr, lat) in zip(self._langs, self._shown):  # newest at the bottom
+            f_orig, f_tr = self.own_fonts(src)[0], self.own_fonts(tgt)[1]  # long lines keep their end (the latest words)
             for text, font, color, h in ((orig + lat, f_orig, GREY, self.h_orig), (tr, f_tr, WHITE, self.h_tr)):
                 if text:
                     p.setFont(font)

@@ -958,6 +958,7 @@ class Controller:
                           f'ready in {time.perf_counter() - t:.1f} s)')
         if call.startswith('call app: none'):
             self.on_state('error: choose the call app in the tray menu (Call app): until then the call is not translated')
+        self._stock_note(s)
         self._fonts(s)
 
     def _fonts(self, s: config.Settings) -> None:
@@ -1035,16 +1036,26 @@ class Controller:
                       'the tray menu (Crash report…)')
 
     def _drop(self, side: Side) -> None:
+        """A side goes (to be made again): meanwhile the call is heard as it is and hears me as I am, as with translation
+        off — them: the route undone (Windows: un-muted), macOS < 14.4 the pass-through; me: the microphone loop."""
         self.sides.remove(side)
-        if side.name == 'them':  # before its input stops (the route holds it): the call is heard as usual meanwhile,
-            self._unroute()  # Windows: un-muted; the new side routes it again
+        if side.name == 'them':  # before its input stops (the route holds it); the new side routes it again
+            self._unroute()
+        else:
+            self._loopback(True)
         try:
             side.stop()
         except Exception:
             log.exception('stopping %s', side.name)
+        if side.name == 'them':
+            self._through_start()  # after its input let BlackHole 16ch go
 
     def _make(self, name: str, s: config.Settings) -> Side:
-        new = self._side(name, s)  # raises: the caller says why
+        new = self._side(name, s)  # raises: the caller says why (the loop / the pass-through then stay)
+        if name == 'me':
+            self._loopback(False)  # the call heard me through the loop until the translation was ready (as in _on)
+        else:
+            self._through_stop()  # BlackHole 16ch goes to the translation now
         self.sides.append(new)
         new.set_live(self.live)
         new.start()
@@ -1053,8 +1064,8 @@ class Controller:
         return new
 
     def set_languages(self) -> concurrent.futures.Future | None:
-        """The pair changed (tray): while translating, each side is made again for it, as after an error — the devices,
-        the call's route and the microphone loop stay; off, the next start takes the new pair."""
+        """The pair changed (tray): while translating, each side is made again for it, as after an error (`_drop`,
+        `_make`: meanwhile the call and I hear each other as with translation off); off, the next start takes it."""
         return self.submit(self._relanguage)
 
     def _pair_to_overlay(self, s: config.Settings) -> None:
@@ -1062,9 +1073,10 @@ class Controller:
             self.overlay.set_pair(s.my_lang, s.their_lang)
 
     def _relanguage(self) -> None:
-        if not self.on:
-            return
         s = self.settings or config.load()
+        if not self.on:
+            self.on_state(f'idle, translation off (languages {s.my_lang} ⇄ {s.their_lang})')
+            return
         self._pair_to_overlay(s)
         files = {'them': self.them_file, 'me': self.me_file}
         for name in ('them', 'me'):
@@ -1077,13 +1089,22 @@ class Controller:
             except Exception as e:
                 log.exception('%s', name)
                 self.on_state(f'error: {ARROW[name]} cannot start for {s.my_lang} ⇄ {s.their_lang}: {e}')
-        self._loopback(not any(x.name == 'me' for x in self.sides))  # no me -> them now: the call hears me as is
         if not self.sides:
             self._off()
             return
         self.on_state(f'translating ({", ".join(f"{x.name}: {x.engine}" for x in self.sides)}; '
                       f'languages {s.my_lang} ⇄ {s.their_lang})')
+        self._stock_note(s)
         self._fonts(s)
+
+    def _stock_note(self, s: config.Settings) -> None:
+        """Me -> them local speaks in a stock voice though the clone is chosen (it cannot speak the language, or needs an
+        NVIDIA GPU here): said at each start and new pair."""
+        from peresmeshnik import languages
+        from peresmeshnik.voice import STOCK
+        if s.local.clone != STOCK and any(x.name == 'me' and x.engine == 'local' for x in self.sides) and (
+                d := languages.direction(s, 'me_to_them')).voice == 'stock':
+            self.on_state(f'note: {ARROW["me"]}: {"; ".join(d.notes)}')
 
     def _route(self, s: config.Settings) -> str:
         """The call app's sound into the call sink (Linux) or a tap of it (macOS 14.4+) while translating: the app
@@ -1243,11 +1264,12 @@ class Controller:
         return r
 
     def _through_start(self) -> None:
-        """macOS < 14.4 with translation off: the call app's speaker (BlackHole 16ch) on to the headphones while a call
-        app plays into it (capture_macos.PassThrough), else the call is not heard. The saved headphones, else the
-        default; back to the saved ones when they are back."""
+        """macOS < 14.4 with translation off (or them -> me being made again): the call app's speaker (BlackHole 16ch)
+        on to the headphones while a call app plays into it (capture_macos.PassThrough), else the call is not heard. The
+        saved headphones, else the default; back to the saved ones when they are back."""
         from peresmeshnik.audio import capture_macos
-        if not (self.devices and sys.platform == 'darwin') or capture_macos.path() != 'blackhole' or self._through or self.sides:
+        if not (self.devices and sys.platform == 'darwin') or capture_macos.path() != 'blackhole' or self._through or any(
+                x.name == 'them' for x in self.sides):  # them -> me reads BlackHole 16ch itself
             return
         try:
             saved = (self.settings or config.load()).ui.headphones

@@ -273,11 +273,13 @@ class Tray(QObject):
 
     def _lang_chosen(self, action) -> None:
         key, code = action.data()
-        s = config.load()
-        pair = {'my_lang': s.my_lang, 'their_lang': s.their_lang}
+        base = self._pair[0] if self._pair else config.load()  # a pair still downloading is the one changed further
+        pair = {'my_lang': base.my_lang, 'their_lang': base.their_lang}
         if code == pair['their_lang' if key == 'my_lang' else 'my_lang']:  # the other side's language: the pair turns round
             pair = {'my_lang': pair['their_lang'], 'their_lang': pair['my_lang']}
         pair[key] = code
+        if (pair['my_lang'], pair['their_lang']) == (base.my_lang, base.their_lang):  # the language it has: nothing to do
+            return
         self.switch_pair(pair['my_lang'], pair['their_lang'])
 
     def confirm(self, text: str) -> bool:
@@ -285,20 +287,25 @@ class Tray(QObject):
         return QMessageBox.question(None, 'Peresmeshnik', text) == QMessageBox.Yes
 
     def switch_pair(self, my: str, their: str) -> None:
-        """Another pair without restarting the app: a local side that cannot run for it goes to the cloud (said); its
-        missing models are fetched first (size and licenses said, restricted ones asked) while translation goes on with
-        the old pair; then it is saved and the sides are made again for it (Controller.set_languages)."""
+        """Another pair without restarting the app: a local side that cannot run for it goes to the cloud (said), what a
+        local side does differently is said (a stock voice instead of the clone); its missing models are fetched first
+        (size and licenses said, restricted ones asked) while translation goes on with the old pair; then it is saved
+        and the sides are made again for it (Controller.set_languages)."""
         from peresmeshnik import models
         from peresmeshnik.ui.overlay import font_note
         from peresmeshnik.ui.wizard import has_key
         s = config.load()
         s.my_lang, s.their_lang = my, their
         name = f'{languages.name(my)} ⇄ {languages.name(their)}'
-        notes = []
+        notes, moved = [], []
         for key in languages.SIDES:
-            if getattr(s, key) == 'local' and not (d := languages.direction(s, key)).local:
+            d = languages.direction(s, key)
+            if getattr(s, key) == 'local' and not d.local:
                 setattr(s, key, 'cloud')
+                moved.append(key)
                 notes.append(f'{SIDES[key]} goes to the cloud ({"; ".join(d.why)})')
+            elif getattr(s, key) == 'local':
+                notes += [f'{SIDES[key]}: {n}' for n in d.notes]
         if 'cloud' in (s.them_to_me, s.me_to_them) and not has_key(s):
             self.message(f'{name}: not changed — it needs the cloud ({"; ".join(notes) or "chosen"}) and no Gemini key is '
                          'set (Settings…)')
@@ -313,41 +320,40 @@ class Tray(QObject):
             return
         if note := font_note([my, their]):
             notes.append(note)
-        self._pair = s
+        self._pair = s, moved
         if not todo:
-            return self._pair_ready(s, '', notes)
-        self.message(f'{name}: downloading {sum(m.size for m in todo) / 1e6:,.0f} MB ({lic}); translation goes on with the '
+            if notes:
+                self.message(f'{name}: ' + '. '.join(notes))
+            return self._pair_ready(s, '')
+        self.message(f'{name}: downloading {sum(map(models.size, todo)) / 1e6:,.0f} MB ({lic}); translation goes on with the '
                      'old pair meanwhile' + ''.join(f'. {n}' for n in notes))
         self.status.setText(f'downloading the models for {name}')  # the Translation check stays as it is
 
         def work():
             try:
                 for m in todo:
-                    models.fetch(m.id)
+                    models.fetch(m.id)  # one download per model at a time (the wizard may fetch it too)
                 self.pair_ready.emit(s, '')
             except Exception as e:  # the network: the .part files stay, choosing the pair again resumes them
                 self.pair_ready.emit(s, str(e))
         threading.Thread(target=work, name='pair-fetch', daemon=True).start()
 
-    def _pair_ready(self, s: config.Settings, err: str, notes=()) -> None:
-        if s is not self._pair:  # another pair was chosen since
+    def _pair_ready(self, s: config.Settings, err: str) -> None:
+        if not self._pair or s is not self._pair[0]:  # another pair was chosen since
             return
-        self._pair = None
+        moved, self._pair = self._pair[1], None
         name = f'{languages.name(s.my_lang)} ⇄ {languages.name(s.their_lang)}'
         if err:
             self.set_state(f'error: {name} not changed: the download failed ({err}); choose it again to resume')
             self.sync()
             return
-        saved = config.load()  # the pair and the engines it moved to the cloud; the rest as saved now
-        saved.my_lang, saved.their_lang, saved.them_to_me, saved.me_to_them = s.my_lang, s.their_lang, s.them_to_me, s.me_to_them
+        saved = config.load()  # the pair, and the sides it moved to the cloud; the rest as saved now (changed meanwhile)
+        saved.my_lang, saved.their_lang = s.my_lang, s.their_lang
+        for key in moved:
+            setattr(saved, key, 'cloud')
         config.save(saved)
         self.sync()
-        if notes:
-            self.message(f'{name}: ' + '. '.join(notes))
-        if self.ctl.on:
-            self.ctl.set_languages()
-        else:
-            self.set_state(f'idle, translation off ({name})')
+        self.ctl.set_languages()  # its control thread knows whether translation is on (a start may be under way)
 
     def restart(self) -> None:
         """New settings take effect: a running translation is turned off and on again."""
@@ -527,11 +533,12 @@ class SettingsDialog(QDialog):
             s.ui.hotkey = combo
         if hasattr(self, 'headphones'):
             s.ui.headphones, s.ui.mic = self.headphones.currentData(), self.mic.currentData()
-        if self.key.text().strip():
+        if new_key := bool(self.key.text().strip()):
             save_key(self.key.text(), s.cloud)
-        config.save(s)  # the pair as it was: a new one is saved once its models are here (Tray.switch_pair)
-        self.tray.sync()
-        self.tray.restart()
+        if new_key or s != config.load():  # the pair as it was: a new one is saved once its models are here (switch_pair)
+            config.save(s)
+            self.tray.sync()
+            self.tray.restart()
         if pair != (s.my_lang, s.their_lang):
             self.tray.switch_pair(*pair)
         self.accept()

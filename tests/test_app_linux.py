@@ -20,10 +20,12 @@ import pytest
 
 LINUX = sys.platform.startswith('linux')
 SOUND = LINUX and shutil.which('pactl') and subprocess.run(['pactl', 'info'], capture_output=True).returncode == 0
-pytestmark = pytest.mark.skipif(not SOUND, reason='needs PipeWire / PulseAudio')
 DISPLAY = bool(os.environ.get('DISPLAY'))
 E2E = os.environ.get('PERESMESHNIK_E2E') == '1'
 PAIR_MODELS = os.environ.get('PERESMESHNIK_PAIR_MODELS', '')  # CI: the models folder (cached) of the pair test, which must run
+if (PAIR_MODELS or os.environ.get('PERESMESHNIK_REQUIRE_PIPEWIRE') == '1') and not (SOUND and DISPLAY):
+    pytest.fail(f'these tests must run here: PipeWire {bool(SOUND)}, display {DISPLAY}', pytrace=False)  # not a skip
+pytestmark = pytest.mark.skipif(not SOUND, reason='needs PipeWire / PulseAudio')
 DATA = Path(__file__).parent / 'data'
 
 
@@ -371,7 +373,6 @@ def test_a_new_pair_through_the_wizard_and_the_app(tmp_path, devices, monkeypatc
     """de -> ja, both sides local: the languages page offers local for both, the models page lists only the pair's
     models (no GigaAM, no clone: the stock voice), the test phrase in each language goes through the app's real path
     (Silero VAD, ASR, MT, Piper, the headphones) and shows translated subtitles; the pair is saved at the end."""
-    assert DISPLAY, 'the pair test needs a display (Xvfb)'
     from PySide6.QtWidgets import QApplication
     QApplication.instance() or QApplication([])
     from peresmeshnik import config, languages

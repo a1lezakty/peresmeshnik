@@ -240,6 +240,9 @@ class LanguagesPage(QWizardPage):
                 text = '✔ Both on this computer and in the cloud.' + ''.join(f' ⚠ {n}.' for n in d.notes if c.currentText() == 'local')
             if c.currentText() == 'cloud' and languages.cloud_subtitles(s, key) and not s.cloud.subtitles:
                 text += ' Its subtitles come from the cloud too.'
+            if d.src == 'ar' and c.currentText() == 'cloud' and languages.cloud_subtitles(s, key):
+                text += ' Arabic subtitles from the cloud are Egyptian Arabic (Gemini has no other): other dialects come out ' \
+                        'worse.'
             if MACOS and key == 'me_to_them':  # BENCH stage 6: no clone keeps up on an M1's CPU (XTTS, LuxTTS measured)
                 text += ' On a Mac your voice goes to the call through the cloud (or a stock voice): no local clone of it ' \
                         'keeps up here.'
@@ -250,7 +253,7 @@ class LanguagesPage(QWizardPage):
         for m in ms:
             lic.setdefault(m.license, f'<a href="{m.license_url}">{m.license}</a>'
                            + (' (noncommercial: you accept it on the models page)' if m.consent else ''))
-        self.download.setText((f'{sum(m.size for m in todo) / 1e6:,.0f} MB for this pair ({len(todo)} of {len(ms)} models '
+        self.download.setText((f'{sum(map(models.size, todo)) / 1e6:,.0f} MB for this pair ({len(todo)} of {len(ms)} models '
                                'not here yet)' if todo else 'Nothing: every model of this pair is here') +
                               '. Licenses: ' + ', '.join(lic.values()) + '.')
         self.fonts.setText(f'⚠ Subtitles: {note}' if (note := font_note([s.my_lang, s.their_lang])) else '')
@@ -536,7 +539,8 @@ class ModelsPage(QWizardPage):
     def initializePage(self) -> None:  # noqa: N802
         self.ms = [models.get(i) for i in needed_models(self.w.s)]
         base = models.root()
-        rows = [f'<tr><td>{"✔" if models.is_fetched(m, base) else "·"}</td><td>{m.id}</td><td align=right>{m.size / 1e6:.0f} MB</td>'
+        rows = [f'<tr><td>{"✔" if models.is_fetched(m, base) else "·"}</td><td>{m.id}</td>'
+                f'<td align=right>{models.size(m) / 1e6:.0f} MB</td>'
                 f'<td><a href="{m.license_url}">{m.license}</a></td></tr>' for m in self.ms]
         self.list.setText(f'<table cellspacing=6>{"".join(rows)}</table><p>Folder: {base}</p>')
         restricted = [m for m in self.ms if m.consent and not models.is_fetched(m, base)]
@@ -560,7 +564,7 @@ class ModelsPage(QWizardPage):
         self.busy = True
         self.button.setEnabled(False)
         self.completeChanged.emit()
-        total = sum(m.size for m in todo)
+        total = sum(map(models.size, todo))
 
         def run():
             done = [0]
@@ -586,7 +590,7 @@ class ModelsPage(QWizardPage):
         self.button.setEnabled(bool(todo))
         self.bar.setVisible(bool(todo) or bool(err))
         self.state.setText(f'Download failed: {err}. Press Download again to resume.' if err else
-                           f'{len(todo)} to download, {sum(m.size for m in todo) / 1e6:.0f} MB.' if todo else 'All models are here.')
+                           f'{len(todo)} to download, {sum(map(models.size, todo)) / 1e6:.0f} MB.' if todo else 'All models are here.')
         self.completeChanged.emit()
 
 
@@ -723,6 +727,14 @@ class VoicePage(QWizardPage):
     def local(self) -> bool:
         return self.w.s.me_to_them == 'local'
 
+    def clone_off(self) -> str:
+        """Why me -> them local speaks in a stock voice though the clone is chosen ('' = the clone speaks): it cannot
+        speak their language, or needs an NVIDIA GPU here (languages.direction)."""
+        from peresmeshnik.voice import STOCK
+        s = self.w.s
+        d = languages.direction(s, 'me_to_them')
+        return '; '.join(d.notes) if self.local() and s.local.clone != STOCK and d.voice == 'stock' else ''
+
     def initializePage(self) -> None:  # noqa: N802
         from peresmeshnik import voice
         s = self.w.s
@@ -743,6 +755,10 @@ class VoicePage(QWizardPage):
         elif self.gpu is None and not getattr(self, '_asking', False):  # once: the GPU does not change meanwhile
             self._asking = True
             threading.Thread(target=lambda: self.gpu_found.emit(gpu()), name='gpu', daemon=True).start()
+        if why := self.clone_off():  # nothing to record for it: said, and the page can be left
+            self.setSubTitle(f'"Me → them" speaks in a stock voice for this pair: {why}. No recording is needed.')
+            for x in (self.stock, self.prompt, self.record_button, self.import_button, self.check_button):
+                x.setVisible(False)
         if self.voice is None and s.local.voice and (voice.voices_dir() / s.local.voice / 'voice.json').exists():
             self.voice = voice.load(s.local.voice)
             q = self.voice.meta.get('quality', {})
@@ -752,13 +768,14 @@ class VoicePage(QWizardPage):
         self._buttons()
 
     def isComplete(self) -> bool:  # noqa: N802
-        return not self.running and not self.packing and (not self.local() or self.stock.isChecked() or self.voice is not None)
+        return not self.running and not self.packing and (not self.local() or self.stock.isChecked() or self.voice is not None
+                                                          or bool(self.clone_off()))
 
     def pack(self) -> str:
         """The clone's voice pack here: '' where it is not this page's business (not Windows, cloud, the stock voice, a
         runner of one's own in $PERESMESHNIK_VOICE_CMD, a build without the pack's files), 'installing', 'gpu' (gpu_refusal:
         too little memory, an old driver or GPU, a driver that does not answer), else voicepack.state()."""
-        if not (WINDOWS and self.local() and not self.stock.isChecked()) or os.environ.get('PERESMESHNIK_VOICE_CMD') \
+        if not (WINDOWS and self.local() and not self.stock.isChecked()) or self.clone_off() or os.environ.get('PERESMESHNIK_VOICE_CMD') \
                 or not voicepack.lock_file().is_file():
             return ''
         if self.packing:

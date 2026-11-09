@@ -47,6 +47,10 @@ class Local:
     # the echo gates look for our own speech coming back this late, s (a call's round trip; up to 2.8: the reference
     # keeps 4 s). 1.0 / 1.5 / 2.0 cost 0.21 / 0.28 / 0.34 ms of CPU per 16 ms block while we speak (BENCH stage 5)
     echo_max_delay_s: float = 2.0
+    # the microphone's gate (speakers, no headphones): how closely the capture must follow what the speakers played; a
+    # room's reverb smears it, and at 0.5 a reverberant room (RT60 0.8 s) let 2 of 36 echoes through (BENCH stage 5).
+    # The call side's gate keeps audio/echo.py's 0.5
+    mic_echo_rho_on: float = 0.4
 
 
 @dataclass
@@ -113,6 +117,9 @@ def load(path: Path | None = None) -> Settings:
     for k in ('them_to_me', 'me_to_them'):
         if getattr(s, k) not in ENGINES:
             raise ValueError(f'settings: {k} must be one of {ENGINES}, got {getattr(s, k)!r}')
+    if not 0.2 <= (r := s.local.mic_echo_rho_on) <= 0.8:  # near 0 it zeroes my speech, near 1 lets every echo through
+        s.local.mic_echo_rho_on = min(max(r, 0.2), 0.8)
+        print(f'settings: local.mic_echo_rho_on {r} is outside 0.2..0.8, {s.local.mic_echo_rho_on} used', file=sys.stderr)
     return s
 
 

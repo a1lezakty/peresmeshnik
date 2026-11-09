@@ -211,11 +211,11 @@ jobs:
           PERESMESHNIK_WORK_GATE: '1'  # the models are there: the test fails instead of skipping
           PERESMESHNIK_MODELS: ${{ runner.temp }}/models
         run: uv run pytest -q -s -rs tests/test_crash.py -k killed
-      - name: Call scenarios (echo, long phrases, two people, latency per link)
+      - name: Call scenarios (echo, long phrases, two people, latency per link; me -> them voice level, speakers echo)
         env:
           PERESMESHNIK_WORK_GATE: '1'
           PERESMESHNIK_MODELS: ${{ runner.temp }}/models
-        run: uv run pytest -q -s tests/test_call.py
+        run: uv run pytest -q -s tests/test_call.py tests/test_me_side.py
       - name: macOS call sound with the models (file -> BlackHole 16ch / a tapped afplay -> subtitles and voice)
         if: runner.os == 'macOS'
         env:

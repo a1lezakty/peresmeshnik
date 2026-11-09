@@ -1734,3 +1734,23 @@ stream: first sound = the whole sentence (≈ 4 s of its fast speech). n = 6 sen
 taken: borderline speed on the runner, the first-word loss in the product's direction, and its license and dependency
 questions (an NC-trained model under Apache, GPL espeak in-process, an unlicensed vocoder). A real M1 (4 performance
 cores, not virtual) may be faster: a check on a real Mac, if it is ever taken up again.
+
+### Subtitles in Chinese, Japanese, Korean and Arabic
+
+`tests/test_languages_ui.py::test_overlay_draws_chinese_japanese_korean_and_arabic` on the CI runners (2026-11-09,
+snapshots of zh ⇄ ja and ko ⇄ ar per OS as the `overlay-<os>` artifact of the ci run):
+
+| runner | fonts per script (first of the font database) | font of a zh / ja / ko row | first paint of a zh, ja row; ko, ar row — cold → pair warmed | later rows |
+|---|---|---|---|---|
+| macos-15 | zh 10, ja 10, ko 7, ar 38 | PingFang SC / Hiragino Sans / Apple SD Gothic Neo | 84.5, 41.2; 27.6, 16.2 ms → 74.7, 30.1; 6.2, 2.8 ms | 0.8–4.3 ms |
+| windows-latest (Server 2025) | zh 10, ja 12, ko 6, ar 22 | Microsoft YaHei / Yu Gothic UI / Malgun Gothic | 120.9, 98.2; 78.2, 65.5 ms → 88.3, 74.0; 39.7, 52.5 ms | 1.4–2.3 ms |
+| ubuntu-latest | zh 0, ja 0, ko 0, ar 3 (DejaVu) | none: the wizard, the tray and the start of translation say what to install | 2.1, 1.0; 6.9, 1.5 ms (empty boxes, no CJK font) | 0.9–1.2 ms |
+| dev server (Linux, Noto/WQY/IPA fonts) | zh 7, ja 9, ko 6, ar 7 | WenQuanYi Zen Hei / IPAGothic / fallback | 2.5–6.3 ms cold, 0.9–2.9 ms warmed | ~1 ms |
+
+- Before the own-language font a Chinese row on Windows came out half in Korean glyph forms (Malgun Gothic, the
+  system's fallback for Han); now each CJK row is drawn in a font of its language. `QFont.setFamilies` as a fallback
+  list does not work for this on Linux (fontconfig picks its own fallback), so the row's main font is set.
+- The first paint of a row costs what its new glyphs cost to rasterise: tens of ms on the macOS and Windows runners
+  (no GPU) for a sentence of Han characters never shown before, ~1 ms once they were. Loading the pair's fonts at
+  translation on (`overlay.set_pair`) takes 10–30 ms off the first row, not the rest: in a call, new characters keep
+  coming, so a CJK subtitle may show up to ~0.1 s later on such a machine. Arabic: right to left by Qt's own layout.

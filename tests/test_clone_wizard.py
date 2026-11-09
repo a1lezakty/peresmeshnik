@@ -262,9 +262,9 @@ def fake_smi(monkeypatch, out, old=None):
 
 @pytest.mark.parametrize('out, old, says', [
     ('8192, 572.83, 8.6\n', None, ''),
-    ('8192, 566.36, 8.6\n', None, 'needs NVIDIA driver 572.30 or newer; this computer has 566.36'),
+    ('8192, 566.36, 8.6\n', None, ''),  # 528.33 .. 570.64: not refused (CUDA 12.x compatibility), a note instead
     ('Field "compute_cap" is not a valid field to query.\n', '8192, 472.12\n',
-     'needs NVIDIA driver 572.30 or newer; this computer has 472.12'),
+     'needs NVIDIA driver 570.65 or newer; this computer has 472.12'),
     ('8192, 572.83, 6.1\n', None, ''),  # Pascal (GTX 1070): the Windows torch has sm_61
     ('6144, 572.83, 5.2\n', None, 'too old for the voice pack (compute capability 5.2; it needs 6.1 or newer'),
     ('NVIDIA-SMI has failed because it could not communicate with the NVIDIA driver.\n', None,
@@ -275,8 +275,11 @@ def test_the_gpu_is_checked_before_the_download(monkeypatch, out, old, says):
     before the pack's 3.7 GB, not found after them."""
     from peresmeshnik.ui import wizard
     fake_smi(monkeypatch, out, old)
-    why = wizard.gpu_refusal(wizard.gpu())
+    g = wizard.gpu()
+    why = wizard.gpu_refusal(g)
     assert (says in why) if says else why == '', why
+    note = wizard.gpu_note(g)
+    assert ('566.36 is older than 570.65' in note and 'not checked, it may work' in note) if '566.36' in out else note == ''
 
 
 @pytest.fixture
@@ -289,7 +292,13 @@ def windows(page, tmp_path, monkeypatch):
 
     def at(vram):
         monkeypatch.setattr(wizard, 'gpu', lambda: wizard.Gpu(vram, (572, 83), 8.6) if vram else wizard.Gpu())
+        page.gpu, page._asking = None, False  # the page fixture showed it off Windows already
         page.initializePage()
+        assert page.pack() == 'checking' and page.pack_out.text() == 'Checking the NVIDIA GPU…'  # nvidia-smi: a worker
+        end = time.monotonic() + 5
+        while page.gpu is None and time.monotonic() < end:
+            QApplication.processEvents()
+            time.sleep(0.01)
         return page
     return at
 

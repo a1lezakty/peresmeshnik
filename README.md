@@ -142,8 +142,9 @@ to over a pipe. Its license and those of the other bundled packages are in
 The Windows voice pack (your own voice on an NVIDIA GPU, downloaded by the wizard after you accept its licenses) is a
 Python of its own with PyTorch (BSD-3-Clause) and coqui-tts (MPL-2.0); the XTTS-v2 model it runs is under the
 [Coqui Public Model License](https://huggingface.co/coqui/XTTS-v2/blob/main/LICENSE.txt) (noncommercial only). It needs an NVIDIA GPU with 6 GB of memory
-or more, compute capability 6.1 or newer (GeForce GTX 10xx and later) and driver 572.30 or newer; the
-wizard checks before the download.
+or more, compute capability 6.1 or newer (GeForce GTX 10xx and later; a GTX 10xx is not measured: the app
+measures the clone at start and uses the stock voice if the card is slower than real time) and driver 570.65 or
+newer (528.33 to 570.64: not checked, may work); the wizard checks before the download.
 
 ---
 

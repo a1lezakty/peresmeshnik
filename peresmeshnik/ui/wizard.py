@@ -8,6 +8,7 @@ Qt signals; nothing is polled. Settings are written when the wizard finishes.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -41,6 +42,7 @@ from peresmeshnik.local import voicepack
 from peresmeshnik.ui.tray import LANGS, MIC_LABEL, SIDES, device_combo, save_key
 
 LINUX = sys.platform.startswith('linux')
+log = logging.getLogger('peresmeshnik.ui')
 MACOS = sys.platform == 'darwin'
 WINDOWS = sys.platform == 'win32'
 VMIC = 'BlackHole 2ch' if MACOS else 'CABLE Output' if WINDOWS else 'Peresmeshnik Mic'  # the call app's microphone
@@ -76,7 +78,8 @@ PACK_CONSENT = ('I accept the licenses of the voice pack: PyTorch (BSD-3-Clause)
                 'only, it binds me as the user')
 
 
-MIN_DRIVER = (572, 30)  # Windows: CUDA 12.8's driver (the pack's torch 2.8.0+cu128; NVIDIA's CUDA 12.8 release notes)
+MIN_DRIVER = (570, 65)  # Windows: CUDA 12.8 GA's driver (the pack's torch 2.8.0+cu128; NVIDIA's CUDA 12.8.0 notes)
+MIN_DRIVER_COMPAT = (528, 33)  # CUDA 12.x minor version compatibility on Windows: below 570.65 not checked, may work
 MIN_CC = 6.1  # the pack's Windows torch is built for sm_61 .. sm_120 (its _cuda_getArchFlags, the voice-pack job)
 
 
@@ -88,7 +91,7 @@ class Gpu(NamedTuple):
 
     @property
     def driver_text(self) -> str:
-        return '.'.join(f'{x:02d}' if i else str(x) for i, x in enumerate(self.driver))
+        return _version(self.driver)
 
 
 def _smi(exe: str, fields: str) -> list[list[str]] | str:
@@ -128,6 +131,18 @@ def gpu_text(vram: float) -> str:
     return f'an NVIDIA GPU with {vram:.0f} GB' if vram else 'no NVIDIA GPU'
 
 
+def _version(v: tuple[int, ...]) -> str:
+    return '.'.join(f'{x:02d}' if i else str(x) for i, x in enumerate(v))
+
+
+def gpu_note(g: Gpu) -> str:
+    """A driver between CUDA 12.x's compatibility floor and CUDA 12.8's own: not refused, not checked either."""
+    if not g.why and MIN_DRIVER_COMPAT <= g.driver < MIN_DRIVER:
+        return (f'Your NVIDIA driver {g.driver_text} is older than {_version(MIN_DRIVER)} (CUDA 12.8\'s): not checked, it '
+                'may work; if the clone does not start, update it from nvidia.com/drivers.')
+    return ''
+
+
 def gpu_refusal(g: Gpu) -> str:
     """Why the voice pack (Windows) would not run the clone on this GPU, said before its 3.7 GB download; '' if it would."""
     if g.why:
@@ -136,10 +151,10 @@ def gpu_refusal(g: Gpu) -> str:
     if g.vram < MIN_VRAM_GB:
         return (f'The clone of your voice needs an NVIDIA GPU with at least 6 GB of memory; this computer has '
                 f'{gpu_text(g.vram)}.')
-    if g.driver < MIN_DRIVER:
-        need = '.'.join(map(str, MIN_DRIVER))
-        return (f'The clone of your voice needs NVIDIA driver {need} or newer; this computer has {g.driver_text or "an older one"}: '
-                'update it from nvidia.com/drivers (or the NVIDIA app), then open this page again.')
+    if g.driver < MIN_DRIVER_COMPAT:
+        return (f'The clone of your voice needs NVIDIA driver {_version(MIN_DRIVER)} or newer; this computer has '
+                f'{g.driver_text or "an older one"}: update it from nvidia.com/drivers (or the NVIDIA app), then open this '
+                'page again.')
     if g.cc and g.cc < MIN_CC:
         return (f'This NVIDIA GPU is too old for the voice pack (compute capability {g.cc:g}; it needs {MIN_CC:g} or newer: '
                 'GeForce GTX 10xx and later).')
@@ -208,6 +223,8 @@ class LanguagesPage(QWizardPage):
 
 
 class DevicesPage(QWizardPage):
+    mic_checked = Signal(bool)  # Windows: the microphone is denied (the worker's probe)
+
     def __init__(self, w: SetupWizard):
         super().__init__()
         self.w = w
@@ -217,6 +234,8 @@ class DevicesPage(QWizardPage):
         self.f = QFormLayout(self)
         self.warn = QLabel()
         self.warn.setWordWrap(True)
+        self.mic_checked.connect(self._mic_checked)
+        self._vmic_text, self._denied, self._probed = '', False, False
 
     def initializePage(self) -> None:  # noqa: N802
         while self.f.rowCount():
@@ -236,17 +255,17 @@ class DevicesPage(QWizardPage):
             self.vmic.setOpenExternalLinks(True)
             self.vmic.setTextInteractionFlags(Qt.TextBrowserInteraction)  # the brew command can be copied
             self.recheck = QPushButton('Check again')
-            self.recheck.clicked.connect(self.check_vmic)
+            self.recheck.clicked.connect(lambda: self.check_vmic(probe=True))
             self.f.addRow('Virtual microphone', self.vmic)
             self.f.addRow('', self.recheck)
-            self.check_vmic()
+            self.check_vmic(probe=not self._probed)  # the microphone tried once, not on every visit to the page
 
-    def check_vmic(self) -> bool:
-        return self.check_cable() if WINDOWS else self.check_blackhole()
+    def check_vmic(self, probe: bool = False) -> bool:
+        return self.check_cable(probe) if WINDOWS else self.check_blackhole()
 
-    def check_cable(self) -> bool:
+    def check_cable(self, probe: bool = False) -> bool:
         """Windows: VB-Cable is the user's to install (the driver needs an administrator and a restart); missing -> how
-        to, and "Check again"."""
+        to, and "Check again". `probe`: also try the microphone (Windows' permission), in a worker: up to seconds."""
         from peresmeshnik.audio import windows
         try:
             devs = windows.devices()
@@ -261,8 +280,15 @@ class DevicesPage(QWizardPage):
                 text += (f'<br>⚠ <b>{rec["name"]}</b> is Windows\' default microphone: the call app may take it, but every '
                          'other app hears the translation instead of you. Choose your real microphone in Settings → System '
                          '→ Sound → Input, and CABLE Output in the call app.')
-            if windows.permission() == 'denied':
-                text += f'<br>✘ {windows.NO_PERMISSION}.'
+            if probe:
+                self._probed = True
+
+                def ask():
+                    try:
+                        self.mic_checked.emit(windows.permission() == 'denied')
+                    except Exception as e:  # the helper is missing: said above already
+                        log.warning('microphone permission: %s', e)
+                threading.Thread(target=ask, name='mic-permission', daemon=True).start()
         except windows.CableMissing:
             text, ok = ('<b>✘ VB-Audio Virtual Cable is not installed.</b> It is the virtual microphone that carries your '
                         'translated voice to the call app (them → me works without it).<br>Install it: download the '
@@ -271,9 +297,17 @@ class DevicesPage(QWizardPage):
                         'restart Windows. Then press <b>Check again</b>.'), False
         except Exception as e:  # the helper is missing (a broken install)
             text, ok = f'✘ Cannot list the sound devices: {e}', False
-        self.vmic.setText(text)
-        self.recheck.setVisible(not ok)
+        self._vmic_text = text if ok else ''
+        self.vmic.setText(text + (f'<br>✘ {windows.NO_PERMISSION}.' if ok and self._denied else ''))
+        self.recheck.setVisible(not ok or self._denied)
         return ok
+
+    def _mic_checked(self, denied: bool) -> None:
+        from peresmeshnik.audio import windows
+        self._denied = denied
+        if self._vmic_text:
+            self.vmic.setText(self._vmic_text + (f'<br>✘ {windows.NO_PERMISSION}.' if denied else ''))
+            self.recheck.setVisible(denied)
 
     def check_blackhole(self) -> bool:
         """macOS: BlackHole 2ch is the user's to install; missing -> how to, and "Check again". The microphone permission
@@ -573,6 +607,7 @@ class VoicePage(QWizardPage):
     checked = Signal(str)
     pack_progress = Signal(object)  # voicepack.install's (stage, done, total[, text]): bytes overflow a Qt int
     pack_done = Signal(str)  # '' or why it stopped
+    gpu_found = Signal(object)  # Gpu: nvidia-smi runs in a worker (up to its 10 s), not in the GUI thread
     seconds = 45.0
     name = 'me'
 
@@ -627,7 +662,8 @@ class VoicePage(QWizardPage):
         self.pack_done.connect(self._pack_done)
         self.voice = None
         self.running = False
-        self.packing, self.pack_note, self.gpu = False, '', Gpu()
+        self.packing, self.pack_note, self.gpu = False, '', None  # None: not known yet (the worker asks)
+        self.gpu_found.connect(self._gpu_found)
         self._cancel_pack = threading.Event()
         self.draft = f'{self.name}.new'
 
@@ -649,7 +685,11 @@ class VoicePage(QWizardPage):
         self.stock.setVisible(self.local())
         self.stock.setChecked(s.local.clone == voice.STOCK)
         self.check_button.setVisible(self.local() and not self.stock.isChecked())
-        self.gpu = gpu() if WINDOWS else Gpu()
+        if not WINDOWS:
+            self.gpu = Gpu()
+        elif self.gpu is None and not getattr(self, '_asking', False):  # once: the GPU does not change meanwhile
+            self._asking = True
+            threading.Thread(target=lambda: self.gpu_found.emit(gpu()), name='gpu', daemon=True).start()
         if self.voice is None and s.local.voice and (voice.voices_dir() / s.local.voice / 'voice.json').exists():
             self.voice = voice.load(s.local.voice)
             q = self.voice.meta.get('quality', {})
@@ -670,7 +710,14 @@ class VoicePage(QWizardPage):
             return ''
         if self.packing:
             return 'installing'
+        if self.gpu is None:
+            return 'checking'
         return 'gpu' if gpu_refusal(self.gpu) else voicepack.state()
+
+    def _gpu_found(self, g) -> None:
+        self.gpu = g
+        self._show_pack()
+        self._buttons()
 
     def _show_pack(self) -> None:
         st = self.pack()
@@ -682,6 +729,9 @@ class VoicePage(QWizardPage):
         self.pack_cancel.setVisible(st == 'installing')
         self.pack_bar.setVisible(st == 'installing')
         if st == 'installing':
+            return
+        if st == 'checking':
+            self.pack_out.setText('Checking the NVIDIA GPU…')
             return
         if st == 'gpu':
             text = gpu_refusal(self.gpu) + ' Choose a stock voice above, or cloud for "me → them" on the first page.'
@@ -698,6 +748,8 @@ class VoicePage(QWizardPage):
             self.pack_button.setText({'partial': 'Resume the install'}.get(st, 'Install the voice pack'))
             self.pack_button.setVisible(True)
             self.pack_consent.setVisible(True)
+        if st != 'gpu' and (note := gpu_note(self.gpu)):
+            text = f'{note} {text}'
         self.pack_out.setText(f'{self.pack_note} {text}'.strip())
 
     def install_pack(self) -> None:

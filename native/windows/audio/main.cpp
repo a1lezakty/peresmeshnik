@@ -16,7 +16,8 @@
 // software devices); back to DEV when it returns. Windows converts rate and channels (AUTOCONVERTPCM): a format change
 // of a device only reopens it. record and loop end when stdin closes (the app is gone: no microphone stays open).
 // Events on stderr, a line each: "using <id>\t<name>", "lost <id>\t<name>", "none"; loop also "idle" (nobody records
-// --watch: the microphone is closed, no microphone icon in the taskbar) and "call" (somebody does). A microphone that
+// --watch: the microphone is closed, no microphone icon in the taskbar), "call" (somebody does) and "reopened" (its
+// output stream was invalidated, a format change of DEV, and is open again). A microphone that
 // does not open (another app holds it in exclusive mode) is "none" with a line why, and tried again every 2 s.
 // Exit codes: 0 done, 2 usage, 3 no such device, 4 the device went away, 5 WASAPI / COM error, 6 no microphone
 // permission (Windows privacy settings), 7 (play) the output stream was invalidated (a format change): start it again.
@@ -656,14 +657,22 @@ static int run_loop(const std::wstring& from, const std::wstring& to, const std:
         if (!active(target->id)) die(GONE, target->name + " went away");
         HRESULT hr = out.open(*target, rate, 40);
         if (FAILED(hr)) die(WASAPI, "cannot play into " + target->name + ": " + hex(hr));
+        say("reopened");
+    };
+    ULONGLONG checked = GetTickCount64();
+    auto check = [&] {  // once a second while running: the output's periods never let the wait time out
+        if (GetTickCount64() - checked < CHECK_MS) return;
+        checked = GetTickCount64();
+        if (!out.alive()) reopen();
+        in.check();
     };
     for (;;) {
         HANDLE w[5] = {g_stdin, g_devices, g_sessions, out.evt, in.s.evt};
         DWORD n = running ? (in.open ? 5 : 4) : 3;
         DWORD r = WaitForMultipleObjects(n, w, FALSE, running ? std::min<DWORD>(CHECK_MS, in.wait_ms()) : INFINITE);
         if (r == WAIT_TIMEOUT) {  // a quiet while: the streams Windows invalidated without a word, a microphone to retry
-            if (!out.alive()) reopen();
-            in.check();
+            checked = 0;
+            check();
             continue;
         }
         r -= WAIT_OBJECT_0;
@@ -681,6 +690,7 @@ static int run_loop(const std::wstring& from, const std::wstring& to, const std:
             else if (!now && running) end();
         } else if (r == 3) {
             if (!render(out, ring, prime, primed, false, tmp)) reopen();  // a format change of the output
+            check();
         } else if (r == 4) {
             bool ok = in.s.read([&](const float* p, size_t k) {
                 ring.write(p, k);

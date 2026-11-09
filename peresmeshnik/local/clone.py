@@ -21,6 +21,7 @@ import os
 import shlex
 import struct
 import subprocess
+import sys
 import threading
 from collections.abc import Iterator
 from pathlib import Path
@@ -77,6 +78,8 @@ def make_clone(model_dir: Path | str, threads: int = 2):
     try:
         return XttsClone(model_dir, threads=threads)
     except ImportError as e:
+        if sys.platform == 'win32':  # the app's own place for it: the pack is the wizard's to install
+            raise CloneUnavailable('the voice pack is not installed: install it in the setup wizard (Your voice)') from e
         raise CloneUnavailable(f'the voice clone needs the voice pack (torch, coqui-tts): {e}') from e
 
 

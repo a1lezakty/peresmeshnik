@@ -232,9 +232,9 @@ def test_no_cable_says_how_to_install(monkeypatch):
     QApplication.instance() or QApplication([])
     from peresmeshnik import config
     from peresmeshnik.ui import selftest, wizard
-    devs, perm = [HEADSET, SPEAKERS], ['granted']
+    devs, perm, asked = [HEADSET, SPEAKERS], ['granted'], []
     monkeypatch.setattr(windows, 'devices', lambda: list(devs))
-    monkeypatch.setattr(windows, 'permission', lambda: perm[0])
+    monkeypatch.setattr(windows, 'permission', lambda: asked.append(1) or perm[0])
     monkeypatch.setattr(wizard, 'WINDOWS', True)
     monkeypatch.setattr(wizard, 'MACOS', False)
     monkeypatch.setattr(selftest, 'HELPER', True)
@@ -255,12 +255,18 @@ def test_no_cable_says_how_to_install(monkeypatch):
     assert '⚠' not in page.vmic.text() and '✘' not in page.vmic.text()
     devs[:] = [HEADSET, {**SPEAKERS, 'default_output': False}, {**CABLE_IN, 'default_output': True},
                {**CABLE_OUT, 'default_input': True}]  # the cable as Windows' default devices, the microphone refused
+    assert wait_for(lambda: QApplication.processEvents() or asked == [1])  # tried once the cable is there, in a worker
     perm[0] = 'denied'
-    page.check_vmic()
+    page.initializePage()  # back to the page: the devices again, the microphone not (it takes up to seconds)
+    QApplication.processEvents()
+    assert asked == [1] and windows.NO_PERMISSION not in page.vmic.text()
+    assert page.vmic.text().count('⚠') == 2  # the cable as Windows' default devices
+    page.recheck.click()  # "Check again" tries the microphone again
+    assert wait_for(lambda: QApplication.processEvents() or windows.NO_PERMISSION in page.vmic.text())
     text = page.vmic.text()
     assert "CABLE Input (VB-Audio Virtual Cable)</b> is Windows' default output" in text and 'Sound → Output' in text
     assert "CABLE Output (VB-Audio Virtual Cable)</b> is Windows' default microphone" in text and 'Sound → Input' in text
-    assert windows.NO_PERMISSION in text
+    assert asked == [1, 1] and not page.recheck.isHidden()
 
 
 def test_a_refused_microphone_says_so_at_once(monkeypatch):
@@ -575,6 +581,7 @@ def test_a_format_change_of_the_cable_opens_its_streams_again(monkeypatch):
     vm, frames, events, rates = VirtualMic(), [], [], {}
     m = Mic(rec['uid'], follow=True, on_device=lambda kind, name: events.append((kind, name)))
     loop = windows.spawn('loop', '--from', '', '--to', play['uid'], stdout=subprocess.DEVNULL)  # no --watch: it runs
+    looped = lines(loop, [])
     try:
         m.start(frames.append)
         assert wait_for(lambda: ('using', rec['name']) in events), events
@@ -583,13 +590,15 @@ def test_a_format_change_of_the_cable_opens_its_streams_again(monkeypatch):
         rates[play['uid']] = device_rate(play['uid'], new)
         assert wait_for(lambda: vm._proc.poll() is not None, 10), 'play went on after the format change (silent?)'
         assert vm._proc.returncode == 7, vm._proc.returncode
+        assert wait_for(lambda: 'reopened' in looped, 5), f'the loop did not open its output again: {looped}'
         rates[rec['uid']] = device_rate(rec['uid'], new)
         time.sleep(1.5)  # a check a second at most
         n = len(frames)
         vm.play(tone(1.5, SR_IN), SR_IN)  # reopen = (7,): a new player at the new format
         assert wait_for(lambda: len(frames) > n + 60, 10)
         level = np.abs(np.concatenate(frames[n:])).max()
-        say(f'\nformat change to {new} Hz: play exit {7}, the recording after it peaks {level:.2f}; events {events}')
+        say(f'\nformat change to {new} Hz: play exit {7}, the recording after it peaks {level:.2f}; events {events}; '
+            f'loop {looped}')
         assert level > 0.2, 'no tone through the cable after its format changed'
         assert loop.poll() is None, f'the loop ended ({loop.returncode})'
     finally:

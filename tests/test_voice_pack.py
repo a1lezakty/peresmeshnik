@@ -4,6 +4,7 @@ its stderr, its idle CPU; make_clone's choice; the app's fallback when the clone
 no GPU."""
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -182,7 +183,12 @@ def test_make_clone_chooses(monkeypatch, tmp_path):
     monkeypatch.setattr(config, 'data_dir', lambda: tmp_path)
     monkeypatch.setitem(sys.modules, 'torch', None)  # a base install: no torch in this process
     assert voice_cmd() is None
-    with pytest.raises(CloneUnavailable, match='needs the voice pack'):
+    with monkeypatch.context() as m, pytest.raises(CloneUnavailable, match='needs the voice pack'):
+        m.setattr(sys, 'platform', 'linux')  # a source install: torch and coqui-tts are the user's
+        make_clone(tmp_path)
+    with monkeypatch.context() as m, pytest.raises(CloneUnavailable, match=r'not installed: install it in the setup '
+                                                                          r'wizard \(Your voice\)'):
+        m.setattr(sys, 'platform', 'win32')  # the app: the next step, not the module that is missing
         make_clone(tmp_path)
     pack = tmp_path / 'voice-pack'
     pack.mkdir()
@@ -277,6 +283,32 @@ def test_clone_out_of_vram_at_warm_up_falls_back_to_the_stock_voice_not_the_clou
     assert d is not cloud and side.engine == 'local' and made == ['oom', None]
     assert side.errors == ['error: me: the voice clone is off (CUDA out of memory); a stock voice speaks instead. With '
                            'your Gemini key you can switch "Me → them" to cloud in the settings']  # said, not done
+
+
+class SlowTts:
+    """A runner on a card that cannot keep up: 0.1 s of speech per 0.15 s (RTF 1.5)."""
+    sample_rate = 24_000
+
+    def synth(self, text, lang, voice=None, speed=1.0):
+        for _ in range(4):
+            time.sleep(0.15)
+            yield np.zeros(self.sample_rate // 10, np.float32)
+
+    def close(self):
+        pass
+
+
+def test_a_clone_slower_than_real_time_gives_way_to_the_stock_voice(monkeypatch, tmp_path):
+    """Its real-time factor, measured at warm-up, above MAX_CLONE_RTF (a GTX 10xx, say): me -> them has no lag limit,
+    so the stock voice speaks from the start, with the reason, instead of a clone that falls further behind."""
+    from peresmeshnik import app
+    slow = SlowTts()
+    side, s, made, cloud = me_side(monkeypatch, tmp_path, slow, key=False)
+    d = side._local(s)
+    assert made == [slow, None] and d.warm == 1  # the clone made and dropped, the stock voice warmed up
+    m = re.search(r'the GPU is too slow for the clone: (\d+\.\d) s of synthesis per second', side.errors[0])
+    assert len(side.errors) == 1 and m and float(m[1]) > app.MAX_CLONE_RTF, side.errors  # 1.5, more on a slow runner
+    assert app.clone_rtf(slow, 'de', None) > app.MAX_CLONE_RTF  # a language without a test phrase: the English one
 
 
 def test_clone_that_dies_mid_call_is_replaced(monkeypatch, tmp_path):

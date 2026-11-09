@@ -42,6 +42,9 @@ from peresmeshnik.engines import SAMPLE_RATE, Caption, Latency, Speech
 log = logging.getLogger('peresmeshnik.app')
 ARROW = {'them': 'them → me', 'me': 'me → them'}
 RESTARTS = 3  # a side that fails this often within a minute stays off, with the reason
+MAX_CLONE_RTF = 1.0  # seconds of synthesis per second of speech, warm: above, the clone falls behind for good (me -> them
+#                      has no lag limit) and the stock voice speaks; the RTX 3060 runs it at 0.4-0.5 (BENCH), a GTX 10xx
+#                      is not measured
 OURS = 'peresmeshnik_'  # every PipeWire device the app makes starts with this
 MIC_SINK = 'peresmeshnik_mic_sink'  # = audio/virtual_mic_linux.SINK, without importing it on other OSes
 BARGE_IN_WORDS = 3  # my clause has this many words: I talk over their voice (fewer: "yeah", "ага" while listening)
@@ -437,6 +440,16 @@ def remove_stale() -> None:
         subprocess.run(['pactl', 'unload-module', m[0]], capture_output=True, timeout=10)
 
 
+def clone_rtf(tts, lang: str, voice) -> float:
+    """The clone's real-time factor, warm (after warm_up): one ~4 s test phrase, synthesis time over its length."""
+    from peresmeshnik.voice import TEST_PHRASES
+    lang = lang if lang in TEST_PHRASES else 'en'
+    t0, n = time.perf_counter(), 0
+    for chunk in tts.synth(TEST_PHRASES[lang][0], lang, voice):
+        n += len(chunk)
+    return (time.perf_counter() - t0) / max(n / tts.sample_rate, 1e-3)
+
+
 def spoke(e: BaseException | None) -> bool:
     """The error came from the pipeline's speak worker (the TTS: the clone), not from ASR or MT."""
     return e is not None and any(f.name == '_speak' for f in traceback.extract_tb(e.__traceback__))
@@ -491,9 +504,13 @@ class Side:
             d = make_local(self.src, self.tgt, settings=s, tts=tts, voice=v)
             try:
                 d.warm_up()
+                rtf = clone_rtf(tts, self.tgt, v)
             except RuntimeError as e:  # out of VRAM on the first phrase, the runner died
                 d.close()
                 return self._fallback(s, e)
+            if rtf > MAX_CLONE_RTF:
+                d.close()
+                return self._fallback(s, f'the GPU is too slow for the clone: {rtf:.1f} s of synthesis per second of speech')
             return d
         return self._stock(d, s)
 

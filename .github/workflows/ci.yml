@@ -88,12 +88,37 @@ jobs:
           sudo sqlite3 "$HOME/Library/Application Support/com.apple.TCC/TCC.db" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, flags, last_modified) VALUES ('kTCCServiceAudioCapture', '/opt/hca/hosted-compute-agent', 1, 2, 4, 1, 0, strftime('%s','now'))"
           killall tccd; sleep 1
           echo "PERESMESHNIK_TCC=granted" >> "$GITHUB_ENV"
+      # SHARED with S2: VB-Cable is the virtual speakers/headphones here and the call app's microphone for me -> them
+      - name: VB-Audio Virtual Cable (the virtual speakers/headphones of the Windows sound tests), silent
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 6
+        run: |
+          Set-Service Audiosrv -StartupType Automatic; Start-Service Audiosrv
+          $d = "$env:RUNNER_TEMP\vbcable"
+          Invoke-WebRequest https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack46.zip -OutFile "$d.zip"
+          if ((Get-FileHash "$d.zip" -Algorithm SHA256).Hash -ne 'BC44E8974191A5A2427D6C979E2DAB08DBB09925F3F435DFA2F0BA3E45B6EB90') { throw 'VB-Cable checksum mismatch' }
+          Expand-Archive "$d.zip" $d
+          # trust the driver publisher so the install needs no "Install this device software?" dialog (CI only)
+          $cert = (Get-AuthenticodeSignature "$d\vbaudio_cable64_win10.cat").SignerCertificate
+          $store = New-Object System.Security.Cryptography.X509Certificates.X509Store 'TrustedPublisher', 'LocalMachine'
+          $store.Open('ReadWrite'); $store.Add($cert); $store.Close()
+          Start-Process "$d\VBCABLE_Setup_x64.exe" -ArgumentList '-i', '-h' -Wait
+          Start-Sleep 6
+          if (-not (Get-PnpDevice -Class AudioEndpoint | Where-Object FriendlyName -Like '*CABLE Output*')) { throw 'VB-Cable did not install' }
+      - name: Loopback helper (native/windows/loopback), as the .exe gets it
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          call native\windows\loopback\build.cmd "%RUNNER_TEMP%\bin\peresmeshnik-loopback.exe" || exit /b 1
+          echo PERESMESHNIK_LOOPBACK=%RUNNER_TEMP%\bin\peresmeshnik-loopback.exe>> %GITHUB_ENV%
       # includes the idle-CPU watchdogs: the app (tray, overlay, first-run wizard) 60 s idle, and again with
       # the overlay on screen; each fails above 0.13 s of CPU. Linux: Xvfb; macOS, Windows: the runner's desktop
       - run: uv run pytest -q -s -rs  # -rs: what was skipped and why
         env:  # macOS, Windows: a synthetic key press or click that does not arrive fails the test instead of skipping it
           PERESMESHNIK_REQUIRE_SYNTHETIC: ${{ runner.os != 'Linux' && '1' || '' }}
           PERESMESHNIK_REQUIRE_MACOS: ${{ runner.os == 'macOS' && '1' || '' }}  # the call-sound tests run, not skip
+          PERESMESHNIK_REQUIRE_WINDOWS: ${{ runner.os == 'Windows' && '1' || '' }}  # the Windows call-sound tests run, not skip
 
   # working-mode CPU gate: the local pipeline on a 30 s recording (RTF, CPU s per audio s)
   work-gate:

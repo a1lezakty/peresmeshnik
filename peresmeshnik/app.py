@@ -109,6 +109,22 @@ class Headphones:
         self._lock = threading.Lock()  # capture (live), events (speech) and control (switch, stop) threads
 
     def resolve(self, exclude: str = '') -> str:
+        if sys.platform == 'win32':
+            from peresmeshnik.audio import winaudio
+            names = winaudio.output_names()
+            is_cable = lambda n: 'CABLE' in n.upper()  # noqa: E731  VB-Cable is the call's mic side, not headphones
+            if self.sink and self.sink != exclude and self.sink in names:
+                name = self.sink
+            else:
+                name = winaudio.default_output()
+                if not name or name == exclude or is_cable(name):
+                    name = next((n for n in names if n != exclude and not is_cable(n)), '')
+                if not name:
+                    raise RuntimeError('no output device')
+            if is_cable(name):
+                raise RuntimeError(f'the output is {name}, a virtual cable (the call app\'s microphone): choose your '
+                                   'headphones in the settings or the system')
+            return name
         if sys.platform == 'darwin':
             from peresmeshnik.audio import capture_macos, coreaudio
             outs = [d for d in coreaudio.devices() if d['outputs']]
@@ -612,6 +628,8 @@ class Controller:
         if self.devices and sys.platform == 'darwin':
             self._startup_call_macos()
             self._startup_macos()
+        if self.devices and sys.platform == 'win32':
+            self._startup_call_windows()
         if not (self.devices and sys.platform.startswith('linux')):
             return
         errors = []
@@ -656,6 +674,19 @@ class Controller:
             self.startup_error = '; '.join(x for x in (self.startup_error, str(e)) if x)  # next to S1's, not over it
             return
         self._loopback(True)
+
+    def _startup_call_windows(self) -> None:
+        """Windows, the call's sound (S1): a previous run that crashed while muting the call app left its session
+        volume at 0 -> put it back now; then check the loopback helper so a missing one is said at start, not at the
+        first call."""
+        from peresmeshnik.audio import capture_windows
+        try:
+            capture_windows.restore_call()
+            code, why = capture_windows.check()
+        except Exception as e:
+            code, why = 1, str(e)
+        if code:
+            self.startup_error = '; '.join(x for x in (self.startup_error, why) if x)
 
     def _mic_source(self) -> str:
         return mic_source((self.settings or config.load()).ui.mic, self._mic)
@@ -762,13 +793,19 @@ class Controller:
         move)."""
         from peresmeshnik.audio.capture_pipewire import CallRouter, guess_call_app
         try:
-            tap = None
+            tap = None  # a process tap (macOS) or loopback (Windows): retarget it to the app, no sink move
+            mute = False  # Windows: the loopback does not mute, so lower the call app's session volume (variant A)
             if sys.platform == 'darwin':
                 from peresmeshnik.audio import capture_macos
                 tap = next(x for x in self.sides if x.name == 'them').inp
                 if not isinstance(tap, capture_macos.ProcessTap):  # BlackHole 16ch: the call app's own speaker setting
                     return f'call sound: {tap.device} (the call app\'s speaker); '
                 guess_call_app = capture_macos.guess_call_app
+            elif sys.platform == 'win32':
+                from peresmeshnik.audio import capture_windows
+                tap = next(x for x in self.sides if x.name == 'them').inp
+                guess_call_app = capture_windows.guess_call_app
+                mute = True
             app = s.ui.call_app
             if not app and (app := guess_call_app()):
                 self._save_call_app(app)
@@ -776,7 +813,12 @@ class Controller:
                 return 'call app: none; '
             if tap is not None:
                 tap.retarget(app)
-                self._router = SimpleNamespace(stop=lambda: tap.retarget(''))  # off: no tap, the call is heard as usual
+                if mute:  # the translation is heard, the original is not; restored on off and after a crash
+                    from peresmeshnik.audio import capture_windows
+                    capture_windows.mute_call(app)
+                    self._router = SimpleNamespace(stop=lambda: (tap.retarget(''), capture_windows.restore_call()))
+                else:
+                    self._router = SimpleNamespace(stop=lambda: tap.retarget(''))  # off: no tap, the call is heard as usual
                 return f'call sound: {app}; '
             self._router = CallRouter(app, self._call.name)
             self._router.start()
@@ -810,12 +852,21 @@ class Controller:
 
     def _set_call_app(self, app: str) -> None:
         self._save_call_app(app)
-        if self.on and (self._call or sys.platform == 'darwin') and any(x.name == 'them' for x in self.sides):
+        if self.on and (self._call or sys.platform in ('darwin', 'win32')) and any(x.name == 'them' for x in self.sides):
             self._unroute()
             self.on_state(f'translating ({self._route(self.settings or config.load()).rstrip("; ")})')
 
     def _input(self, name: str, s: config.Settings | None = None):
         s = s or self.settings or config.load()
+        if name == 'them' and sys.platform == 'win32':
+            from peresmeshnik.audio import capture_windows
+            # the loopback ended (the helper exited, the call app restarted): un-mute, so the call is heard as usual
+            on_end = lambda why: (capture_windows.restore_call(),  # noqa: E731
+                                  self.on_state(f'error: the call sound capture stopped: {why}'))
+            code, why = capture_windows.check()
+            if code:
+                raise RuntimeError(why)
+            return capture_windows.ProcessLoopback(on_end=on_end)  # the app is chosen in _route, after the start
         if name == 'them' and sys.platform == 'darwin':
             from peresmeshnik.audio import capture_macos
             on_end = lambda why: self.on_state(f'error: the call sound capture stopped: {why}')  # noqa: E731
@@ -838,10 +889,8 @@ class Controller:
         return Microphone(s.ui.mic, self.on_state, self._mic)
 
     def _output(self, name: str, s: config.Settings):
-        if sys.platform == 'win32':
-            raise RuntimeError('audio routing on Windows comes in a later version (stage 4)')
         if name == 'them' or self.test:
-            back = (lambda: self.submit(self._refresh_devices)) if self.devices and sys.platform == 'darwin' else None
+            back = (lambda: self.submit(self._refresh_devices)) if self.devices and sys.platform in ('darwin', 'win32') else None
             out = Headphones(s.ui.headphones, self.on_state, on_back=back)
             out.resolve()  # a missing device or our own as the default: say so now, not at the first word
             return out
@@ -870,7 +919,7 @@ class Controller:
         pass-through's, the wizard's test phrase's), all at once; the engines and the process tap stay (BENCH: the
         gap). The control thread: at translation on and when the saved headphones are back. A stream that cannot open
         again is reported and its owner reopens elsewhere; translation stays on."""
-        if not (self.devices and sys.platform == 'darwin'):
+        if not (self.devices and sys.platform in ('darwin', 'win32')):
             return {}
         from peresmeshnik.audio.coreaudio import refresh_portaudio
         r = refresh_portaudio()
@@ -878,7 +927,7 @@ class Controller:
         for why in r['failed']:
             self.on_state(f'error: after the device refresh: {why}')
         saved = (self.settings or config.load()).ui.headphones
-        if self._through and saved:
+        if sys.platform == 'darwin' and self._through and saved:
             from peresmeshnik.audio.out import portaudio_names
             if saved not in portaudio_names():  # still not there for PortAudio: the next change of it, not a loop
                 self._through_wait(saved)

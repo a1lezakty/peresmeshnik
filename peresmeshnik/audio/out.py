@@ -359,4 +359,69 @@ class SoundDeviceOut:
         self.on_end(why)
 
 
-Output = PulseOut if sys.platform.startswith('linux') else SoundDeviceOut
+class WasapiOut(SoundDeviceOut):
+    """Windows headphones through PortAudio's WASAPI host API, by name (None / '' = the system's default output now),
+    at the device's shared-mode mix rate. Same queue and callback as SoundDeviceOut (macOS); the device backend is
+    winaudio (the default and rates from sounddevice's WASAPI, device-change notifications from the native helper's
+    `watch`, the shared PortAudio refresh). `on_end(why)` once when the device goes (a headset unplugged, the default
+    device changed away): the owner reopens. Registered with the shared holder registry: a refresh suspends it."""
+
+    def __init__(self, sample_rate: int, device: str | None = None, latency_ms: int = 40,
+                 on_end: Callable[[str], None] = lambda why: None):
+        from peresmeshnik.audio import winaudio
+        from peresmeshnik.audio.resample import Resampler
+        self.sample_rate, self.on_end = sample_rate, on_end
+        self._was_default = not device  # opened as the system default: follow it when it changes
+        self.device = device or winaudio.default_output()
+        if not self.device:
+            raise RuntimeError('no output device')
+        self.rate = winaudio.rate(self.device)
+        self._rs = Resampler(sample_rate, self.rate)
+        self.alive = True
+        self._stopping = self._closed = False
+        self._lock = threading.Lock()
+        self._chunks: collections.deque[np.ndarray] = collections.deque()
+        self._pos = 0
+        self._empty = threading.Event()
+        self._empty.set()
+        self._stream = None
+        # a default-device change or a device-state change: check if ours is gone and, if so, report it
+        self._watch = winaudio.DeviceWatch(self._on_device_event)
+        try:
+            self._open()
+        except BaseException:
+            self._watch.close()
+            raise
+
+    def _open(self) -> None:
+        import sounddevice as sd
+
+        from peresmeshnik.audio import coreaudio, winaudio
+        with coreaudio.portaudio_lock:
+            index = winaudio.device_index(self.device)  # pinned to WASAPI (a VB-Cable name repeats across host APIs)
+            self.channels = min(2, sd.query_devices(index)['max_output_channels'])  # mono on both ears
+            args = winaudio.stream_args(self.device)
+            if args['samplerate'] != self.rate:  # the device's mix rate changed: what is queued is at the old rate
+                raise RuntimeError(f'its rate changed ({self.rate} -> {args["samplerate"]} Hz)')
+            self._stream = sd.OutputStream(device=index, channels=self.channels, dtype='float32', callback=self._fill,
+                                           finished_callback=self._finished, **args)
+            self._stream.start()
+            self._stopping = False
+            coreaudio.hold(self)
+
+    def _on_device_event(self) -> None:
+        from peresmeshnik.audio import coreaudio, winaudio
+        if self._stopping or not self.alive:
+            return
+        # PortAudio reads the device list only at init, so output_names()/default_output() are stale until a refresh;
+        # refreshing frees and reopens every held stream (ours on the same device, or _lost when it is gone now).
+        coreaudio.refresh_portaudio()
+        if self._stopping or not self.alive:
+            return  # the refresh could not reopen ours (the device went): _lost already fired
+        if self.device not in winaudio.output_names():
+            self._lost(f'{self.device} went away')
+        elif self._was_default and winaudio.default_output() not in ('', self.device):
+            self._lost(f'the default output changed from {self.device}')  # follow it: the owner reopens on the new one
+
+
+Output = PulseOut if sys.platform.startswith('linux') else (WasapiOut if sys.platform == 'win32' else SoundDeviceOut)

@@ -1312,3 +1312,56 @@ by the filter seeing it twice in a row (Qt's dispatcher, then the window procedu
 window (the installer's) quits. A command that fails in the
 windowed `.exe` (e.g. the cloud refusing a key) printed its error and then waited forever on PyInstaller's
 "Unhandled exception" dialog; `packaging/entry.py` now prints it and exits with code 1 when there is a stderr.
+
+## Stage 4: the call's sound on Windows and CUDA (S1)
+
+### them → me on CUDA vs CPU (ASR on onnxruntime, MT on CTranslate2)
+
+An RTX A4000 box (Linux, 1× NVIDIA RTX A4000 16 GB, CUDA 13.2; onnxruntime-gpu 1.31.1, CTranslate2 4.8.5), the 30 s
+`tests/data/call-{en,ru}.ogg` fed in real time through the them → me pipeline (VAD → streaming ASR → clauses → MT),
+TTS left out (the stock Piper is CPU either way, so this isolates the GPU effect on the subtitles), 6 threads. The
+device is chosen automatically (`PERESMESHNIK_DEVICE=auto`): CUDA when onnxruntime and CTranslate2 both see a GPU,
+else CPU. VRAM is the peak total on the GPU over the run (the container blocks per-process accounting; nothing
+else ran on it), so it includes the CUDA context and cuDNN/cuBLAS (~0.3 GB).
+
+| pair (ASR) | device | ASR partial RTF | MT RTF | subtitle lag p50 / max, s | VRAM peak, MiB |
+|---|---|---|---|---|---|
+| en → ru (Parakeet-tdt-0.6b-v3 int8) | CPU | 0.49 | 0.023 | 0.48 / 1.34 | — |
+| en → ru (Parakeet-tdt-0.6b-v3 int8) | **CUDA** | **0.25** | **0.0034** | **0.37 / 1.15** | **633** |
+| ru → en (GigaAM-v3-e2e-ctc int8) | CPU | 0.27 | 0.011 | 0.36 / 1.67 | — |
+| ru → en (GigaAM-v3-e2e-ctc int8) | **CUDA** | **0.15** | **0.0025** | **0.30 / 1.61** | **477** |
+
+- CUDA roughly halves the ASR real-time factor (the partial ASR is the heaviest them → me link) and cuts the MT to
+  near nothing; the median subtitle lag drops by ~0.07–0.11 s. The clauses and their text are the same on both.
+- **It fits in 6 GB.** them → me on CUDA is 0.5–0.6 GB (models int8 + the CUDA context): on a 6 GB card it leaves
+  room for S2's clone (me → them). Both directions together in 6 GB is S2's measurement.
+- onnxruntime logs "Memcpy nodes are added … for CUDAExecutionProvider" for these int8 graphs (some ops stay on the
+  CPU, so there are host↔device copies): CUDA still wins, but an fp16/CUDA-native build would win more. Not pursued —
+  the int8 models are shared with the CPU path and the registry.
+- A CUDA that cannot start (no driver, too little VRAM) falls back to CPU with one logged message
+  (`peresmeshnik.device`), and translation goes on. **Windows + CUDA is unproven** (no Windows GPU in CI): USER-CHECKS.
+
+### Windows process loopback and the mute spike (the runner)
+
+Measured on the GitHub Actions `windows-latest` runner (Windows Server 2025, build 26100, x64, 4 cores, no real
+audio device). The loopback helper `native/windows/loopback` is built with MSVC (`build.cmd`, via vswhere);
+VB-Audio Virtual Cable stands in for the speakers/headphones (its "CABLE Input" is the output, "CABLE Output" the
+recording side), installed silently in CI. A tone-player process (`tests/windows/tone.py`, 440 Hz) is the call app.
+Tests: `tests/test_windows_audio.py`.
+
+| check | result |
+|---|---|
+| helper build (`build.cmd`, MSVC via vswhere) | Visual Studio 18, cl /std:c++17 /O2, one `main.cpp`; `check` → `windows=26100 loopback=yes`, exit 0 |
+| process loopback of the player by pid | the tone is captured: mono float32 48 kHz, RMS > 0.05, peak 440 Hz (±10) |
+| audio sessions (`list`) across every active render endpoint | the player's `python.exe` session is listed with its pid and `playing: true` (the call app may play to a non-default device: every render endpoint is scanned, not just the default) |
+| mute spike, variant A | the session volume is set to 0 (read back `< 0.01`) while the loopback still has the tone (RMS > 0.05): the loopback is taken **before** the session volume, so the translation is heard and the original is not. The device output's silence on real speakers is a USER-CHECKS line (the runner cannot record the virtual cable: WASAPI capture → PaErrorCode −9996, MME → −9999) |
+| WASAPI headphones (`WasapiOut`) | opens on the virtual cable, takes audio and drains it (queue → 0) with no spurious end; a device-gone notification reports it so the owner reopens |
+
+- The process loopback captures only the target process tree (`PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE`),
+  so a browser's tab processes and a call app's helpers go with it; the exe name is resolved to the tree's root pid
+  (psutil) since loopback needs a pid, not a name.
+- Variant A (session volume) works, so the second virtual cable (variant B) is not needed: BENCH/ARCHITECTURE.
+- The helper also serves device-change notifications (`watch`, IMMNotificationClient) for the headphones, so no
+  comtypes and no polling on the Python side.
+- The runner has no GPU, so **Windows + CUDA** (the voice pack's onnxruntime-gpu / CTranslate2) is a USER-CHECKS line;
+  the CUDA numbers above are on Linux (an RTX A4000).

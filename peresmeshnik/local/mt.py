@@ -9,9 +9,19 @@ class OpusMt:
         import sentencepiece as spm
 
         from peresmeshnik import models
+        from peresmeshnik.local import device
         path = models.path(model_id or f'opus-mt-{src}-{tgt}')
         self.src, self.tgt = src, tgt
-        self._tr = ctranslate2.Translator(str(path), device='cpu', inter_threads=1, intra_threads=threads)
+        self.device = 'cuda' if device.ct2_cuda() else 'cpu'
+        try:
+            self._tr = ctranslate2.Translator(str(path), device=self.device, inter_threads=1, intra_threads=threads)
+        except Exception as e:  # CUDA there but the model would not load on it (VRAM): them -> me falls back to CPU
+            if self.device != 'cuda':
+                raise
+            import logging
+            logging.getLogger('peresmeshnik.device').warning('MT on CUDA failed (%s); using CPU', e)
+            self.device = 'cpu'
+            self._tr = ctranslate2.Translator(str(path), device='cpu', inter_threads=1, intra_threads=threads)
         self._sp_src = spm.SentencePieceProcessor(str(path / 'source.spm'))
         self._sp_tgt = spm.SentencePieceProcessor(str(path / 'target.spm'))
 

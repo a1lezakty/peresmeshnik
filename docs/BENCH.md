@@ -1182,7 +1182,19 @@ last IO buffer in coreaudiod's mix, repeated with no process left: the call app 
 flush and in 16ch after a test's player was killed. The helpers now stop every IOProc before they exit, on SIGTERM,
 end of stdin or an error, and the app ends them with SIGTERM (SIGKILL only if one is still there after 2 s).
 `tests/test_blackhole_stale.py` (a writer goes while the call app reads and another writer goes on): 0 % of the
-old tone afterwards, and a reader alone afterwards hears rms 0.0000.
+old tone afterwards, and a reader alone afterwards hears rms 0.0000. Such a buffer, once left, stays for the
+machine's session, so the suite never kills a writer into BlackHole: a SIGKILL variant of that test left its 220 Hz
+writer looping on 2 of 6 runners that ran the suite three times in a row, and 11 later tests on BlackHole 2ch
+failed up to the end of that runner (the round trip heard 656 Hz = 7 × 93.75).
+
+**A Core Audio listener freed under Core Audio.** The whole macOS suite died in 2 of 6 runs (SIGSEGV / SIGBUS on
+Core Audio's `HALC_ShellObject_Listener Queue`): a pass-through whose `start()` failed (a call app already playing
+into BlackHole 16ch, no headphones) kept its `coreaudio.Running` registered, the garbage collector later freed it
+with its ctypes callback, and the next change of BlackHole 16ch called freed memory; the app would do the same on
+its next call. Now one C callback serves every listener and is never freed, the listeners are registered by key
+until `close()`, and `PassThrough.start()` stops itself when opening fails. Before: 4 crashes in 15 runs of the
+suite; with it: none in 18 (6 runners, 3 runs in a row each), 0 listeners left registered at the end of each
+(`test_a_listener_lives_while_core_audio_holds_it`).
 
 ### The clone on the M1 runner (CPU, 2 threads as the app)
 

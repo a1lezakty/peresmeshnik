@@ -1,7 +1,7 @@
 """Global hotkey: an X11 key grab, or the XDG GlobalShortcuts portal on Wayland; on macOS Carbon's
-RegisterEventHotKey (`ui/macos.py`).
+RegisterEventHotKey (`ui/macos.py`), on Windows RegisterHotKey (`ui/windows.py`).
 
-All of them wait for the system (Qt socket notifier / a thread blocked in recv / the app's run loop) and never poll. Callbacks
+All of them wait for the system (Qt socket notifier / a thread blocked in recv / the app's run or message loop) and never poll. Callbacks
 run on the Qt GUI thread. `make()` picks one, or returns (None, reason) when neither works: then
 the tray item is the only switch, and the reason is shown to the user.
 
@@ -316,9 +316,10 @@ def wayland() -> bool:
 
 def make() -> tuple[object | None, str]:
     """(hotkey, '') or (None, why there is no global hotkey)."""
-    if not sys.platform.startswith(('linux', 'darwin')):
-        return None, 'the global hotkey on this OS comes in a later version: use the tray menu'
     try:
+        if sys.platform == 'win32':
+            from peresmeshnik.ui.windows import WinHotkey
+            return WinHotkey(), ''
         if sys.platform == 'darwin':
             from peresmeshnik.ui.macos import MacHotkey
             return MacHotkey(), ''

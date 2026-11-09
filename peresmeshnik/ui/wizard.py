@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 import psutil
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QTimer, Signal
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -542,7 +542,7 @@ class DonePage(QWizardPage):
     def __init__(self):
         super().__init__()
         self.setTitle('Ready')
-        lab = QLabel(DONE_MACOS if sys.platform == 'darwin' else DONE_LINUX)
+        lab = QLabel({'darwin': DONE_MACOS, 'win32': DONE_WINDOWS}.get(sys.platform, DONE_LINUX))
         lab.setWordWrap(True)
         QVBoxLayout(self).addWidget(lab)
 
@@ -556,6 +556,16 @@ DONE_MACOS = ('In your call app (Meet, Zoom, Telegram) choose the microphone <b>
               'too, so for calls a separate browser is better.<br><br>'
               'Turn translation on from the Peresmeshnik icon in the menu bar. The hotkey switches to your live voice '
               'and back.<br><br>Settings and this wizard are in the same menu.')
+DONE_WINDOWS = ('In your call app (Meet, Zoom, Telegram) choose the microphone <b>CABLE Output</b> (VB-Audio Virtual Cable). '
+                'While translation is off it carries your own voice, so the call always hears you.<br><br>'
+                "Their voice: while translation is on, the app records the call app's sound and mutes its original on your "
+                'speakers (you hear the translation instead), and gives it back when translation is off. Telegram, Zoom, '
+                'Discord and the like are found by themselves; else choose the app in the tray menu <b>Call app</b> while '
+                'the call plays. A browser (Meet) is taken with <b>all</b> of its sound: YouTube in another tab is '
+                'translated too, so for calls a separate browser is better.<br><br>'
+                'Turn translation on from the Peresmeshnik icon in the notification area (at first Windows may keep it '
+                'behind the ^ arrow). The hotkey switches to your live voice and back.<br><br>'
+                'Settings and this wizard are in the same menu.')
 DONE_LINUX = ('In your call app (Meet, Zoom, Telegram) choose the microphone <b>Peresmeshnik Mic</b>. While '
               'translation is off it carries your own voice, so the call always hears you.<br><br>'
               'Their voice: while translation is on, the app moves the call app\'s sound to <b>Peresmeshnik Call</b> '
@@ -580,6 +590,19 @@ class SetupWizard(QWizard):
         self.accepted.connect(self.finish)
         self.rejected.connect(self.cancel)
         self.finished.connect(lambda _: tray.ctl.on or tray.ctl.overlay.clear.emit())  # the test phrase's subtitles
+        self.currentIdChanged.connect(lambda _: QTimer.singleShot(0, self.fit))
+
+    def showEvent(self, event) -> None:  # noqa: N802 (Qt name)
+        super().showEvent(event)
+        QTimer.singleShot(0, self.fit)
+
+    def fit(self) -> None:
+        """Taller when the current page's wrapped text needs it: QWizard sizes pages as if nothing wrapped (on Windows
+        the last lines of a page were cut off)."""
+        p = self.currentPage()
+        if p and p.layout() and (need := p.layout().totalHeightForWidth(p.width())) > p.height():
+            room = self.screen().availableGeometry().height() - (self.frameGeometry().height() - self.height())
+            self.resize(self.width(), min(room, self.height() + need - p.height()))  # the buttons stay on screen
 
     def busy(self) -> bool:
         """Still downloading, testing or playing a phrase: the tray keeps this wizard alive after it is closed."""

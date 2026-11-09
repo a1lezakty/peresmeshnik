@@ -37,15 +37,21 @@ ICONS = Path(__file__).resolve().parents[2] / 'assets' / 'icons'  # ponytail: re
 LANGS = {'en': 'English', 'ru': 'Русский'}
 MIC_LABEL = 'Microphone'  # me -> them and the loopback while translation is off
 SIDES = {'them_to_me': 'Them → me', 'me_to_them': 'Me → them'}
-MAC = sys.platform == 'darwin'
-BROWSER_NOTE = (f'A browser {"is taken" if MAC else "moves"} with all of its sound: YouTube in another tab is translated too. '
+MAC, WIN = sys.platform == 'darwin', sys.platform == 'win32'
+BROWSER_NOTE = (f'A browser {"is taken" if MAC or WIN else "moves"} with all of its sound: YouTube in another tab is translated too. '
                 'For calls a separate browser is better.')
-CALL_NOTE = 'While translating, macOS mutes it on your speakers' if MAC else 'Its sound moves to the translation while it is on'
+CALL_NOTE = ('While translating, macOS mutes it on your speakers' if MAC else
+             'While translating, its own sound is muted on your speakers' if WIN else 'Its sound moves to the translation while it is on')
+CAPTURE = {'darwin': 'capture_macos', 'win32': 'capture_windows'}.get(sys.platform, 'capture_pipewire')
 
 
 def tray_icon() -> QIcon:
     icon = QIcon()
-    light = sys.platform.startswith('linux') or sys.platform == 'win32'  # dark panels
+    if WIN:
+        from peresmeshnik.ui.windows import light_taskbar
+        light = not light_taskbar()  # the white glyph on a dark taskbar
+    else:
+        light = sys.platform.startswith('linux')  # dark panels; macOS colours the template itself
     for px in (16, 22, 24, 32, 44, 48, 64):
         f = ICONS / f'tray{"-light" if light else ""}-{px}.png'
         if f.exists():
@@ -56,11 +62,8 @@ def tray_icon() -> QIcon:
 
 def capture():
     """The call-sound module of this OS: `apps()` playing now as [(key, label)], `is_browser(key)`."""
-    if sys.platform == 'darwin':
-        from peresmeshnik.audio import capture_macos as mod
-    else:
-        from peresmeshnik.audio import capture_pipewire as mod
-    return mod
+    import importlib
+    return importlib.import_module(f'peresmeshnik.audio.{CAPTURE}')
 
 
 class Tray(QObject):
@@ -95,10 +98,9 @@ class Tray(QObject):
                 group.addAction(a)
             group.triggered.connect(self._engine_chosen)
         self._call_group = None
-        if sys.platform.startswith(('linux', 'darwin')):  # Windows: stage 4
-            self.call_menu = m.addMenu('Call app')
-            self.call_menu.aboutToShow.connect(self._fill_call_menu)
-            self.call_apps.connect(self._show_call_apps)
+        self.call_menu = m.addMenu('Call app')
+        self.call_menu.aboutToShow.connect(self._fill_call_menu)
+        self.call_apps.connect(self._show_call_apps)
         m.addSeparator()
         m.addAction('Settings…', self.open_settings)
         m.addAction('Setup wizard…', self.open_wizard)
@@ -106,6 +108,9 @@ class Tray(QObject):
         m.addAction('Quit', self._quit)
         self.sync()
         self.icon = QSystemTrayIcon(tray_icon())
+        if WIN:  # the taskbar went light or dark: the glyph that shows on it
+            from peresmeshnik.ui import windows
+            windows.host().theme.connect(lambda: self.icon.setIcon(tray_icon()))
         self.icon.setContextMenu(m)
         self.icon.setToolTip('Peresmeshnik')
         self.fallback = None
@@ -179,8 +184,8 @@ class Tray(QObject):
         def work():
             try:
                 self.call_apps.emit((capture().apps(), ''))
-            except Exception as e:  # no sound server; macOS: no call sound capture in this version yet
-                missing = isinstance(e, ModuleNotFoundError) and e.name == 'peresmeshnik.audio.capture_macos'
+            except Exception as e:  # no sound server; macOS, Windows: no call sound capture in this version yet
+                missing = isinstance(e, ModuleNotFoundError) and e.name == f'peresmeshnik.audio.{CAPTURE}' and CAPTURE != 'capture_pipewire'
                 self.call_apps.emit(([], 'not in this version' if missing else str(e)))
         threading.Thread(target=work, name='call-apps', daemon=True).start()
 

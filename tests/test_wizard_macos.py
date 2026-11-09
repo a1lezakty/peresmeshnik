@@ -117,25 +117,39 @@ def _ready():
 
 
 @pytest.mark.skipif(not _ready(), reason='macOS with BlackHole 2ch and the helper built')
-def test_self_test_page():
+def test_self_test_page(caplog):
+    """The app runs, translation off: its loop (microphone -> BlackHole 2ch) waits for a call app to record BlackHole 2ch.
+    The self-test records it like one: the loop must stay closed meanwhile (else the real microphone opens: the orange
+    dot, AirPods' call profile, and its sound over the chirp). Here a loud tone plays into the stand-in microphone."""
+    import logging
+
+    from test_virtual_mic_macos import MIC16, Feed, after_sound
+
     from peresmeshnik import app as app_
     from peresmeshnik.ui import wizard
+    caplog.set_level(logging.INFO, logger='peresmeshnik.app')
     s = config.Settings()
-    s.ui.mic = 'BlackHole16ch_UID'
+    s.ui.mic = MIC16
     states = []
     overlay = type('O', (), {'side': lambda self, n: self, 'hide': lambda self: None, 'show': lambda self, c: None})()
     ctl = app_.Controller(overlay, states.append, settings=s)
-    from test_virtual_mic_macos import after_sound
     print('\nbefore:', after_sound())
+    feed = Feed(MIC16, f=300.0)
     try:
         ctl.startup()
+        assert ctl._loop is not None and ctl._loop.poll() is None, (ctl.startup_error, states)
         page = wizard.SelfTestPage(type('W', (), {'s': s, 'tray': type('T', (), {'ctl': ctl})()})())
         page.run()
         pump(lambda: page.ran, 30)
+        loop_back = ctl._loop is not None and ctl._loop.poll() is None
     finally:
         ctl.quit()
-    print('\n' + page.out.text())
+        feed.stop()
+    said = [r.getMessage() for r in caplog.records if r.getMessage().startswith('microphone loop:')]
+    print('\n' + page.out.text(), said)
     assert '✔ virtual mic (BlackHole 2ch): chirp found' in page.out.text()
+    assert 'microphone loop: call' not in said, said  # the loop never opened the microphone during the test
+    assert loop_back  # and runs again after it (translation is still off)
 
 
 @pytest.mark.skipif(not _ready(), reason='macOS with BlackHole 2ch and the helper built')

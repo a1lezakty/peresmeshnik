@@ -44,7 +44,29 @@ def test_blackhole_missing_says_how_to_install():
     assert macos.blackhole([{'uid': 'BlackHole2ch_UID', 'name': 'BlackHole 2ch', 'inputs': 2, 'outputs': 2}])
     with pytest.raises(ValueError, match='not your microphone'):
         macos.not_blackhole('BlackHole 2ch')
-    assert macos.not_blackhole('BlackHole16ch_UID') == 'BlackHole16ch_UID'
+    assert macos.not_blackhole('BlackHole16ch_UID') == 'BlackHole16ch_UID'  # the tests' stand-in (conftest)
+
+
+def test_the_call_device_and_virtual_inputs_are_no_microphone(monkeypatch):
+    """BlackHole 16ch is the call app's speaker below 14.4: as the microphone me -> them would translate the other side
+    back into the call. Virtual inputs (Zoom's, Teams') and aggregates are not offered as the microphone either."""
+    from peresmeshnik.ui import selftest
+    monkeypatch.delenv('PERESMESHNIK_TEST_MIC')
+    for key in macos.CALL:
+        with pytest.raises(ValueError, match="carries the call's sound"):
+            macos.not_blackhole(key)
+    assert macos.not_blackhole('BlackHole 16ch', what='headphones') == 'BlackHole 16ch'
+    dev = {'inputs': 1, 'outputs': 0, 'rate': 48000.0, 'default_input': False, 'default_output': False}
+    devs = [{**dev, 'uid': 'BuiltInMicrophoneDevice', 'name': 'MacBook Pro Microphone', 'transport': 'bltn'},
+            {**dev, 'uid': 'ZoomAudioDevice', 'name': 'ZoomAudioDevice', 'transport': 'virt'},
+            {**dev, 'uid': 'BlackHole16ch_UID', 'name': 'BlackHole 16ch', 'transport': 'virt', 'outputs': 16},
+            {**dev, 'uid': 'peresmeshnik-test-mic', 'name': 'Test Mic', 'transport': 'grup'}]
+    monkeypatch.setattr(selftest, 'MACOS', True)
+    monkeypatch.setattr(macos, 'devices', lambda: devs)
+    assert selftest.devices('sources') == [('BuiltInMicrophoneDevice', 'MacBook Pro Microphone')]
+    assert ('BlackHole16ch_UID', 'BlackHole 16ch') in selftest.devices('sinks')  # an output: S1's (the call app's)
+    monkeypatch.setenv('PERESMESHNIK_TEST_MIC', 'BlackHole16ch_UID')
+    assert ('BlackHole16ch_UID', 'BlackHole 16ch') in selftest.devices('sources')
 
 
 def cpu(p: subprocess.Popen) -> float:
@@ -221,6 +243,55 @@ def test_latency():
 
 
 @mac
+@pytest.mark.parametrize('what', ['play', 'loop'])
+def test_blackhole_changes_its_rate_the_tone_keeps_its_pitch(what):
+    """A call app or Audio MIDI Setup moves BlackHole 2ch to another rate while the translation plays into it (play) or
+    the microphone is looped into it (loop): the call app still hears 440 Hz, not the old rate's samples at the new
+    one. play ends with 7 and VirtualMic opens the next one at the new rate; loop restarts its output itself."""
+    from test_macos_audio import peak_hz, set_rate
+
+    from peresmeshnik.audio import coreaudio as ca
+    from peresmeshnik.audio.virtual_mic_macos import VirtualMic
+    from peresmeshnik.ui.selftest import Recorder
+    old = ca.rate(macos.BLACKHOLE)
+    new = 44100 if old != 44100 else 48000
+    rec = Recorder(macos.BLACKHOLE_UID, SR_OUT)
+    stop, procs, vm = threading.Event(), [], None
+    if what == 'play':
+        vm = VirtualMic()
+
+        def speak():  # the translation's voice, chunk by chunk, in real time
+            t0 = time.monotonic()
+            for i in range(10 ** 6):
+                if stop.wait(max(0.0, t0 + i * 0.1 - time.monotonic())):
+                    return
+                vm.play(tone(0.1, SR_IN)[:], SR_IN)
+        threading.Thread(target=speak, daemon=True).start()
+    else:
+        procs.append(Feed(MIC16))
+        procs.append(macos.spawn('loop', '--from', MIC16, '--to', macos.BLACKHOLE_UID, '--always', stdout=subprocess.DEVNULL))
+    try:
+        time.sleep(1.5)
+        n0 = sum(len(c) for c in rec.chunks)
+        set_rate(macos.BLACKHOLE, new)
+        time.sleep(3.0)
+        y = rec.stop()
+    finally:
+        stop.set()
+        rec.p.poll() is None and rec.stop()
+        if vm:
+            vm.remove()
+        for p in procs:
+            p.stop() if isinstance(p, Feed) else (p.stdin.close(), p.wait(5))
+        set_rate(macos.BLACKHOLE, old)
+    before, after = y[SR_OUT // 2:n0], y[n0 + SR_OUT:]  # from 1 s after the change: the restart takes ~0.3 s
+    print(f'\n{what}: BlackHole 2ch {old:.0f} -> {new} Hz: before {peak_hz(before, SR_OUT):.0f} Hz, after '
+          f'{peak_hz(after, SR_OUT):.0f} Hz rms {np.sqrt(np.mean(after ** 2)):.3f} ({len(after) / SR_OUT:.1f} s)')
+    assert abs(peak_hz(before, SR_OUT) - 440) <= 3
+    assert len(after) > SR_OUT and np.sqrt(np.mean(after ** 2)) > 0.1 and abs(peak_hz(after, SR_OUT) - 440) <= 3
+
+
+@mac
 def test_mic_refuses_blackhole():
     from peresmeshnik.audio.mic import Mic
     with pytest.raises(ValueError, match='not your microphone'):
@@ -265,6 +336,68 @@ def test_mic_follows_a_device_that_goes_and_comes_back():
         agg.stdin.close()
         agg.wait(5)
         feed.stop()
+
+
+def test_a_playback_that_ended_by_itself_reopens_or_says_why():
+    """The helper ends by itself: 7 (BlackHole 2ch changed its rate) - the next chunk opens a new one at the new rate;
+    anything else (BlackHole 2ch went away: 4) - play() says why, the translation does not go silent unseen."""
+    from peresmeshnik.audio.virtual_mic_macos import VirtualMic
+
+    def ended(code, why=''):
+        p = subprocess.Popen([sys.executable, '-c', f'import sys; print({why!r}, file=sys.stderr); sys.exit({code})'],
+                             stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+        p.wait()
+        return p
+    opened = []
+
+    class Stub(VirtualMic):
+        def _make(self):
+            return []
+
+        def _open(self, sample_rate):
+            opened.append(sample_rate)
+            self._proc = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.buffer.read()'],
+                                          stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+            self._sr = sample_rate
+    vm = Stub()
+    x = np.zeros(2400, np.float32)
+    try:
+        vm.play(x, 24000)
+        vm._stop_proc(vm._proc)
+        vm._proc = ended(7, 'peresmeshnik-audio: the rate of BlackHole 2ch changed')
+        vm.play(x, 24000)
+        assert len(opened) == 2 and vm._proc.poll() is None  # opened again, nothing said
+        vm._stop_proc(vm._proc)
+        vm._proc = ended(4, 'peresmeshnik-audio: BlackHole 2ch went away')
+        with pytest.raises(RuntimeError, match='BlackHole 2ch: the playback stopped .*BlackHole 2ch went away'):
+            vm.play(x, 24000)
+        vm.play(x, 24000)  # the next try opens a new one
+        assert len(opened) == 3
+    finally:
+        vm.remove()
+
+
+def test_followed_says_which_microphone_plays_meanwhile():
+    """The saved microphone goes: the helper takes another one at once; the tray says which, then that it is back."""
+    from peresmeshnik.audio.mic import followed
+    states = []
+    m = followed('USBMic_UID', states.append)
+
+    def event(kind, uid, name):
+        if kind == 'using':
+            m.uid = uid  # as Mic's reader sets it before on_device
+        m.on_device(kind, name)
+    event('using', 'USBMic_UID', 'USB Mic')  # the start: nothing to say
+    event('lost', 'USBMic_UID', 'USB Mic')
+    event('using', 'BuiltInMicrophoneDevice', 'MacBook Pro Microphone')
+    event('using', 'USBMic_UID', 'USB Mic')
+    event('lost', 'USBMic_UID', 'USB Mic')
+    event('none', '', '')
+    event('using', 'USBMic_UID', 'USB Mic')
+    assert states == ['translating (USB Mic went away: MacBook Pro Microphone meanwhile)',
+                      'translating (the microphone is back: USB Mic)',
+                      'error: no microphone: plug one in or choose it in the settings',
+                      'translating (the microphone is back: USB Mic)']
 
 
 @mac

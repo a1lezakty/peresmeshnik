@@ -522,7 +522,7 @@ class Side:
         if (tts := getattr(d, 'tts', None)) is not None:
             from peresmeshnik import languages
             from peresmeshnik.local.tts import PiperTts
-            vid = languages._pick(s.local.tts, self.tgt)  # the language's stock voice (languages.direction's)
+            vid = languages.pick(s.local.tts, self.tgt)  # the language's stock voice (languages.direction's)
             d.tts = crash.Respawn(lambda: PiperTts(vid, threads=s.local.threads), self._tts_respawned, tts)
         d.warm_up()
         return d

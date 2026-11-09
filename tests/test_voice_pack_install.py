@@ -173,6 +173,21 @@ def test_not_enough_disk_space(pack, monkeypatch):
     assert httpd.ranges == []  # refused before any download
 
 
+def test_leftovers_are_not_counted_as_used_space(pack, monkeypatch):
+    """A cancel or a full disk leaves voice-pack.tmp and voice-pack.pip-tmp (up to ~8 GB): the retry clears them before it
+    counts the free space, or it would refuse a disk that has room once they are gone."""
+    lock, where, _, _ = pack
+    left = [where.with_name('voice-pack.tmp') / 'Lib' / 'torch_cuda.dll', where.with_name('voice-pack.pip-tmp') / 'x' / 'y']
+    for f in left:
+        f.parent.mkdir(parents=True)
+        f.write_bytes(b'0')
+    need = voicepack.need_bytes(lock, where)
+    monkeypatch.setattr(voicepack.shutil, 'disk_usage', lambda p: shutil._ntuple_diskusage(
+        100 << 30, 0, need - (8 << 30 if any(f.exists() for f in left) else 0)))  # they hold 8 GB, then just enough
+    run(lock, where)
+    assert voicepack.state(lock, where) == 'ready' and sorted(p.name for p in where.parent.iterdir()) == ['voice-pack']
+
+
 def test_need_bytes_of_the_real_lock():
     spec = json.loads(voicepack.lock_file().read_text())
     names = {w['name'] for w in spec['wheels']}

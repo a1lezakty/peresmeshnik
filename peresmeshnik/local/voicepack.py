@@ -113,6 +113,9 @@ def install(progress=lambda stage, done, total, text='': None, cancel: threading
         _discard(where)  # half installed or outdated: from scratch
     except OSError as e:  # Windows: its runner still has files open
         raise PackError(f'cannot move the old voice pack away ({e}): turn translation off first') from e
+    tmp, pip_tmp = where.with_name('voice-pack.tmp'), where.with_name('voice-pack.pip-tmp')
+    for p in (tmp, pip_tmp):  # an earlier attempt's, up to ~8 GB: gone before the free space is counted
+        _discard(p)
     for old in where.parent.glob(f'{where.name}.old-*'):  # what an earlier cleanup did not finish
         shutil.rmtree(old, ignore_errors=True)
     dl = where.with_name('voice-pack.download')
@@ -128,8 +131,6 @@ def install(progress=lambda stage, done, total, text='': None, cancel: threading
         done += _fetch(f, dl, retries, cancel, lambda n, base=done, name=name: progress('downloading', base + n, total, name))
         progress('downloading', done, total, name)
     progress('unpacking', 0, 0)
-    tmp = where.with_name('voice-pack.tmp')
-    _discard(tmp)
     shutil.unpack_archive(dl / _name(spec['python']), tmp, 'zip')
     site = tmp / 'Lib' / 'site-packages'
     site.mkdir(parents=True)
@@ -139,9 +140,7 @@ def install(progress=lambda stage, done, total, text='': None, cancel: threading
     cmd = [*(run_python or [str(python(tmp))]), str(dl / _name(spec['pip']) / 'pip'), 'install', '--no-index', '--no-deps',
            '--require-hashes', '--only-binary', ':all:', '--no-cache-dir', '--disable-pip-version-check',
            '--no-warn-script-location', '--target', str(site), '-r', str(reqs)]
-    pip_tmp = where.with_name('voice-pack.pip-tmp')  # pip's temp on the drive checked above: its moves are renames
-    _discard(pip_tmp)
-    pip_tmp.mkdir()
+    pip_tmp.mkdir()  # pip's temp on the drive checked above: its moves are renames
     _pip(cmd, cancel, lambda line: progress('installing', 0, 0, line), pip_tmp)
     tmp.rename(where)
     (where / '.complete').write_text(identity(lock) + '\n')  # last: until here the pack is not there

@@ -117,6 +117,9 @@ def load(path: Path | None = None) -> Settings:
     for k in ('them_to_me', 'me_to_them'):
         if getattr(s, k) not in ENGINES:
             raise ValueError(f'settings: {k} must be one of {ENGINES}, got {getattr(s, k)!r}')
+    if not 0.2 <= (r := s.local.mic_echo_rho_on) <= 0.8:  # near 0 it zeroes my speech, near 1 lets every echo through
+        s.local.mic_echo_rho_on = min(max(r, 0.2), 0.8)
+        print(f'settings: local.mic_echo_rho_on {r} is outside 0.2..0.8, {s.local.mic_echo_rho_on} used', file=sys.stderr)
     return s
 
 

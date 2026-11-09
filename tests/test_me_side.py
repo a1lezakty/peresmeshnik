@@ -75,6 +75,15 @@ def test_the_microphones_gate_takes_its_threshold(monkeypatch):
     assert ctl._side('me', s).echo.rho_on == 0.35 and ctl._side('them', s).echo.rho_on == 0.5
 
 
+@pytest.mark.parametrize('rho,used', [(0.05, 0.2), (1.0, 0.8), (0.6, 0.6)])
+def test_the_microphones_threshold_is_kept_in_range(tmp_path, capsys, rho, used):
+    from peresmeshnik import config
+    p = tmp_path / 'settings.toml'
+    p.write_text(f'[local]\nmic_echo_rho_on = {rho}\n')
+    assert config.load(p).local.mic_echo_rho_on == used
+    assert ('outside 0.2..0.8' in capsys.readouterr().err) == (rho != used)
+
+
 @pytest.fixture(scope='module')
 def base():
     assert GATE, 'job work-gate without PERESMESHNIK_WORK_GATE=1: the scenarios would silently skip'

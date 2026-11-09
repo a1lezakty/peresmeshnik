@@ -4,7 +4,9 @@ runner (voice-runner/voice_runner.py, local/clone.py VoicePackClone).
 `install()` downloads what voice-runner/pack-windows.json pins (voice-runner/lock.py: the embeddable CPython from
 python.org, a pip wheel, ~100 wheels, each by URL, SHA-256 and size; ~3.7 GB, ~8 GB installed), resuming a
 download that stopped, then unpacks the Python, lets it see Lib/site-packages and has pip install the verified wheels
-from disk (no index, no network). `.complete` is written last and holds the lock's identity: a pack without it is a
+from disk (no index, no network). A package that has no wheel, only its data (unidic-lite, the Japanese dictionary of
+XTTS's text cleaning), is an `archives` entry: its folder is unpacked from the verified source archive.
+`.complete` is written last and holds the lock's identity: a pack without it is a
 half-installed one (cleaned up by the next install), one with another identity was made for another app version and
 is outdated (installed again). The runner itself ships with the app (beside the executable when frozen), so it always
 matches the app.
@@ -16,6 +18,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 import urllib.parse
@@ -74,7 +77,7 @@ def need_bytes(lock: Path | None = None, where: Path | None = None) -> int:
     """Free space the install needs: what is not downloaded yet, the installed size and a margin."""
     spec = json.loads((lock or lock_file()).read_text())
     dl = (where or folder()).with_name('voice-pack.download')
-    files = [spec['python'], spec['pip'], *spec['wheels']]
+    files = [spec['python'], spec['pip'], *spec['wheels'], *spec.get('archives', [])]
     return sum(f['size'] - _have(dl, f) for f in files) + spec['installed_bytes'] + MARGIN
 
 
@@ -124,7 +127,7 @@ def install(progress=lambda stage, done, total, text='': None, cancel: threading
     if free < need:
         raise PackError(f'the voice pack needs {need / 2 ** 30:.1f} GB free on {dl.anchor or dl.parent}, '
                         f'there are {free / 2 ** 30:.1f} GB')
-    files = [spec['python'], spec['pip'], *spec['wheels']]
+    files = [spec['python'], spec['pip'], *spec['wheels'], *spec.get('archives', [])]
     total, done = sum(f['size'] for f in files), 0
     for f in files:
         name = _name(f)
@@ -142,6 +145,20 @@ def install(progress=lambda stage, done, total, text='': None, cancel: threading
            '--no-warn-script-location', '--target', str(site), '-r', str(reqs)]
     pip_tmp.mkdir()  # pip's temp on the drive checked above: its moves are renames
     _pip(cmd, cancel, lambda line: progress('installing', 0, 0, line), pip_tmp)
+    for a in spec.get('archives', []):  # 'folder': the package's folder in the archive, e.g. unidic-lite-1.0.8/unidic_lite
+        progress('installing', 0, 0, f'unpacking {a["folder"]}')
+        root, name = a['folder'].rsplit('/', 1)
+        with tarfile.open(dl / _name(a)) as t:
+            members = []
+            for m in t.getmembers():
+                if (m.name + '/').startswith(a['folder'] + '/'):
+                    m.name = m.name[len(root) + 1:]
+                elif m.isfile() and m.name.startswith(f'{root}/LICENSE') and '/' not in m.name[len(root) + 1:]:
+                    m.name = f'{name}/{m.name[len(root) + 1:]}'  # the archive's own license files go with its folder
+                else:
+                    continue
+                members.append(m)
+            t.extractall(site, members, filter='data')
     tmp.rename(where)
     (where / '.complete').write_text(identity(lock) + '\n')  # last: until here the pack is not there
     for p in (dl, pip_tmp):

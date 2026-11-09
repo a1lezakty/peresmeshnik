@@ -12,7 +12,7 @@ import pytest
 
 from peresmeshnik import voice
 from peresmeshnik.local.clone import SR, XttsClone, budget_samples, cap_pauses, guard, split_text
-from peresmeshnik.local.xtts import FADE_IN, SENTENCE_END, SENTENCE_PAUSE_S, closed, shape
+from peresmeshnik.local.xtts import FADE_IN, SENTENCE_END, SENTENCE_PAUSE_S, closed, ending, normalize, shape
 
 REF_RU = Path(os.environ.get('BENCH_DATA', 'bench-data')) / 'set' / 'ref_ru.wav'  # LibriVox reader (bench/data.py), if present
 
@@ -76,6 +76,25 @@ def test_clone_check_thresholds():
     assert voice.wer('Ёлка, раз два!', 'елка раз три') == pytest.approx(1 / 3)
 
 
+def test_test_phrases_in_every_language_the_clone_speaks():
+    """check_clone says TEST_PHRASES[their language]: a language of the clone without them was a KeyError (stage 6, S1).
+    The wizard's recording text: one for each of the 14."""
+    from peresmeshnik import languages, models
+    spoken = {lang for m in models.registry().values() if m.role == 'clone' for lang in m.langs}
+    assert 'ja' in spoken and spoken <= set(voice.TEST_PHRASES) and all(len(voice.TEST_PHRASES[x]) == 2 for x in spoken)
+    assert set(languages.NAMES) == set(voice.PROMPTS) and len(voice.PROMPTS) == 14
+
+
+def test_wer_of_the_test_phrases_in_arabic_chinese_japanese():
+    """An ASR writes no Arabic vowel marks (the tanwin of مرحبًا would split the word); zh / ja go by character."""
+    import re
+    for phrase in voice.TEST_PHRASES['ar']:
+        heard = re.sub('[\u064b-\u0652\u0670]', '', phrase)
+        assert heard != phrase and voice.wer(phrase, heard) == 0
+    zh = voice.TEST_PHRASES['zh'][0]
+    assert voice.wer(zh, zh.replace('十', '四')) == pytest.approx(1 / len(voice._words(zh)))
+
+
 def test_too_long_is_trimmed_with_warning(tmp_path):
     x = speech_like(75)
     r = voice.check(x, 16_000)
@@ -122,7 +141,7 @@ def test_record_needs_a_prompt_in_that_language(monkeypatch, capsys):
     import peresmeshnik.audio.mic as mic
     monkeypatch.setattr(mic, 'record', lambda *a, **k: pytest.fail('must not record'))
     with pytest.raises(SystemExit):
-        voice.main(['enroll', '--record', '30', '--lang', 'de'])
+        voice.main(['enroll', '--record', '30', '--lang', 'nl'])  # none of the 14: no prompt text
     assert '--transcript' in capsys.readouterr().err
 
 
@@ -160,6 +179,94 @@ def test_split_text():
     assert len(parts) > 1 and all(len(p) <= 182 for p in parts)
     assert ' '.join(parts) == ' '.join(long.split())
     assert all(len(p) <= 50 for p in split_text('слово ' * 100, 50))
+    # zh / ja: cut after their own punctuation (no space follows it), joined back without a space
+    assert split_text('你好，世界！今天很好。我们走吧。', 10) == ['你好，世界！', '今天很好。', '我们走吧。']
+    assert split_text('警方说，尸体看上去在那里放了一天左右。', 82) == ['警方说，尸体看上去在那里放了一天左右。']
+    assert split_text('مرحبا، كيف حالك؟ أنا بخير.', 12) == ['مرحبا،', 'كيف حالك؟', 'أنا بخير.']  # Arabic comma, question mark
+
+
+@pytest.mark.parametrize('lang, text, said', [
+    ('de', 'Um 15:30 Uhr zahlte er 250,50 €, um 9:00.', 'Um 15 Uhr 30 zahlte er 250,50€, um 9 Uhr,'),
+    ('de', 'Ab 9.30 Uhr, nicht 25:70. Usw.', 'Ab 9 Uhr 30, nicht 25:70. Usw.'),  # the period of an abbreviation stays
+    ('fr', 'À 15h30 et 9h00, 20 €.', 'À 15 heures 30 et 9 heures, 20€,'),
+    ('fr', 'De 9h à 1h30 et 21h.', 'De 9 heures à une heure 30 et vingt et une heures,'),  # "heure": feminine
+    ('pt', 'Às 15h30 pagou 250,50 € e $20.', 'Às 15 horas e 30 pagou 250,50€ e 20 dólares,'),  # cents: XTTS's own
+    ('pt', 'Custa R$ 250, US$ 20 e R$ 1.250,50 às 2:00.', 'Custa 250 reais, 20 dólares e 1.250 reais e 50 centavos às duas horas,'),
+    ('en', 'At 15:30 she paid 250 $, score 3:2, 1:30:00, 9:75.', 'At 15 30 she paid 250$, score 3:2, 1:30:00, 9:75.'),
+    ('it', 'Alle 3 p.m.', 'Alle 3 p.m.'),
+    ('ko', '15:00에 $250를 냈다. 9:05.', '15시에 250 달러를 냈다. 9시 05분,'),
+    ('zh', '15:30，250.50€', '15点30分，250.50 欧元'),
+    ('it', 'Secondo la polizia, il corpo era lì da un giorno.', 'Secondo la polizia, il corpo era lì da un giorno,'),
+    ('es', 'Bueno... Llegó tarde.»', 'Bueno... Llegó tarde,»'),
+    ('it', 'Aspetta...', 'Aspetta...'),
+])
+def test_normalize_money_and_clock(lang, text, said):
+    """What XTTS's own cleaning misreads (BENCH stage 6): a sign apart from its number, a currency it names wrong or
+    drops, clock times, the final period where XTTS goes on after it (de fr pt ko it es). No num2words needed here."""
+    assert ending(normalize(text, lang), lang) == said
+
+
+class Chunk:  # what XTTS streams: a tensor
+    def __init__(self, x):
+        self.x = x
+
+    def float(self):
+        return self
+
+    cpu = float
+
+    def numpy(self):
+        return self.x
+
+
+def test_every_part_of_a_long_text_ends_with_a_comma():
+    """A text over XTTS's limit (it: 213 chars) is said in parts: the final period of each becomes a comma."""
+    said = []
+
+    def stream(part, lang, *a, **k):
+        said.append(part)
+        yield Chunk(np.full(SR // 10, 0.1, np.float32))
+    eng = XttsClone.__new__(XttsClone)  # no model
+    eng.latents, eng.temperature, eng.top_p = lambda v: (None, None), 0.75, 0.85
+    eng.model = types.SimpleNamespace(tokenizer=types.SimpleNamespace(char_limits={'it': 213}), inference_stream=stream)
+    list(eng.synth('Il corpo era lì da un giorno e nessuno se ne era accorto prima di stamattina. ' * 6, 'it', 'me'))
+    assert len(said) == 3 and all(p.endswith('stamattina,') for p in said), said
+
+
+@pytest.mark.parametrize('lang, text, xtts_gets, paused', [
+    ('it', 'Ciao.', 'Ciao,', True),  # the comma for XTTS, the pause after the sentence all the same
+    ('en', 'Hello.', 'Hello.', True),
+    ('it', 'perché il', 'perché il,', False),  # a clause cut mid-sentence (stage 5): a comma, no pause
+])
+def test_the_pause_after_a_sentence_survives_the_comma_ending(lang, text, xtts_gets, paused):
+    said = []
+
+    def stream(part, lang, *a, **k):
+        said.append(part)
+        yield Chunk(np.full(SR // 2, 0.1, np.float32))
+    eng = XttsClone.__new__(XttsClone)  # no model
+    eng.latents, eng.temperature, eng.top_p = lambda v: (None, None), 0.75, 0.85
+    eng.model = types.SimpleNamespace(tokenizer=types.SimpleNamespace(char_limits={}), inference_stream=stream)
+    x = np.concatenate(list(eng.synth(text, lang, 'me')))
+    quiet = len(x) - 1 - np.nonzero(np.abs(x) > 1e-4)[0][-1]
+    assert said == [xtts_gets] and (quiet >= SENTENCE_PAUSE_S * SR - 1) == paused, (said, quiet)
+
+
+@pytest.mark.parametrize('lang, text, said', [
+    ('ja', '2024年3月3日15:30、250.50ドル、12.5%、1,000人。',
+     '二千二十四年三月三日十五時三十分、二百五十点五ドル、十二点五パーセント、千人。'),
+    ('ja', '1,250,000人、12.05ドル。', '百二十五万人、十二点零五ドル。'),
+    ('tr', 'Saat 15:30, 1.250,5 TL; 20€.', 'Saat 15 30, binikiyüzelli virgül beş TL; 20 avro.'),
+    ('tr', 'Saat 15.30, 1.250.000 kişi, 3,05 TL, 2,3,4.', 'Saat 15 30, 1250000 kişi, üç virgül sıfır beş TL, 2,3,4.'),
+    ('ar', 'دفع 1,250.5 دولار', 'دفع ألف و مئتان و خمسون فاصلة خمسة دولار'),
+    ('ar', '12.05 $ و 1,250,000 و E£ 50 و £20 و 1,2,3', 'اثنا عشر فاصلة صفر خمسة دولار و 1250000 و 50 جنيه و 20 جنيه و 1,2,3'),
+])
+def test_normalize_numbers_xtts_misreads(lang, text, said):
+    """Japanese digits (XTTS leaves them to the model), Turkish and Arabic decimals (num2words reads 12,5 as 12,50
+    and 3,05 as 3,5), thousands, the Egyptian pound. num2words comes with coqui-tts: without it (the main CI) these run
+    in the voice pack's job."""
+    pytest.importorskip('num2words')
+    assert normalize(text, lang) == said
 
 
 def test_guard_cuts_runaway_and_stops_generation():
@@ -179,6 +286,8 @@ def test_budget_allows_slow_speech_only():
     text = "It is Martelly's fifth CEP in four years."  # spoken in 2.5-5.1 s; 8 s when XTTS babbled
     assert 5.1 * SR < budget_samples(text) < 8 * SR
     assert budget_samples('In 1999.') > budget_samples('In this.') + SR  # digits read long
+    # Han / kana / Hangul: a syllable or two each; the shortest FLEURS sentences took XTTS 4.0-5.8 s (BENCH stage 6)
+    assert budget_samples('警方说，尸体看上去在那里放了一天左右。') > 5.8 * SR
 
 
 def test_cap_pauses_streams_and_keeps_speech():

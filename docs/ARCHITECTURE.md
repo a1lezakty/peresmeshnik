@@ -277,6 +277,18 @@ seconds its models take to load. Subtitles: Qt picks a font per script and lays 
 to left by itself; where the font database has no font for a script (Linux without Noto CJK / Arabic) the app says what
 to install. The per-language engines and their numbers are S1's / S2's rows in [BENCH.md](BENCH.md) ("Stage 6").
 
+**The clone in each language (stage 6).** XTTS-v2 speaks 13 of the 14 (all but Ukrainian: there the stock voice or
+the cloud); measured with the same FLEURS sentences in each, my voice from a Russian or an English recording (BENCH
+"Stage 6: the clone in 13 languages"). Its tokenizer cleans each language's text itself (num2words for numbers,
+pinyin for Chinese, romaji through cutlet / MeCab / UniDic for Japanese, a romanizer for Korean); what it misreads is
+fixed before it in `xtts.normalize`: money signs apart from their number or named as another currency, clock times,
+Turkish and Arabic decimals, Japanese digits (left as digits, read as noise). Chinese and Japanese clauses are cut at
+their own punctuation, and the length guard counts a Han / kana / Hangul character as three letters (they are spoken
+4–6 a second). In it / es / de / fr / pt / ko each part XTTS says ends with a comma, not a period (`xtts.ending`:
+after a period it went on with a word or two of its own); the pause after a sentence (`xtts.shape`) is decided on the
+part before that. The text tools for Chinese and Japanese are in the voice pack (Windows) and in the Linux clone's venv
+(`voice-runner/requirements-linux.in`); the wizard's recording text is public-domain prose in each language.
+
 ## 7. Audio routing per OS and setup guidance
 
 | | Capture "them" (call sound) | Mute original while translating | Virtual microphone "me → them" |

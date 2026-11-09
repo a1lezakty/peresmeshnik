@@ -1,0 +1,15 @@
+# The voice clone from source on Linux: its own venv with the voice pack's runner (the Windows pins without +cu128:
+# PyPI's torch for Linux is the CUDA 12.8 build; CPU only: --extra-index-url https://download.pytorch.org/whl/cpu
+# --index-strategy unsafe-best-match). README "Trying it from source (Linux)"; CI: .github/workflows/voice-pack.yml.
+torch==2.8.0
+torchaudio==2.8.0
+coqui-tts==0.28.0
+transformers==5.22.2
+six==1.17.0  # imported by TTS.tts.utils.text.punctuation but not declared by coqui-tts 0.28.0
+soundfile==0.14.0
+# XTTS's text cleaning for Chinese (pinyin) and Japanese (romaji: cutlet, fugashi's MeCab, the unidic-lite dictionary);
+# Korean's (ko-speech-tools) comes with coqui-tts itself
+pypinyin==0.55.0
+cutlet==0.5.2
+fugashi==1.5.2
+unidic-lite==1.0.8

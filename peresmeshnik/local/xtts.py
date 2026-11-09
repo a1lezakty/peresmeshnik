@@ -20,13 +20,96 @@ SLOW_CPS = 8.0  # spoken chars per second; real XTTS speech is 12-20 (BENCH): a 
 FADE = SR // 100
 FADE_IN = SR // 200  # XTTS starts mid-waveform: half of its utterances stepped -33..-10 dB under their peak (a click, BENCH)
 SENTENCE_PAUSE_S = 0.35  # silence after a sentence: queued clauses played back to back had 0.1-0.16 s between sentences
-SENTENCE_END = re.compile(r'[.!?…。！？؟]["»”)」』]*$')  # zh / ja / ar too (stage 6)
+QUOTES = '["»”)」』]'  # closing quotes and brackets after the end of a sentence or clause
+SENTENCE_END = re.compile(rf'[.!?…。！？؟]{QUOTES}*$')  # zh / ja / ar too (stage 6)
+# Han, kana, Hangul syllables: one is a syllable or two, spoken 4-8 a second against 12-20 letters (BENCH stage 6)
+CJK = '\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff'
+CJK_LEN = 3  # spoken length of one of them in letters
+WIDE_STOP = '。！？；：，、'  # zh / ja punctuation: no space after it
+
+# What XTTS's own text cleaning (num2words in its tokenizer) misreads, per language (BENCH stage 6 "Numbers"):
+MONEY = {  # it drops the sign or names another currency: the word after the number instead (pt: € $ £ with cents it
+    # reads as euros and cents itself). Letters before a sign make another currency: R$ the Brazilian real, E£ the
+    # Egyptian pound (ar-EG: £ too), US$ the dollar everywhere
+    'pt': {'R$': 'reais', '€': 'euros', '$': 'dólares', '£': 'libras'}, 'tr': {'€': 'avro', '$': 'dolar', '£': 'sterlin'},
+    'ar': {'E£': 'جنيه', '€': 'يورو', '$': 'دولار', '£': 'جنيه'}, 'ko': {'€': '유로', '$': '달러', '£': '파운드'},
+    'ja': {'€': 'ユーロ', '$': 'ドル', '£': 'ポンド'}, 'zh': {'€': '欧元', '$': '美元', '£': '英镑'}}
+CLOCK = {  # 15:30 and 15:00 as "<hours><unit><joiner><minutes><minutes unit>" and "<hours><unit>"; else "15 30", "15"
+    'de': (' Uhr', ' ', ''), 'fr': (' heures', ' ', ''), 'pt': (' horas', ' e ', ''), 'it': ('', ' e ', ''),
+    'ja': ('時', '', '分'), 'ko': ('시', ' ', '분'), 'zh': ('点', '', '分')}
+HOURS = {'fr': {1: 'une heure', 21: 'vingt et une heures'},  # "heure" / "hora" is feminine: not "un", "um", "dois"
+         'pt': {1: 'uma hora', 2: 'duas horas', 21: 'vinte e uma horas', 22: 'vinte e duas horas'}}
+# a final period: XTTS goes on after it ("punto" in Italian, 13 of 54) in these; with a comma 1 tail in 120 (BENCH)
+COMMA_END = {'it', 'es', 'de', 'fr', 'pt', 'ko'}
+ABBR_END = re.compile(r'(?:\b\w\.){2,}$|\b(?:etc|ecc|usw|bzw)\.$', re.I)  # p.m. / etc.: the period is the abbreviation's
+POINT = {'tr': ('.', ',', 'virgül'), 'ar': (',', '.', 'فاصلة')}  # thousands, decimal mark, its word: num2words reads 12,5 as 12,50
+
+
+def normalize(text: str, lang: str) -> str:
+    """The text as XTTS should read it: money, clock times, decimals in tr / ar, Japanese numbers (its tokenizer
+    leaves digits as they are for ja). The rest of the numbers, abbreviations and symbols: XTTS's own cleaning. The final
+    period of each part XTTS says: ending()."""
+    t = re.sub(r'(\d)\s+([€$£])', r'\1\2', re.sub(r'\bUS\$\s?', '$', text))  # "250,50 €": XTTS reads a sign only beside the number
+    if lang in MONEY:
+        signs = '|'.join(re.escape(x) for x in sorted(MONEY[lang], key=len, reverse=True))
+        t = re.sub(rf'(?<![^\W\d_])({signs})\s?(\d[\d.,]*\d|\d)|(\d[\d.,]*\d|\d)({signs})', lambda m: _money(m, lang), t)
+    if lang == 'de':  # 9.30 Uhr
+        t = re.sub(r'(?<![\d.])(\d{1,2})\.(\d{2})(?=\s*Uhr\b)', r'\1:\2', t)
+    sep = {'fr': '[:h]', 'pt': '[:h]', 'tr': '[:.]'}.get(lang, ':')  # tr 15.30, fr / pt 15h30 and 9h
+    bare, after = r'|h(?!\w)' if lang in ('fr', 'pt') else '', r'(?:\s*Uhr\b)?' if lang == 'de' else ''
+    t = re.sub(rf'(?<![\d:])(?<!\d[.,])(\d{{1,2}})(?:{sep}(\d{{2}}){bare})(?![\d:]|[.,]\d){after}', lambda m: _clock(m, lang), t)
+    if lang in POINT or lang == 'ja':
+        from num2words import num2words  # coqui-tts' own dependency: its tokenizer reads numbers with it
+    if lang in POINT:
+        thousands, mark, word = POINT[lang]
+        t = re.sub(rf'(?<=\d)\{thousands}(?=\d{{3}}(?!\d))', '', t)  # 1.250.000
+        t = re.sub(rf'(?<![\d.,])(\d+)\{mark}(\d+)(?![.,]?\d)', lambda m: _decimal(m, lang, word, num2words), t)  # not 2,3,4
+    if lang == 'ja':
+        t = re.sub(r'(?<=\d),(?=\d{3}(?!\d))', '', t).replace('%', 'パーセント').replace('％', 'パーセント')
+        t = re.sub(r'\d+(?:\.\d+)?', lambda m: num2words(float(m[0]) if '.' in m[0] else int(m[0]), lang='ja'), t)
+    return t
+
+
+def _money(m: re.Match, lang: str) -> str:
+    sign, amount = m[1] or m[4], m[2] or m[3]
+    cents = re.fullmatch(r'(.+)[.,](\d\d)', amount) if lang == 'pt' else None
+    if cents and len(sign) == 1:
+        return m[0]  # 250,50€: XTTS reads euros and cents itself
+    if cents:  # R$ 250,50
+        return f'{cents[1]} {MONEY[lang][sign]}' + ('' if cents[2] == '00' else f' e {cents[2]} centavos')
+    return f'{amount} {MONEY[lang][sign]}'
+
+
+def _clock(m: re.Match, lang: str) -> str:
+    minutes = m[2] or '00'
+    if int(m[1]) > 24 or int(minutes) > 59:
+        return m[0]
+    unit, joiner, after = CLOCK.get(lang, ('', ' ', ''))
+    hours = HOURS.get(lang, {}).get(int(m[1])) or m[1] + unit
+    return hours if minutes == '00' else hours + joiner + minutes + after
+
+
+def _decimal(m: re.Match, lang: str, word: str, num2words) -> str:
+    """12,05 as "twelve point zero five": num2words alone reads its fraction 05 as five."""
+    whole, frac = m[1], m[2]
+    if not frac.strip('0'):
+        return num2words(int(whole), lang=lang)
+    zeros = [num2words(0, lang=lang)] * (len(frac) - len(frac.lstrip('0')))
+    return ' '.join([num2words(int(whole), lang=lang), word, *zeros, num2words(int(frac), lang=lang)])
+
+
+def ending(part: str, lang: str) -> str:
+    """A part's final period as a comma where XTTS goes on after it (COMMA_END); an abbreviation's period stays."""
+    part = part.rstrip()
+    if lang not in COMMA_END or ABBR_END.search(re.sub(f'{QUOTES}+$', '', part)):
+        return part
+    return re.sub(rf'(?<!\.)\.({QUOTES}*)$', r',\1', part)
 
 
 def split_text(text: str, limit: int) -> list[str]:
     """Pieces of at most `limit` chars (XTTS's per-language limit), cut at sentence and clause ends."""
     pieces = []
-    for p in re.split(r'(?<=[.!?;:,])\s+', ' '.join(text.split())):
+    for p in re.split(rf'(?<=[.!?;:,؟،؛])\s+|(?<=[{WIDE_STOP}])\s*', ' '.join(text.split())):
         while len(p) > limit:  # no punctuation for too long: cut at a space
             cut = p.rfind(' ', 0, limit)
             cut = cut if cut > 0 else limit
@@ -36,7 +119,7 @@ def split_text(text: str, limit: int) -> list[str]:
     parts: list[str] = []
     for p in pieces:
         if parts and len(parts[-1]) + 1 + len(p) <= limit:
-            parts[-1] += ' ' + p
+            parts[-1] += ('' if parts[-1][-1] in WIDE_STOP else ' ') + p
         else:
             parts.append(p)
     return [p for p in parts if re.search(r'\w', p)]
@@ -46,12 +129,14 @@ def closed(text: str) -> str:
     """A clause cut mid-sentence ("... opposed to the") ends with a comma for XTTS: without one it went on with a
     word or two of its own in 6 of 102 such clauses, with a comma in none (a period: 6; BENCH stage 5)."""
     text = ' '.join(text.split())
-    return text if not text or re.search(r'[.!?…,;:。！？，；：、؟،]["»”)」』]*$', text) else text + ','
+    return text if not text or re.search(rf'[.!?…,;:。！？，；：、؟،]{QUOTES}*$', text) else text + ','
 
 
 def spoken_len(text: str) -> int:
-    """Text length as spoken: a digit reads as ~5 letters, an abbreviation letter by letter."""
-    return len(re.sub(r'\d', 'xxxxx', re.sub(r'\b[A-ZА-ЯЁ]{2,}\b', lambda m: m.group() * 3, text)))
+    """Text length as spoken, in letters: a digit reads as ~5, an abbreviation letter by letter, a Han / kana / Hangul
+    character as CJK_LEN."""
+    t = re.sub(r'\d', 'xxxxx', re.sub(r'\b[A-ZА-ЯЁ]{2,}\b', lambda m: m.group() * 3, text))
+    return len(t) + (CJK_LEN - 1) * len(re.findall(f'[{CJK}]', t))
 
 
 def budget_samples(text: str, sr: int = SR) -> int:
@@ -183,12 +268,13 @@ class Engine:
         if voice is None:
             raise ValueError('the clone engine speaks only in an enrolled voice')
         gpt, spk = self.latents(voice)
-        for part in split_text(closed(text), self.model.tokenizer.char_limits.get(lang, 250)):
+        for part in split_text(normalize(closed(text), lang), self.model.tokenizer.char_limits.get(lang, 250)):
+            pause = bool(SENTENCE_END.search(part))  # a sentence ends here: decided before ending() makes it a comma
+            part = ending(part, lang)  # each part: a long text is cut into several
             gen = self.model.inference_stream(part, lang, gpt, spk, temperature=self.temperature, top_p=self.top_p,
                                               enable_text_splitting=False)
             try:
-                yield from shape(guard(cap_pauses(c.float().cpu().numpy() for c in gen), budget_samples(part)),
-                                 bool(SENTENCE_END.search(part)))
+                yield from shape(guard(cap_pauses(c.float().cpu().numpy() for c in gen), budget_samples(part)), pause)
             finally:
                 gen.close()  # stops generation on a cut or when the caller stops listening (barge-in)
 

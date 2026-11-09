@@ -1100,7 +1100,7 @@ url = "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109
 
 [xtts-v2]  # voice clone (coqui-tts); needs the optional voice pack with torch
 role = "clone"
-langs = ["en", "ru"]  # and 15 more
+langs = ["en", "ru", "de", "fr", "es", "it", "pt", "pl", "tr", "zh", "ja", "ko", "ar"]  # all of the 14 but uk; and nl cs hu hi
 license = "CPML-1.0"
 license_url = "https://huggingface.co/coqui/XTTS-v2/blob/main/LICENSE.txt"  # coqui.ai is closed
 note = "Coqui Public Model License: noncommercial use only"

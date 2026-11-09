@@ -36,17 +36,17 @@ the language, a stock voice speaks instead, and the wizard says so.
 | English | parakeet-tdt-0.6b-v3 | piper-en_US-john-medium | xtts-v2 (NVIDIA GPU) | ✔ |
 | Русский (Russian) | gigaam-v3-e2e-ctc | piper-ru_RU-dmitri-medium | xtts-v2 (NVIDIA GPU) | ✔ |
 | Українська (Ukrainian) | parakeet-tdt-0.6b-v3 | piper-uk_UA-ukrainian_tts-medium | — (cloud or a stock voice) | ✔ |
-| Deutsch (German) | parakeet-tdt-0.6b-v3 | piper-de_DE-thorsten-medium | — (cloud or a stock voice) | ✔ |
-| Français (French) | fastconformer-fr-pc | piper-fr_FR-siwis-medium | — (cloud or a stock voice) | ✔ |
-| Español (Spanish) | parakeet-tdt-0.6b-v3 | piper-es_MX-ald-medium | — (cloud or a stock voice) | ✔ |
-| Italiano (Italian) | parakeet-tdt-0.6b-v3 | piper-it_IT-paola-medium | — (cloud or a stock voice) | ✔ |
-| Português (Portuguese) | parakeet-tdt-0.6b-v3 | piper-pt_BR-faber-medium | — (cloud or a stock voice) | ✔ |
-| Polski (Polish) | parakeet-tdt-0.6b-v3 | piper-pl_PL-gosia-medium | — (cloud or a stock voice) | ✔ |
-| Türkçe (Turkish) | whisper-large-v3-turbo (NVIDIA GPU) | piper-tr_TR-dfki-medium | — (cloud or a stock voice) | ✔ |
-| 中文 (Chinese) | whisper-large-v3-turbo (NVIDIA GPU) | — (cloud) | — (cloud or a stock voice) | ✔ |
-| 日本語 (Japanese) | parakeet-tdt_ctc-0.6b-ja | piper-ja_JP-hi_fi_captain-medium | — (cloud or a stock voice) | ✔ |
-| 한국어 (Korean) | whisper-large-v3-turbo (NVIDIA GPU) | piper-ko_KR-kss-medium | — (cloud or a stock voice) | ✔ |
-| العربية (Arabic) | fastconformer-ar-pcd | — (cloud) | — (cloud or a stock voice) | ✔ |
+| Deutsch (German) | parakeet-tdt-0.6b-v3 | piper-de_DE-thorsten-medium | xtts-v2 (NVIDIA GPU) | ✔ |
+| Français (French) | fastconformer-fr-pc | piper-fr_FR-siwis-medium | xtts-v2 (NVIDIA GPU) | ✔ |
+| Español (Spanish) | parakeet-tdt-0.6b-v3 | piper-es_MX-ald-medium | xtts-v2 (NVIDIA GPU) | ✔ |
+| Italiano (Italian) | parakeet-tdt-0.6b-v3 | piper-it_IT-paola-medium | xtts-v2 (NVIDIA GPU) | ✔ |
+| Português (Portuguese) | parakeet-tdt-0.6b-v3 | piper-pt_BR-faber-medium | xtts-v2 (NVIDIA GPU) | ✔ |
+| Polski (Polish) | parakeet-tdt-0.6b-v3 | piper-pl_PL-gosia-medium | xtts-v2 (NVIDIA GPU) | ✔ |
+| Türkçe (Turkish) | whisper-large-v3-turbo (NVIDIA GPU) | piper-tr_TR-dfki-medium | xtts-v2 (NVIDIA GPU) | ✔ |
+| 中文 (Chinese) | whisper-large-v3-turbo (NVIDIA GPU) | — (cloud) | xtts-v2 (NVIDIA GPU) | ✔ |
+| 日本語 (Japanese) | parakeet-tdt_ctc-0.6b-ja | piper-ja_JP-hi_fi_captain-medium | xtts-v2 (NVIDIA GPU) | ✔ |
+| 한국어 (Korean) | whisper-large-v3-turbo (NVIDIA GPU) | piper-ko_KR-kss-medium | xtts-v2 (NVIDIA GPU) | ✔ |
+| العربية (Arabic) | fastconformer-ar-pcd | — (cloud) | xtts-v2 (NVIDIA GPU) | ✔ |
 
 Translation on this computer: any pair of the 14 (142 of the 182 through English).
 <!-- languages:end -->
@@ -142,6 +142,9 @@ app's sound to "Peresmeshnik Call" and gives it back when it is off: Telegram, Z
 are found by themselves, otherwise choose the app in the tray menu "Call app" while the call plays. A
 browser (Meet) moves with all of its sound, other tabs too. One instance runs per user:
 while yours is open, the app instances that the tests start exit with code 3 ("already running").
+Your cloned voice runs in a venv of its own (PyTorch and coqui-tts, ~7 GB with CUDA): `uv venv -p 3.12 ~/.local/share/Peresmeshnik/clone-venv`,
+`uv pip install -p ~/.local/share/Peresmeshnik/clone-venv/bin/python -r voice-runner/requirements-linux.in`, then start the
+app with `PERESMESHNIK_VOICE_CMD="$HOME/.local/share/Peresmeshnik/clone-venv/bin/python voice-runner/voice_runner.py"`.
 
 ## When something goes wrong
 
@@ -177,7 +180,9 @@ to over a pipe. Its license and those of the other bundled packages are in
 `Peresmeshnik.app/Contents/Resources/licenses/` and in the `licenses` folder of the Windows install.
 
 The Windows voice pack (your own voice on an NVIDIA GPU, downloaded by the wizard after you accept its licenses) is a
-Python of its own with PyTorch (BSD-3-Clause) and coqui-tts (MPL-2.0); the XTTS-v2 model it runs is under the
+Python of its own with PyTorch (BSD-3-Clause) and coqui-tts (MPL-2.0), with the text tools for Chinese and Japanese
+(pypinyin, cutlet with jaconv and mojimoji, fugashi with MeCab, the UniDic dictionary: MIT, Apache-2.0, BSD-3-Clause;
+[docs/MODELS.md](docs/MODELS.md)); the XTTS-v2 model it runs is under the
 [Coqui Public Model License](https://huggingface.co/coqui/XTTS-v2/blob/main/LICENSE.txt) (noncommercial only). It needs an NVIDIA GPU with 6 GB of memory
 or more, compute capability 6.1 or newer (GeForce GTX 10xx and later; a GTX 10xx is not measured: the app
 measures the clone at start and uses the stock voice if the card is slower than real time) and driver 570.65 or

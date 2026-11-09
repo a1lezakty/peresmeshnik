@@ -2171,3 +2171,138 @@ than the CPU for some languages (pl → ru 1.45 s against 0.57 s), so tr / zh / 
 - **Whisper writes Chinese partly in traditional characters** ("我們對待你他們"; 24 % of the zh clauses taken for another
   language): the text is right, the script mixed. Converting needs OpenCC (a new dependency): backlog.
 - Peak RSS of a side: 1.6–2.0 GB on the CPU (ASR + MT + the Piper runner); fr with FastConformer 0.6–0.8 GB.
+
+## Stage 6: the clone in 13 languages (S3)
+
+Measured 2026-11-09 on one RTX A4000 of the C server (CUDA memory cap 0.3, 2 CPU threads); the CPU columns on its
+i7-13700 with 2 threads on 2 physical cores (`taskset`), CUDA hidden. "The engine" is the app's (`XttsClone`: streaming,
+text split, pause cap, length guard and, from this stage, `xtts.normalize`; `bench/tts_clone.py --model xtts-engine`),
+"raw XTTS" the upstream call without them (`--model xtts`).
+
+- **Sentences:** the same 6 FLEURS dev sentences in each language (ids 1552, 1572, 1578, 1582, 1645, 1656: the shortest
+  that all 13 have, 3.9–10 s as FLEURS speakers read them; `bench/tts_clone.py set`); the CPU columns: the 3 shortest.
+- **Voices:** "me" is the LibriVox reader recorded in Russian (42 s); the second voice the LibriSpeech reader in
+  English. So each language is said by a voice recorded in another language, as in the app.
+- **Judge:** SpeechBrain ECAPA cosine against the whole recording; Whisper large-v3-turbo (fp16) for CER and WER (zh, ja:
+  CER over characters without spaces, no WER). Baselines: two halves of one recording 0.90 / 0.93, the two readers
+  0.085, the FLEURS speakers against "me" −0.02–0.17; Whisper turbo on the real FLEURS recordings of these sentences:
+  CER 0.2–5.4 % (ru 0.5, pt 0.2, es 1.0, ar 1.2, fr 1.3, en 1.5, de 1.6, it 1.6, ko 2.7, pl 3.1, tr 4.8, zh 4.8, ja 5.4).
+- `first call s`: the first synthesis in a language (an untimed warm-up sentence), with loading its text tools
+  (pinyin, MeCab and UniDic for Japanese). The app does that at its warm-up, in the other side's language.
+
+**The engine as the app runs it now** (Italian and Spanish from a second run, German, French, Portuguese and Korean
+from a third, after the change at the end of a clause; their speed columns from the first run, the GPU to itself:
+in the third someone else's work shared it):
+
+| language | sim ru → X (min) | CER / WER ru → X | sim en → X | CER / WER en → X | GPU first audio s ru → X: mean (max) | GPU RTF | CPU 2 thr. first audio s ru → X | CPU RTF | first call s |
+|---|---|---|---|---|---|---|---|---|---|
+| English | 0.37 (0.28) | 1.3 % / 4.2 % | 0.58 | 5.4 % / 6.9 % | 0.15 (0.15) | 0.17 | 1.76 | 2.36 | 0.96 |
+| Russian | 0.65 (0.55) | 3.3 % / 5.3 % | 0.35 | 7.9 % / 14.0 % | 0.15 (0.15) | 0.18 | 2.07 | 2.53 | 1.33 |
+| German | 0.44 (0.39) | 13.7 % / 15.9 % | 0.41 | 24.3 % / 30.4 % | 0.15 (0.15) | 0.18 | 1.81 | 2.80 | 1.22 |
+| French | 0.42 (0.37) | 2.2 % / 3.6 % | 0.34 | 1.1 % / 4.8 % | 0.15 (0.15) | 0.18 | 1.64 | 2.62 | 0.79 |
+| Spanish | 0.49 (0.44) | 0.6 % / 2.3 % | 0.31 | 1.8 % / 3.5 % | 0.17 (0.21) | 0.20 | 1.88 | 2.76 | 0.77 |
+| Italian | 0.57 (0.49) | 0.9 % / 2.7 % | 0.35 | 1.6 % / 5.3 % | 0.15 (0.15) | 0.18 | 1.52 | 2.75 | 1.15 |
+| Portuguese | 0.63 (0.57) | 1.2 % / 4.0 % | 0.29 | 1.5 % / 4.0 % | 0.15 (0.15) | 0.18 | 1.53 | 2.53 | 0.59 |
+| Polish | 0.63 (0.57) | 0.2 % / 1.6 % | 0.36 | 1.3 % / 6.2 % | 0.15 (0.15) | 0.18 | 2.03 | 2.61 | 1.07 |
+| Turkish | 0.55 (0.46) | 4.0 % / 13.0 % | 0.33 | 4.5 % / 14.8 % | 0.15 (0.15) | 0.18 | 1.94 | 3.08 | 0.73 |
+| Chinese | 0.51 (0.44) | 5.8 % / — | 0.37 | 8.6 % / — | 0.15 (0.15) | 0.18 | 1.65 | 2.33 | 0.83 |
+| Japanese | 0.58 (0.55) | 3.6 % / — | 0.34 | 4.2 % / — | 0.15 (0.16) | 0.20 | 1.87 | 2.48 | 0.77 |
+| Korean | 0.56 (0.46) | 5.4 % / 21.7 % | 0.33 | 3.8 % / 21.7 % | 0.16 (0.19) | 0.19 | 2.04 | 3.34 | 0.95 |
+| Arabic | 0.60 (0.51) | 1.5 % / 8.2 % | 0.36 | 1.5 % / 4.9 % | 0.17 (0.21) | 0.19 | 1.70 | 2.71 | 0.57 |
+
+- **My voice in every language.** Recorded in Russian, the clone keeps 0.42–0.63 similarity in the 12 other languages
+  (Russian itself 0.65). Recorded in English, 0.29–0.41 (English itself 0.58). That matches the cross-lingual
+  ru → en of stage 1 (0.37–0.44) and is far above another speaker (0.085).
+- **Understood.** From the Russian recording CER is ≤ 5.8 % in 12 of 13 languages, ≤ 1.5 % in 6. German is the
+  exception: in every run XTTS sometimes went on after the last word ("…bis zum einfachen Bürger popfing per den
+  mund…", "…dass Felix so friedlich gewählt wird"). That gave 13.7 % from the Russian recording and 24.3 % from the
+  English one in the last run, against 2.0 % in another run of the same sentences: 1 to 3 of 6 sentences, with a
+  period or a comma at the end. A stop for these tails is in the backlog. Korean WER (13–22 % at 3–5 % CER) is mostly
+  Whisper's spacing ("정부청사" / "정부 청사").
+- **Speed.** On the A4000 every language starts in 0.15–0.17 s on average (max 0.21 from the Russian recording, 0.26
+  from the English one) and runs at RTF 0.17–0.20. On
+  2 CPU threads, RTF is 2.3–3.3 and the first audio comes after 1.5–2.1 s, in every language. Without an NVIDIA GPU the
+  clone falls behind the conversation in each language: the wizard says so, and the app measures the clone at its
+  start and gives way to the stock voice.
+
+**Before → after** (CER from the Russian recording; the audio of the 6 sentences: shorter means cut):
+
+| language | CER ru → X: raw XTTS | engine before | engine after | audio s of the 6, ru → X: raw / before / after |
+|---|---|---|---|---|
+| English | 1.0 % | 1.5 % | 1.3 % | 21.9 / 20.9 / 21.4 |
+| Russian | 2.0 % | 6.6 % | 3.3 % | 31.8 / 30.2 / 29.0 |
+| German | 4.9 % | 2.0 % | 13.7 %¹ | 32.6 / 31.2 / 33.3 |
+| French | 2.6 % | 3.3 % | 2.2 % | 27.8 / 29.4 / 25.9 |
+| Spanish | 1.2 % | 1.6 % | 0.6 % | 35.4 / 37.0 / 35.1 |
+| Italian | 9.5 % | 8.1 % | 0.9 % | 32.0 / 35.7 / 29.8 |
+| Portuguese | 3.7 % | 2.0 % | 1.2 % | 31.9 / 31.4 / 28.0 |
+| Polish | 0.9 % | 0.7 % | 0.2 % | 31.9 / 36.2 / 32.0 |
+| Turkish | 5.0 % | 4.5 % | 4.0 % | 26.0 / 25.9 / 25.9 |
+| Chinese | 6.7 % | 17.3 % | 5.8 % | 26.2 / 20.4 / 26.5 |
+| Japanese | 6.6 % | 7.8 % | 3.6 % | 31.9 / 27.6 / 29.5 |
+| Korean | 2.7 % | 6.5 % | 5.4 % | 33.8 / 30.7 / 34.6 |
+| Arabic | 3.2 % | 2.3 % | 1.5 % | 31.7 / 30.2 / 31.3 |
+
+- **Chinese 17.3 % → 5.8 %.** The length guard (1 s + letters / 8) cut Chinese speech. XTTS says 4–5 Han characters a
+  second (FLEURS speakers 2.6), so the guard allowed about a third of the time a sentence takes. The 6 sentences had
+  20.4 s of audio against 26.2 s raw. Now a Han / kana / Hangul character counts as 3 letters: 26.5 s. Japanese 7.8
+  → 3.6 % and Korean 6.5 → 5.4 % for the same reason.
+- **Italian 8.1 → 0.9 %, Spanish 1.6 → 0.6 %, French 3.3 → 2.2 %, Portuguese 2.0 → 1.2 %:** the comma at the end of a
+  clause (below). ¹ German 2.0 → 13.7 %: 6 sentences, one run each, so the noise of one run: the tails above come in
+  1 to 3 of the 6 sentences in any run, with either ending.
+
+### Numbers, money and clock times
+
+Three sentences per language with a price, a clock time, a decimal, a percentage, a date and counts (e.g. "At 15:30 it
+costs 250.50 € (12.5% more).", "The meeting is on 3 March 2024 at 9:00, room 214.", "We sold 1,250 tickets, about 40% of
+the 3,000 seats."). Each is said twice by the engine from the "me" voice: with XTTS's own cleaning only ("raw"), and
+with `xtts.normalize` first. Whisper turbo is the judge.
+
+| | raw | normalize |
+|---|---|---|
+| the currency named (the price sentence, 13 languages × 2; pt from a second run with the final code) | 0 / 26 | 26 / 26 |
+| "9:00" said without a stray zero ("9-0", "9.00", "nine zero") | 15 / 26 | 26 / 26 |
+| Japanese: CER, numbers heard as said | 78 %, 0 / 30 | 9.3 %, 26 / 30 |
+| Arabic: CER, numbers heard | 59 %, 11 / 28 | 7.1 %, 26 / 28 |
+| Portuguese: numbers heard | 15 / 24 | 18 / 24 |
+| Polish / Turkish / Korean: numbers heard | 15 / 20 / 23 of 24, 24, 30 | 20 / 22 / 25 |
+
+- **Raw XTTS loses the price everywhere:** "250,5 Freaking", "250. Punto C punto", Turkish "250-50E", Arabic "riyal"
+  for every sign. Normalized: "250 Euro und 50 Cent", "250 евро 50 центов", "250,50 avro", "250.5 ユーロ".
+- **Japanese digits were noise:** XTTS's tokenizer leaves digits as they are for Japanese ("2時間" → "u時間",
+  "3つ" → "破裂", "15:30 … 250.50" → "ファイアングに1周図…"). Normalized, they are read as Japanese numbers ("2024年3月3日の9時から214号室").
+- CER against the written digits grows in de, en, es, fr, it, ru, zh (3–10 % → 9–21 %) for a reason that is not the
+  speech: the price is now said in words, and Whisper writes "250 euro, 50 cents" where the text has "250.50 €".
+- What is left to XTTS: other numbers, abbreviations (read as words, lower-cased: "USA" → "usa"), symbols. Its
+  num2words reads Spanish decimals with "punto" and Turkish numbers as one word ("ikiyüzelli"). Not changed: nobody
+  listened to them.
+- After these runs (review of the stage, tests only, not said by XTTS yet): R$ as reais and E£ / £ in Arabic as the
+  (Egyptian) pound, thousands with several groups (tr 1.250.000, ar / ja 1,250,000), a decimal with a leading zero
+  (3,05: "üç virgül sıfır beş", not "beş"), tr 15.30, de 9.30 Uhr, fr / pt 9h and "une heure" / "uma hora", the
+  comma ending of every part of a long text, the period of an abbreviation kept (p.m., etc.).
+
+### The final period
+
+In Italian, raw XTTS said the full stop as a word after the sentence ("…da un giorno circa punto tonto"). It did so in
+3 of 6 sentences raw, in 2 + 2 of 12 through the engine, and in 6 of 36 more in two repeats. Each FLEURS sentence was
+said again with its period, without it, and with a comma instead ("me" voice, the engine):
+
+| | with the period | no period | a comma |
+|---|---|---|---|
+| Italian: "punto" said / 2+ words of tail / CER (24 each) | 5 / 6 / 10.3 % | 0 / 0 / 1.5 % | 0 / 0 / 1.5 % |
+| Spanish: the same | 1 / 1 / 3.2 % | 0 / 0 / 1.4 % | 0 / 0 / 1.2 % |
+
+The other 11 languages, 3 repeats of the 6 sentences each (18), with the period or a comma (zh, ja: ，for 。); a tail =
+the transcript runs 2+ words (zh, ja: 3+ characters) longer than the text:
+
+| tails / CER | en | ru | de | fr | pt | pl | tr | zh | ja | ko | ar |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| with the period | 0 / 1.5 % | 4 / 8.5 % | 2 / 5.5 % | 2 / 4.3 % | 1 / 3.4 % | 0 / 0.9 % | 0 / 4.4 % | 0 / 2.6 % | 0 / 5.4 % | 3 / 4.0 % | 0 / 1.7 % |
+| a comma | 0 / 2.0 % | 0 / 0.9 % | 1 / 4.9 % | 0 / 2.1 % | 0 / 1.1 % | 0 / 0.8 % | 0 / 4.1 % | 0 / 2.9 % | 0 / 5.4 % | 0 / 2.9 % | 0 / 1.5 % |
+
+So the engine ends a clause with a comma in Italian, Spanish, German, French, Portuguese and Korean
+(`xtts.COMMA_END`): the languages where XTTS went on after the period; with a comma 1 tail in 120 against 15 in 120.
+German is the one where it does not hold up: in the engine run above it went on with a comma too.
+Polish, Turkish, Chinese, Japanese, Arabic: no tail either way, the period stays. English and Russian are left as they
+are here (stage 5 measures the clone's tails in them: Russian had 4 of 18 with the period, 0 with a comma). Whether a
+comma at the end sounds unfinished (rising) is a check by ear (USER-CHECKS).

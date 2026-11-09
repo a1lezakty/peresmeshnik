@@ -47,10 +47,44 @@ registry's `langs` ([`models.toml`](../peresmeshnik/models.toml)); what runs loc
 | [Piper](https://github.com/OHF-Voice/piper1-gpl) (`piper-tts` 1.x) | fast TTS without cloning | **GPL-3.0** (and espeak-ng, GPL-3.0) | per voice (dataset license): chosen en `john` public domain, ru `dmitri` CC0, en `joe` CC0; ru `denis` CC0 (worse intelligibility); `irina` unknown; en `lessac` Blizzard research license; `ryan`, ru `ruslan` CC-BY-NC-SA | GPL code cannot be linked into a PolyForm app: Piper runs as a **separate process**, never imported. [`piper-runner/`](../piper-runner) is that process: a separate program under GPL-3.0 (its own LICENSE) that the app starts with `uv run --no-project --with piper-tts==1.8.0` and talks to over stdin/stdout; the bench uses the upstream CLI the same way |
 | Piper voices of stage 6 ([rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices), each voice's MODEL_CARD) | stock voice per language | as Piper | uk `ukrainian_tts` CC0, de `thorsten` CC0, fr `siwis` CC-BY-4.0, es `es_MX-ald` Unlicense, it `paola` CC0 (its card says "See URL": the dataset is cc0-1.0), pt `pt_BR-faber` CC0, pl `gosia` CC0; **noncommercial (consent):** tr `dfki`, ko `kss`, ja `hi_fi_captain` (CC-BY-NC-SA-4.0); zh, ar: none usable (zh `chaowen` is fine-tuned from the noncommercial `xiao_ya`, `huayan` unknown; ar `kareem` unknown) | the Japanese voice needs Piper's `[ja]` extra: the runner starts with `--with piper-tts[ja]==1.8.0` ([pyopenjtalk-plus](https://github.com/tsukumijima/pyopenjtalk-plus) 0.4.x, MIT; its bundled dictionary: mecab-naist-jdic, BSD-3-Clause, with UniDic-CSJ words, BSD-3-Clause among UniDic's three licenses); the builds carry it (packaging/piper-requirements.txt) with sudachipy (Apache-2.0) but not Sudachi's 192 MB dictionary: the runner reads kanji by OpenJTalk's dictionary alone (FLEURS ja test: 6 of 321 sentences, 0.05 % of the phonemes differ) |
 | [Silero TTS](https://github.com/snakers4/silero-models) v5 ru, v3 en | TTS without cloning | — | **CC-BY-NC-SA-4.0** | noncommercial, share-alike; torch |
-| [XTTS-v2](https://huggingface.co/coqui/XTTS-v2) via [coqui-tts](https://github.com/idiap/coqui-ai-TTS) | voice cloning, 17 languages incl. ru | MPL-2.0 | **Coqui Public Model License 1.0** (noncommercial) | |
+| [XTTS-v2](https://huggingface.co/coqui/XTTS-v2) via [coqui-tts](https://github.com/idiap/coqui-ai-TTS) | voice cloning, 17 languages: 13 of the app's 14 (not uk) | MPL-2.0 | **Coqui Public Model License 1.0** (noncommercial) | its text tools: the next table |
 | [Chatterbox Multilingual](https://github.com/resemble-ai/chatterbox) (Resemble AI) | voice cloning, 23 languages | MIT | MIT | adds an inaudible watermark |
 | [CosyVoice 2 / Fun-CosyVoice3](https://github.com/FunAudioLLM/CosyVoice) | voice cloning | Apache-2.0 | Apache-2.0 | |
 | [FocalCodec](https://github.com/lucadellalib/focalcodec) | planned own timbre converter (later research) | Apache-2.0 | Apache-2.0 | |
+
+### The clone's text tools (in the Windows voice pack and the Linux clone venv, never in the app)
+
+XTTS-v2's tokenizer cleans the text of each language with these before the model reads it (coqui-tts imports them;
+`voice-runner/requirements-*.in`). Checked on PyPI and in the packages' own license files, 2026-11-09.
+
+| Package | For | License |
+|---|---|---|
+| [num2words](https://github.com/savoirfairelinux/num2words) 0.5.14 | numbers as words in every language (a coqui-tts dependency) | LGPL-2.1 (in the clone's own process) |
+| [ko-speech-tools](https://pypi.org/project/ko-speech-tools/) 0.1.1 | Korean: Hangul to the romanization XTTS reads (a coqui-tts dependency) | Apache-2.0 |
+| [pypinyin](https://github.com/mozillazg/python-pinyin) 0.55.0 | Chinese: characters to pinyin with tones | MIT |
+| [cutlet](https://github.com/polm/cutlet) 0.5.2, with [jaconv](https://github.com/ikegami-yukino/jaconv) 0.5.0 and [mojimoji](https://github.com/studio-ousia/mojimoji) 0.0.13 | Japanese: kanji and kana to romaji | MIT; MIT; Apache-2.0 |
+| [fugashi](https://github.com/polm/fugashi) 1.5.2 | Japanese: word splitting (MeCab, bundled in its wheel) | MIT; MeCab BSD-3-Clause (of its BSD / LGPL / GPL choice) |
+| [unidic-lite](https://github.com/polm/unidic-lite) 1.0.8 | Japanese: the MeCab dictionary (UniDic 2.1.2, 260 MB unpacked); no wheel: the voice pack unpacks its folder from the source archive, with its license files | MIT (packaging); UniDic BSD-3-Clause, © The UniDic Consortium |
+
+## Texts to record your voice
+
+The wizard shows a text to read aloud in your language (`voice.PROMPTS`): for ru and en one written for the app; for
+the other 12 public-domain prose, verbatim from these sources (every author died before 1950).
+
+| Language | Author (died) | Work, year | Source |
+|---|---|---|---|
+| uk | Михайло Коцюбинський (1913) | Intermezzo, 1909 | [uk.wikisource.org](https://uk.wikisource.org/w/index.php?title=Твори_%28Коцюбинський,_1955%29/2/Intermezzo&action=render) |
+| de | Franz Kafka (1924) | Die Verwandlung, 1915 | [www.gutenberg.org](https://www.gutenberg.org/cache/epub/22367/pg22367.txt) |
+| fr | Alphonse Daudet (1897) | Lettres de mon moulin (Installation), 1869 | [www.gutenberg.org](https://www.gutenberg.org/cache/epub/36780/pg36780.txt) |
+| es | Horacio Quiroga (1937) | Cuentos de la selva: La tortuga gigante, 1918 | [es.wikisource.org](https://es.wikisource.org/w/index.php?title=La_tortuga_gigante&action=render) |
+| it | Carlo Collodi (1890) | Le avventure di Pinocchio, 1883 | [www.gutenberg.org](https://www.gutenberg.org/cache/epub/52484/pg52484.txt) |
+| pt | Machado de Assis (1908) | Conto de Escola (Várias Histórias), 1884 | [pt.wikisource.org](https://pt.wikisource.org/w/index.php?title=Conto_de_Escola&action=render) |
+| pl | Henryk Sienkiewicz (1916) | Latarnik, 1881 | [wolnelektury.pl](https://wolnelektury.pl/media/book/txt/latarnik.txt) |
+| tr | Ömer Seyfettin (1920) | Kaşağı, 1919 | [tr.wikisource.org](https://tr.wikisource.org/w/index.php?title=Kaşağı&action=raw) |
+| zh | 鲁迅 (1936) | 从百草园到三味书屋（朝花夕拾）, 1926 | [www.marxists.org](https://www.marxists.org/chinese/reference-books/luxun/06/008.htm) |
+| ja | 芥川龍之介 (1927) | トロッコ, 1922 | [www.aozora.gr.jp](https://www.aozora.gr.jp/cards/000879/files/43016_16836.html) |
+| ko | 이효석 (1942) | 메밀꽃 필 무렵, 1936 | [ko.wikisource.org](https://ko.wikisource.org/w/index.php?title=메밀꽃_필_무렵&action=raw) |
+| ar | جبران خليل جبران (1931) | الأجنحة المتكسرة — في باب الهيكل, 1912 | [ar.wikisource.org](https://ar.wikisource.org/w/index.php?title=الأجنحة_المتكسرة/في_باب_الهيكل&action=raw) |
 
 ## Cloud
 

@@ -204,7 +204,8 @@ def test_wizard_asks_for_the_right_models():
     s.cloud.subtitles, s.them_to_me = True, 'cloud'
     assert needed_models(s) == ['silero-vad']
     s.me_to_them = 'local'
-    assert needed_models(s) == ['silero-vad', 'gigaam-v3-e2e-ctc', 'opus-mt-ru-en', 'xtts-v2']
+    assert needed_models(s) == ['silero-vad', 'gigaam-v3-e2e-ctc', 'opus-mt-ru-en', 'xtts-v2',
+                                s.local.tts[s.their_lang]]  # the stock voice: the clone's fallback
 
 
 def test_hotkey_combos():

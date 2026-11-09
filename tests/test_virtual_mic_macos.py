@@ -61,7 +61,8 @@ def test_the_call_device_and_virtual_inputs_are_no_microphone(monkeypatch):
     devs = [{**dev, 'uid': 'BuiltInMicrophoneDevice', 'name': 'MacBook Pro Microphone', 'transport': 'bltn'},
             {**dev, 'uid': 'ZoomAudioDevice', 'name': 'ZoomAudioDevice', 'transport': 'virt'},
             {**dev, 'uid': 'BlackHole16ch_UID', 'name': 'BlackHole 16ch', 'transport': 'virt', 'outputs': 16},
-            {**dev, 'uid': 'peresmeshnik-test-mic', 'name': 'Test Mic', 'transport': 'grup'}]
+            {**dev, 'uid': 'peresmeshnik-test-mic', 'name': 'Test Mic', 'transport': 'grup'},
+            {**dev, 'uid': 'KrispMicrophone', 'name': 'krisp microphone', 'transport': 'virt'}]  # the real one, processed
     monkeypatch.setattr(selftest, 'HELPER', True)
     monkeypatch.setattr(selftest, 'WINDOWS', False)
     monkeypatch.setattr(sys, 'platform', 'darwin')  # mic.native() picks audio/macos.py (on the Windows runner too)
@@ -72,8 +73,10 @@ def test_the_call_device_and_virtual_inputs_are_no_microphone(monkeypatch):
     with pytest.raises(ValueError, match='Test Mic is an aggregate device, not your microphone'):
         macos.not_blackhole('Test Mic')
     assert macos.not_blackhole('BuiltInMicrophoneDevice') == 'BuiltInMicrophoneDevice'
+    assert macos.not_blackhole('KrispMicrophone') == 'KrispMicrophone'
     assert macos.not_blackhole('') == ''  # the default input: the helper never takes a virtual one by itself
-    assert selftest.devices('sources') == [('BuiltInMicrophoneDevice', 'MacBook Pro Microphone')]
+    assert selftest.devices('sources') == [('BuiltInMicrophoneDevice', 'MacBook Pro Microphone'),
+                                           ('KrispMicrophone', 'krisp microphone')]
     assert ('BlackHole16ch_UID', 'BlackHole 16ch') in selftest.devices('sinks')  # an output: S1's (the call app's)
     monkeypatch.setenv('PERESMESHNIK_TEST_MIC', 'BlackHole16ch_UID')
     assert ('BlackHole16ch_UID', 'BlackHole 16ch') in selftest.devices('sources')

@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 import psutil
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -63,7 +64,7 @@ def needed_models(s: config.Settings) -> list[str]:
             ids += [s.local.asr[src], s.local.mt[f'{src}-{tgt}']]
         if local:
             stock = side == 'them_to_me' or s.local.clone == 'piper'  # voice.STOCK: me -> them in a stock voice
-            ids.append(s.local.tts[tgt] if stock else s.local.clone)
+            ids += [s.local.tts[tgt]] if stock else [s.local.clone, s.local.tts[tgt]]  # the clone's fallback (~60 MB)
     return list(dict.fromkeys(ids))
 
 
@@ -75,26 +76,79 @@ PACK_CONSENT = ('I accept the licenses of the voice pack: PyTorch (BSD-3-Clause)
                 'the user')
 
 
-def gpu_vram_gb() -> float:
-    """Memory of the biggest NVIDIA GPU in GB (nvidia-smi: no torch, ~0.1 s); 0 without one or without its driver."""
+MIN_DRIVER = (572, 30)  # Windows: CUDA 12.8's driver (the pack's torch 2.8.0+cu128; NVIDIA's CUDA 12.8 release notes)
+MIN_CC = 7.0  # the pack's torch is built for sm_70 .. sm_120 (torch.cuda.get_arch_list()): no Pascal (GTX 10xx) or older
+
+
+class Gpu(NamedTuple):
+    vram: float = 0.0  # GB
+    driver: tuple[int, ...] = ()
+    cc: float = 0.0  # compute capability; 0: not known (a driver too old to say)
+    why: str = ''  # nvidia-smi is there but fails: the driver's own words
+
+    @property
+    def driver_text(self) -> str:
+        return '.'.join(f'{x:02d}' if i else str(x) for i, x in enumerate(self.driver))
+
+
+def _smi(exe: str, fields: str) -> list[list[str]] | str:
+    try:
+        r = subprocess.run([exe, f'--query-gpu={fields}', '--format=csv,noheader,nounits'], capture_output=True, text=True,
+                           timeout=10, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    except (OSError, subprocess.SubprocessError) as e:
+        return str(e)
+    rows = [[x.strip() for x in ln.split(',')] for ln in (r.stdout or '').splitlines() if ln.strip()]
+    if rows and all(len(row) == fields.count(',') + 1 and row[0].replace('.', '', 1).isdigit() for row in rows):
+        return rows
+    return ' '.join((r.stdout or '').split())[:200] or f'nvidia-smi exited with {getattr(r, "returncode", "?")}'
+
+
+def gpu() -> Gpu:
+    """The biggest NVIDIA GPU by nvidia-smi (no torch, ~0.1 s): memory, driver, compute capability; Gpu() without one.
+    A driver that does not answer is not "no GPU": `why` says what nvidia-smi said."""
     exe = shutil.which('nvidia-smi')
     if not exe:
-        return 0.0
-    try:
-        out = subprocess.run([exe, '--query-gpu=memory.total', '--format=csv,noheader,nounits'], capture_output=True,
-                             text=True, timeout=10, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)).stdout
-    except (OSError, subprocess.SubprocessError):
-        return 0.0
-    return max((float(x) / 1024 for x in out.split() if x.replace('.', '', 1).isdigit()), default=0.0)
+        return Gpu()
+    rows = _smi(exe, 'memory.total,driver_version,compute_cap')
+    if isinstance(rows, str):  # a driver before compute_cap (R510) does not know the field
+        rows = old if not isinstance(old := _smi(exe, 'memory.total,driver_version'), str) else rows
+    if isinstance(rows, str):
+        return Gpu(why=rows)
+    best = max(rows, key=lambda row: float(row[0]))
+
+    def num(x: str, kind=float):
+        try:
+            return kind(x)
+        except ValueError:
+            return kind()
+    return Gpu(float(best[0]) / 1024, tuple(num(x, int) for x in best[1].split('.')), num(best[2]) if len(best) > 2 else 0.0)
 
 
 def gpu_text(vram: float) -> str:
     return f'an NVIDIA GPU with {vram:.0f} GB' if vram else 'no NVIDIA GPU'
 
 
+def gpu_refusal(g: Gpu) -> str:
+    """Why the voice pack (Windows) would not run the clone on this GPU, said before its 3.7 GB download; '' if it would."""
+    if g.why:
+        return (f'The NVIDIA driver does not answer ({g.why}): reinstall or update it from nvidia.com/drivers, then open '
+                'this page again.')
+    if g.vram < MIN_VRAM_GB:
+        return (f'The clone of your voice needs an NVIDIA GPU with at least 6 GB of memory; this computer has '
+                f'{gpu_text(g.vram)}.')
+    if g.driver < MIN_DRIVER:
+        need = '.'.join(map(str, MIN_DRIVER))
+        return (f'The clone of your voice needs NVIDIA driver {need} or newer; this computer has {g.driver_text or "an older one"}: '
+                'update it from nvidia.com/drivers (or the NVIDIA app), then open this page again.')
+    if g.cc and g.cc < MIN_CC:
+        return (f'This NVIDIA GPU is too old for the voice pack (compute capability {g.cc:g}; it needs {MIN_CC:g} or newer: '
+                'GeForce GTX 16xx, RTX 20xx and later).')
+    return ''
+
+
 def tier() -> tuple[str, str]:
     """(what this machine is, the recommended me -> them engine)."""
-    gb, vram = psutil.virtual_memory().total / 2 ** 30, gpu_vram_gb()
+    gb, vram = psutil.virtual_memory().total / 2 ** 30, gpu().vram
     rec = 'local' if vram >= MIN_VRAM_GB else 'cloud'  # the clone keeps up only on an NVIDIA GPU with room for it (BENCH)
     return f'{gb:.0f} GB RAM, {gpu_text(vram)}: recommended them → me local, me → them {rec}', rec
 
@@ -195,9 +249,20 @@ class DevicesPage(QWizardPage):
         to, and "Check again"."""
         from peresmeshnik.audio import windows
         try:
-            windows.cable()
+            devs = windows.devices()
+            play, rec = windows.cable(devs)
             text, ok = ('✔ VB-Audio Virtual Cable is installed: in the call app choose the microphone '
                         f'<b>{windows.CABLE_OUT}</b>.'), True
+            if any(d['default_output'] for d in devs if d['outputs'] and windows.is_ours(d)):
+                text += (f'<br>⚠ <b>{play["name"]}</b> is Windows\' default output: what Windows plays, the translation of '
+                         'the other side too, goes into the call instead of your headphones. Choose your headphones or '
+                         'speakers in Settings → System → Sound → Output.')
+            if rec['default_input']:
+                text += (f'<br>⚠ <b>{rec["name"]}</b> is Windows\' default microphone: the call app may take it, but every '
+                         'other app hears the translation instead of you. Choose your real microphone in Settings → System '
+                         '→ Sound → Input, and CABLE Output in the call app.')
+            if windows.permission() == 'denied':
+                text += f'<br>✘ {windows.NO_PERMISSION}.'
         except windows.CableMissing:
             text, ok = ('<b>✘ VB-Audio Virtual Cable is not installed.</b> It is the virtual microphone that carries your '
                         'translated voice to the call app (them → me works without it).<br>Install it: download the '
@@ -562,7 +627,7 @@ class VoicePage(QWizardPage):
         self.pack_done.connect(self._pack_done)
         self.voice = None
         self.running = False
-        self.packing, self.pack_note, self.vram = False, '', 0.0
+        self.packing, self.pack_note, self.gpu = False, '', Gpu()
         self._cancel_pack = threading.Event()
         self.draft = f'{self.name}.new'
 
@@ -584,7 +649,7 @@ class VoicePage(QWizardPage):
         self.stock.setVisible(self.local())
         self.stock.setChecked(s.local.clone == voice.STOCK)
         self.check_button.setVisible(self.local() and not self.stock.isChecked())
-        self.vram = gpu_vram_gb() if WINDOWS else 0.0
+        self.gpu = gpu() if WINDOWS else Gpu()
         if self.voice is None and s.local.voice and (voice.voices_dir() / s.local.voice / 'voice.json').exists():
             self.voice = voice.load(s.local.voice)
             q = self.voice.meta.get('quality', {})
@@ -598,14 +663,14 @@ class VoicePage(QWizardPage):
 
     def pack(self) -> str:
         """The clone's voice pack here: '' where it is not this page's business (not Windows, cloud, the stock voice, a
-        runner of one's own in $PERESMESHNIK_VOICE_CMD, a build without the pack's files), 'installing', 'gpu' (no NVIDIA
-        GPU with MIN_VRAM_GB: the clone would not keep up), else voicepack.state()."""
+        runner of one's own in $PERESMESHNIK_VOICE_CMD, a build without the pack's files), 'installing', 'gpu' (gpu_refusal:
+        too little memory, an old driver or GPU, a driver that does not answer), else voicepack.state()."""
         if not (WINDOWS and self.local() and not self.stock.isChecked()) or os.environ.get('PERESMESHNIK_VOICE_CMD') \
                 or not voicepack.lock_file().is_file():
             return ''
         if self.packing:
             return 'installing'
-        return 'gpu' if self.vram < MIN_VRAM_GB else voicepack.state()
+        return 'gpu' if gpu_refusal(self.gpu) else voicepack.state()
 
     def _show_pack(self) -> None:
         st = self.pack()
@@ -619,8 +684,7 @@ class VoicePage(QWizardPage):
         if st == 'installing':
             return
         if st == 'gpu':
-            text = (f'The clone of your voice needs an NVIDIA GPU with at least 6 GB of memory; this computer has '
-                    f'{gpu_text(self.vram)}. Choose a stock voice above, or cloud for "me → them" on the first page.')
+            text = gpu_refusal(self.gpu) + ' Choose a stock voice above, or cloud for "me → them" on the first page.'
         elif st == 'ready':
             text = 'The voice pack is installed.'
         else:

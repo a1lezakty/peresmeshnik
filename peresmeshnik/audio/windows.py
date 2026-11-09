@@ -12,7 +12,10 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
+
+from peresmeshnik.audio import processed
 
 HELPER = 'peresmeshnik-audio.exe'
 CABLE = 'VB-Audio Virtual Cable'  # in both endpoints' names, also when the user renames them: "CABLE Input (VB-Audio ...)"
@@ -43,8 +46,11 @@ def helper() -> str:
 def devices() -> list[dict]:
     """[{uid, name, inputs, outputs, rate, transport, default_input, default_output}] of the active endpoints, now: a
     capture endpoint has inputs, a render one outputs; transport 'virt' = a software device (VB-Cable, Voicemeeter)."""
-    out = subprocess.run([helper(), 'list'], check=True, capture_output=True, timeout=10, creationflags=NO_WINDOW).stdout
-    return json.loads(out.decode('utf-8'))
+    r = subprocess.run([helper(), 'list'], capture_output=True, timeout=10, creationflags=NO_WINDOW)
+    if r.returncode:  # the helper's own words ("is the Windows Audio service running?"), not only its exit code
+        lines = r.stderr.decode(errors='replace').strip().splitlines()
+        raise RuntimeError((lines[-1] if lines else f'{HELPER} list exited with {r.returncode}').removeprefix('peresmeshnik-audio: '))
+    return json.loads(r.stdout.decode('utf-8'))
 
 
 def is_ours(d: dict) -> bool:
@@ -57,7 +63,8 @@ def cable(devs: list[dict] | None = None) -> tuple[dict, dict]:
     devs = devices() if devs is None else devs
     plays = [d for d in devs if d['outputs'] and is_ours(d)]  # also "CABLE In 16ch" (pack 46): "CABLE Input" first
     play = next((d for d in plays if d['name'].startswith(CABLE_IN)), plays[0] if plays else None)
-    rec = next((d for d in devs if d['inputs'] and is_ours(d)), None)
+    recs = [d for d in devs if d['inputs'] and is_ours(d)]
+    rec = next((d for d in recs if d['name'].startswith(CABLE_OUT)), recs[0] if recs else None)
     if not (play and rec):
         raise CableMissing
     return play, rec
@@ -71,16 +78,36 @@ def stand_in_mic() -> str:
 
 def not_virtual(key: str, what: str = 'microphone') -> str:
     """CABLE Output carries our own translation: as the microphone the app would hear itself. Any other virtual input
-    (another cable, Voicemeeter) is not the user's voice either."""
+    (another cable, Voicemeeter) is not the user's voice either; NVIDIA Broadcast and Krisp are (audio.processed)."""
     if not key or what != 'microphone' or key == stand_in_mic():
         return key
     d = next((d for d in devices() if d['inputs'] and key in (d['uid'], d['name'])), None)
     if d and is_ours(d):
         raise ValueError(f'{CABLE_OUT} is the virtual microphone for the call app, not your microphone: choose your real '
                          'microphone in the settings')
-    if d and (d['transport'] == 'virt' or 'VB-Audio' in d['name']):
+    if d and (d['transport'] == 'virt' or 'VB-Audio' in d['name']) and not processed(d['name']):
         raise ValueError(f'{d["name"]} is a virtual device, not your microphone: choose your real microphone in the settings')
     return key
+
+
+def permission() -> str:
+    """'denied' when Windows keeps the microphone from desktop apps (Privacy & security: the helper exits with 6 as it
+    opens one), else 'granted' (it opened one, or there is none to open); found by starting a recording for a moment."""
+    p = spawn('record', '--rate', '16000', stdout=subprocess.DEVNULL)
+    first: list[bytes] = []
+    t = threading.Thread(target=lambda: first.append(p.stderr.readline()), daemon=True)
+    t.start()
+    t.join(5)  # "using ..." or "none" once it is set up, else the line it dies with
+    try:
+        if first and first[0].startswith((b'using', b'none')):
+            return 'granted'
+        return 'denied' if p.wait(3) == 6 else 'granted'
+    except subprocess.TimeoutExpired:
+        return 'granted'
+    finally:
+        if p.poll() is None:
+            p.stdin.close()
+            p.wait(5)
 
 
 def spawn(*args: str, stdout=subprocess.PIPE, stdin=subprocess.PIPE) -> subprocess.Popen:

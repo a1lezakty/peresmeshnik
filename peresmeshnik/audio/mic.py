@@ -204,29 +204,38 @@ def record(seconds: float, device: int | str | None = None, sample_rate: int = S
            on_progress: Callable[[float], None] | None = None) -> np.ndarray:
     """Blocking recording of `seconds` of sound from the microphone (enrollment); `on_progress(seconds so far)` once a
     second of it. Counted in sound, not wall time: the helper takes ~0.5 s to start (macOS runner: 2.5 s of 3 came by
-    wall time). A microphone that gives less within `START_S` extra (it went away) returns what came."""
+    wall time). A microphone that gives less within `START_S` extra (it went away) returns what came; one that ends
+    before any sound came raises with why (no permission: the helper says so at once, not after the wait)."""
     frames: list[np.ndarray] = []
     got = threading.Condition()
-    n = [0]
+    n, ended = [0], []
 
     def take(pcm: np.ndarray) -> None:
         with got:
             frames.append(pcm)
             n[0] += len(pcm)
             got.notify()
-    mic = Mic(device, sample_rate)
+
+    def end(why: str) -> None:
+        with got:
+            ended.append(why)
+            got.notify()
+    mic = Mic(device, sample_rate, on_end=end)
     mic.start(take)
     try:
-        end = time.monotonic() + seconds + START_S
+        end_at = time.monotonic() + seconds + START_S
         for i in range(1, math.ceil(seconds) + 1):
             want = min(i, seconds)
             with got:
-                if not got.wait_for(lambda: n[0] >= want * sample_rate, max(0.0, end - time.monotonic())):  # noqa: B023
+                if not got.wait_for(lambda: n[0] >= want * sample_rate or ended, max(0.0, end_at - time.monotonic())) \
+                        or n[0] < want * sample_rate:  # noqa: B023
                     break
             if on_progress:
                 on_progress(want)
     finally:
         mic.stop()
+    if not frames and ended:
+        raise RuntimeError(ended[0])
     return np.concatenate(frames)[:int(seconds * sample_rate)] if frames else np.zeros(0, np.float32)
 
 

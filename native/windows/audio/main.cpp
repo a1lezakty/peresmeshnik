@@ -9,16 +9,19 @@
 //   peresmeshnik-audio loop [--from DEV] --to DEV [--watch DEV]        the microphone into DEV (CABLE Input) until stdin
 //                                                             closes; with --watch only while another process records
 //                                                             that input (CABLE Output: the call app)
+//   peresmeshnik-audio watch --watch DEV                      "call" / "idle" as another process records DEV or stops
 //
 // DEV is an endpoint id, else a friendly name. --from '' is the default input. --follow (always for loop): while DEV
 // is not there, the default input if it is a real one, else the first real one (not virtual: VB-Cable and the like are
 // software devices); back to DEV when it returns. Windows converts rate and channels (AUTOCONVERTPCM): a format change
 // of a device only reopens it. record and loop end when stdin closes (the app is gone: no microphone stays open).
 // Events on stderr, a line each: "using <id>\t<name>", "lost <id>\t<name>", "none"; loop also "idle" (nobody records
-// --watch: the microphone is closed, no microphone icon in the taskbar) and "call" (somebody does).
+// --watch: the microphone is closed, no microphone icon in the taskbar) and "call" (somebody does). A microphone that
+// does not open (another app holds it in exclusive mode) is "none" with a line why, and tried again every 2 s.
 // Exit codes: 0 done, 2 usage, 3 no such device, 4 the device went away, 5 WASAPI / COM error, 6 no microphone
 // permission (Windows privacy settings), 7 (play) the output stream was invalidated (a format change): start it again.
-// Nothing polls: WASAPI events, endpoint and audio session notifications, a blocked read of stdin.
+// WASAPI events, endpoint and audio session notifications, a blocked read of stdin; an open stream is also checked
+// once a second (Windows may invalidate one without a word); idle, nothing runs.
 //
 // Build: native/windows/audio/build.cmd [out.exe] (cl via vswhere, as native/windows/loopback).
 
@@ -53,6 +56,8 @@ using Microsoft::WRL::RuntimeClass;
 using Microsoft::WRL::RuntimeClassFlags;
 
 enum Code { OK = 0, USAGE = 2, NO_DEVICE = 3, GONE = 4, WASAPI = 5, PERMISSION = 6, RESTART = 7 };
+static const DWORD CHECK_MS = 1000;  // a stream is checked at least this often (Windows may stop it without a word)
+static const DWORD RETRY_MS = 2000;  // a microphone that did not open is tried again after this
 
 // Here, not from functiondiscoverykeys_devpkey.h: without INITGUID those are only declared (a link error).
 static const PROPERTYKEY FRIENDLY_NAME = {{0xa45c254e, 0xdf1c, 0x4efd, {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}}, 14};
@@ -179,6 +184,12 @@ static std::optional<Device> find(const std::vector<Device>& all, const std::wst
     return std::nullopt;
 }
 
+// The user's voice: not a software device, unless it is the real microphone processed (peresmeshnik/audio PROCESSED).
+static bool real(const Device& d) {
+    return d.transport != "virt" || d.name.find("NVIDIA Broadcast") != std::string::npos ||
+           d.name.find("Krisp") != std::string::npos;
+}
+
 static bool active(const std::wstring& id) {
     ComPtr<IMMDevice> d;
     DWORD st = 0;
@@ -195,7 +206,10 @@ struct Endpoints : RuntimeClass<RuntimeClassFlags<ClassicCom>, FtmBase, IMMNotif
     STDMETHOD(OnDeviceStateChanged)(LPCWSTR, DWORD) override { SetEvent(g_devices); return S_OK; }
     STDMETHOD(OnDeviceAdded)(LPCWSTR) override { SetEvent(g_devices); return S_OK; }
     STDMETHOD(OnDeviceRemoved)(LPCWSTR) override { SetEvent(g_devices); return S_OK; }
-    STDMETHOD(OnPropertyValueChanged)(LPCWSTR, const PROPERTYKEY) override { return S_OK; }
+    STDMETHOD(OnPropertyValueChanged)(LPCWSTR, const PROPERTYKEY key) override {  // "Default format" changed: the streams
+        if (key.fmtid == DEVICE_FORMAT.fmtid && key.pid == DEVICE_FORMAT.pid) SetEvent(g_devices);  // on it are reset
+        return S_OK;
+    }
 };
 
 static DWORD WINAPI wait_stdin(LPVOID) {
@@ -294,6 +308,12 @@ struct Stream {
         return SUCCEEDED(hr);
     }
 
+    // False once Windows invalidated it (the device went, its format changed): it may stay silent without a word.
+    bool alive() {
+        UINT32 pad = 0;
+        return client && SUCCEEDED(client->GetCurrentPadding(&pad));
+    }
+
     // Free room in the buffer, frames; -1 when invalidated.
     long room() {
         UINT32 pad = 0;
@@ -330,7 +350,8 @@ struct Input {
     DWORD rate = 16000;
     Stream s;
     bool open = false;
-    std::string said;
+    std::string said, failed;
+    ULONGLONG retry = 0;  // when to try a microphone that did not open again (exclusive mode elsewhere, a busy driver)
 
     void event(const std::string& e) {
         if (e != said) say(e);
@@ -343,8 +364,8 @@ struct Input {
         if (!saved.empty()) if (auto d = find(ins, saved)) return d;
         if (!follow) return std::nullopt;
         std::wstring def = default_id(eCapture);
-        for (auto& d : ins) if (d.id == def && d.transport != "virt") return d;
-        for (auto& d : ins) if (d.transport != "virt") return d;
+        for (auto& d : ins) if (d.id == def && real(d)) return d;
+        for (auto& d : ins) if (real(d)) return d;
         return std::nullopt;
     }
 
@@ -371,11 +392,16 @@ struct Input {
             s.close();
             if (hr == E_ACCESSDENIED) die(PERMISSION, "no permission to use the microphone");
             if (!follow) die(WASAPI, "cannot record " + want->name + ": " + hex(hr));
-            say("peresmeshnik-audio: cannot record " + want->name + ": " + hex(hr));
+            std::string why = "peresmeshnik-audio: cannot record " + want->name + ": " + hex(hr) + "; trying again";
+            if (why != failed) say(why);  // once per outage, not every retry
+            failed = why;
+            retry = GetTickCount64() + RETRY_MS;
             event("none");
             return;
         }
         open = true;
+        failed.clear();
+        retry = 0;
         event("using " + want->label());
     }
 
@@ -383,6 +409,19 @@ struct Input {
         if (open) s.close();
         open = false;
         said.clear();
+        failed.clear();
+        retry = 0;
+    }
+
+    // After a device event or a quiet while: a stream Windows invalidated is opened again; a retry that is due runs.
+    void check() {
+        if (open ? !s.alive() : retry && GetTickCount64() >= retry) update(open);
+    }
+
+    // How long a wait may last before check() should run.
+    DWORD wait_ms() const {
+        if (!open && retry) return (DWORD)std::min<ULONGLONG>(CHECK_MS, retry > GetTickCount64() ? retry - GetTickCount64() : 0);
+        return open ? CHECK_MS : INFINITE;
     }
 };
 
@@ -439,11 +478,6 @@ struct Readers {
                 key = iid;
                 CoTaskMemFree(iid);
             }
-            AudioSessionState st = AudioSessionStateInactive;
-            DWORD pid = 0;
-            c->GetState(&st);
-            c2->GetProcessId(&pid);
-            if (st == AudioSessionStateExpired) continue;
             auto it = watched.find(key);
             if (it != watched.end()) {
                 now[key] = it->second;
@@ -452,6 +486,10 @@ struct Readers {
                 Watched w{c, Make<SessionEvents>()};
                 if (SUCCEEDED(c->RegisterAudioSessionNotification(w.events.Get()))) now[key] = w;
             }
+            AudioSessionState st = AudioSessionStateInactive;  // read after its events are watched: no change is lost
+            DWORD pid = 0;
+            c->GetState(&st);
+            c2->GetProcessId(&pid);
             if (st == AudioSessionStateActive && pid != GetCurrentProcessId()) reading = true;
         }
         for (auto& kv : watched) kv.second.ctl->UnregisterAudioSessionNotification(kv.second.events.Get());
@@ -490,10 +528,14 @@ static int run_record(const std::wstring& from, bool follow, DWORD rate) {
     CreateThread(nullptr, 0, wait_stdin, nullptr, 0, nullptr);
     for (;;) {
         HANDLE w[3] = {g_stdin, g_devices, in.s.evt};
-        DWORD r = WaitForMultipleObjects(in.open ? 3 : 2, w, FALSE, INFINITE);
+        DWORD r = WaitForMultipleObjects(in.open ? 3 : 2, w, FALSE, in.wait_ms());
         if (r == WAIT_OBJECT_0) return OK;
         if (r == WAIT_OBJECT_0 + 1) {
-            in.update();
+            in.update(in.open && !in.s.alive());
+            continue;
+        }
+        if (r == WAIT_TIMEOUT) {
+            in.check();
             continue;
         }
         bool ok = in.s.read([](const float* p, size_t n) {
@@ -540,16 +582,18 @@ static int run_play(const std::wstring& to, DWORD rate, DWORD latency) {
     Stream out;
     HRESULT hr = out.open(*target, rate, std::max<DWORD>(latency, 30));
     if (FAILED(hr)) die(WASAPI, "cannot play into " + target->name + ": " + hex(hr));
-    Ring ring(rate / 4);
+    const size_t prime = (size_t)rate * latency / 1000;
+    Ring ring(std::max<size_t>(rate / 4, 2 * prime));  // room for the --latency cushion and as much again
     g_ring = &ring;
     CreateThread(nullptr, 0, feed, nullptr, 0, nullptr);
     std::vector<float> tmp;
     bool primed = false;
-    const size_t prime = (size_t)rate * latency / 1000;
     for (;;) {
         HANDLE w[2] = {out.evt, g_devices};
-        if (WaitForMultipleObjects(2, w, FALSE, INFINITE) == WAIT_OBJECT_0 + 1) {
+        DWORD r = WaitForMultipleObjects(2, w, FALSE, CHECK_MS);
+        if (r == WAIT_OBJECT_0 + 1 || r == WAIT_TIMEOUT) {  // a device event, or no period for a while: still playing?
             if (!active(target->id)) die(GONE, target->name + " went away");
+            if (!out.alive()) die(RESTART, "the output stream of " + target->name + " was reset");  // a format change
             continue;
         }
         bool ok, end;
@@ -607,26 +651,36 @@ static int run_loop(const std::wstring& from, const std::wstring& to, const std:
     if (!watched || readers.any()) start();
     else say("idle");
     CreateThread(nullptr, 0, wait_stdin, nullptr, 0, nullptr);
+    auto reopen = [&] {  // the output stopped working (a format change): open it again
+        out.close();
+        if (!active(target->id)) die(GONE, target->name + " went away");
+        HRESULT hr = out.open(*target, rate, 40);
+        if (FAILED(hr)) die(WASAPI, "cannot play into " + target->name + ": " + hex(hr));
+    };
     for (;;) {
         HANDLE w[5] = {g_stdin, g_devices, g_sessions, out.evt, in.s.evt};
         DWORD n = running ? (in.open ? 5 : 4) : 3;
-        DWORD r = WaitForMultipleObjects(n, w, FALSE, INFINITE) - WAIT_OBJECT_0;
+        DWORD r = WaitForMultipleObjects(n, w, FALSE, running ? std::min<DWORD>(CHECK_MS, in.wait_ms()) : INFINITE);
+        if (r == WAIT_TIMEOUT) {  // a quiet while: the streams Windows invalidated without a word, a microphone to retry
+            if (!out.alive()) reopen();
+            in.check();
+            continue;
+        }
+        r -= WAIT_OBJECT_0;
         if (r == 0) break;
         if (r == 1) {
             if (!active(target->id)) die(GONE, target->name + " went away");
             if (watched && !active(watched->id)) die(GONE, watched->name + " went away");
-            if (running) in.update();
+            if (running) {
+                if (!out.alive()) reopen();
+                in.update(in.open && !in.s.alive());
+            }
         } else if (r == 2) {
             bool now = readers.any();
             if (now && !running) start();
             else if (!now && running) end();
         } else if (r == 3) {
-            if (!render(out, ring, prime, primed, false, tmp)) {  // a format change of the output: open it again
-                out.close();
-                if (!active(target->id)) die(GONE, target->name + " went away");
-                HRESULT hr = out.open(*target, rate, 40);
-                if (FAILED(hr)) die(WASAPI, "cannot play into " + target->name + ": " + hex(hr));
-            }
+            if (!render(out, ring, prime, primed, false, tmp)) reopen();  // a format change of the output
         } else if (r == 4) {
             bool ok = in.s.read([&](const float* p, size_t k) {
                 ring.write(p, k);
@@ -637,6 +691,30 @@ static int run_loop(const std::wstring& from, const std::wstring& to, const std:
     }
     if (running) end();
     return OK;
+}
+
+// watch: "call" / "idle" as another process starts and stops recording DEV (translation on: does the call app take
+// CABLE Output?), until stdin closes.
+static int run_watch(const std::wstring& watch) {
+    auto watched = find(devices(eCapture), watch);
+    if (!watched) die(NO_DEVICE, "no input device " + utf8(watch));
+    Readers readers;
+    if (!readers.init(*watched)) die(WASAPI, "cannot watch who records " + watched->name);
+    bool on = readers.any();
+    say(on ? "call" : "idle");
+    CreateThread(nullptr, 0, wait_stdin, nullptr, 0, nullptr);
+    for (;;) {
+        HANDLE w[3] = {g_stdin, g_devices, g_sessions};
+        DWORD r = WaitForMultipleObjects(3, w, FALSE, INFINITE) - WAIT_OBJECT_0;
+        if (r == 0) return OK;
+        if (r == 1) {
+            if (!active(watched->id)) die(GONE, watched->name + " went away");
+            continue;
+        }
+        bool now = readers.any();
+        if (now != on) say(now ? "call" : "idle");
+        on = now;
+    }
 }
 
 // ---- entry --------------------------------------------------------------------------------------
@@ -677,8 +755,9 @@ int wmain(int argc, wchar_t** argv) {
         code = run_record(opt(L"--from").value_or(L""), flag(L"--follow"), number(L"--rate", 16000, 8000, 192000));
     else if (cmd == L"play") code = run_play(*to, number(L"--rate", 24000, 8000, 192000), number(L"--latency", 0, 0, 999));
     else if (cmd == L"loop") code = run_loop(opt(L"--from").value_or(L""), *to, opt(L"--watch").value_or(L""));
+    else if (cmd == L"watch" && opt(L"--watch")) code = run_watch(*opt(L"--watch"));
     else die(USAGE, "usage: peresmeshnik-audio list | record [--from DEV] [--follow] [--rate R] | "
-                    "play --to DEV [--rate R] [--latency MS] | loop [--from DEV] --to DEV [--watch DEV]");
+                    "play --to DEV [--rate R] [--latency MS] | loop [--from DEV] --to DEV [--watch DEV] | watch --watch DEV");
     fflush(stdout);
     ExitProcess(code);  // not through the static destructors: COM objects stay registered until the end
 }

@@ -27,6 +27,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -436,6 +437,11 @@ def remove_stale() -> None:
         subprocess.run(['pactl', 'unload-module', m[0]], capture_output=True, timeout=10)
 
 
+def spoke(e: BaseException | None) -> bool:
+    """The error came from the pipeline's speak worker (the TTS: the clone), not from ASR or MT."""
+    return e is not None and any(f.name == '_speak' for f in traceback.extract_tb(e.__traceback__))
+
+
 class Side:
     """One direction with its input, output and subtitles. `name` is 'them' (them -> me) or 'me'."""
     RETRY_S = 2.0  # the live voice's output failed: tried again at most this often (on the frames that come anyway)
@@ -502,20 +508,25 @@ class Side:
     def _fallback(self, s: config.Settings, why):
         """The clone cannot speak: the stock voice (voice.STOCK), still local; said once. Not the cloud, even with a
         key: local was chosen, so the user's voice does not leave the machine unasked."""
+        from peresmeshnik.cloud import api_key
         from peresmeshnik.pipeline import make_local
         d = self._stock(make_local(self.src, self.tgt, settings=s), s)
-        self.on_error(f'error: {self.name}: the voice clone is off ({why}); a stock voice speaks instead')
+        try:
+            cloud = bool(api_key(s.cloud))
+        except SystemExit:  # no key
+            cloud = False
+        self.on_error(f'error: {self.name}: the voice clone is off ({why}); a stock voice speaks instead'
+                      + ('. With your Gemini key you can switch "Me → them" to cloud in the settings' if cloud else ''))
         return d
 
     def _clone_died(self, dead):
-        """Mid-call the clone's worker died (its runner crashed, out of VRAM): the rest of the call in the fallback voice."""
+        """Mid-call the clone's worker died (its runner crashed, out of VRAM): the rest of the call in the fallback voice.
+        None: translation went off meanwhile; no fallback voice raises (the side restarts or stops, and says why)."""
         dead.close()
         try:
             d = self._fallback(self.settings, dead._error)
         except Exception as e:
-            log.exception('%s: no fallback voice', self.name)
-            self.on_error(f'error: {self.name}: the voice clone stopped ({dead._error}) and no other voice starts: {e}')
-            return None
+            raise RuntimeError(f'the voice clone stopped ({dead._error}) and the stock voice does not start: {e}') from e
         if not getattr(d, 'supports_live', False):
             from peresmeshnik.audio.mic import LiveSwitch
             d = LiveSwitch(d)
@@ -596,7 +607,7 @@ class Side:
                 return
             inner = getattr(d, 'inner', d)  # LiveSwitch's
             if self.name == 'me' and self.engine == 'local' and getattr(inner, 'voice', None) is not None \
-                    and getattr(inner, '_error', None) is not None:  # the clone died: the rest of the call in a stock voice
+                    and spoke(getattr(inner, '_error', None)):  # the clone died: the rest of the call in a stock voice
                 if (d := self._clone_died(inner)) is not None:
                     self._consume(d, True, True)
                 return
@@ -645,6 +656,40 @@ class Side:
         self.out.stop()
 
 
+class CallWatch:
+    """Windows, translation on: does the call app record CABLE Output (the helper's `watch`: "call" / "idle")? If not
+    while the user talks, the tray says once which microphone to choose there: else the other side hears nothing."""
+    HINT_S = 10.0  # nobody recorded the cable this long, and the user talks
+    HINT = ('note: the call app does not record CABLE Output: choose "CABLE Output (VB-Audio Virtual Cable)" as the '
+            'microphone in the call app, else the other side does not hear the translation')
+
+    def __init__(self, uid: str, on_state, spawn):
+        self.on_state, self.reading, self.since, self.hinted = on_state, True, time.monotonic(), False  # until it says
+        self.p = spawn('watch', '--watch', uid, stdout=subprocess.DEVNULL)
+        threading.Thread(target=self._read, name='call-watch', daemon=True).start()
+
+    def _read(self) -> None:
+        for line in self.p.stderr:
+            word = line.decode(errors='replace').strip()
+            if word in ('call', 'idle'):
+                self.reading, self.since = word == 'call', time.monotonic()
+            elif word:
+                log.info('call watch: %s', word)
+
+    def talked(self) -> None:  # the me side's thread: a partial caption of the user's speech
+        if not self.reading and not self.hinted and time.monotonic() - self.since >= self.HINT_S:
+            self.hinted = True
+            self.on_state(self.HINT)
+
+    def stop(self) -> None:
+        if self.p.poll() is None:
+            self.p.stdin.close()
+            try:
+                self.p.wait(5)
+            except subprocess.TimeoutExpired:
+                self.p.kill()
+
+
 class Controller:
     """Turns translation on and off on one control thread; reports states through `on_state(str)`."""
 
@@ -660,7 +705,7 @@ class Controller:
         self.on = False
         self.startup_error = ''
         self._pool = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix='control')  # no thread until first use
-        self._vmic = self._call = self._router = self._loop = None
+        self._vmic = self._call = self._router = self._loop = self._call_watch = None
         self._through = self._through_arrival = None  # macOS < 14.4, translation off: the call app's speaker on to the headphones
         self._mic = ''  # the default input as it was before our devices existed
         self._restarts: dict[str, list[float]] = {}  # side -> times of its restarts in the last minute
@@ -827,10 +872,29 @@ class Controller:
                 ready.set()
                 log.info('microphone loop: %s', line.decode(errors='replace').strip())
             ready.set()
-            if p.wait() and p is self._loop:  # ended by itself
-                self.on_state(why + (helper.NO_PERMISSION if p.returncode == 6 else f'the loop ended ({p.returncode})'))
+            if p.wait() and p is self._loop:  # ended by itself: started again as a side is, at most RESTARTS a minute
+                now = time.monotonic()
+                times = self._restarts['loop'] = [x for x in self._restarts.get('loop', ()) if now - x < 60]
+                if p.returncode != 6 and len(times) < RESTARTS:
+                    times.append(now)
+                    log.warning('microphone loop ended (%s): starting it again', p.returncode)
+                    self.submit(lambda: self._loop is p and self._loop_helper(True))
+                else:
+                    self.on_state(why + (helper.NO_PERMISSION if p.returncode == 6 else f'the loop ended ({p.returncode})'))
         threading.Thread(target=watch, name='mic-loop', daemon=True).start()
         ready.wait(3)  # its first word ("idle": set up, waiting for a call): its start belongs to ours, not to the idle
+
+    def _watch_call(self, on: bool) -> None:
+        """Windows: CallWatch while me -> them translates into CABLE Input (only the app's own devices, not tests)."""
+        if self._call_watch:
+            self._call_watch.stop()
+            self._call_watch = None
+        if on and self.devices and sys.platform == 'win32' and self._vmic is not None:
+            from peresmeshnik.audio import windows
+            try:
+                self._call_watch = CallWatch(self._vmic.call_mic['uid'], self.on_state, windows.spawn)
+            except Exception as e:  # no hint, nothing else lost
+                log.warning('call watch: %s', e)
 
     def _on(self) -> None:
         if self.on:
@@ -839,22 +903,30 @@ class Controller:
         self._refresh_devices()  # macOS: devices plugged in since (AirPods back) become visible to PortAudio
         s = self.settings or config.load()
         files = {'them': self.them_file, 'me': self.me_file}
-        t, failed = time.perf_counter(), []
+        from peresmeshnik.voice import STOCK
+        t, failed, call = time.perf_counter(), [], ''
         for name in ('them', 'me'):  # a side that cannot start (no key, no voice pack, no device) does not stop the other
-            if self.devices or files[name]:
-                try:
-                    self.sides.append(self._side(name, s))
-                except Exception as e:
-                    log.exception('%s', name)
-                    failed.append(f'{name}: {e}')
-        if any(x.name == 'me' for x in self.sides):
-            self._loopback(False)  # the call hears the user until the translation is ready
-        self._through_stop()  # BlackHole 16ch goes to the translation now
-        for side in self.sides:
+            if not (self.devices or files[name]):
+                continue
+            try:
+                side = self._side(name, s)
+            except Exception as e:
+                log.exception('%s', name)
+                failed.append(f'{name}: {e}')
+                continue
+            self.sides.append(side)
+            if name == 'me':
+                self._loopback(False)  # the call hears the user until the translation is ready
+                self._watch_call(True)
+            else:
+                self._through_stop()  # BlackHole 16ch goes to the translation now
             side.set_live(self.live)
-            side.start()
+            side.start()  # them -> me runs while the clone loads (its runner: up to ~30 s)
+            if name == 'them':
+                call = self._route(s) if self.devices else ''
+                if s.me_to_them == 'local' and s.local.clone != STOCK and (self.devices or files['me']):
+                    self.on_state('translating (them → me; me → them: your voice is loading)')
         self.on = bool(self.sides)
-        call = self._route(s) if self.devices and any(x.name == 'them' for x in self.sides) else ''
         for f in failed:
             self.on_state(f'error: {f}')
         if self.sides:
@@ -871,8 +943,9 @@ class Controller:
                                                     max_delay_s=s.local.echo_max_delay_s)
         side = Side(name, s, inp, self._output(name, s), self.overlay.side(name), self.on_state, echo=gate)
         side.on_failure = lambda why, e: self.submit(self._restart, side, why, e)
-        if name == 'me':  # I talk over their voice: barge-in on the them -> me side of now
-            side.on_talk = lambda: [x.interrupt() for x in self.sides if x.name == 'them']
+        if name == 'me':  # I talk over their voice: barge-in on the them -> me side of now; does the call hear me?
+            side.on_talk = lambda: ([x.interrupt() for x in self.sides if x.name == 'them'],
+                                    self._call_watch and self._call_watch.talked())
         return side
 
     def failed(self, inp, why: str, restart: bool = True) -> None:
@@ -910,6 +983,8 @@ class Controller:
                           'A report without your data is in the tray menu (Crash report…)')
             if not self.sides:
                 self._off()
+            elif side.name == 'me':
+                self._loopback(True)  # the call hears the user as is again
             return
         times.append(now)
         s = self.settings or config.load()
@@ -918,6 +993,10 @@ class Controller:
         except Exception as ex:
             log.exception('%s', side.name)
             self.on_state(f'error: {ARROW[side.name]} stopped: {why}; it cannot start again: {ex}')
+            if not self.sides:
+                self._off()
+            elif side.name == 'me':
+                self._loopback(True)  # the call hears the user as is again
             return
         self.sides.append(new)
         new.set_live(self.live)
@@ -1052,6 +1131,7 @@ class Controller:
         self.live = False
         if not self.test:  # the test phrase's subtitles stay until the wizard closes
             self.overlay.side('them').hide()
+        self._watch_call(False)
         self._loopback(True)
         self._through_start()
         if self.on or sides:

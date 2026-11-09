@@ -24,6 +24,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from peresmeshnik.audio import processed
+
 MACOS = sys.platform == 'darwin'
 WINDOWS = sys.platform == 'win32'
 HELPER = MACOS or WINDOWS  # our native helper does the sound (audio/macos.py, audio/windows.py)
@@ -46,7 +48,8 @@ def devices(kind: str) -> list[tuple[str, str]]:
         helper = native()
         side, default = ('outputs', 'default_output') if kind == 'sinks' else ('inputs', 'default_input')
         out = [d for d in helper.devices() if d[side] and not helper.is_ours(d)
-               and (kind == 'sinks' or d['transport'] not in ('virt', 'grup') or d['uid'] == helper.stand_in_mic())]
+               and (kind == 'sinks' or d['transport'] not in ('virt', 'grup') or d['uid'] == helper.stand_in_mic()
+                    or d['transport'] == 'virt' and processed(d['name']))]  # NVIDIA Broadcast, Krisp: the user's voice
         key = 'name' if WINDOWS and kind == 'sinks' else 'uid'
         return [(d[key], d['name']) for d in sorted(out, key=lambda d: not d[default])]
     items = json.loads(pactl('-f', 'json', 'list', kind) or '[]')

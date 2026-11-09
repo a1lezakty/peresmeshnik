@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 
 import numpy as np
 import psutil
@@ -116,11 +117,9 @@ def _pwsh(cmd: str) -> subprocess.CompletedProcess:
                           timeout=60)
 
 
-def endpoint_enabled(uid: str, on: bool) -> None:
-    """Disable or enable an endpoint as the Sound control panel does: WASAPI then sees it go (DEVICE_STATE_DISABLED,
-    its streams invalidated), as an unplugged headset's. IPolicyConfig::SetEndpointVisibility is undocumented but
-    stable since Windows 7 (what SoundVolumeView /Disable calls). Disable-PnpDevice is no stand-in: on the endpoint's
-    node (SWD\\MMDEVAPI\\<id>) WASAPI still lists it active, and the cable's driver node is not stopped while it plays."""
+def _policy(call):
+    """IPolicyConfig, what the Sound control panel calls: undocumented but stable since Windows 7 (SoundVolumeView,
+    AudioDeviceCmdlets). `call(p, vtbl)` with the object; released after."""
     import ctypes
     import uuid
 
@@ -138,11 +137,49 @@ def endpoint_enabled(uid: str, on: bool) -> None:
                                 ctypes.byref(guid('f8679f50-850a-41cf-9c72-430f290290c8')), ctypes.byref(p))  # IPolicyConfig
     assert hr == 0 and p.value, f'IPolicyConfig: {hr & 0xFFFFFFFF:#x}'
     vtbl = ctypes.cast(p, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
-    try:  # IUnknown (3), then GetMixFormat ... SetDefaultEndpoint (11): SetEndpointVisibility is slot 14
-        hr = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int)(vtbl[14])(p, uid, int(on))
+    try:  # IUnknown (0-2), GetMixFormat 3, GetDeviceFormat 4, ResetDeviceFormat 5, SetDeviceFormat 6, ...,
+        return call(p, vtbl)  # SetDefaultEndpoint 13, SetEndpointVisibility 14
     finally:
         ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtbl[2])(p)
+
+
+def endpoint_enabled(uid: str, on: bool) -> None:
+    """Disable or enable an endpoint as the Sound control panel does: WASAPI then sees it go (DEVICE_STATE_DISABLED,
+    its streams invalidated), as an unplugged headset's. Disable-PnpDevice is no stand-in: on the endpoint's node
+    (SWD\\MMDEVAPI\\<id>) WASAPI still lists it active, and the cable's driver node is not stopped while it plays."""
+    import ctypes
+    hr = _policy(lambda p, v: ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int)(v[14])(
+        p, uid, int(on)))
     assert hr == 0, f'SetEndpointVisibility({uid}, {on}): {hr & 0xFFFFFFFF:#x}'
+
+
+def device_rate(uid: str, rate: int) -> int:
+    """The endpoint's "Default format" to `rate` (channels and sample type kept), as the Sound control panel's Advanced
+    tab sets it; returns the rate it had."""
+    import ctypes
+    import struct
+
+    def call(p, v):
+        fn = ctypes.WINFUNCTYPE
+        get = fn(ctypes.c_long, ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p))(v[4])
+        mix = fn(ctypes.c_long, ctypes.c_void_p, ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_void_p))(v[3])
+        put = fn(ctypes.c_long, ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_void_p, ctypes.c_void_p)(v[6])
+        fmts = []
+        for ask in (lambda out: get(p, uid, 0, out), lambda out: mix(p, uid, out)):  # the device's, the engine's mix
+            ptr = ctypes.c_void_p()
+            hr = ask(ctypes.byref(ptr))
+            assert hr == 0 and ptr.value, f'the format of {uid}: {hr & 0xFFFFFFFF:#x}'
+            head = ctypes.string_at(ptr, 18)  # WAVEFORMATEX; cbSize more bytes follow (EXTENSIBLE: 22)
+            fmts.append(bytearray(ctypes.string_at(ptr, 18 + struct.unpack_from('<H', head, 16)[0])))
+            ctypes.windll.ole32.CoTaskMemFree(ptr)
+        old = struct.unpack_from('<I', fmts[0], 4)[0]
+        for f in fmts:  # nSamplesPerSec, nAvgBytesPerSec = rate x nBlockAlign
+            struct.pack_into('<II', f, 4, rate, rate * struct.unpack_from('<H', f, 12)[0])
+        bufs = [(ctypes.c_char * len(f)).from_buffer(f) for f in fmts]
+        hr = put(p, uid, ctypes.addressof(bufs[0]), ctypes.addressof(bufs[1]))
+        assert hr == 0, f'SetDeviceFormat({uid}, {rate}): {hr & 0xFFFFFFFF:#x}'
+        return old
+    return _policy(call)
 
 
 # --- what needs no Windows
@@ -158,11 +195,13 @@ SPEAKERS = {**DEV, 'uid': '{0.0.0.00000000}.{hda}', 'name': 'Speakers (Realtek(R
             'transport': '', 'default_output': True}
 MEETER = {**DEV, 'uid': '{0.0.1.00000000}.{vm}', 'name': 'VoiceMeeter Output (VB-Audio VoiceMeeter VAIO)', 'inputs': 2,
           'outputs': 0, 'transport': 'virt'}
+BROADCAST = {**DEV, 'uid': '{0.0.1.00000000}.{nv}', 'name': 'Microphone (NVIDIA Broadcast)', 'inputs': 1, 'outputs': 0,
+             'transport': 'virt'}  # the real microphone, its noise taken out: the user's voice
 
 
 def test_cable_and_virtual_inputs_are_no_microphone(monkeypatch):
     from peresmeshnik.ui import selftest
-    devs = [HEADSET, SPEAKERS, CABLE_IN, CABLE_OUT, MEETER]
+    devs = [HEADSET, SPEAKERS, CABLE_IN, CABLE_OUT, MEETER, BROADCAST]
     monkeypatch.setattr(windows, 'devices', lambda: devs)
     monkeypatch.setattr(selftest, 'HELPER', True)
     monkeypatch.setattr(selftest, 'WINDOWS', True)
@@ -174,9 +213,10 @@ def test_cable_and_virtual_inputs_are_no_microphone(monkeypatch):
     with pytest.raises(ValueError, match='VoiceMeeter Output .* is a virtual device, not your microphone'):
         windows.not_virtual(MEETER['uid'])
     assert windows.not_virtual(HEADSET['uid']) == HEADSET['uid']
+    assert windows.not_virtual(BROADCAST['uid']) == BROADCAST['uid']
     assert windows.not_virtual('') == ''  # the default input: the helper never takes a virtual one by itself
     assert windows.not_virtual(CABLE_OUT['name'], what='headphones') == CABLE_OUT['name']  # not this check's business
-    assert selftest.devices('sources') == [(HEADSET['uid'], HEADSET['name'])]
+    assert selftest.devices('sources') == [(HEADSET['uid'], HEADSET['name']), (BROADCAST['uid'], BROADCAST['name'])]
     assert selftest.devices('sinks') == [(SPEAKERS['name'], SPEAKERS['name'])]  # by name: the headphones go through PortAudio
     monkeypatch.setenv('PERESMESHNIK_TEST_MIC', MEETER['uid'])  # the tests' stand-in passes
     assert windows.not_virtual(MEETER['uid']) == MEETER['uid']
@@ -192,8 +232,9 @@ def test_no_cable_says_how_to_install(monkeypatch):
     QApplication.instance() or QApplication([])
     from peresmeshnik import config
     from peresmeshnik.ui import selftest, wizard
-    devs = [HEADSET, SPEAKERS]
+    devs, perm = [HEADSET, SPEAKERS], ['granted']
     monkeypatch.setattr(windows, 'devices', lambda: list(devs))
+    monkeypatch.setattr(windows, 'permission', lambda: perm[0])
     monkeypatch.setattr(wizard, 'WINDOWS', True)
     monkeypatch.setattr(wizard, 'MACOS', False)
     monkeypatch.setattr(selftest, 'HELPER', True)
@@ -211,6 +252,137 @@ def test_no_cable_says_how_to_install(monkeypatch):
     assert page.vmic.text().startswith('✔ VB-Audio Virtual Cable is installed') and page.recheck.isHidden()
     assert 'CABLE Output' in page.vmic.text()
     assert [page.mic.itemData(i) for i in range(page.mic.count())] == ['', HEADSET['uid']]  # never the cable
+    assert '⚠' not in page.vmic.text() and '✘' not in page.vmic.text()
+    devs[:] = [HEADSET, {**SPEAKERS, 'default_output': False}, {**CABLE_IN, 'default_output': True},
+               {**CABLE_OUT, 'default_input': True}]  # the cable as Windows' default devices, the microphone refused
+    perm[0] = 'denied'
+    page.check_vmic()
+    text = page.vmic.text()
+    assert "CABLE Input (VB-Audio Virtual Cable)</b> is Windows' default output" in text and 'Sound → Output' in text
+    assert "CABLE Output (VB-Audio Virtual Cable)</b> is Windows' default microphone" in text and 'Sound → Input' in text
+    assert windows.NO_PERMISSION in text
+
+
+def test_a_refused_microphone_says_so_at_once(monkeypatch):
+    """No permission (the helper exits with 6 as it opens the microphone): record() raises why at once, not after its
+    seconds of waiting for sound (the voice page's bar ran 50 s, then said "too quiet")."""
+    from peresmeshnik.audio import mic
+
+    class Refused:
+        def __init__(self, device=None, sample_rate=16000, on_end=None, **k):
+            self.on_end = on_end
+
+        def start(self, on_frames):
+            threading.Timer(0.2, self.on_end, [f'the microphone: {windows.NO_PERMISSION}']).start()
+
+        def stop(self):
+            pass
+    monkeypatch.setattr(mic, 'Mic', Refused)
+    t0 = time.monotonic()
+    with pytest.raises(RuntimeError, match='Privacy & security'):
+        mic.record(45)
+    assert time.monotonic() - t0 < 2
+
+
+def test_cable_output_by_name_and_the_helpers_own_words(monkeypatch):
+    other = {**CABLE_OUT, 'uid': '{0.0.1.00000000}.{16}', 'name': 'CABLE 16ch Output (VB-Audio Virtual Cable)'}
+    assert windows.cable([CABLE_IN, other, CABLE_OUT]) == (CABLE_IN, CABLE_OUT)  # as play prefers "CABLE Input"
+    monkeypatch.setattr(windows, 'helper', lambda: 'peresmeshnik-audio.exe')
+    monkeypatch.setattr(windows.subprocess, 'run', lambda *a, **k: types.SimpleNamespace(
+        returncode=5, stdout=b'', stderr=b'peresmeshnik-audio: no audio device enumerator (is the Windows Audio service running?)\n'))
+    with pytest.raises(RuntimeError, match=r'^no audio device enumerator \(is the Windows Audio service running\?\)$'):
+        windows.devices()
+
+
+class Proc:
+    """A helper process: its stderr lines, then its exit code."""
+    def __init__(self, lines=(), code=None):
+        self.stderr, self.returncode, self.stdin = iter(lines), code, types.SimpleNamespace(close=lambda: None)
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode if self.returncode is not None else 0
+
+    def kill(self):
+        pass
+
+
+def test_a_call_app_on_another_microphone_is_hinted_once(monkeypatch):
+    """Translation on, nobody records CABLE Output (the helper's watch: idle) and the user talks: one hint which
+    microphone to choose in the call app; while the call app records it, none."""
+    from peresmeshnik import app
+    said = []
+    w = app.CallWatch(CABLE_OUT['uid'], said.append, lambda *a, **k: Proc([b'idle\n']))
+    assert wait_for(lambda: not w.reading)
+    w.talked()
+    assert said == []  # not yet HINT_S without a reader
+    w.since -= app.CallWatch.HINT_S
+    w.talked()
+    w.talked()
+    assert said == [app.CallWatch.HINT] and 'CABLE Output' in said[0]
+    ok = app.CallWatch(CABLE_OUT['uid'], said.append, lambda *a, **k: Proc([b'idle\n', b'call\n']))
+    assert wait_for(lambda: ok.reading and ok.p.stderr.__length_hint__() == 0)
+    ok.since -= app.CallWatch.HINT_S
+    ok.talked()
+    assert said == [app.CallWatch.HINT]
+
+
+def test_the_microphone_loop_starts_again_within_its_budget(monkeypatch):
+    """Translation off: the loop "microphone -> CABLE Input" ends by itself: started again like a side, at most RESTARTS
+    times a minute, then the tray says why; a refused microphone (6) is said at once."""
+    from peresmeshnik import app
+    from peresmeshnik.audio import mic
+    spawned, states = [], []
+
+    def spawn(*a, **k):
+        spawned.append(a)
+        return Proc([b'idle\n'], 5)
+    monkeypatch.setattr(mic, 'native', lambda: types.SimpleNamespace(not_virtual=lambda key: key, spawn=spawn, NO_PERMISSION='no'))
+    monkeypatch.setattr(sys, 'platform', 'win32')
+    ctl = app.Controller(Overlay(), states.append, settings=app.config.Settings())
+    ctl.devices, ctl._vmic = True, types.SimpleNamespace(device=CABLE_IN, call_mic=CABLE_OUT)
+    try:
+        ctl.submit(ctl._loopback, True).result(5)
+        assert wait_for(lambda: len(spawned) == 1 + app.RESTARTS and states, 10), (spawned, states)
+        assert states == ['error: the call will not hear your microphone while translation is off: the loop ended (5)']
+    finally:
+        ctl._pool.shutdown()
+
+
+def test_them_to_me_translates_while_the_clone_loads(monkeypatch):
+    """Translation on with the clone: them -> me starts before me -> them is made (the voice pack's runner loads for up
+    to ~30 s), and the tray says the voice is loading."""
+    from peresmeshnik import app
+    order, states = [], []
+
+    class FakeSide:
+        def __init__(self, name):
+            self.name, self.engine, self.inp = name, 'local', None
+
+        def set_live(self, on):
+            pass
+
+        def start(self):
+            order.append(f'{self.name} starts')
+
+        def stop(self):
+            pass
+
+    def side(self, name, s):
+        order.append(f'{name} made')
+        return FakeSide(name)
+    monkeypatch.setattr(app.Controller, '_side', side)
+    s = app.config.Settings()
+    s.me_to_them, s.local.voice = 'local', 'me'
+    ctl = app.Controller(Overlay(), states.append, them_file='them.wav', me_file='me.wav', settings=s)
+    try:
+        ctl.submit(ctl._on).result(10)
+    finally:
+        ctl._pool.shutdown()
+    assert order == ['them made', 'them starts', 'me made', 'me starts']
+    assert 'translating (them → me; me → them: your voice is loading)' in states and ctl.on
 
 
 # --- on Windows, with VB-Cable
@@ -388,6 +560,66 @@ def test_mic_follows_a_device_that_goes_and_comes_back(monkeypatch):
         endpoint_enabled(play['uid'], True)
         vm.remove()
         assert wait_for(lambda: bool(_ready() == ''), 15)
+
+
+@win
+def test_a_format_change_of_the_cable_opens_its_streams_again(monkeypatch):
+    """The user changes the "Default format" of CABLE Input, then of CABLE Output (Sound control panel → Advanced) while
+    the translation plays, the call app records and the loop runs: Windows invalidates their streams, often without a
+    word. play ends with 7 and VirtualMic plays the next clause on a new one; the recording and the loop go on."""
+    from peresmeshnik.audio.mic import Mic
+    from peresmeshnik.audio.virtual_mic_windows import VirtualMic
+    play, rec = windows.cable()
+    monkeypatch.setenv('PERESMESHNIK_TEST_MIC', rec['uid'])
+    new = 44100 if play['rate'] != 44100 else 48000
+    vm, frames, events, rates = VirtualMic(), [], [], {}
+    m = Mic(rec['uid'], follow=True, on_device=lambda kind, name: events.append((kind, name)))
+    loop = windows.spawn('loop', '--from', '', '--to', play['uid'], stdout=subprocess.DEVNULL)  # no --watch: it runs
+    try:
+        m.start(frames.append)
+        assert wait_for(lambda: ('using', rec['name']) in events), events
+        vm.play(tone(4.0, SR_IN), SR_IN)
+        time.sleep(0.5)
+        rates[play['uid']] = device_rate(play['uid'], new)
+        assert wait_for(lambda: vm._proc.poll() is not None, 10), 'play went on after the format change (silent?)'
+        assert vm._proc.returncode == 7, vm._proc.returncode
+        rates[rec['uid']] = device_rate(rec['uid'], new)
+        time.sleep(1.5)  # a check a second at most
+        n = len(frames)
+        vm.play(tone(1.5, SR_IN), SR_IN)  # reopen = (7,): a new player at the new format
+        assert wait_for(lambda: len(frames) > n + 60, 10)
+        level = np.abs(np.concatenate(frames[n:])).max()
+        say(f'\nformat change to {new} Hz: play exit {7}, the recording after it peaks {level:.2f}; events {events}')
+        assert level > 0.2, 'no tone through the cable after its format changed'
+        assert loop.poll() is None, f'the loop ended ({loop.returncode})'
+    finally:
+        for uid, rate in rates.items():
+            device_rate(uid, rate)
+        m.stop()
+        vm.remove()
+        loop.stdin.close()
+        loop.wait(5)
+
+
+@win
+def test_watch_says_who_records_the_cable():
+    """Translation on: `watch` says "call" while another process (the call app) records CABLE Output, "idle" when it
+    stops (CallWatch hints the microphone of the call app from it)."""
+    from peresmeshnik.ui.selftest import Recorder
+    play, rec = windows.cable()
+    w = windows.spawn('watch', '--watch', rec['uid'], stdout=subprocess.DEVNULL)
+    ev = lines(w, [])
+    try:
+        assert wait_for(lambda: ev[:1] == ['idle']), ev
+        call = Recorder(rec['uid'], SR_OUT)
+        assert wait_for(lambda: ev[-1:] == ['call']), ev
+        call.stop()
+        assert wait_for(lambda: ev[-1:] == ['idle']), ev
+    finally:
+        w.stdin.close()
+        w.wait(5)
+    say(f'\nwatch: {ev}')
+    assert w.returncode == 0
 
 
 @win

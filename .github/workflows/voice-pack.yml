@@ -1,0 +1,93 @@
+name: voice-pack
+
+# Manual only (Actions → voice-pack → Run workflow; the file has to be on the default branch, or run it with
+# `gh workflow run voice-pack.yml --ref <branch>` once it is there): the real Windows voice pack
+# (voice-runner/pack-windows.json, ~3.7 GB of downloads, ~8 GB installed) installed by local/voicepack.py as the wizard
+# does, into this runner's fresh data folder. No GPU here: torch sees no CUDA, which is expected.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Install the real voice pack, then its Python imports torch and TTS
+        shell: bash
+        env:
+          PYTHONIOENCODING: utf-8  # pip's lines and paths in the log as they are
+        run: |
+          uv run python - <<'EOF'
+          import json, shutil, subprocess, sys, time
+          from pathlib import Path
+
+          from peresmeshnik.local import voicepack
+          from peresmeshnik.local.clone import RUNNER, CloneUnavailable, VoicePackClone
+
+          GB = 2 ** 30
+          where, spec = voicepack.folder(), json.loads(voicepack.lock_file().read_text())
+          dl = where.with_name('voice-pack.download')
+          assert voicepack.state() == 'none', f'{where}: not a fresh data folder ({voicepack.state()})'
+          where.parent.mkdir(parents=True, exist_ok=True)
+          print(f'pack: {where}; free {shutil.disk_usage(where.parent).free / GB:.1f} GB, '
+                f'needs {voicepack.need_bytes() / GB:.1f} GB', flush=True)
+
+          def size(p: Path) -> int:
+              return sum(f.stat().st_size for f in p.rglob('*') if f.is_file())
+
+          t0, at, pct, downloaded = time.perf_counter(), {}, [-1], [0]
+
+          def progress(stage, done, total, text=''):
+              now = time.perf_counter()
+              if stage not in at:
+                  if at:
+                      last = list(at)[-1]
+                      print(f'== {last}: {now - at[last]:.0f} s', flush=True)
+                  if stage == 'unpacking':
+                      downloaded[0] = size(dl)
+                  at[stage] = now
+                  print(f'== {stage}', flush=True)
+              if stage == 'downloading' and total and done * 10 // total > pct[0]:
+                  pct[0] = done * 10 // total
+                  print(f'   {done / GB:.2f} of {total / GB:.2f} GB ({now - at[stage]:.0f} s) {text}', flush=True)
+              elif stage == 'installing' and text:
+                  print('   pip:', text, flush=True)
+
+          voicepack.install(progress)
+          end = time.perf_counter()
+          last = list(at)[-1]
+          print(f'== {last}: {end - at[last]:.0f} s; all: {end - t0:.0f} s')
+          files = [spec['python'], spec['pip'], *spec['wheels']]
+          print(f'downloaded: {downloaded[0] / GB:.2f} GB (the lock: {sum(f["size"] for f in files) / GB:.2f} GB)')
+          print(f'installed: {size(where) / GB:.2f} GB (the lock: {spec["installed_bytes"] / GB:.2f} GB)')
+          longest = max((str(p) for p in where.rglob('*')), key=len)
+          rel = len(longest) - len(str(where))
+          print(f'longest path: {len(longest)} chars, {rel} after the pack folder ({len(str(where))} chars): {longest}')
+          if len(longest) >= 260:
+              print(f'::warning::a path inside the voice pack is {len(longest)} chars (MAX_PATH 260): {longest}')
+
+          py = str(voicepack.python())
+          subprocess.run([py, '-c', 'import torch; print(torch.__version__, torch.version.cuda, torch._C._cuda_getArchFlags())'],
+                         check=True)
+          subprocess.run([py, '-c', 'import importlib.metadata as m, torch, TTS; '
+                          'print("cuda available:", torch.cuda.is_available(), "| coqui-tts", m.version("coqui-tts"))'],
+                         check=True)
+          try:  # the runner on it with the real model code (local/xtts.py): no model here, so it fails past the imports
+              VoicePackClone(where.parent / 'no-model', cmd=[py, str(RUNNER), '--device', 'cpu']).close()
+              sys.exit('the runner started without a model')
+          except CloneUnavailable as e:
+              print('runner without a model:', e)
+              assert 'No module named' not in str(e), e
+          st = voicepack.state()
+          print('state:', st)
+          assert st == 'ready', st
+          EOF

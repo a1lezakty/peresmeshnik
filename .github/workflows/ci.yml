@@ -144,13 +144,14 @@ jobs:
           "%RUNNER_TEMP%\bin\peresmeshnik-audio.exe" list
       - uses: actions/cache@v4
         if: runner.os == 'Linux'
-        with:
-          path: ${{ runner.temp }}/pair-models
-          key: pair-models-${{ hashFiles('peresmeshnik/models.toml', 'peresmeshnik/config.py') }}
+        with:  # the work-gate's models of main as a start (the same path): only the pair's others are downloaded
+          path: ${{ runner.temp }}/models
+          key: pair-models-${{ runner.os }}-${{ hashFiles('peresmeshnik/models.toml', 'peresmeshnik/config.py') }}
+          restore-keys: models-${{ runner.os }}-${{ hashFiles('peresmeshnik/models.toml') }}
       - name: Models of the new-pair test (de -> ja; stand-ins on the en/ru files until the registry has the pair's own)
         if: runner.os == 'Linux'
         env:
-          PERESMESHNIK_MODELS: ${{ runner.temp }}/pair-models
+          PERESMESHNIK_MODELS: ${{ runner.temp }}/models
         run: |
           ids=$(uv run python -c "from peresmeshnik import config, languages as l; s = config.Settings(my_lang='de', their_lang='ja', them_to_me='local', me_to_them='local'); s.local.clone = 'piper'; print(*(l.needed_models(s) if all(l.direction(s, k).local for k in l.SIDES) else ['silero-vad', 'parakeet-tdt-0.6b-v3', 'opus-mt-en-ru', 'opus-mt-ru-en', 'piper-ru_RU-dmitri-medium', 'piper-en_US-john-medium']))")
           echo "$ids"
@@ -163,7 +164,7 @@ jobs:
       # the overlay on screen; each fails above 0.13 s of CPU. Linux: Xvfb; macOS, Windows: the runner's desktop
       - run: uv run pytest -q -s -rs --deselect tests/test_macos_audio.py::test_a_killed_helper_lets_the_original_through  # -rs: what was skipped and why
         env:  # macOS, Windows: a synthetic key press or click that does not arrive fails the test instead of skipping it
-          PERESMESHNIK_PAIR_MODELS: ${{ runner.os == 'Linux' && format('{0}/pair-models', runner.temp) || '' }}  # must run
+          PERESMESHNIK_PAIR_MODELS: ${{ runner.os == 'Linux' && format('{0}/models', runner.temp) || '' }}  # must run
           PERESMESHNIK_SHOTS: ${{ runner.temp }}/shots  # the overlay with Chinese, Japanese, Korean, Arabic
           PERESMESHNIK_REQUIRE_SYNTHETIC: ${{ runner.os != 'Linux' && '1' || '' }}
           PERESMESHNIK_REQUIRE_MACOS: ${{ runner.os == 'macOS' && '1' || '' }}  # the call-sound tests run, not skip

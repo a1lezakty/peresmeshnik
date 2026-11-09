@@ -6,10 +6,12 @@ Real-time translator for calls. You hear the other side in your language — as 
 headphones and as subtitles — and they hear you in theirs, spoken in **your own cloned voice**.
 Works with any call app (Google Meet, Zoom, Telegram, …) through system audio devices.
 
-**Status: in development.** Version 0.2.0 adds Windows to macOS; on Linux it runs from source. Not yet
-tried in a real call (see below).
+**Status: in development.** Version 0.3.0 adds languages: any pair of 14. macOS and Windows have builds; on Linux it
+runs from source. Not yet tried in a real call (see below).
 
-- English ↔ Russian first, more languages later.
+- 14 languages, any pair both ways: English, Russian, Ukrainian, German, French, Spanish, Italian, Portuguese, Polish,
+  Turkish, Chinese, Japanese, Korean, Arabic — on this computer where there are models for it, else in the cloud
+  ([Languages](#languages)).
 - macOS, Windows and Linux. Local models (CPU, Apple Silicon, optional NVIDIA GPU) or cloud
   (Gemini Live), switchable in settings.
 - Voice cloning of **your own voice only**, from a 30–60 s recording.
@@ -17,6 +19,40 @@ tried in a real call (see below).
 
 Design and numbers: [architecture](docs/ARCHITECTURE.md), [benchmarks](docs/BENCH.md),
 [plan](docs/PLAN.md), [models and licenses](docs/MODELS.md).
+
+## Languages
+
+Choose "I speak" and "They speak" in the setup wizard, or later in the tray menu **Languages** (no restart: the new
+pair's models are downloaded first while translation goes on, then both directions start again in it). For each
+direction the wizard says before anything is downloaded whether it can run on this computer, why not (no speech
+recognition, translation or voice for a language), what it downloads and under which licenses; a direction that
+cannot run here is translated in the cloud (Gemini Live has all 14 languages). Where your cloned voice does not speak
+the language, a stock voice speaks instead, and the wizard says so.
+
+<!-- languages:begin (generated: python -m peresmeshnik.languages) -->
+| Language | Speech recognition | Stock voice | Your cloned voice | Cloud (Gemini Live) |
+|---|---|---|---|---|
+| English | parakeet-tdt-0.6b-v3 | piper-en_US-john-medium | xtts-v2 (NVIDIA GPU) | ✔ |
+| Русский (Russian) | gigaam-v3-e2e-ctc | piper-ru_RU-dmitri-medium | xtts-v2 (NVIDIA GPU) | ✔ |
+| Українська (Ukrainian) | — (cloud) | — (cloud) | — (cloud or a stock voice) | ✔ |
+| Deutsch (German) | — (cloud) | — (cloud) | — (cloud or a stock voice) | ✔ |
+| Français (French) | — (cloud) | — (cloud) | — (cloud or a stock voice) | ✔ |
+| Español (Spanish) | — (cloud) | — (cloud) | — (cloud or a stock voice) | ✔ |
+| Italiano (Italian) | — (cloud) | — (cloud) | — (cloud or a stock voice) | ✔ |
+| Português (Portuguese) | — (cloud) | — (cloud) | — (cloud or a stock voice) | ✔ |
+| Polski (Polish) | — (cloud) | — (cloud) | — (cloud or a stock voice) | ✔ |
+| Türkçe (Turkish) | — (cloud) | — (cloud) | — (cloud or a stock voice) | ✔ |
+| 中文 (Chinese) | — (cloud) | — (cloud) | — (cloud or a stock voice) | ✔ |
+| 日本語 (Japanese) | — (cloud) | — (cloud) | — (cloud or a stock voice) | ✔ |
+| 한국어 (Korean) | — (cloud) | — (cloud) | — (cloud or a stock voice) | ✔ |
+| العربية (Arabic) | — (cloud) | — (cloud) | — (cloud or a stock voice) | ✔ |
+
+Translation on this computer: en → ru, ru → en; every other pair of the 14 is translated in the cloud.
+<!-- languages:end -->
+
+Subtitles in Chinese, Japanese, Korean and Arabic need a font for that script. macOS and Windows have them; on Linux
+install e.g. `fonts-noto-cjk` and `fonts-noto-core` (Debian / Ubuntu) — without one the subtitles show empty boxes,
+and the wizard and the tray say so. Arabic is shown right to left.
 
 ## Installation on macOS
 
@@ -151,5 +187,6 @@ newer (528.33 to 570.64: not checked, may work); the wizard checks before the do
 **По-русски.** Пересмешник — переводчик звонков в реальном времени. Собеседника вы слышите
 на своём языке — голосом в наушниках и субтитрами, а он вас — на своём, вашим же клонированным
 голосом. Работает с любой программой созвона через системные аудиоустройства; macOS, Windows и
-Linux, локальные модели или облако. Сейчас в разработке; сборки для macOS и Windows — 0.2.0 (установка — выше).
+Linux, локальные модели или облако; 14 языков в любой паре (0.3.0). Сейчас в разработке; сборки для macOS и Windows
+— установка выше.
 Лицензия некоммерческая: пользоваться можно всем, продавать нельзя.

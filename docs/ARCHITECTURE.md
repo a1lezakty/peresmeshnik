@@ -259,6 +259,20 @@ it. Idle cost: none (no thread, no timer; a fault file left open).
 
 Recommended default on M1 8 GB: **them → me local, me → them cloud**.
 
+**Languages (stage 6).** 14 languages, any pair both ways: en, ru, uk, de, fr, es, it, pt, pl, tr, zh, ja, ko, ar.
+[`peresmeshnik/languages.py`](../peresmeshnik/languages.py) is the one place that says what a pair runs on: a side is
+local when `[local]` names an ASR for its source (`asr[src]`), an MT for the pair (`mt["src-tgt"]`) and a voice for its
+target (`tts[tgt]`, or for me → them the clone), and the registry's `langs` of each model has that language or pair
+(a multilingual model lists its languages: any pair of two of them). Otherwise the side is cloud-only, with the cloud's
+subtitles (no local ASR + MT), and the wizard and the tray say why before anything is downloaded. Me → them in a
+language the clone does not speak goes to the stock voice of that language, said once. The cloud covers all 14
+(`CLOUD_TRANSLATE`: Gemini's `target_language_code`; `CLOUD_TRANSCRIBE`: `language_codes` with the region — Portuguese
+pt-BR, Spanish es-419, Chinese zh-Hans / cmn-Hans-CN, Arabic ar-EG). Changing the pair while translating (tray) fetches
+its models first, then makes both sides again the way a failed side is restarted (`Controller.set_languages`): the
+devices, the call's route and the microphone loop stay. Subtitles: Qt picks a font per script and lays Arabic out right
+to left by itself; where the font database has no font for a script (Linux without Noto CJK / Arabic) the app says what
+to install. The per-language engines and their numbers are S1's / S2's rows in [BENCH.md](BENCH.md) ("Stage 6").
+
 ## 7. Audio routing per OS and setup guidance
 
 | | Capture "them" (call sound) | Mute original while translating | Virtual microphone "me → them" |
@@ -458,7 +472,8 @@ runner so far (BENCH "Stage 3: me → them on macOS"); a real Mac, AirPods and a
 - Download over plain HTTPS with `urllib` (HTTP Range resume, no credentials sent), then SHA-256
   check and a "verified" marker with a fingerprint of the pins; engines only call
   `models.path(id)`, nothing is fetched at run time after setup — the app works offline in local
-  mode. CLI: `peresmeshnik models list | fetch <id>...`.
+  mode. CLI: `peresmeshnik models list | fetch <id>...`. Only the chosen pair's models are fetched
+  (`languages.needed_models`): a cloud side gets only its local subtitles' ASR + MT, if the pair has them.
 - First download shows each license; noncommercial and territory-limited ones (CPML, CC-BY-NC,
   Tencent HY; `consent = true` in the registry) need an explicit "yes" (`--accept-licenses` without
   a terminal).

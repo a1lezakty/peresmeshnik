@@ -71,3 +71,10 @@ def test_covers_reads_the_registry_langs(monkeypatch, mid, key, ok):
                   stub('vad', 'vad', '*'))
     assert languages.covers(mid, key) is ok
 
+
+def test_readme_table_is_the_generated_one():
+    """README's "what runs locally, what in the cloud" is languages.table(): a registry change shows up there."""
+    from pathlib import Path
+    readme = (Path(__file__).parents[1] / 'README.md').read_text('utf-8')
+    block = readme.split('<!-- languages:begin', 1)[1].split('\n', 1)[1].split('<!-- languages:end -->')[0].strip()
+    assert block == languages.table(), 'README is stale: python -m peresmeshnik.languages, into README.md'

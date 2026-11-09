@@ -142,6 +142,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v4
         with:
           pattern: Peresmeshnik-*
@@ -152,7 +156,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           sums=$(cat dist/*.sha256 | sed 's/^/    /')
-          cat > notes.md <<EOF
+          # this version's CHANGELOG section first (its heading line dropped), then how to install
+          awk -v v="## ${GITHUB_REF_NAME#v}" '/^## / {p = index($0, v " ") == 1 || $0 == v; next} p' CHANGELOG.md > notes.md
+          grep -q . notes.md || { echo "CHANGELOG.md has no section for ${GITHUB_REF_NAME#v}"; exit 1; }
+          cat >> notes.md <<EOF
           **macOS** 14+ on Apple Silicon (\`.dmg\`). Ad-hoc signed, not notarized: after the first blocked start use
           System Settings → Privacy & Security → "Open Anyway" (README, "Installation on macOS"). BlackHole 2ch
           is needed for the voice to the call.

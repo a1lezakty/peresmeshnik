@@ -6,7 +6,9 @@ with the app: it downloads them on first use into the model cache (see
 download. Because the app is noncommercial, noncommercial model licenses (CPML, CC-BY-NC) are
 usable; they still bind the user, so the app says so.
 
-Checked 2026-11-07 from the model cards and license files linked below.
+Checked 2026-11-07 from the model cards and license files linked below. Which model serves which language is the
+registry's `langs` ([`models.toml`](../peresmeshnik/models.toml)); what runs locally per language is the table in the
+[README](../README.md#languages), made from it. A language without a local model is translated in the cloud.
 
 ## Speech recognition (ASR) and voice activity (VAD)
 
@@ -43,7 +45,7 @@ Checked 2026-11-07 from the model cards and license files linked below.
 
 | Service | Role | Terms |
 |---|---|---|
-| [Gemini Live API](https://ai.google.dev/gemini-api/docs/live) (`gemini-3.5-live-translate-preview`, `gemini-3.5-transcribe-live`) | cloud mode: speech-to-speech translation, subtitles | Google APIs Terms and Gemini API Additional Terms; the user's own API key; on the free tier Google may use the data to improve its products |
+| [Gemini Live API](https://ai.google.dev/gemini-api/docs/live) (`gemini-3.5-live-translate-preview`, `gemini-3.5-transcribe-live`) | cloud mode: speech-to-speech translation, subtitles; all 14 languages of the app ([translate](https://ai.google.dev/gemini-api/docs/live-api/live-translate), [transcribe](https://ai.google.dev/gemini-api/docs/live-api/live-transcribe) language tables, checked 2026-11-09) | Google APIs Terms and Gemini API Additional Terms; the user's own API key; on the free tier Google may use the data to improve its products |
 
 ## Not bundled, installed by the user
 
@@ -67,7 +69,7 @@ Checked 2026-11-07 from the model cards and license files linked below.
 |---|---|---|
 | [FLEURS](https://huggingface.co/datasets/google/fleurs) en_us, ru_ru dev | ASR WER, MT references (parallel sentences) | CC-BY-4.0 |
 | FLEURS, 3 + 3 sentences in [`tests/data/`](../tests/data) | 30 s test recordings for the pipeline and the working-mode CPU gate | CC-BY-4.0, attribution in its README |
-| FLEURS, 1 + 1 sentences in [`peresmeshnik/ui/samples/`](../peresmeshnik/ui/samples) (shipped) | the setup wizard's test phrase | CC-BY-4.0, attribution in its README |
+| FLEURS, sentence 1515 in each of the 14 languages in [`peresmeshnik/ui/samples/`](../peresmeshnik/ui/samples) (shipped) | the setup wizard's test phrase | CC-BY-4.0, attribution in its README |
 | [LibriSpeech](https://www.openslr.org/12) test-clean | English voice reference for cloning | CC-BY-4.0 |
 | [Russian LibriSpeech](https://huggingface.co/datasets/bond005/rulibrispeech) test (LibriVox) | Russian voice reference for cloning | public domain recordings |
 | [AMI Meeting Corpus](https://groups.inf.ed.ac.uk/ami/corpus/) ES2002a, IS1009a (Mix-Headset, manual words) | English conversational speech: clause segmentation, voice lag (`bench/conversation.py`) | CC-BY-4.0 |

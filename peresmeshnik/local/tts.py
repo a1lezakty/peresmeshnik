@@ -15,6 +15,8 @@ import numpy as np
 from peresmeshnik.engines import Voice
 
 RUNNER = Path(__file__).resolve().parents[2] / 'piper-runner' / 'piper_runner.py'
+# the frozen piper-runner.exe is windowed, but in dev the runner is uv/python (a console program): no flashing window
+CREATE_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
 
 def voice_path(voice_id: str) -> Path:
@@ -35,7 +37,8 @@ class PiperTts:
     def __init__(self, voice_id: str = 'piper-ru_RU-dmitri-medium', threads: int = 2):
         self.voice_id = voice_id
         onnx = voice_path(voice_id)
-        self._p = subprocess.Popen([*runner_cmd(), str(onnx), '--threads', str(threads)], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        self._p = subprocess.Popen([*runner_cmd(), str(onnx), '--threads', str(threads)], stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, creationflags=CREATE_NO_WINDOW)
         self.sample_rate = self._u32()
 
     def _read(self, n: int) -> bytes:

@@ -64,7 +64,7 @@ class Mic:
         self.macos = sys.platform == 'darwin'
         self.source = ''  # the device being recorded (Linux, macOS)
         self.uid = ''  # macOS: its Core Audio UID
-        self._stream = self._proc = self._thread = None
+        self._stream = self._proc = self._thread = self._on_frames = None
         self._stopping = False
 
     def start(self, on_frames: Callable[[np.ndarray], None]) -> None:
@@ -75,6 +75,16 @@ class Mic:
         if self.macos:
             self._start_helper(on_frames)
             return
+        self._on_frames = on_frames
+        if sys.platform == 'win32':  # register in the shared PortAudio holder registry: a device refresh suspends/
+            from peresmeshnik.audio import coreaudio  # resumes it (else refresh_portaudio frees this live stream)
+            with coreaudio.portaudio_lock:
+                self._open(on_frames)
+                coreaudio.hold(self)
+        else:
+            self._open(on_frames)
+
+    def _open(self, on_frames) -> None:
         import sounddevice as sd  # PortAudio is loaded only when a stream opens
 
         def callback(indata, frames, time_info, status):
@@ -86,7 +96,24 @@ class Mic:
 
         self._stream = sd.InputStream(device=self.device, channels=1, samplerate=self.sample_rate, blocksize=self.blocksize,
                                       dtype='float32', callback=callback, finished_callback=finished)
+        self._stopping = False
         self._stream.start()
+
+    def suspend(self) -> None:  # coreaudio.refresh_portaudio: the stream is freed, resume() opens it again (Windows)
+        self._stopping = True
+        stream, self._stream = self._stream, None
+        if stream is not None:
+            stream.abort()
+            stream.close()
+
+    def resume(self) -> None:  # under coreaudio.portaudio_lock (the refresh)
+        if self._on_frames is None:  # stopped meanwhile
+            return
+        try:
+            self._open(self._on_frames)
+        except Exception as e:
+            if self.on_end:  # its own thread: the owner may wait for a thread that waits for this refresh
+                threading.Thread(target=self.on_end, args=(f'the microphone after the device refresh: {e}',), daemon=True).start()
 
     def _start_parec(self, on_frames) -> None:
         name = not_ours(self.device or _pactl('get-default-source').strip())
@@ -145,6 +172,13 @@ class Mic:
 
     def stop(self) -> None:
         self._stopping = True
+        if self._on_frames is not None and sys.platform == 'win32':  # unregister before closing the PortAudio stream
+            from peresmeshnik.audio import coreaudio
+            self._on_frames = None  # a refresh going on does not open it again
+            with coreaudio.portaudio_lock:
+                coreaudio.release(self)
+                self.suspend()
+        self._on_frames = None
         if self._stream is not None:
             self._stream.stop()
             self._stream.close()

@@ -1,11 +1,12 @@
-"""Loopback self-test of the Linux audio routing (PipeWire / PulseAudio), no call needed.
+"""Loopback self-test of the audio routing (Linux: PipeWire / PulseAudio; macOS: Core Audio), no call needed.
 
 A short chirp goes out through each of our paths and is recorded back from the other end:
 - call capture: chirp -> "Peresmeshnik Call" sink -> its monitor, read by the app's capture (S1);
 - virtual mic: chirp -> the virtual mic (S2) -> recorded from "Peresmeshnik Mic", what the call app hears;
 - headphones: chirp -> the chosen output sink -> its monitor;
 - microphone: 3 s from the chosen input, level only (say something).
-A path passes when the chirp is found by cross-correlation, clearly above the noise.
+A path passes when the chirp is found by cross-correlation, clearly above the noise. macOS: the virtual mic is
+BlackHole 2ch (chirp into its output, recorded from its input, as the call app does) and the microphone.
 
     python -m peresmeshnik.ui.selftest [--headphones SINK] [--mic SOURCE]
 """
@@ -14,12 +15,14 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
 
 import numpy as np
 
+MACOS = sys.platform == 'darwin'
 SR = 48_000
 MIN_SCORE = 0.5  # normalised correlation of the found chirp; noise and silence stay < 0.1
 MIN_MIC_DB = -50.0
@@ -30,7 +33,15 @@ def pactl(*args: str) -> str:
 
 
 def devices(kind: str) -> list[tuple[str, str]]:
-    """[(name, description)] of 'sinks' or 'sources' (monitors of sinks left out); default first."""
+    """[(name, description)] of 'sinks' or 'sources' (monitors of sinks left out); default first.
+    macOS: [(Core Audio UID, name)] of outputs or inputs, BlackHole 2ch left out (it is ours: the virtual mic); as inputs
+    no virtual device (BlackHole, Zoom's, Teams') and no aggregate either: none of them is the user's voice."""
+    if MACOS:
+        from peresmeshnik.audio import macos
+        side, default = ('outputs', 'default_output') if kind == 'sinks' else ('inputs', 'default_input')
+        out = [d for d in macos.devices() if d[side] and not macos.is_blackhole(d['uid']) and not macos.is_blackhole(d['name'])
+               and (kind == 'sinks' or d['transport'] not in ('virt', 'grup') or d['uid'] == macos.stand_in_mic())]
+        return [(d['uid'], d['name']) for d in sorted(out, key=lambda d: not d[default])]
     items = json.loads(pactl('-f', 'json', 'list', kind) or '[]')
     default = pactl('get-default-sink' if kind == 'sinks' else 'get-default-source').strip()
     out = [(d['name'], d.get('description') or d['name']) for d in items if not d['name'].endswith('.monitor')]
@@ -66,12 +77,17 @@ def play(sink: str, pcm: np.ndarray, sr: int) -> None:
 
 
 class Recorder:
-    """parec of one source at SR, in a thread blocked on the pipe."""
+    """parec of one source at SR (macOS: the helper's record of a device, '' = the default input), in a thread blocked
+    on the pipe."""
 
     def __init__(self, source: str, rate: int = SR):
         self.rate, self.chunks = rate, []
-        self.p = subprocess.Popen(['parec', f'--device={source}', '--raw', '--format=float32le', f'--rate={rate}', '--channels=1',
-                                   '--latency-msec=20', '--property=node.dont-reconnect=true'], stdout=subprocess.PIPE)
+        if MACOS:
+            from peresmeshnik.audio import macos
+            self.p = macos.spawn('record', '--from', source, '--rate', str(rate))
+        else:
+            self.p = subprocess.Popen(['parec', f'--device={source}', '--raw', '--format=float32le', f'--rate={rate}', '--channels=1',
+                                       '--latency-msec=20', '--property=node.dont-reconnect=true'], stdout=subprocess.PIPE)
         self.t = threading.Thread(target=self._read, daemon=True)
         self.t.start()
 
@@ -81,7 +97,11 @@ class Recorder:
 
     def stop(self) -> np.ndarray:
         self.p.terminate()
-        self.p.wait(5)
+        try:
+            self.p.wait(5)
+        except subprocess.TimeoutExpired:  # the helper once hung stopping (1 in ~400 on the runner): a reader, kill is safe
+            self.p.kill()
+            self.p.wait()
         self.t.join(5)
         return np.concatenate(self.chunks) if self.chunks else np.zeros(0, np.float32)
 
@@ -129,6 +149,8 @@ def check_call_capture() -> Result:
 
 def check_virtual_mic(vmic=None) -> Result:
     """Through the app's virtual mic (`vmic`, or the device while the app runs), else a temporary one."""
+    if MACOS:
+        return _check_blackhole(vmic)
     from peresmeshnik.audio.virtual_mic_linux import SINK, SOURCE, VirtualMic, exists
     own = None if vmic is not None or exists() else VirtualMic()  # a new VirtualMic would replace the app's
     ref = chirp()
@@ -148,6 +170,26 @@ def check_virtual_mic(vmic=None) -> Result:
         if own:
             own.remove()
     return _judge('virtual mic', got, ref, SR)
+
+
+def _check_blackhole(vmic=None) -> Result:
+    """macOS: a chirp into BlackHole 2ch's output, recorded from its input like the call app (none to make or remove)."""
+    from peresmeshnik.audio import macos
+    from peresmeshnik.audio.virtual_mic_macos import VirtualMic
+    out, ref = vmic or VirtualMic(), chirp()
+    rec = Recorder(out.device['uid'])
+    try:
+        time.sleep(0.3)
+        out.play(ref, SR)
+        out.drain()
+        time.sleep(0.4)
+    finally:
+        got = rec.stop()
+        if vmic is None:
+            out.remove()
+    if rec.p.returncode == 6:
+        return Result('virtual mic', False, macos.NO_PERMISSION)
+    return _judge(f'virtual mic ({macos.BLACKHOLE})', got, ref, SR)
 
 
 def check_headphones(sink: str) -> Result:
@@ -170,16 +212,28 @@ def check_mic(source: str, seconds: float = 3.0) -> Result:
         time.sleep(seconds)
     finally:
         x = rec.stop()
+    if MACOS and rec.p.returncode == 6:
+        from peresmeshnik.audio import macos
+        return Result('microphone', False, macos.NO_PERMISSION)
     db = 20 * np.log10(np.max(np.sqrt(np.convolve(x ** 2, np.ones(1600) / 1600, 'valid'))) + 1e-9) if len(x) > 1600 else -120.0
     ok = bool(db >= MIN_MIC_DB)
-    return Result(f'microphone ({source})', ok, f'loudest 0.1 s at {db:.0f} dBFS' + ('' if ok else ': say something, or check the input'))
+    return Result(f'microphone ({source or "the default input"})', ok,
+                  f'loudest 0.1 s at {db:.0f} dBFS' + ('' if ok else ': say something, or check the input'))
+
+
+def _mac_mic(mic: str | None) -> str:
+    from peresmeshnik.audio import macos
+    return macos.not_blackhole(mic or '')  # '' = the default input (never BlackHole: the helper skips virtual devices)
 
 
 def run_all(headphones: str | None = None, mic: str | None = None, vmic=None, report=lambda r: None) -> list[Result]:
     """Every check, each reported as soon as it is done; a failing check does not stop the others."""
-    checks = [('call capture', check_call_capture), ('virtual mic', lambda: check_virtual_mic(vmic)),
-              ('headphones', lambda: check_headphones(headphones or pactl('get-default-sink').strip())),
-              ('microphone', lambda: check_mic(mic or '@DEFAULT_SOURCE@'))]
+    if MACOS:  # ponytail: no call capture or headphones check here yet (S1: the process tap, the output device)
+        checks = [('virtual mic', lambda: check_virtual_mic(vmic)), ('microphone', lambda: check_mic(_mac_mic(mic)))]
+    else:
+        checks = [('call capture', check_call_capture), ('virtual mic', lambda: check_virtual_mic(vmic)),
+                  ('headphones', lambda: check_headphones(headphones or pactl('get-default-sink').strip())),
+                  ('microphone', lambda: check_mic(mic or '@DEFAULT_SOURCE@'))]
     results = []
     for name, check in checks:
         try:

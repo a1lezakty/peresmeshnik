@@ -22,6 +22,14 @@ elif [ "${REQUIRE_TAP:-}" = 1 ]; then  # a release without the call's sound woul
   echo 'no native/macos/tap/*.swift: the call sound helper is missing' >&2
   exit 1
 fi
+if [ -f native/macos/audio/main.swift ]; then  # the Core Audio helper of me -> them (S2): BlackHole 2ch, the microphone
+  native/macos/audio/build.sh
+  cp native/macos/audio/build/peresmeshnik-audio "$APP/Contents/MacOS/"
+  test -x "$APP/Contents/MacOS/peresmeshnik-audio"
+elif [ "${REQUIRE_TAP:-}" = 1 ]; then  # the release guard: without it the call hears nothing of the translation
+  echo 'no native/macos/audio/main.swift: the me -> them helper is missing' >&2
+  exit 1
+fi
 # the GPL check (the app's own Analysis must not import piper; the spec copies its warnings before piper's) and the licenses
 $PY packaging/licenses.py "$APP/Contents/Resources/licenses" build/pyinstaller/Peresmeshnik/warn-app.txt Contents/MacOS/piper-runner
 

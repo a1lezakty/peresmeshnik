@@ -299,7 +299,11 @@ class PassThrough:
         from peresmeshnik.audio import coreaudio
         self._running = coreaudio.Running(CALL_DEVICE, lambda running: running and self._try_open())
         if self._running.running():
-            self._open()
+            try:
+                self._open()
+            except BaseException:
+                self.stop()  # its listener goes too: nobody will stop a pass-through that did not start
+                raise
 
     def _try_open(self) -> None:  # a thread of Core Audio's event or of _quiet: nobody up the stack would hear it
         try:

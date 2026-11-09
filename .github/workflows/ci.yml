@@ -69,6 +69,9 @@ jobs:
           mkdir -p "$RUNNER_TEMP/bin"
           swiftc -O -target arm64-apple-macos12 native/macos/tap/*.swift -o "$RUNNER_TEMP/bin/peresmeshnik-tap"
           echo "PERESMESHNIK_TAP=$RUNNER_TEMP/bin/peresmeshnik-tap" >> "$GITHUB_ENV"
+      - name: Swift Core Audio helper (native/macos/audio), me -> them on macOS
+        if: runner.os == 'macOS' && hashFiles('native/macos/audio/main.swift') != ''
+        run: native/macos/audio/build.sh  # found in its build/ by audio/macos.py; tests fail without it on CI
       # "System Audio Recording" for the call-sound tests (tests/test_macos_audio.py), on the runner's VM only: a TCC.db row
       # for the job's top process (TCC asks the responsible process); refused here, allowed for the rest of the job
       - name: macOS call sound, System Audio Recording refused

@@ -164,3 +164,25 @@ def test_recorded_voice_from_a_bad_microphone_is_rejected_with_the_reason(page):
     text = page.out.text()
     assert text.startswith('<b>Record again: 3 s recorded, need 30-60 s; only 0 s of speech'), text
     assert 'Not saved' in text and page.voice is None and not page.isComplete()
+
+
+def test_stock_voice_instead_of_the_clone(page, monkeypatch):
+    """Where the clone falls behind (an 8 GB Mac, BENCH): me -> them local in the stock Piper voice, no recording needed;
+    the models are that voice's, not the clone's, and the app makes the direction without the clone."""
+    from peresmeshnik import app, models, pipeline
+    from peresmeshnik.ui.wizard import needed_models
+    monkeypatch.setattr(models, 'is_fetched', lambda m, base=None: True)
+    assert not page.isComplete() and not page.stock.isHidden()
+    page.stock.setChecked(True)
+    s = page.w.s
+    assert page.isComplete() and page.check_button.isHidden() and s.local.clone == voice.STOCK
+    ids = needed_models(s)
+    assert s.local.tts[s.their_lang] in ids and 'xtts-v2' not in ids
+    made = []
+    monkeypatch.setattr(pipeline, 'make_local', lambda *a, **k: made.append((a, k)) or type('D', (), {'warm_up': lambda self: None})())
+    side = app.Side.__new__(app.Side)
+    side.name, side.src, side.tgt = 'me', s.my_lang, s.their_lang
+    side._local(s)
+    assert made == [((s.my_lang, s.their_lang), {'settings': s})]  # no clone, no voice profile
+    page.stock.setChecked(False)
+    assert s.local.clone == 'xtts-v2' and not page.isComplete()

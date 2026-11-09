@@ -1,10 +1,17 @@
 """Shared fixtures: a local HTTP server with Range support (model downloads)."""
 import http.server
+import os
+import sys
 import threading
 
 import pytest
 
 from peresmeshnik import models
+
+if sys.platform == 'darwin':
+    # the macOS runner has no microphone: its tests record BlackHole 16ch, which the app refuses as the microphone
+    # (a virtual device); audio/macos.stand_in_mic() lets this one through, and only under pytest
+    os.environ.setdefault('PERESMESHNIK_TEST_MIC', 'BlackHole16ch_UID')
 
 
 class Range(http.server.BaseHTTPRequestHandler):

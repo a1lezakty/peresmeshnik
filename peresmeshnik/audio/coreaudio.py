@@ -10,6 +10,7 @@ when a process starts or stops playing into a device.
 from __future__ import annotations
 
 import ctypes
+import itertools
 import logging
 import threading
 import time
@@ -36,6 +37,18 @@ class Address(ctypes.Structure):
 
 
 LISTENER = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(Address), ctypes.c_void_p)
+_listeners: dict[int, _Listener] = {}  # registered with Core Audio, by their client data: alive until close()
+_keys = itertools.count(1)
+
+
+@LISTENER
+def _dispatch(obj, n, addrs, key) -> int:
+    """The one C callback of every listener, never freed: Core Audio holds only its pointer, and may call it while a
+    listener is being removed (a freed callback was a SIGSEGV / SIGBUS on its 'HALC_ShellObject_Listener Queue')."""
+    listener = _listeners.get(key or 0)
+    return listener._changed(obj, n, addrs, key) if listener else 0
+
+
 _ca = _cf = None
 
 
@@ -187,10 +200,11 @@ class _Listener:
     def __init__(self, addrs: list[tuple[int, int, int]], what: str):
         self._done = False
         self._lock = threading.Lock()
-        self._cb = LISTENER(self._changed)  # kept: Core Audio holds only the C pointer
+        self._key = next(_keys)
+        _listeners[self._key] = self
         self._addrs = [(obj, Address(sel, scope, 0)) for obj, sel, scope in addrs]
         for obj, a in self._addrs:
-            if err := _lib().AudioObjectAddPropertyListener(obj, a, self._cb, None):
+            if err := _lib().AudioObjectAddPropertyListener(obj, a, _dispatch, self._key):
                 self.close()
                 raise RuntimeError(f'cannot watch {what}: Core Audio error {err}')
 
@@ -216,7 +230,8 @@ class _Listener:
         with self._lock:
             self._done = True
         for obj, a in self._addrs:
-            _lib().AudioObjectRemovePropertyListener(obj, a, self._cb, None)
+            _lib().AudioObjectRemovePropertyListener(obj, a, _dispatch, self._key)
+        _listeners.pop(self._key, None)
 
 
 class Watch(_Listener):

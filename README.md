@@ -42,6 +42,11 @@ macOS 14 Sonoma or later on Apple Silicon (M1 and newer).
    FaceTime cannot be translated this way: its sound is played by a macOS system process, not by FaceTime.
    The app is signed ad hoc, so after an update to a new version macOS asks for both permissions again.
 
+The call hears a hum or an old tone while nothing plays: a program that played into BlackHole was killed hard
+(Force Quit, a crash), and the BlackHole driver may keep repeating its last sound buffer. That is the driver's known
+behaviour; restarting the sound system clears it: `sudo killall coreaudiod` in the Terminal (or restart the Mac).
+Peresmeshnik's own audio helpers close their streams themselves when the app goes, even after a Force Quit.
+
 The hotkey ⇧⌘Space switches between translation and your live voice (Settings to change it; a combo
 that is a macOS shortcut or another app's global hotkey is refused with the reason; a shortcut inside
 another app's own menus is not detected and the hotkey takes it over everywhere).

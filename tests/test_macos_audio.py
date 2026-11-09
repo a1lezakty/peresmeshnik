@@ -532,7 +532,8 @@ def test_devices_refresh_keeps_the_streams_with_a_short_gap(tmp_path):
         q.put(None)
         t_play.join(5)
         hp.stop()
-        call.kill()
+        call.terminate()
+        call.wait(5)
         if before:
             set_default_output(before)
     gap = longest_quiet_s(x, sr)
@@ -668,8 +669,11 @@ def test_headphones_unknown_to_portaudio_play_on_the_default_meanwhile(fakedevic
 
 
 PLAYER = '''
-import sys, numpy as np, sounddevice as sd
+import signal, sys, numpy as np, sounddevice as sd
 from peresmeshnik.audio.coreaudio import stream_args
+# SIGTERM ends it cleanly (PortAudio closes the stream at exit): killed while playing, its last 1024-frame buffer could
+# stay looping in BlackHole 16ch for the rest of the runner's session (seen: 423 Hz, every later test hears it)
+signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
 args = stream_args(sys.argv[1])
 sr = args.pop('samplerate')
 x = (0.3 * np.sin(2 * np.pi * 440 * np.arange(int(float(sys.argv[2]) * sr)) / sr)).astype(np.float32)
@@ -729,7 +733,8 @@ def test_pass_through_plays_on_the_default_while_portaudio_does_not_see_the_save
     finally:
         ctl.submit(ctl._through_stop).result()
         if call:
-            call.kill()
+            call.terminate()
+            call.wait(5)
         if before:
             set_default_output(before)
     print(f'pass-through, saved headphones unknown to PortAudio: {looped} refresh(es) in 2 s, on {SPEAKERS2} rms '
@@ -742,20 +747,59 @@ def test_pass_through_plays_on_the_default_while_portaudio_does_not_see_the_save
 def test_pass_through_that_cannot_open_says_so():
     """N3: opening on Core Audio's event thread fails (no headphones): on_end says why, not lost in that thread."""
     from peresmeshnik.audio import capture_macos as cm
+    from peresmeshnik.audio import coreaudio as ca
 
     def pick(exclude=''):
         raise RuntimeError('no output device')
-    ended = []
+    busy = ca.Running(cm.CALL_DEVICE, lambda running: None)
+    try:  # the last test's call app may still run IO on BlackHole 16ch: start() would open (and fail) at once
+        assert until(lambda: not busy.running(), 10), f'{cm.CALL_DEVICE} stays busy'
+    finally:
+        busy.close()
+    ended, call = [], None
     through = cm.PassThrough(pick, on_end=ended.append)
-    through.start()
-    call = player(cm.CALL_DEVICE, 4.0)
     try:
+        through.start()
+        call = player(cm.CALL_DEVICE, 4.0)
         assert until(lambda: ended), 'the failure was lost'
     finally:
         through.stop()
-        call.kill()
+        if call:
+            call.terminate()
+            call.wait(5)
     print(f'pass-through cannot open: {ended}')
     assert 'no output device' in ended[0]
+
+
+def test_a_listener_lives_while_core_audio_holds_it(monkeypatch):
+    """A listener nobody closed is not freed under Core Audio (that was a SIGSEGV on its listener queue): it stays
+    registered by its key, with the one C callback that is never freed; after close() a late call does nothing."""
+    import gc
+    import types
+
+    from peresmeshnik.audio import coreaudio as ca
+    added, removed, fired = [], [], []
+    monkeypatch.setattr(ca, '_lib', lambda: types.SimpleNamespace(
+        AudioObjectAddPropertyListener=lambda obj, a, cb, key: added.append((cb, key)) or 0,
+        AudioObjectRemovePropertyListener=lambda obj, a, cb, key: removed.append((cb, key)) or 0))
+
+    class Changed(ca._Listener):
+        once = False
+
+        def _check(self, obj):
+            return obj
+
+        def _fire(self, why):
+            fired.append(why)
+    Changed([(ca.SYSTEM, ca.DEVICES, ca.GLOBAL)], 'the devices')  # dropped at once, never closed
+    gc.collect()
+    (cb, key), = added
+    assert cb is ca._dispatch and key in ca._listeners
+    ca._dispatch(7, 1, None, key)
+    assert until(lambda: fired == [7])
+    ca._listeners[key].close()
+    assert removed == [(ca._dispatch, key)] and key not in ca._listeners
+    assert ca._dispatch(7, 1, None, key) == 0
 
 
 @needs_blackhole
@@ -794,42 +838,37 @@ def test_a_stream_stopped_during_a_refresh_stays_closed():
 
 
 @needs_blackhole
-def test_the_microphone_is_kept_by_a_refresh(afplay):
-    """M1: the wizard's voice enrollment records through mic.Mic (PortAudio on macOS): registered, a refresh suspends
-    and resumes it; stopped during one, it stays closed."""
+def test_the_microphone_is_kept_by_a_refresh(tmp_path):
+    """M1: the wizard's voice enrollment records through mic.Mic; on macOS that is the Core Audio helper (S2),
+    no PortAudio stream: not registered, and a refresh does not interrupt it."""
+    import soundfile as sf
+
     from peresmeshnik.audio import coreaudio as ca
     from peresmeshnik.audio.mic import Mic
     from peresmeshnik.engines import SAMPLE_RATE
+    t = tone(6)  # stereo: a mono file lands in the centre channel (3) of BlackHole 16ch, the helper reads the first
+    sf.write(tmp_path / 'tone.wav', np.stack([t, t], axis=1), SR)
+    before = set_default_output('BlackHole 16ch')  # BlackHole 2ch is the app's own: the microphone refuses it
+    p = subprocess.Popen(['afplay', str(tmp_path / 'tone.wav')])
     frames = Frames()
-    mic = Mic(SPEAKERS)  # afplay plays into BlackHole 2ch: its input side
-    mic.start(frames)
+    mic = Mic('BlackHole16ch_UID')
     try:
+        time.sleep(1.0)
+        mic.start(frames)
         time.sleep(0.5)
         held = mic in set(ca._holders)
-        r = ca.refresh_portaudio()
         n = len(frames.pcm())
+        r = ca.refresh_portaudio()
         time.sleep(1.0)
         got = frames.pcm()[n:]
-
-        class Stopper:
-            def suspend(self):
-                threading.Thread(target=mic.stop).start()
-                time.sleep(0.3)
-
-            def resume(self):
-                pass
-        stopper = Stopper()
-        ca.hold(stopper)
-        r2 = ca.refresh_portaudio()
-        ca.release(stopper)
-        time.sleep(0.5)
     finally:
         mic.stop()
-    print(f'microphone: held {held}, refresh {r}, then {len(got) / SAMPLE_RATE:.2f} s rms {rms(got):.3f}; stopped during '
-          f'one: {r2}, stream {mic._stream}')
-    assert held and r['streams'] >= 1 and not r['failed']
-    assert len(got) > SAMPLE_RATE // 2 and rms(got) > 0.1, 'the microphone did not come back after the refresh'
-    assert mic._stream is None and mic not in set(ca._holders)
+        p.wait(15)  # to its end: a killed writer may leave its last buffer looping in BlackHole
+        if before:
+            set_default_output(before)
+    print(f'microphone: held {held}, refresh {r}, then {len(got) / SAMPLE_RATE:.2f} s rms {rms(got):.3f}')
+    assert not held and not r['failed']
+    assert len(got) > SAMPLE_RATE // 2 and rms(got) > 0.1, 'the microphone stopped at the refresh'
 
 
 @needs_blackhole

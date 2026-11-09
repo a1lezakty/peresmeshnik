@@ -347,8 +347,8 @@ Linux. PortAudio lists the devices of its start only, and listing again (`refres
 stream of the process: it runs at translation on, before any stream opens, and when the saved headphones are back
 while translating (`coreaudio.Arrival`, or the saved device is there but unknown to PortAudio). Every object of the
 process that holds a PortAudio stream registers with `coreaudio` (`hold` / `release`, with `suspend()` / `resume()`):
-the sides', the pass-through's, the wizard's test phrase's and voice enrollment's microphone (`mic.Mic`);
-`refresh_portaudio` suspends them all at once (PortAudio
+the sides', the pass-through's, the wizard's test phrase's (the microphone is not one: on macOS `mic.Mic` is the
+Core Audio helper of S2); `refresh_portaudio` suspends them all at once (PortAudio
 takes 0.1–0.25 s to stop each one), refreshes, resumes each (one that fails is reported, its owner reopens
 elsewhere); a device PortAudio still does not see after its refresh counts as absent: the default plays meanwhile,
 `Arrival` waits for it again; the engines and the process tap stay, the speech not played yet
@@ -359,6 +359,25 @@ Checked so far only in a test desktop: always-on-top and click-through under Xvf
 and an `xdotool click` through the overlay reaches the window below); the idle gate with an XEmbed
 tray (`stalonetray`), not a StatusNotifierItem tray over D-Bus (KDE, GNOME's AppIndicator) nor Qt's
 wayland plugin; the portal against a fake one.
+
+**macOS, me → them (stage 3).** The virtual microphone is BlackHole 2ch, installed by the user (the wizard's
+devices page checks for it and, missing, shows `brew install blackhole-2ch`, the installer's link and "Check
+again"); the call app takes it as its microphone. Core Audio work runs in `peresmeshnik-audio`
+(`native/macos/audio`, Swift, built by one `swiftc` and placed next to the app's executable), one small process
+per stream, as parec / pacat / module-loopback on Linux; Python starts, reads and stops them (`audio/macos.py`).
+Not PortAudio: its device list is fixed when it starts, so a device plugged in later would need a re-init that
+closes every stream of the process, and it does not report a device that went away. `record` gives the
+microphone (a device UID, else a name; `ui.mic`), mixed to mono and converted to 16 kHz; with `--follow` it keeps
+to the saved device, else the default input, else the first real one (BlackHole and other virtual devices and
+aggregates are never chosen by themselves, BlackHole 2ch never at all), switches on Core Audio's notifications
+(the device list, the default input, the device's rate) and goes back to the saved device when it returns: one
+tray message per outage, no reopening in Python. `play` sends the translation into BlackHole 2ch with a 40 ms
+cushion, like pacat's. While translation is off, `loop` sends the microphone into BlackHole 2ch so the call hears
+the user; on macOS 14+ it opens the microphone only while another process records BlackHole 2ch (Core Audio's
+process objects), so outside a call there is no orange microphone dot, AirPods keep their music profile and it
+costs nothing. Every helper ends when its stdin closes: a dead app leaves no microphone open. Denied microphone
+permission (macOS hands silence, not an error) is checked before recording and said in words. Only on the CI
+runner so far (BENCH "Stage 3: me → them on macOS"); a real Mac, AirPods and a real call are in USER-CHECKS.
 
 ## 8. Model download and cache
 

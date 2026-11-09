@@ -1126,8 +1126,145 @@ unplugged there) it is called directly while a tone goes BlackHole 16ch → `Bla
 - Real Core Audio notifications (round 1): an aggregate device made and destroyed by another process stands in for
   the headphones (`tests/macos/fakedevice.swift`). The saved one comes back: `Arrival`, a refresh, the output moves to
   it in 0.38 s; unplugged: `Watch` tells in 0.08 s, the default plays again. Saved headphones Core Audio has and
-  PortAudio does not see even after its refresh: the default plays meanwhile. With the microphone's streams (S2) stopped at the same time it
-  should stay one stop long; not measured with them.
+  PortAudio does not see even after its refresh: the default plays meanwhile. The microphone (S2) is no PortAudio
+  stream on macOS (the Core Audio helper), so a refresh does not stop it (`test_the_microphone_is_kept_by_a_refresh`).
+
+## Stage 3: me → them on macOS (BlackHole 2ch, the microphone, the clone)
+
+Measured 2026-11-08 on the `macos-15` runner (Apple M1 Virtual, 3 cores, 7 GB, macOS 15.8, no GPU), BlackHole
+2ch and 16ch 0.7.1 from Homebrew; BlackHole 16ch stands in for the real microphone (a test process plays into
+it). Tests: `tests/test_virtual_mic_macos.py`, `tests/test_wizard_macos.py`.
+
+### The helper
+
+The macOS side of me → them is `peresmeshnik-audio` (`native/macos/audio`, Swift, one `swiftc`): Core Audio
+IOProcs in one small process per stream, as parec / pacat / module-loopback on Linux — `record` (the
+microphone, mixed to mono, converted by AVAudioConverter), `play` (into BlackHole 2ch, a 40 ms cushion like
+pacat's), `loop` (the microphone into BlackHole 2ch while translation is off). PortAudio was not used for it:
+its device list is fixed at `Pa_Initialize` (a device plugged in later needs a re-init that closes every stream
+of the process, the headphones too) and it reports no device loss.
+
+| what | value |
+|---|---|
+| BlackHole 2ch round trip (play → its input as a call app reads it) | 440 Hz tone: frequency, length 1.500 s and level (rms 0.212 of 0.212) kept, played in real time (3.2–3.3 s for 3 s); a flush mid-tone leaves silence (0.0000), not the old buffer |
+| play → heard at BlackHole 2ch's input | first sound 128–236 ms (the player process starts), then 16–64 ms (upper bound: the reader's 10 ms chunks included; 40 ms of it is the player's cushion since 5dfe233) |
+| microphone, helper's CPU | 0.011–0.022 CPU s per s (48 kHz device → 16 kHz, 20 ms frames in real time) |
+| the loop while translation is off, nobody records BlackHole 2ch | 0.0000–0.0001 CPU s per s: the microphone is not open |
+| the loop while the call app records BlackHole 2ch | 0.0048–0.0058 CPU s per s with a 1024-frame IO cycle (512: 0.0068); a chirp through it found, match 0.69–0.97 |
+| play's own CPU | 0.001–0.004 s for 3 s of sound |
+
+**Idle gates with all of it** (macos-15, BlackHole 2ch/16ch installed, so the app finds BlackHole at start and
+runs the loop, idle): `tests/test_idle_cpu.py` 0.030 s of CPU in 60 s (the first 15 s after "idle", not gated:
+0.108); `tests/test_ui.py` with tray, overlay and wizard 0.117 s in 60 s, per quarter 0.111 / 0.003 / 0.002 / 0.000
+(the first quarter is AppKit's one-off; limit 0.13 each). The loop helper is set up before the app says "idle": first
+its start (AVFoundation, Core Audio listeners) landed in the gated window and that gate read 0.155.
+
+**The loop opens the microphone only during a call.** Translation off, the call must still hear the user, so
+the real microphone goes into BlackHole 2ch; a loop that is always on would keep the microphone open all day:
+the orange dot in the menu bar, AirPods switched to their call profile, ~0.7 % of a core. On macOS 14+ the
+helper watches Core Audio's process objects (`kAudioHardwarePropertyProcessObjectList`, each process's
+`IsRunningInput` and input devices) and runs only while another process records BlackHole 2ch. Below 14 (no
+process objects) it stays on.
+
+**A microphone that goes away** (an aggregate device over BlackHole 16ch made and removed by the helper stands in
+for a headset): the helper's `--follow` switches to the default input at once, says so on stderr (one tray message),
+and goes back to the saved device when it returns; frames flow from it again. Events seen on the runner:
+`using Test Mic → lost Test Mic → using Apple Virtual Sound Device → using Test Mic`.
+
+**Translation ⇄ live voice through BlackHole 2ch** (the app's `Controller`, a fake translation at 220 Hz, the
+stand-in microphone at 300 Hz): the call app hears translation → live → translation → (translation off) the
+microphone through the loop; jumps at the hotkey's seams ≤ 1.2× the tones' own with the 30 ms crossfade,
+up to 11.3× without. Turning translation off while it speaks is a hard stop (22–44×), as on Linux.
+
+**A killed helper's last buffer keeps playing.** A helper killed (SIGKILL) while its IOProc ran sometimes left its
+last IO buffer in coreaudiod's mix, repeated with no process left: the call app heard a hum at 187.5 and 281.25 Hz
+(the 2nd and 3rd harmonics of 93.75 Hz = one 512-frame buffer at 48 kHz, 10.7 ms, looping), in BlackHole 2ch after a
+flush and in 16ch after a test's player was killed. The helpers now stop every IOProc before they exit, on SIGTERM,
+end of stdin or an error, and the app ends them with SIGTERM (SIGKILL only if one is still there after 2 s).
+`tests/test_blackhole_stale.py` (a writer goes while the call app reads and another writer goes on): 0 % of the
+old tone afterwards, and a reader alone afterwards hears rms 0.0000. Such a buffer, once left, stays for the
+machine's session, so the suite never kills a writer into BlackHole: a SIGKILL variant of that test left its 220 Hz
+writer looping on 2 of 6 runners that ran the suite three times in a row, and 11 later tests on BlackHole 2ch
+failed up to the end of that runner (the round trip heard 656 Hz = 7 × 93.75).
+
+**BlackHole 2ch changes its rate** (a call app or Audio MIDI Setup, 48 → 44.1 kHz) while the translation plays
+into it or the microphone is looped into it: the call app hears 440 Hz before and after, rms 0.212 (`play`
+ends with 7 and `VirtualMic` opens the next one at the new rate; `loop` restarts its output itself;
+`test_blackhole_changes_its_rate_the_tone_keeps_its_pitch`). Before, the output kept the old rate: a wrong
+speed and pitch until a restart.
+
+**A Core Audio listener freed under Core Audio.** The whole macOS suite died in 2 of 6 runs (SIGSEGV / SIGBUS on
+Core Audio's `HALC_ShellObject_Listener Queue`): a pass-through whose `start()` failed (a call app already playing
+into BlackHole 16ch, no headphones) kept its `coreaudio.Running` registered, the garbage collector later freed it
+with its ctypes callback, and the next change of BlackHole 16ch called freed memory; the app would do the same on
+its next call. Now one C callback serves every listener and is never freed, the listeners are registered by key
+until `close()`, and `PassThrough.start()` stops itself when opening fails. Before: 4 crashes in 15 runs of the
+suite; with it: none in 18 (6 runners, 3 runs in a row each), 0 listeners left registered at the end of each
+(`test_a_listener_lives_while_core_audio_holds_it`).
+
+### The clone on the M1 runner (CPU, 2 threads as the app)
+
+torch 2.8.0 CPU wheels, coqui-tts 0.28.0, the "me" voice of the earlier stages (a LibriVox reader, ~40 s).
+
+| | value |
+|---|---|
+| a sentence alone (`python -m peresmeshnik.local.clone`, 2.8–3.3 s of English) | first audio 4.15–4.31 s, RTF 5.50–5.76, peak RSS 3.81 GB |
+| in the pipeline (`bench/me_them.py run --mic BlackHole16ch_UID`: 33 s of Russian, 9 clauses) | first audio of a clause 2.3–3.4 s; synthesis 2.9–3.5 s per second of speech (28 s of English took ~85 s) |
+| when the call hears each clause, from its end (`voice_lag_s`) | 3.8, 10.9, 32.4, 42.5, 47.8, 48.7, 50.6, 58.9, 64.3 s: it falls behind with every clause |
+| subtitles (no waiting for the voice) | 0.37–2.75 s after the clause |
+| CPU | 7.3 CPU s per second of input (~2.3 of the 3 cores over the 105 s run) |
+| memory | the process 3.8 GB at the peak (getrusage; 3.4 GB sampled), the system 4.4 of 7 GB used, no swap |
+
+**Through BlackHole 2ch, end to end**: what the call app records from BlackHole 2ch transcribes like the
+clone's own output — **WER 4.9 % against the MT text, the same 4.9 % as the TTS output itself** (Whisper small
+as the judge): the path loses nothing. The link play → BlackHole 2ch's input
+19–22 ms (the first sound 151 ms, the player starting).
+
+**On MPS — the runner's virtual GPU, not an M1's.** torch on the runner now reports MPS (in stage 0 it did not:
+"paravirtual device does not support Metal 2.0"), so the clone was tried there too (`--device mps`,
+`PYTORCH_ENABLE_MPS_FALLBACK=1`): first audio 20.0 s for the first sentence (warm-up), then 7.2–7.5 s; RTF 5.0–10.9 —
+no gain over the CPU (4.2 s, 5.5) on that virtual GPU. The app stays on the CPU and the 8 GB decision below rests on
+the CPU numbers; a real M1's GPU (MPS) and Neural Engine are a check on a real Mac (USER-CHECKS).
+
+### Both directions at once on the 7 GB runner (the 8 GB question)
+
+`bench/me_them.py run --mic BlackHole16ch_UID --with-them tests/data/call-en.ogg`: as in the app, one process holds
+them → me (Parakeet, OPUS-MT en-ru, Piper) and me → them (GigaAM, OPUS-MT ru-en, the clone), both fed in real time.
+
+| | me → them alone | both at once |
+|---|---|---|
+| engines loaded | 30 s | 78 s |
+| process RSS, peak | 3.8 GB | 3.5–3.8 GB |
+| the system, used at the peak (of 7 GB) | 4.4 GB | 5.0 GB, swap 22 MB |
+| clone synthesis per second of speech | 2.9–3.5 s | 4.4–5.7 s (3 cores shared) |
+| my last clause heard by the call, after its end | 64 s | 115 s |
+| WER of what the call app records (of the TTS output itself) | 4.9 % (4.9 %) | 9.6 % (3.6 %) |
+| CPU s per second of input | 7.3 | 10.3 |
+
+- It fits in memory: 5 GB used of 7, next to nothing swapped. An 8 GB M1 has ~1 GB more; the clone's 3.6 GB is
+  most of it.
+- It is not live: the clone makes speech 3–6 times slower than it is said, so the call hears me later with every
+  clause (the subtitles do not wait: 0.4–3 s). With both sides the cores are full, the playback through the mic
+  clock gets gaps and the recording's WER rises to 9.6 % (the TTS output itself 3.6 %).
+- **Decision for 8 GB Macs** (and any Mac until a GPU path is measured): me → them in the cloud (the default,
+  `config.me_to_them = 'cloud'`), or locally in a stock voice (`[local] clone = "piper"`, the wizard's voice page:
+  "Speak with a stock voice (Piper), not mine"). The wizard says so when local me → them is chosen on a Mac.
+
+**The stock voice instead** (`bench/me_them.py run --stock`: Piper `en_US-john-medium` for me → them, the same 33 s):
+
+| | me → them alone | both at once |
+|---|---|---|
+| engines loaded | 4.3 s | 7.4 s |
+| process RSS, peak | 0.5–1.6 GB | 1.6–2.5 GB |
+| the system, used at the peak | 3.5 GB | 4.3 GB, no swap |
+| TTS: first audio of a clause / per second of speech | 0.2–0.57 s / 0.11 s | 0.21–0.56 s / 0.10 s |
+| the call hears each clause, after its end | 1.1–7.0 s | 1.3–7.4 s |
+| WER of what the call app records (of the TTS output itself) | 6.2 % (6.2 %) | 6.2 % (6.2 %) |
+| CPU s per second of input | 1.1 | 1.7 |
+
+Live: synthesis takes a tenth of the speech. What the call waits for is the queue: the English is as long as the
+Russian it translates (34 s for 33 s), so in a monologue a clause waits for the previous ones to be said (up to
+7 s here), and that does not grow with time — as with the GPU clone in stage 2.
 
 ## Stage 4: the Windows shell and the installer (S3)
 

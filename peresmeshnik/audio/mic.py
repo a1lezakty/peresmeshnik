@@ -1,10 +1,12 @@
 """Microphone capture, and "translation <-> live voice" for the me -> them direction.
 
 `Mic`: on Linux a PipeWire / PulseAudio source by name (the names of `pactl list sources`, as in the
-wizard and the settings) through `parec`, read on a thread blocked on the pipe; elsewhere PortAudio
-(sounddevice). The reader / device callback only hands frames on (engines.py rules): `on_frames` must
-just enqueue. The stream exists only between start() and stop(), so when translation is off no device
-is open. Our own devices (`peresmeshnik_*`) are refused: the app would hear itself.
+wizard and the settings) through `parec`; on macOS a Core Audio device by UID or name through the helper
+(`audio/macos.py`), which can also follow the device itself (`follow`: the saved one while it is there,
+else the default input, back to the saved one when it returns); both read on a thread blocked on the pipe.
+Elsewhere PortAudio (sounddevice). The reader / device callback only hands frames on (engines.py rules):
+`on_frames` must just enqueue. The stream exists only between start() and stop(), so when translation is
+off no device is open. Our own devices (`peresmeshnik_*`, BlackHole 2ch) are refused: the app would hear itself.
 
 `LiveSwitch`: the me -> them `Direction` with `set_live` (see its docstring).
 """
@@ -46,18 +48,23 @@ def not_ours(name: str) -> str:
 
 
 class Mic:
-    """`AudioIn` from a microphone. `device`: Linux: a source name, '' / None = the default source; elsewhere a
-    PortAudio name or index. `on_end(why)`: the stream ended by itself (the device went away, the sound server
-    restarted), called on the reader thread; stop() does not call it. macOS: registered with coreaudio while it runs
-    (a PortAudio refresh frees every stream of the process: it suspends and resumes this one)."""
+    """`AudioIn` from a microphone. `device`: Linux: a source name, '' / None = the default source; macOS: a Core
+    Audio UID or name, '' / None = the default input; elsewhere a PortAudio name or index. `on_end(why)`: the stream
+    ended by itself (the device went away, the sound server restarted, no permission), called on the reader thread;
+    stop() does not call it. macOS: `follow` makes the helper keep to the saved device or the default one by itself,
+    and `on_device(event, name)` hears of it: 'using' (opened, again after a loss), 'lost', 'none' (no microphone)."""
 
     def __init__(self, device: int | str | None = None, sample_rate: int = SAMPLE_RATE, frame_ms: int = 20,
-                 on_end: Callable[[str], None] | None = None):
+                 on_end: Callable[[str], None] | None = None, follow: bool = False,
+                 on_device: Callable[[str, str], None] | None = None):
         self.device, self.sample_rate, self.on_end = device or None, sample_rate, on_end
+        self.follow, self.on_device = follow, on_device
         self.blocksize = sample_rate * frame_ms // 1000
         self.pipewire = sys.platform.startswith('linux') and bool(shutil.which('parec'))
-        self.source = ''  # the source being recorded (Linux)
-        self._stream = self._proc = self._thread = self._on_frames = None
+        self.macos = sys.platform == 'darwin'
+        self.source = ''  # the device being recorded (Linux, macOS)
+        self.uid = ''  # macOS: its Core Audio UID
+        self._stream = self._proc = self._thread = None
         self._stopping = False
 
     def start(self, on_frames: Callable[[np.ndarray], None]) -> None:
@@ -65,16 +72,9 @@ class Mic:
         if self.pipewire:
             self._start_parec(on_frames)
             return
-        self._on_frames = on_frames
-        if sys.platform == 'darwin':
-            from peresmeshnik.audio import coreaudio
-            with coreaudio.portaudio_lock:  # not while PortAudio is being refreshed
-                self._open(on_frames)
-                coreaudio.hold(self)
-        else:
-            self._open(on_frames)
-
-    def _open(self, on_frames) -> None:
+        if self.macos:
+            self._start_helper(on_frames)
+            return
         import sounddevice as sd  # PortAudio is loaded only when a stream opens
 
         def callback(indata, frames, time_info, status):
@@ -86,24 +86,7 @@ class Mic:
 
         self._stream = sd.InputStream(device=self.device, channels=1, samplerate=self.sample_rate, blocksize=self.blocksize,
                                       dtype='float32', callback=callback, finished_callback=finished)
-        self._stopping = False
         self._stream.start()
-
-    def suspend(self) -> None:  # coreaudio.refresh_portaudio: the stream is freed, resume() opens it again
-        self._stopping = True
-        stream, self._stream = self._stream, None
-        if stream is not None:
-            stream.abort()
-            stream.close()
-
-    def resume(self) -> None:  # under coreaudio.portaudio_lock (the refresh)
-        if self._on_frames is None:  # stopped meanwhile
-            return
-        try:
-            self._open(self._on_frames)
-        except Exception as e:
-            if self.on_end:  # its own thread: the owner may wait for a thread that waits for this refresh
-                threading.Thread(target=self.on_end, args=(f'the microphone after the device refresh: {e}',), daemon=True).start()
 
     def _start_parec(self, on_frames) -> None:
         name = not_ours(self.device or _pactl('get-default-source').strip())
@@ -112,10 +95,14 @@ class Mic:
         self.source = name
         # dont-reconnect: when the device goes, PipeWire would move the recording to another source (maybe a monitor
         # of our own); we would rather know and choose (on_end)
-        self._proc = proc = subprocess.Popen(
+        self._proc = subprocess.Popen(
             ['parec', f'--device={name}', '--raw', '--format=float32le', f'--rate={self.sample_rate}', '--channels=1',
              '--latency-msec=20', '--client-name=Peresmeshnik', '--stream-name=Peresmeshnik microphone',
              '--property=node.dont-reconnect=true'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self._read(on_frames, lambda: self._proc.stderr.read().decode(errors='replace').strip().splitlines())
+
+    def _read(self, on_frames, why) -> None:
+        proc, name = self._proc, self.source
 
         def read():
             n = self.blocksize * 4
@@ -123,20 +110,41 @@ class Mic:
                 on_frames(np.frombuffer(b, '<f4'))
             proc.wait()
             if not self._stopping and self.on_end:
-                why = proc.stderr.read().decode(errors='replace').strip().splitlines()
-                self.on_end(f'{name}: {why[-1] if why else f"parec exited with {proc.returncode}"}')
+                lines = why()
+                self.on_end(f'{name or "the microphone"}: {lines[-1] if lines else f"the recording exited with {proc.returncode}"}')
         self._thread = threading.Thread(target=read, name='mic', daemon=True)
         self._thread.start()
 
+    def _start_helper(self, on_frames) -> None:
+        from peresmeshnik.audio import macos
+        self.source = macos.not_blackhole(self.device or '')
+        self._proc = proc = macos.spawn('record', '--from', self.source, '--rate', str(self.sample_rate), *(['--follow'] * self.follow))
+        errors: list[str] = []
+        done = threading.Event()
+
+        def events():  # the helper's stderr: device events, else why it ended
+            for raw in proc.stderr:
+                line = raw.decode(errors='replace').strip()
+                kind, _, rest = line.partition(' ')
+                if kind in ('using', 'lost', 'none'):
+                    uid, _, name = rest.partition('\t')
+                    name = name or rest
+                    if kind == 'using':
+                        self.source, self.uid = name, uid
+                    if self.on_device and not self._stopping:
+                        self.on_device(kind, name)
+                elif line:
+                    errors.append(line.removeprefix('peresmeshnik-audio: '))
+            done.set()
+
+        def why():
+            done.wait(5)
+            return [macos.NO_PERMISSION] if proc.returncode == 6 else errors
+        threading.Thread(target=events, name='mic-events', daemon=True).start()
+        self._read(on_frames, why)
+
     def stop(self) -> None:
         self._stopping = True
-        if self._on_frames is not None and sys.platform == 'darwin':
-            from peresmeshnik.audio import coreaudio
-            self._on_frames = None  # a refresh going on does not open it again
-            with coreaudio.portaudio_lock:
-                coreaudio.release(self)
-                self.suspend()
-        self._on_frames = None
         if self._stream is not None:
             self._stream.stop()
             self._stream.close()
@@ -150,6 +158,34 @@ class Mic:
             if self._thread is not threading.current_thread():  # on_end may stop it from its own reader
                 self._thread.join(5)
             self._proc = None
+
+
+def followed(saved: str, on_state: Callable[[str], None] = lambda text: None) -> Mic:
+    """macOS: the microphone of me -> them, kept by the helper on the saved device, else the default input (never
+    BlackHole), back on the saved one when it returns. The helper takes another one at once: the tray says which one
+    plays meanwhile, and again when the saved one is back."""
+    away = {'name': '', 'none': False}  # the saved microphone while it is away; no microphone at all
+
+    def on_device(kind: str, name: str) -> None:
+        if kind == 'lost':
+            away['name'] = away['name'] or name
+        elif kind == 'none':
+            if not away['none']:
+                on_state('error: no microphone: plug one in or choose it in the settings')
+            away['none'] = True
+        elif kind == 'using' and (away['name'] or away['none']):
+            away['none'] = False
+            if saved:
+                back = saved in (m.uid, name)
+            else:  # the default input: back when the one that went comes back (or a first one after none)
+                back = not away['name'] or name == away['name']
+            if back:
+                away['name'] = ''
+                on_state(f'translating (the microphone is back: {name})')
+            else:
+                on_state(f'translating ({away["name"] or "your microphone"} went away: {name} meanwhile)')
+    m = Mic(saved, follow=True, on_device=on_device, on_end=lambda why: on_state(f'error: the microphone stopped: {why}'))
+    return m
 
 
 def record(seconds: float, device: int | str | None = None, sample_rate: int = SAMPLE_RATE,

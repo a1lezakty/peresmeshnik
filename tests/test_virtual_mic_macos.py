@@ -38,20 +38,21 @@ def _ready() -> str:
 mac = pytest.mark.skipif(bool(_ready()), reason=_ready() if MAC else 'macOS only')
 
 
-def test_blackhole_missing_says_how_to_install():
+def test_blackhole_missing_says_how_to_install(monkeypatch):
     with pytest.raises(macos.BlackHoleMissing, match='brew install blackhole-2ch'):
         macos.blackhole([{'uid': 'BuiltInSpeakerDevice', 'name': 'MacBook Pro Speakers', 'inputs': 0, 'outputs': 2}])
     assert macos.blackhole([{'uid': 'BlackHole2ch_UID', 'name': 'BlackHole 2ch', 'inputs': 2, 'outputs': 2}])
     with pytest.raises(ValueError, match='not your microphone'):
         macos.not_blackhole('BlackHole 2ch')
-    assert macos.not_blackhole('BlackHole16ch_UID') == 'BlackHole16ch_UID'  # the tests' stand-in (conftest)
+    monkeypatch.setenv('PERESMESHNIK_TEST_MIC', 'BlackHole16ch_UID')  # as tests/conftest.py on macOS
+    assert macos.not_blackhole('BlackHole16ch_UID') == 'BlackHole16ch_UID'  # the tests' stand-in
 
 
 def test_the_call_device_and_virtual_inputs_are_no_microphone(monkeypatch):
     """BlackHole 16ch is the call app's speaker below 14.4: as the microphone me -> them would translate the other side
     back into the call. Virtual inputs (Zoom's, Teams') and aggregates are not offered as the microphone either."""
     from peresmeshnik.ui import selftest
-    monkeypatch.delenv('PERESMESHNIK_TEST_MIC')
+    monkeypatch.delenv('PERESMESHNIK_TEST_MIC', raising=False)
     for key in macos.CALL:
         with pytest.raises(ValueError, match="carries the call's sound"):
             macos.not_blackhole(key)
@@ -63,10 +64,19 @@ def test_the_call_device_and_virtual_inputs_are_no_microphone(monkeypatch):
             {**dev, 'uid': 'peresmeshnik-test-mic', 'name': 'Test Mic', 'transport': 'grup'}]
     monkeypatch.setattr(selftest, 'MACOS', True)
     monkeypatch.setattr(macos, 'devices', lambda: devs)
+    # saved earlier (or by hand) as the microphone: refused when it opens, with the reason
+    with pytest.raises(ValueError, match='ZoomAudioDevice is a virtual device, not your microphone'):
+        macos.not_blackhole('ZoomAudioDevice')
+    with pytest.raises(ValueError, match='Test Mic is an aggregate device, not your microphone'):
+        macos.not_blackhole('Test Mic')
+    assert macos.not_blackhole('BuiltInMicrophoneDevice') == 'BuiltInMicrophoneDevice'
+    assert macos.not_blackhole('') == ''  # the default input: the helper never takes a virtual one by itself
     assert selftest.devices('sources') == [('BuiltInMicrophoneDevice', 'MacBook Pro Microphone')]
     assert ('BlackHole16ch_UID', 'BlackHole 16ch') in selftest.devices('sinks')  # an output: S1's (the call app's)
     monkeypatch.setenv('PERESMESHNIK_TEST_MIC', 'BlackHole16ch_UID')
     assert ('BlackHole16ch_UID', 'BlackHole 16ch') in selftest.devices('sources')
+    monkeypatch.delenv('PYTEST_CURRENT_TEST')  # the app itself: the tests' hook lets nothing through
+    assert ('BlackHole16ch_UID', 'BlackHole 16ch') not in selftest.devices('sources')
 
 
 def cpu(p: subprocess.Popen) -> float:
@@ -299,7 +309,7 @@ def test_mic_refuses_blackhole():
 
 
 @mac
-def test_mic_follows_a_device_that_goes_and_comes_back():
+def test_mic_follows_a_device_that_goes_and_comes_back(monkeypatch):
     """The saved microphone (an aggregate device over BlackHole 16ch) goes away: the helper takes the default input
     and comes back to the saved one when it returns; frames flow from it again."""
     from peresmeshnik.audio.mic import Mic
@@ -310,6 +320,7 @@ def test_mic_follows_a_device_that_goes_and_comes_back():
         assert p.stdout.readline().startswith(b'created'), p.stderr.read()
         return p
 
+    monkeypatch.setenv('PERESMESHNIK_TEST_MIC', uid)  # an aggregate: refused as the microphone but for the tests' hook
     feed, agg = Feed(), plug()
     frames, events = [], []
     m = Mic(uid, follow=True, on_device=lambda kind, name: events.append((kind, name)), on_end=lambda why: events.append(('end', why)))
@@ -377,6 +388,54 @@ def test_a_playback_that_ended_by_itself_reopens_or_says_why():
         vm.remove()
 
 
+def test_live_voice_with_a_dead_output_says_so(monkeypatch):
+    """Live voice (no translation): the output dies (BlackHole 2ch removed: VirtualMic raises). The tray hears it once,
+    the frames still leave the queue, nothing plays into the dead output again."""
+    from peresmeshnik import app, config
+    s = config.Settings()
+    s.them_to_me = 'local'
+    errors, plays = [], []
+
+    class Direction:
+        def feed(self, pcm):
+            pass
+
+        def events(self):
+            yield from ()
+
+        def close(self):
+            pass
+
+    class DeadOut:
+        def play(self, pcm, sr):
+            plays.append(len(pcm))
+            raise RuntimeError('BlackHole 2ch: the playback stopped (peresmeshnik-audio: BlackHole 2ch went away)')
+
+        def flush(self):
+            pass
+
+        def stop(self):
+            pass
+
+    class In:
+        def start(self, cb):
+            self.cb = cb
+
+        def stop(self):
+            pass
+    inp = In()
+    monkeypatch.setattr(app.Side, '_local', lambda self, s: Direction())
+    side = app.Side('them', s, inp, DeadOut(), type('O', (), {'show': lambda self, c: None})(), errors.append)
+    side.start()
+    side.set_live(True)
+    for _ in range(5):
+        inp.cb(np.zeros(320, np.float32))
+    assert wait_for(lambda: side._live_q.empty() and errors)
+    side.stop()
+    assert errors == ['error: them: BlackHole 2ch: the playback stopped (peresmeshnik-audio: BlackHole 2ch went away)']
+    assert plays == [320]
+
+
 def test_followed_says_which_microphone_plays_meanwhile():
     """The saved microphone goes: the helper takes another one at once; the tray says which, then that it is back."""
     from peresmeshnik.audio.mic import followed
@@ -397,6 +456,14 @@ def test_followed_says_which_microphone_plays_meanwhile():
     assert states == ['translating (USB Mic went away: MacBook Pro Microphone meanwhile)',
                       'translating (the microphone is back: USB Mic)',
                       'error: no microphone: plug one in or choose it in the settings',
+                      'translating (the microphone is back: USB Mic)']
+    states.clear()
+    m = followed('', states.append)  # none saved: the default input; it goes, another one plays meanwhile
+    event('using', 'USBMic_UID', 'USB Mic')
+    event('lost', 'USBMic_UID', 'USB Mic')
+    event('using', 'BuiltInMicrophoneDevice', 'MacBook Pro Microphone')
+    event('using', 'USBMic_UID', 'USB Mic')
+    assert states == ['translating (USB Mic went away: MacBook Pro Microphone meanwhile)',
                       'translating (the microphone is back: USB Mic)']
 
 

@@ -61,18 +61,26 @@ def blackhole(devs: list[dict] | None = None) -> dict:
 
 
 def stand_in_mic() -> str:
-    """$PERESMESHNIK_TEST_MIC: a virtual device the tests take as the microphone (BlackHole 16ch on the CI runner)."""
-    return os.environ.get('PERESMESHNIK_TEST_MIC', '')
+    """$PERESMESHNIK_TEST_MIC: a virtual device the tests take as the microphone (BlackHole 16ch on the CI runner);
+    read only under pytest, so it never lets a virtual device through in the app."""
+    return os.environ.get('PERESMESHNIK_TEST_MIC', '') if os.environ.get('PYTEST_CURRENT_TEST') else ''
 
 
 def not_blackhole(key: str, what: str = 'microphone') -> str:
     """BlackHole 2ch carries our own output: as the microphone (or the headphones) the app would hear itself. BlackHole
-    16ch carries the call (below macOS 14.4): as the microphone, me -> them would translate the other side back."""
+    16ch carries the call (below macOS 14.4): as the microphone, me -> them would translate the other side back. Any
+    other virtual input (Zoom's, Teams') or aggregate saved as the microphone is not the user's voice either."""
     if key and is_blackhole(key):
         raise ValueError(f'{BLACKHOLE} is the virtual microphone for the call app, not your {what}: choose your real '
                          f'{what} in the settings')
-    if key and what == 'microphone' and key in CALL and key != stand_in_mic():
+    if not key or what != 'microphone' or key == stand_in_mic():
+        return key
+    if key in CALL:
         raise ValueError(f'{CALL[0]} carries the call\'s sound, not your microphone: choose your real microphone in the settings')
+    d = next((d for d in devices() if d['inputs'] and key in (d['uid'], d['name'])), None)
+    if d and d['transport'] in ('virt', 'grup'):
+        kind = 'an aggregate device' if d['transport'] == 'grup' else 'a virtual device'
+        raise ValueError(f'{d["name"]} is {kind}, not your microphone: choose your real microphone in the settings')
     return key
 
 

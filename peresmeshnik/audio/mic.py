@@ -175,7 +175,11 @@ def followed(saved: str, on_state: Callable[[str], None] = lambda text: None) ->
             away['none'] = True
         elif kind == 'using' and (away['name'] or away['none']):
             away['none'] = False
-            if not saved or saved in (m.uid, name):
+            if saved:
+                back = saved in (m.uid, name)
+            else:  # the default input: back when the one that went comes back (or a first one after none)
+                back = not away['name'] or name == away['name']
+            if back:
                 away['name'] = ''
                 on_state(f'translating (the microphone is back: {name})')
             else:

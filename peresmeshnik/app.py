@@ -503,9 +503,15 @@ class Side:
             d.feed(pcm)
 
     def _pass_through(self) -> None:
+        dead = False  # the output failed: the tray was told; frames still leave the queue
         while (pcm := self._live_q.get()) is not None:
-            if self.live:  # frames queued just before switching back are dropped
-                self.out.play(pcm, SAMPLE_RATE)
+            if self.live and not dead:  # frames queued just before switching back are dropped
+                try:
+                    self.out.play(pcm, SAMPLE_RATE)
+                except Exception as e:  # BlackHole 2ch gone (VirtualMic says why): the tray, not only a traceback
+                    log.exception('%s: live voice failed', self.name)
+                    self.on_error(f'error: {self.name}: {e}')
+                    dead = True
 
     @property
     def _supports_live(self) -> bool:

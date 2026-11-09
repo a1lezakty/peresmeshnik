@@ -681,6 +681,7 @@ case "play":
     listen(target.id, kAudioDevicePropertyNominalSampleRate, DispatchQueue(label: "rate")) {
         if device(target.id).rate != target.rate { die(7, "the rate of \(target.name) changed") }  // the app starts us again
     }
+    if device(target.id).rate != target.rate { die(7, "the rate of \(target.name) changed") }  // before the listener was there
     let ring = Ring(Int(target.rate / 4))  // a full ring blocks stdin: the writer waits as on a pipe
     let pulled = DispatchSemaphore(value: 0)
     func nextCycle() {  // signalled on every IO cycle, waited on only now and then: the next one, not a backlog

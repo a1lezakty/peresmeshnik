@@ -925,7 +925,7 @@ class Controller:
             if name == 'them':
                 call = self._route(s) if self.devices else ''
                 if s.me_to_them == 'local' and s.local.clone != STOCK and (self.devices or files['me']):
-                    self.on_state('translating (them → me; me → them: your voice is loading)')
+                    self.on_state('warming up: them → me translates, your voice is loading')  # not ready yet
         self.on = bool(self.sides)
         for f in failed:
             self.on_state(f'error: {f}')

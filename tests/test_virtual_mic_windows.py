@@ -382,7 +382,7 @@ def test_them_to_me_translates_while_the_clone_loads(monkeypatch):
     finally:
         ctl._pool.shutdown()
     assert order == ['them made', 'them starts', 'me made', 'me starts']
-    assert 'translating (them → me; me → them: your voice is loading)' in states and ctl.on
+    assert 'warming up: them → me translates, your voice is loading' in states and ctl.on
 
 
 # --- on Windows, with VB-Cable

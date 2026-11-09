@@ -42,12 +42,15 @@ def writer(f, cycle_loop=False):
     return procs, stop
 
 
-def share(y, f):
-    w = 320
-    wins = y[:len(y) // w * w].reshape(-1, w)
-    peaks = np.fft.rfftfreq(w, 1 / SR)[np.argmax(np.abs(np.fft.rfft(wins, axis=1)), axis=1)]
+W = 320  # 20 ms windows
+
+
+def tone(y, f):
+    """Per window: loud with its peak at f; loud."""
+    wins = y[:len(y) // W * W].reshape(-1, W)
+    peaks = np.fft.rfftfreq(W, 1 / SR)[np.argmax(np.abs(np.fft.rfft(wins, axis=1)), axis=1)]
     loud = np.sqrt(np.mean(wins ** 2, axis=1)) > 0.02
-    return float(np.mean((np.abs(peaks - f) < 30) & loud)), float(np.mean(loud))
+    return (np.abs(peaks - f) < 30) & loud, loud
 
 
 @pytest.mark.parametrize('loop', [False, True])
@@ -73,13 +76,21 @@ def test_old_tone_after_its_writer_goes(loop):
             if p.poll() is None:
                 p.terminate()
                 p.wait(5)
-    old, loud = share(y, 220.0)
-    new, _ = share(y, 300.0)
+    old_w, loud_w = tone(y, 220.0)
+    new_w, _ = tone(y, 300.0)
+    # the new tone from its first window on: how fast its helpers start is not what this checks (a slow runner: new 89 %
+    # with loud 89 % from 0.5 s after the switch, the rest silence, not another tone); a gap after it still fails
+    first = int(np.argmax(new_w)) if new_w.any() else len(new_w)
+    old, loud, new = float(np.mean(old_w)), float(np.mean(loud_w)), float(np.mean(new_w[first:])) if new_w.any() else 0.0
+    heard = 0.5 + first * W / SR  # s after the switch
+    runs = np.diff(np.flatnonzero(np.diff(np.r_[1, loud_w[first:].astype(int), 1]) != 0))[::2]  # silent runs after it
+    gap = int(runs.max(initial=0)) * W * 1000 // SR  # ms
     time.sleep(2.0)  # everything stopped: a new reader alone
     r2 = Recorder(macos.BLACKHOLE_UID, SR)
     time.sleep(1.0)
     z = r2.stop()[SR // 4:]
     alone = float(np.sqrt(np.mean(z ** 2)))
-    print(f'\nterminate, then {"the loop" if loop else "a player"}: old tone in {old:.0%} of the windows, new {new:.0%}, '
-          f'loud {loud:.0%}; then a reader alone: rms {alone:.4f}')
-    assert old < 0.05 and new > 0.9 and alone < 0.001
+    print(f'\nterminate, then {"the loop" if loop else "a player"}: old tone in {old:.0%} of the windows, new {new:.0%} '
+          f'from {heard:.2f} s after the switch on (longest silence after it {gap} ms), loud {loud:.0%}; then a reader '
+          f'alone: rms {alone:.4f}')
+    assert old < 0.05 and heard < 1.5 and new > 0.9 and alone < 0.001

@@ -229,25 +229,32 @@ class Timed:
         return np.concatenate(self.chunks)
 
 
+def onsets(y: np.ndarray) -> list[int]:
+    on = np.nonzero(np.abs(y) > 0.25)[0]
+    return [i for k, i in enumerate(on) if k == 0 or i - on[k - 1] > SR_OUT // 10]
+
+
 @mac
 def test_latency():
     """play() -> the sound at BlackHole 2ch's input as a call app reads it, 5 clicks from silence (the first one opens
-    the playback process). Upper bound: includes the reader's own 10 ms chunks."""
+    the playback process), each once the one before has played out. Not at a fixed pace: a click is 0.52 s of sound,
+    so with a click every 0.6 s a slow start of the process stayed queued ahead of the next ones (a runner: 545, 377,
+    260, 160, 31 ms). Upper bound: includes the reader's own 10 ms chunks."""
     from peresmeshnik.audio.virtual_mic_macos import VirtualMic
     vm = VirtualMic()
     rec = Timed(macos.BLACKHOLE_UID)
     sent = []
     try:
         time.sleep(0.5)
-        for _ in range(5):
+        for k in range(5):
             sent.append(time.monotonic())
             vm.play(np.concatenate([np.full(SR_IN // 50, 0.5, np.float32), np.zeros(SR_IN // 2, np.float32)]), SR_IN)
-            time.sleep(0.6)
+            wait_for(lambda k=k: len(onsets(np.concatenate([np.zeros(0, np.float32), *rec.chunks[:]]))) > k)
+            time.sleep(0.6)  # its 0.5 s of silence plays out: the next click finds the player idle
         y = rec.stop()
     finally:
         vm.remove()
-    on = np.nonzero(np.abs(y) > 0.25)[0]
-    starts = [i for k, i in enumerate(on) if k == 0 or i - on[k - 1] > SR_OUT // 10]
+    starts = onsets(y)
     lags = [rec.at(i) - t for i, t in zip(starts, sent)]
     print('\nplay -> BlackHole 2ch input, ms:', [round(x * 1000) for x in lags])
     assert len(starts) == 5

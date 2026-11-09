@@ -1187,6 +1187,12 @@ machine's session, so the suite never kills a writer into BlackHole: a SIGKILL v
 writer looping on 2 of 6 runners that ran the suite three times in a row, and 11 later tests on BlackHole 2ch
 failed up to the end of that runner (the round trip heard 656 Hz = 7 × 93.75).
 
+**BlackHole 2ch changes its rate** (a call app or Audio MIDI Setup, 48 → 44.1 kHz) while the translation plays
+into it or the microphone is looped into it: the call app hears 440 Hz before and after, rms 0.212 (`play`
+ends with 7 and `VirtualMic` opens the next one at the new rate; `loop` restarts its output itself;
+`test_blackhole_changes_its_rate_the_tone_keeps_its_pitch`). Before, the output kept the old rate: a wrong
+speed and pitch until a restart.
+
 **A Core Audio listener freed under Core Audio.** The whole macOS suite died in 2 of 6 runs (SIGSEGV / SIGBUS on
 Core Audio's `HALC_ShellObject_Listener Queue`): a pass-through whose `start()` failed (a call app already playing
 into BlackHole 16ch, no headphones) kept its `coreaudio.Running` registered, the garbage collector later freed it

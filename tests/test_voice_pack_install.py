@@ -22,7 +22,7 @@ from peresmeshnik.local.voicepack import Cancelled, PackError
 FAKE_PIP = '''import sys, time, zipfile
 a = sys.argv[1:]
 target, reqs = a[a.index('--target') + 1], a[a.index('-r') + 1]
-assert '--require-hashes' in a and '--no-index' in a and '--no-deps' in a
+assert '--require-hashes' in a and '--no-index' in a and '--no-deps' in a and sys.flags.utf8_mode
 for line in open(reqs):
     whl = line.split(' --hash=')[0]
     print('Processing', whl, flush=True)
@@ -186,6 +186,19 @@ def test_leftovers_are_not_counted_as_used_space(pack, monkeypatch):
         100 << 30, 0, need - (8 << 30 if any(f.exists() for f in left) else 0)))  # they hold 8 GB, then just enough
     run(lock, where)
     assert voicepack.state(lock, where) == 'ready' and sorted(p.name for p in where.parent.iterdir()) == ['voice-pack']
+
+
+def test_a_user_folder_outside_the_ansi_code_page(pack):
+    """Windows writes text in the ANSI code page by default (cp1252: no Cyrillic): the requirements file is UTF-8, and
+    pip runs in UTF-8 mode (the fake pip asserts it), so a path like C:\\Users\\Иван Петров reads and prints right."""
+    lock, where, _, _ = pack
+    where = where.parent.parent / 'Иван Петров' / 'voice-pack'
+    seen = []
+    run(lock, where, progress=lambda stage, done, total, text='': seen.append(text))
+    reqs = (where / 'pack-requirements.txt').read_bytes().decode('utf-8')
+    assert str(where.with_name('voice-pack.download') / 'torch-1.0-py3-none-any.whl') in reqs
+    assert f'Processing {where.with_name("voice-pack.download")}' in ' '.join(seen)
+    assert voicepack.state(lock, where) == 'ready'
 
 
 def test_need_bytes_of_the_real_lock():

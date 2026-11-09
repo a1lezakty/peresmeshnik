@@ -136,7 +136,7 @@ def install(progress=lambda stage, done, total, text='': None, cancel: threading
     site.mkdir(parents=True)
     (tmp / PTH).write_text('python312.zip\n.\nLib\\site-packages\nimport site\n')  # the runner's packages; .pth files
     reqs = tmp / 'pack-requirements.txt'
-    reqs.write_text(''.join(f'{dl / _name(w)} --hash=sha256:{w["sha256"]}\n' for w in spec['wheels']))
+    reqs.write_text(''.join(f'{dl / _name(w)} --hash=sha256:{w["sha256"]}\n' for w in spec['wheels']), 'utf-8')
     cmd = [*(run_python or [str(python(tmp))]), str(dl / _name(spec['pip']) / 'pip'), 'install', '--no-index', '--no-deps',
            '--require-hashes', '--only-binary', ':all:', '--no-cache-dir', '--disable-pip-version-check',
            '--no-warn-script-location', '--target', str(site), '-r', str(reqs)]
@@ -186,8 +186,11 @@ def _fetch(f: dict, dl: Path, retries: int, cancel: threading.Event, progress) -
 def _pip(cmd: list[str], cancel: threading.Event, line, tmp: Path) -> None:
     env = {k: v for k, v in os.environ.items() if not k.startswith('PIP_')}  # no user pip settings (PIP_USER, ...)
     env |= {'PIP_CONFIG_FILE': os.devnull, 'PYTHONNOUSERSITE': '1', 'TMP': str(tmp), 'TEMP': str(tmp), 'TMPDIR': str(tmp)}
+    # a user folder with letters outside the ANSI code page (Windows): pip 26 reads the requirements as UTF-8 (then the
+    # locale's), but prints their paths in the locale's encoding, where a Cyrillic one fails; UTF-8 mode: both UTF-8
+    env['PYTHONUTF8'] = '1'
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, text=True,
-                         errors='replace', creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), env=env)
+                         encoding='utf-8', errors='replace', creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), env=env)
     tail: list[str] = []
 
     def read():

@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from peresmeshnik import config, models
+from peresmeshnik.languages import needed_models  # noqa: F401 (the models page asks it; tests patch it here)
 from peresmeshnik.local import voicepack
 from peresmeshnik.ui.tray import LANGS, MIC_LABEL, SIDES, device_combo, save_key
 
@@ -55,19 +56,6 @@ def has_key(s: config.Settings) -> bool:
         return bool(api_key(s.cloud))
     except SystemExit:
         return False
-
-
-def needed_models(s: config.Settings) -> list[str]:
-    """Registry ids the chosen setup runs on (ARCHITECTURE §6). Silero VAD is always there: it gates the cloud too."""
-    ids = ['silero-vad']
-    for side, (src, tgt) in (('them_to_me', (s.their_lang, s.my_lang)), ('me_to_them', (s.my_lang, s.their_lang))):
-        local = getattr(s, side) == 'local'
-        if local or not s.cloud.subtitles:  # local voice, or local subtitles next to the cloud voice
-            ids += [s.local.asr[src], s.local.mt[f'{src}-{tgt}']]
-        if local:
-            stock = side == 'them_to_me' or s.local.clone == 'piper'  # voice.STOCK: me -> them in a stock voice
-            ids += [s.local.tts[tgt]] if stock else [s.local.clone, s.local.tts[tgt]]  # the clone's fallback (~60 MB)
-    return list(dict.fromkeys(ids))
 
 
 MIN_VRAM_GB = 5.5  # the clone (XTTS-v2 ~2 GB) next to them -> me on CUDA (~0.6 GB): a 6 GB card (6144 MiB, some report less)

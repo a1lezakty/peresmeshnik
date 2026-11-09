@@ -393,8 +393,14 @@ class SelfTestPage(QWizardPage):
                 from peresmeshnik.ui import selftest
                 ctl.set_translation(False).result()  # the call sink must carry only the chirp
                 vmic = ctl.submit(ctl.virtual_mic).result()  # the app's own: a second one would replace it
-                rs = selftest.run_all(s.ui.headphones or None, s.ui.mic or None, vmic,
-                                      report=lambda r: self.result.emit(r.ok, f'{r.name}: {r.detail}'))
+                if MACOS:  # the test records BlackHole 2ch like a call app: the loop would open the microphone into it
+                    ctl.submit(ctl._loopback, False).result()
+                try:
+                    rs = selftest.run_all(s.ui.headphones or None, s.ui.mic or None, vmic,
+                                          report=lambda r: self.result.emit(r.ok, f'{r.name}: {r.detail}'))
+                finally:
+                    if MACOS and not ctl.on:
+                        ctl.submit(ctl._loopback, True).result()
                 self.ok = all(r.ok for r in rs)
             except Exception as e:  # no pactl, no sound server: say so instead of waiting forever
                 self.result.emit(False, f'self-test: {e}')

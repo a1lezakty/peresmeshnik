@@ -63,6 +63,7 @@ class Mic:
         self.pipewire = sys.platform.startswith('linux') and bool(shutil.which('parec'))
         self.macos = sys.platform == 'darwin'
         self.source = ''  # the device being recorded (Linux, macOS)
+        self.uid = ''  # macOS: its Core Audio UID
         self._stream = self._proc = self._thread = None
         self._stopping = False
 
@@ -126,9 +127,10 @@ class Mic:
                 line = raw.decode(errors='replace').strip()
                 kind, _, rest = line.partition(' ')
                 if kind in ('using', 'lost', 'none'):
-                    name = rest.partition('\t')[2] or rest
+                    uid, _, name = rest.partition('\t')
+                    name = name or rest
                     if kind == 'using':
-                        self.source = name
+                        self.source, self.uid = name, uid
                     if self.on_device and not self._stopping:
                         self.on_device(kind, name)
                 elif line:
@@ -160,18 +162,26 @@ class Mic:
 
 def followed(saved: str, on_state: Callable[[str], None] = lambda text: None) -> Mic:
     """macOS: the microphone of me -> them, kept by the helper on the saved device, else the default input (never
-    BlackHole), back on the saved one when it returns; one tray message per outage, as app.Microphone on Linux."""
-    failing = [False]
+    BlackHole), back on the saved one when it returns. The helper takes another one at once: the tray says which one
+    plays meanwhile, and again when the saved one is back."""
+    away = {'name': '', 'none': False}  # the saved microphone while it is away; no microphone at all
 
     def on_device(kind: str, name: str) -> None:
-        if kind == 'using' and failing[0]:
-            failing[0] = False
-            on_state(f'translating (the microphone is back: {name})')
-        elif kind in ('lost', 'none') and not failing[0]:
-            failing[0] = True
-            on_state(f'error: the microphone went away ({name}); reopening' if kind == 'lost' else
-                     'error: no microphone: plug one in or choose it in the settings')
-    return Mic(saved, follow=True, on_device=on_device, on_end=lambda why: on_state(f'error: the microphone stopped: {why}'))
+        if kind == 'lost':
+            away['name'] = away['name'] or name
+        elif kind == 'none':
+            if not away['none']:
+                on_state('error: no microphone: plug one in or choose it in the settings')
+            away['none'] = True
+        elif kind == 'using' and (away['name'] or away['none']):
+            away['none'] = False
+            if not saved or saved in (m.uid, name):
+                away['name'] = ''
+                on_state(f'translating (the microphone is back: {name})')
+            else:
+                on_state(f'translating ({away["name"] or "your microphone"} went away: {name} meanwhile)')
+    m = Mic(saved, follow=True, on_device=on_device, on_end=lambda why: on_state(f'error: the microphone stopped: {why}'))
+    return m
 
 
 def record(seconds: float, device: int | str | None = None, sample_rate: int = SAMPLE_RATE,

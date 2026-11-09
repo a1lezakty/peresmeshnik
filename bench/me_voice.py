@@ -170,7 +170,7 @@ def run(a):
     np.save(out / 'events.npy', np.array(events, np.int64).reshape(-1, 3))
     meta = {'variant': a.variant, 'sr': sink.sr, 'device': tts.device, 'said': [{k: u[k] for k in ('text', 'chunks', 'arrive')}
                                                                                for u in tts.said],
-            'rows': rows, 'captions': captions, 'summary': d.summary()}
+            'rows': rows, 'captions': captions, 'summary': d.summary(), 'model_sha256': model_sha256(a.model_dir)}
     (out / 'run.json').write_text(json.dumps(meta, ensure_ascii=False, indent=0), encoding='utf-8')
     d.close()
     print(out, len(tts.said), 'utterances', len(events), 'output frames')
@@ -323,7 +323,7 @@ def score(a):
         turn = next((s for s in turns if t is not None and s['start'] - 0.5 <= t < s['end']), None)
         if turn and turn['lufs'] is not None and p['lufs'] is not None:
             jump.append(p['lufs'] - turn['lufs'])
-    row = record('me_voice', a.variant, device=meta['device'], clauses=len(per),
+    row = record('me_voice', a.variant, device=meta['device'], model_sha256=meta.get('model_sha256'), clauses=len(per),
                  sim_mean=round(float(np.mean([p['sim'] for p in per])), 3), sim_p10=pct([p['sim'] for p in per], 10),
                  cer=round(sum(p['cer_e'] for p in per) / max(sum(p['cer_n'] for p in per), 1), 4),
                  tails=int(sum(p['tail_words'] > 0 for p in per)), tail_words=sum(p['tail_words'] for p in per),
@@ -358,6 +358,13 @@ def fragment(text: str) -> bool:
     return not re.search(r'[.!?…]["»”)]*$', text)
 
 
+def model_sha256(model_dir: Path) -> str:
+    """model.pth as the run left it: coqui-tts 0.28 rewrites the registry's file at its first load (its config object
+    as a dict; the weights are the same), so it is not the registry's hash (BENCH stage 5, S2)."""
+    from peresmeshnik.models import sha256
+    return sha256(Path(model_dir) / 'model.pth')
+
+
 def tails(a):
     """XTTS's babble after the text, by how a fragment's text ends: as it is, with a comma, with a period."""
     import soundfile as sf
@@ -380,12 +387,14 @@ def tails(a):
                               'dur_s': round(len(wav) / tts.sample_rate, 3)})
         print(i, text, flush=True)
     (out / 'items.json').write_text(json.dumps(items, ensure_ascii=False, indent=0), encoding='utf-8')
+    (out / 'model_sha256').write_text(model_sha256(a.model_dir), encoding='utf-8')
 
 
 def tails_score(a):
     from tts_clone import Judge
     out = OUT / a.src / 'tails'
     items, j = json.loads((out / 'items.json').read_text(encoding='utf-8')), Judge()
+    sha = (out / 'model_sha256').read_text(encoding='utf-8').strip() if (out / 'model_sha256').exists() else None
     for x in items:
         x['cer_e'], x['cer_n'], x['hyp'] = j.cer(str(out / x['wav']), x['text'], 'en')
         x['tail_words'] = tail_words(x['text'], x['hyp'])
@@ -396,7 +405,7 @@ def tails_score(a):
         record('me_voice_tails', name, part=part, src=a.src, n=len(xs), tails=sum(x['tail_words'] > 0 for x in xs),
                tail_words=sum(x['tail_words'] for x in xs),
                cer=round(sum(x['cer_e'] for x in xs) / max(sum(x['cer_n'] for x in xs), 1), 4),
-               dur_s=round(sum(x['dur_s'] for x in xs), 1))
+               dur_s=round(sum(x['dur_s'] for x in xs), 1), model_sha256=sha)
 
 
 def main():

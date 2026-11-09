@@ -2,7 +2,8 @@
 no model. Only the runner's hidden --engine option loads it; nothing in the app passes that.
 
 A synth chunk holds len(text) / 100 in every sample, so a test sees whose audio it got. Texts: 'slow' streams 100
-chunks 50 ms apart, 'boom' fails like CUDA out of memory, 'die' kills the runner like a driver crash."""
+chunks 50 ms apart, 'boom' fails like CUDA out of memory, 'die' kills the runner like a driver crash, 'hang' sends
+nothing for a minute like a hung CUDA call."""
 import os
 import time
 from pathlib import Path
@@ -32,6 +33,8 @@ class Engine:
             raise RuntimeError('CUDA out of memory')
         if text == 'die':
             os._exit(3)
+        if text == 'hang':
+            time.sleep(60)
         n, pause = (100, 0.05) if text == 'slow' else (3, 0.0)
         for _ in range(n):
             time.sleep(pause)

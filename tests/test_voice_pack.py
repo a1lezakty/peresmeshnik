@@ -1,6 +1,10 @@
 """The voice pack's runner (voice-runner/voice_runner.py) and its client (local/clone.py VoicePackClone), with a stub
-engine (tests/voice_stub.py) instead of XTTS: the protocol, barge-in, errors, a runner that dies or never starts, its
-idle CPU; make_clone's choice; the app's fallback when the clone cannot speak. No torch, no coqui-tts, no GPU."""
+engine (tests/voice_stub.py) instead of XTTS: the protocol, barge-in, errors, a runner that dies, hangs or never starts,
+its stderr, its idle CPU; make_clone's choice; the app's fallback when the clone cannot speak. No torch, no coqui-tts,
+no GPU."""
+import json
+import os
+import subprocess
 import sys
 import threading
 import time
@@ -16,6 +20,14 @@ from peresmeshnik.local import clone
 from peresmeshnik.local.clone import RUNNER, CloneUnavailable, VoicePackClone, make_clone, voice_cmd
 
 STUB = [sys.executable, str(RUNNER), '--engine', str(Path(__file__).with_name('voice_stub.py')), '--device', 'cpu']
+
+
+@pytest.fixture(autouse=True)
+def data(monkeypatch, tmp_path):
+    """The runner's log (<data dir>/logs/voice-runner.log) in the test's folder."""
+    import peresmeshnik.config as config
+    monkeypatch.setattr(config, 'data_dir', lambda: tmp_path / 'data')
+    return tmp_path / 'data'
 
 
 @pytest.fixture
@@ -101,6 +113,44 @@ def test_startup_failure_is_clear(tmp_path, cmd, why):
     model = tmp_path / ('broken' if 'FileNotFound' in why else 'xtts-v2')
     with pytest.raises(CloneUnavailable, match=why):
         VoicePackClone(model, cmd=cmd)
+
+
+def test_a_runner_that_stops_answering_is_killed(tmp_path, me):
+    """A hung CUDA call: no reply chunk in reply_s -> the runner is killed and the call raises (the direction's worker
+    dies and the app's fallback runs) instead of the voice going silent for good."""
+    p = VoicePackClone(tmp_path / 'xtts-v2', cmd=STUB, reply_s=1)
+    try:
+        t = time.perf_counter()
+        with pytest.raises(RuntimeError, match=r'did not answer in 1 s'):
+            say(p, 'hang', me)
+        assert time.perf_counter() - t < 5 and p._p.poll() is not None
+    finally:
+        p.close()
+
+
+def test_stderr_nobody_reads_does_not_hide_the_reason(tmp_path):
+    """A windowed .exe has no stderr: its child gets a pipe nobody reads. The runner's traceback there must not kill it
+    before its {"error"} line."""
+    r, w = os.pipe()
+    os.close(r)
+    p = subprocess.Popen([*STUB, '--model-dir', str(tmp_path / 'broken')], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=w)
+    os.close(w)
+    out, _ = p.communicate(timeout=60)
+    assert json.loads(out.splitlines()[0])['error'].startswith('FileNotFoundError'), out
+
+
+def test_the_runner_log(tmp_path, data):
+    """Its stderr goes to <data dir>/logs/voice-runner.log, new at each start; a runner that exits without a reason
+    of its own is named by the log's last lines."""
+    with pytest.raises(CloneUnavailable, match='FileNotFoundError'):
+        VoicePackClone(tmp_path / 'broken', cmd=STUB)
+    log = data / 'logs' / 'voice-runner.log'
+    assert 'Traceback' in log.read_text()
+    crash = [sys.executable, '-c', 'import sys; print("torch DLL not found", file=sys.stderr); sys.exit(4)']
+    with pytest.raises(CloneUnavailable, match=r'did not start: exited \(4\): torch DLL not found$'):
+        VoicePackClone(tmp_path, cmd=crash)
+    assert log.read_text().strip() == 'torch DLL not found'
 
 
 def test_a_runner_that_never_answers_is_killed(tmp_path):

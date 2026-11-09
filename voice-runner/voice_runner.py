@@ -20,6 +20,7 @@ The process sleeps in blocking reads between requests; stdin closed ends it.
 """
 import argparse
 import base64
+import contextlib
 import importlib.util
 import json
 import os
@@ -75,7 +76,8 @@ def main():
             info['vram_cap_gb'] = a.vram_gb
         engine = xtts.Engine(a.model_dir, device=device, threads=a.threads)
     except Exception as e:  # the client says why instead of "exited (1)"
-        traceback.print_exc()
+        with contextlib.suppress(OSError):  # a stderr nobody reads (a pipe of a windowed app) must not hide the reason
+            traceback.print_exc()
         say({'error': f'{type(e).__name__}: {e}'})
         return 1
     say({'sample_rate': engine.sample_rate, 'device': device, 'model': str(a.model_dir), **info})
@@ -124,7 +126,8 @@ def main():
             else:
                 say({'error': f'unknown request {cmd!r}'})
         except Exception as e:  # CUDA out of memory, a bad voice folder: the reply says so, the runner goes on
-            traceback.print_exc()
+            with contextlib.suppress(OSError):
+                traceback.print_exc()
             msg = {'error': f'{type(e).__name__}: {e}'}
             if cmd == 'synth':
                 out.write(struct.pack('<I', ERR))

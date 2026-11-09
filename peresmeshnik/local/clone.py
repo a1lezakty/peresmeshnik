@@ -27,6 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
+from peresmeshnik import config
 from peresmeshnik import voice as profiles
 from peresmeshnik.engines import Voice
 from peresmeshnik.local import voicepack, xtts
@@ -79,13 +80,19 @@ def make_clone(model_dir: Path | str, threads: int = 2):
 class VoicePackClone:
     """XttsClone's interface over the voice pack's runner (voice-runner/voice_runner.py: the protocol is there).
     `info`: what the runner got (device, torch, VRAM). A runner that fails at start raises CloneUnavailable; one that
-    dies later makes the call raise RuntimeError, so the direction ends with a message instead of hanging."""
+    dies later, or sends no reply chunk for `reply_s`, makes the call raise RuntimeError (a silent one is killed), so
+    the direction ends with a message instead of hanging. Its stderr: `log` (<data dir>/logs/voice-runner.log, new
+    at each start)."""
 
-    def __init__(self, model_dir: Path | str, threads: int = 2, cmd: list[str] | None = None, start_s: float = 120.0):
+    def __init__(self, model_dir: Path | str, threads: int = 2, cmd: list[str] | None = None, start_s: float = 120.0,
+                 reply_s: float = 30.0, log: Path | None = None):
         cmd = [*(cmd or voice_cmd() or []), '--model-dir', str(model_dir), '--threads', str(threads)]
-        try:  # no console window from a windowed app on Windows (python.exe is a console program)
-            self._p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        self._log, self.reply_s, self._hung = log or config.data_dir() / 'logs' / 'voice-runner.log', reply_s, False
+        try:  # a file, not the app's stderr: a windowed .exe has none and the runner's first traceback would kill it
+            self._log.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._log, 'wb') as err:  # no console window from a windowed app (python.exe is a console program)
+                self._p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err,
+                                           creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         except OSError as e:
             raise CloneUnavailable(f'the voice pack did not start ({cmd[0]}): {e}') from e
         head: list[bytes] = []
@@ -101,8 +108,30 @@ class VoicePackClone:
             self._p.kill()
             code = self._p.wait()
             why = info.get('error') or (f'exited ({code})' if line is not None else f'no answer in {start_s:g} s')
+            tail = [ln.strip() for ln in self._log.read_text('utf-8', 'replace').splitlines() if ln.strip()][-3:]
+            if tail and 'error' not in info:  # no reason of its own: what it wrote last
+                why += ': ' + ' / '.join(tail)
             raise CloneUnavailable(f'the voice pack did not start: {why}')
         self.sample_rate, self.info, self._id = info.pop('sample_rate'), info, 0
+
+    def _wait(self, read):
+        """`read()` within reply_s: a runner that sends nothing (a hung CUDA call) is killed, so the read ends."""
+        t = threading.Timer(self.reply_s, self._kill_hung)
+        t.daemon = True
+        t.start()
+        try:
+            return read()
+        finally:
+            t.cancel()
+
+    def _kill_hung(self) -> None:
+        self._hung = True
+        self._p.kill()
+
+    def _exited(self) -> RuntimeError:
+        code = self._p.wait()
+        return RuntimeError(f'the voice pack did not answer in {self.reply_s:g} s (killed)' if self._hung
+                            else f'the voice pack exited ({code})')
 
     def _send(self, req: dict) -> int:
         self._id += 1
@@ -110,22 +139,22 @@ class VoicePackClone:
             self._p.stdin.write(json.dumps({'id': self._id, **req}).encode() + b'\n')
             self._p.stdin.flush()
         except OSError:
-            raise RuntimeError(f'the voice pack exited ({self._p.wait()})') from None
+            raise self._exited() from None
         return self._id
 
     def _read(self, n: int) -> bytes:
-        b = self._p.stdout.read(n)
+        b = self._wait(lambda: self._p.stdout.read(n))
         if len(b) < n:
-            raise RuntimeError(f'the voice pack exited ({self._p.wait()})')
+            raise self._exited()
         return b
 
     def _u32(self) -> int:
         return struct.unpack('<I', self._read(4))[0]
 
     def _reply(self) -> dict:
-        r = json.loads(self._p.stdout.readline() or b'{}')
+        r = json.loads(self._wait(self._p.stdout.readline) or b'{}')
         if not r:
-            raise RuntimeError(f'the voice pack exited ({self._p.wait()})')
+            raise self._exited()
         if 'error' in r:
             raise RuntimeError(f'the voice pack: {r["error"]}')
         return r
@@ -143,7 +172,7 @@ class VoicePackClone:
             self._send({'cmd': 'stop', 'id': rid})
             while n := self._u32():
                 if n == ERR:
-                    self._p.stdout.readline()
+                    self._wait(self._p.stdout.readline)
                     break
                 self._read(n)
             raise

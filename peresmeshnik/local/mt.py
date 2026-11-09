@@ -13,17 +13,19 @@ class OpusMt:
         path = models.path(model_id or f'opus-mt-{src}-{tgt}')
         self.src, self.tgt = src, tgt
         self.device = 'cuda' if device.ct2_cuda() else 'cpu'
+        self._sp_src = spm.SentencePieceProcessor(str(path / 'source.spm'))
+        self._sp_tgt = spm.SentencePieceProcessor(str(path / 'target.spm'))
         try:
             self._tr = ctranslate2.Translator(str(path), device=self.device, inter_threads=1, intra_threads=threads)
-        except Exception as e:  # CUDA there but the model would not load on it (VRAM): them -> me falls back to CPU
+            if self.device == 'cuda':  # cuBLAS loads at the first translation: a driver without the CUDA libraries fails there
+                self.translate('Hello.', src, tgt)
+        except Exception as e:  # CUDA there but the model would not load or run on it: them -> me falls back to CPU
             if self.device != 'cuda':
                 raise
             import logging
             logging.getLogger('peresmeshnik.device').warning('MT on CUDA failed (%s); using CPU', e)
             self.device = 'cpu'
             self._tr = ctranslate2.Translator(str(path), device='cpu', inter_threads=1, intra_threads=threads)
-        self._sp_src = spm.SentencePieceProcessor(str(path / 'source.spm'))
-        self._sp_tgt = spm.SentencePieceProcessor(str(path / 'target.spm'))
 
     def translate(self, text: str, src: str, tgt: str, context: tuple[str, ...] = ()) -> str:
         assert (src, tgt) == (self.src, self.tgt), f'model is {self.src}-{self.tgt}'

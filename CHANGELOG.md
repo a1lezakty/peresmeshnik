@@ -14,7 +14,7 @@ Chinese, Japanese, Korean, Arabic — both ways.
   translated in the cloud (Gemini Live has all 14), with the cloud's subtitles too.
 - **Another pair from the tray** (Languages → I speak / They speak) without restarting the app: the new pair's models
   are downloaded first (restricted licenses are asked) while translation goes on with the old pair, then both
-  directions start again in the new one.
+  directions start again in the new one (meanwhile the call and you hear each other untranslated).
 - Where your cloned voice does not speak the language, a stock voice speaks instead, and the app says so.
 - Subtitles in Chinese, Japanese, Korean and Arabic (right to left). Without a font for the script (some Linux
   installs) the wizard and the tray say what to install.

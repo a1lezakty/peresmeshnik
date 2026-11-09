@@ -23,7 +23,8 @@ Design and numbers: [architecture](docs/ARCHITECTURE.md), [benchmarks](docs/BENC
 ## Languages
 
 Choose "I speak" and "They speak" in the setup wizard, or later in the tray menu **Languages** (no restart: the new
-pair's models are downloaded first while translation goes on, then both directions start again in it). For each
+pair's models are downloaded first while translation goes on, then both directions start again in it; for the seconds
+that takes, the call and you hear each other as with translation off). For each
 direction the wizard says before anything is downloaded whether it can run on this computer, why not (no speech
 recognition, translation or voice for a language), what it downloads and under which licenses; a direction that
 cannot run here is translated in the cloud (Gemini Live has all 14 languages). Where your cloned voice does not speak

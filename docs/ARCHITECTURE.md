@@ -265,11 +265,15 @@ local when `[local]` names an ASR for its source (`asr[src]`), an MT for the pai
 target (`tts[tgt]`, or for me → them the clone), and the registry's `langs` of each model has that language or pair
 (a multilingual model lists its languages: any pair of two of them). Otherwise the side is cloud-only, with the cloud's
 subtitles (no local ASR + MT), and the wizard and the tray say why before anything is downloaded. Me → them in a
-language the clone does not speak goes to the stock voice of that language, said once. The cloud covers all 14
+language the clone does not speak goes to the stock voice of that language, said at each start. A model that runs live only with an NVIDIA GPU has
+`needs = "gpu"` in the registry: without one it is not offered (the clone: the stock voice instead). `'*'` in a
+`[local]` table names one model for every language or pair it has (a multilingual MT). The cloud covers all 14
 (`CLOUD_TRANSLATE`: Gemini's `target_language_code`; `CLOUD_TRANSCRIBE`: `language_codes` with the region — Portuguese
 pt-BR, Spanish es-419, Chinese zh-Hans / cmn-Hans-CN, Arabic ar-EG). Changing the pair while translating (tray) fetches
 its models first, then makes both sides again the way a failed side is restarted (`Controller.set_languages`): the
-devices, the call's route and the microphone loop stay. Subtitles: Qt picks a font per script and lays Arabic out right
+devices stay; while a side is made again the call and I hear each other as with translation off (the call app's sound
+back to the speakers — macOS < 14.4 through the pass-through —, the microphone looped into the virtual one), for the
+seconds its models take to load. Subtitles: Qt picks a font per script and lays Arabic out right
 to left by itself; where the font database has no font for a script (Linux without Noto CJK / Arabic) the app says what
 to install. The per-language engines and their numbers are S1's / S2's rows in [BENCH.md](BENCH.md) ("Stage 6").
 

@@ -1701,10 +1701,10 @@ device test after it failed; an earlier CI run had 4 such failures).
 
 ### LuxTTS for me → them on an 8 GB Mac: not taken
 
-The question (research of 2026-11-08, `clone-luxtts-omnivoice`): LuxTTS int8 ONNX, faster than real time on 3 fast x86
-cores (RTF 0.23), was estimated at RTF 0.9–1.2 on the `macos-15` runner. Taken further only if the runner shows
-**RTF ≤ 0.7 and first sound ≤ 2.5 s**. Measured 2026-11-09 on `macos-15` (Apple M1 Virtual, 3 cores, 7 GB) by the
-research's method (one temporary workflow, removed): LuxTTS git `28ae6a6`, weights `527f245`, torch 2.8.0,
+The question (a research run of 2026-11-08 on an NVIDIA GPU machine, not published): LuxTTS int8 ONNX, faster than
+real time on 3 fast x86 cores (RTF 0.23), was estimated at RTF 0.9–1.2 on the `macos-15` runner. Taken further only if
+the runner shows **RTF ≤ 0.7 and first sound ≤ 2.5 s**. Measured 2026-11-09 on `macos-15` (Apple M1 Virtual, 3 cores,
+7 GB) by that run's method (one temporary workflow, removed): LuxTTS git `28ae6a6`, weights `527f245`, torch 2.8.0,
 onnxruntime CPU; the same 6 shortest FLEURS dev sentences (4.9–7.1 s), the same references cut at a pause (en 3.54 s,
 ru 3.80 s; "r10": 9.96 / 9.46 s), Russian references as espeak `ru` phonemes (the transcript from the book text), one
 untimed warm-up; judges ECAPA (cosine to the full 40 s reference) and faster-whisper `small` int8. LuxTTS does not
@@ -1721,13 +1721,13 @@ stream: first sound = the whole sentence (≈ 4 s of its fast speech). n = 6 sen
 
 - **RTF passes** (0.62–0.66 with the short reference), **the first sound does not**: 2.4–2.6 s on average and 3.1–3.6 s
   for the longest sentences. It is RTF × the sentence: the threshold means RTF ≤ ~0.6 for these. The 9.5 s reference
-  (better likeness on B) doubles the cost; the runner's virtual GPU (MPS) is slower than its CPU. Against XTTS-v2 on the
+  (better likeness on the NVIDIA machine) doubles the cost; the runner's virtual GPU (MPS) is slower than its CPU. Against XTTS-v2 on the
   same runner (stage 3: first audio 4.2–4.3 s, RTF 5.5–5.8, 3.8 GB) its RTF is 8–9× lower and it needs a third of the
   memory.
 - **ru → en drops the first word** in 4–5 of the 6 sentences on every path ("Soon officers …" → "officers …", "Some
   festivals have …" → "festivals have …"; en → en keeps them): most of its WER. The Russian prompt is a phoneme hack (the
-  model has no Russian), and its end seems to swallow the start of the target. B's GPU run had WER 3.2 % there.
-- Likeness ru → en 0.46–0.53, as on B (0.46–0.53) and above XTTS on CPU (0.43). Nobody listened to it.
+  model has no Russian), and its end seems to swallow the start of the target. The NVIDIA GPU run of 2026-11-08 had WER 3.2 % there.
+- Likeness ru → en 0.46–0.53, as on the NVIDIA GPU machine (0.46–0.53) and above XTTS on CPU (0.43). Nobody listened to it.
 - Load 8–15 s; the voice prompt from the reference 0.8–12 s (the first call in a process initialises librosa).
 
 **Decision: me → them on a Mac stays in the cloud** (or a stock voice); the wizard says so on a Mac. LuxTTS is not

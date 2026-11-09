@@ -1710,6 +1710,12 @@ RTX 3060 12 GB (a second host, the same picture). The voice: the "me" profile of
 
 ### The clone's voice in the stream (A4000, 90 clauses, before = main f077e58)
 
+The model: XTTS-v2 of the registry (`models.toml`, `model.pth` sha256 `c7ea2000…`), fetched and verified. coqui-tts
+0.28 rewrites `model.pth` in place at its first load (its `XttsConfig` object stored as a dict, `speakers = []`), so
+every run here read a file of sha256 `3077a05b…` (the first one on the A4000 read the registry's and rewrote it; the
+rows' `model_sha256`). Against the registry's file, checked on the RTX 3060: 963 of 963 weight tensors bit-identical,
+the config's 94 keys the same. The app's clone rewrites it the same way at its first load.
+
 | | before | after |
 |---|---|---|
 | a clause starts with a step (> −40 dB under its peak: a click) | **57 of 90** (the step −33…−10 dB) | **0** |
@@ -1727,9 +1733,10 @@ RTX 3060 12 GB (a second host, the same picture). The voice: the "me" profile of
 | voice after the clause's end, p50 / p90 | 1.96 / 3.21 s | 1.72 / 3.25 s |
 | clone's first audio, p50 (a GPU shared with another job: it varies) | 224 ms | 166 ms |
 
-The code after review round 1 (`Level`: power mean, noise floor; the eased limiter, below), on the RTX 3060: clause
-against my turn −0.05 LU p50, |…| p90 1.7 LU; clause loudness −25.6 LUFS (p10–p90 2.5 LU); peak 0.46; clicks 0 / 0 /
-0; pause after a sentence back to back 0.35 s (min 0.34); 1 tail; ECAPA 0.355; CER 2.72 %; 1 hole (0.10 s).
+The code after review round 1 (`Level`: power mean, noise floor, the speech's over ~3 s; the eased limiter: below), on
+the RTX 3060 (row `review1b`): clause against my turn −0.13 LU p50, |…| p90 1.8 LU; clause loudness −25.8 LUFS (p10–p90
+2.3 LU); peak 0.54; clicks 0 / 0 / 0; pause after a sentence back to back 0.35 s (min 0.35); 2 tails; ECAPA 0.355;
+CER 3.0 %; 1 hole (0.08 s).
 
 - The RTX 3060 (main): a click at 46 of 90 clause starts, 37 back to back with 0.16 s after a sentence (min 0.09),
   +7.6 LU against my turn, peak 0.978, ECAPA 0.363, CER 2.45 %, 3 tails, voice p50 / p90 1.70 / 3.22 s: the same picture.
@@ -1779,7 +1786,7 @@ device in memory; level = power mean of 20 ms frames above −45 dBFS.
 | macos-15 | −24.0 dB | −17.3 dB | −24.8 dB | 1.00 → 0.47 |
 | windows-latest | −24.0 dB | −17.4 dB | −25.0 dB | 1.00 → 0.50 |
 | the 4-core VM | −24.0 dB | −17.6 dB | −24.6 dB | 1.00 → 0.48 |
-| the 4-core VM, review round 1 (`Level`: power mean, noise floor) | −24.0 dB | −17.4 dB | −22.7 dB | 1.00 → 0.62 |
+| the 4-core VM, review round 1 (`Level`: power mean, noise floor, the speech's over ~3 s) | −24.0 dB | −17.3 dB | −23.8 dB | 1.00 → 0.56 |
 
 ### The level: room noise before my first word, the cloud's short chunks, a new voice (review, round 1)
 
@@ -1791,7 +1798,11 @@ peak dropped at once at the chunk's start; now it eases down over ≤ 5 ms of th
 back at 20 dB/s. A voice > 15 dB quieter than the level was never followed; now 1 s of it starts the level over (the
 clone's own soft runs reach 0.67 s: 0 restarts in its 6 min stream). The level is now the frames' power mean, not
 their mean in dB: with the floor's cut the mean in dB of a real microphone (`call-en.ogg`, its floor −51…−58 dB) rose
-1–3 dB against the speech's, and Piper went out 2.5 dB over my voice in the test above (−21.5 against −24.0).
+1–3 dB against the speech's, and Piper went out 2.5 dB over my voice in the test above (−21.5 against −24.0). And
+the speech's level now follows over ~3 s of speech, as the microphone's (it was ~1 s): Piper says a clause in one
+chunk, and a level with a 1 s memory, read at the chunk's end, was that of its quieter last second (−19.7 against the
+chunk's −18.0): Piper went out 1.7–1.8 dB over my voice on the CI runners; now 0.2 dB on the 4-core VM. The price: a
+louder new voice is followed in 2.6 s, not 1.6 s (below).
 `tests/test_virtual_mic_live.py`, no models: speech = 0.6 s syllables and 0.16 s pauses down to the room's noise; the
 translation is noise at −17 dB (the cloud's chunks at −30 dB); "before" is 295a7eb's `mic.py` on the same signals.
 
@@ -1801,7 +1812,7 @@ translation is noise at −17 dB (the cloud's chunks at −30 dB); "before" is 2
 | the same with me at −18 dB | −40.6 / −37.5 dB | −17.9 / −17.8 dB |
 | the cloud's 20–40 ms chunks at the +10 dB gain, a peak 2 samples into every third: the gain's biggest step from one sample to the next | **6.0 dB** (at a seam) | 0.07 dB |
 | … the gain's swing after the start | 6.0 dB | 1.4 dB |
-| a new voice in the same LiveSwitch (the cloud's fallback), 12 dB louder: back within 2 dB of my level after | 1.6 s | 0.9 s |
+| a new voice in the same LiveSwitch (the cloud's fallback), 12 dB louder: back within 2 dB of my level after | 1.6 s | 2.6 s |
 | … 16 dB quieter | **never** (−41.8 dB after 4 s) | 1.7 s |
 
 The cloud's own level through LiveSwitch is not measured (this machine has no Gemini key): USER-CHECKS.

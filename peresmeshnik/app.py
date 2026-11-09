@@ -483,13 +483,16 @@ class Side:
             self.directions[0] = (LiveSwitch(d), captions, speech)
 
     def _local(self, s: config.Settings):
+        from peresmeshnik import languages
         from peresmeshnik.pipeline import make_local
-        from peresmeshnik.voice import STOCK
+        pair = languages.direction(s, 'them_to_me' if self.name == 'them' else 'me_to_them')
+        if not pair.local:  # the wizard and the tray say so before; settings edited by hand land here
+            raise RuntimeError(f'{"; ".join(pair.why)}: switch "{ARROW[self.name].capitalize()}" to cloud')
         if self.name == 'them':
             from peresmeshnik.pipeline import MAX_LAG_S
             d = make_local(self.src, self.tgt, settings=s, max_lag_s=MAX_LAG_S)  # the queue policy: subtitles keep the rest
-        elif s.local.clone == STOCK:  # a stock voice, live where the clone falls behind (an 8 GB Mac, BENCH)
-            d = make_local(self.src, self.tgt, settings=s)
+        elif pair.voice == 'stock':  # a stock voice: chosen where the clone falls behind (an 8 GB Mac, BENCH), or the
+            d = make_local(self.src, self.tgt, settings=s)  # clone cannot speak the language
         else:
             if not s.local.voice:
                 raise RuntimeError('me -> them local needs your voice: enroll it first (python -m peresmeshnik.voice enroll), '
@@ -517,8 +520,10 @@ class Side:
     def _stock(self, d, s: config.Settings):
         """A side that speaks with Piper, warmed up. The Piper runner dies: only it starts again."""
         if (tts := getattr(d, 'tts', None)) is not None:
+            from peresmeshnik import languages
             from peresmeshnik.local.tts import PiperTts
-            d.tts = crash.Respawn(lambda: PiperTts(s.local.tts[self.tgt], threads=s.local.threads), self._tts_respawned, tts)
+            vid = languages._pick(s.local.tts, self.tgt)  # the language's stock voice (languages.direction's)
+            d.tts = crash.Respawn(lambda: PiperTts(vid, threads=s.local.threads), self._tts_respawned, tts)
         d.warm_up()
         return d
 
@@ -728,6 +733,7 @@ class Controller:
         self._restarts: dict[str, list[float]] = {}  # side -> times of its restarts in the last minute
         self.call_echo = Reference()  # what we said into the call: its echo from a far end on a loudspeaker is not ours to translate
         self.mic_echo = Reference()  # what the headphones (or speakers) played: for the microphone's echo gate
+        self._fonts_said = ()
 
     def submit(self, fn, *args):
         """None once quit() shut the control thread down (a Core Audio notification can still come then)."""
@@ -919,6 +925,7 @@ class Controller:
         self.on_state('warming up')
         self._refresh_devices()  # macOS: devices plugged in since (AirPods back) become visible to PortAudio
         s = self.settings or config.load()
+        self._pair_to_overlay(s)
         files = {'them': self.them_file, 'me': self.me_file}
         from peresmeshnik.voice import STOCK
         t, failed, call = time.perf_counter(), [], ''
@@ -951,6 +958,22 @@ class Controller:
                           f'ready in {time.perf_counter() - t:.1f} s)')
         if call.startswith('call app: none'):
             self.on_state('error: choose the call app in the tray menu (Call app): until then the call is not translated')
+        self._fonts(s)
+
+    def _fonts(self, s: config.Settings) -> None:
+        """No font for a language of the pair (Linux without CJK / Arabic fonts): said once per pair. Only with the app's
+        GUI running (a headless controller may have no Qt libraries at all); never in the way of translating."""
+        gui = sys.modules.get('PySide6.QtGui')
+        if self.test or not self.sides or self._fonts_said == (s.my_lang, s.their_lang) or not (
+                gui and gui.QGuiApplication.instance()):
+            return
+        self._fonts_said = s.my_lang, s.their_lang
+        try:
+            from peresmeshnik.ui.overlay import font_note
+            if note := font_note([s.my_lang, s.their_lang]):
+                self.on_state(f'note: {note}')
+        except Exception:
+            log.exception('fonts')
 
     def _side(self, name: str, s: config.Settings) -> Side:
         inp = FileIn(f) if (f := {'them': self.them_file, 'me': self.me_file}[name]) else self._input(name, s)
@@ -986,13 +1009,7 @@ class Controller:
         if side not in self.sides or not self.on:
             return
         crash.report(f'{ARROW[side.name]}: {why}', e, self.settings, quiet=True)  # the message below names it
-        self.sides.remove(side)
-        if side.name == 'them':  # before its input stops (the route holds it): the call is heard as usual meanwhile,
-            self._unroute()  # Windows: un-muted; the new side routes it again
-        try:
-            side.stop()
-        except Exception:
-            log.exception('stopping %s', side.name)
+        self._drop(side)
         now = time.monotonic()
         times = self._restarts[side.name] = [t for t in self._restarts.get(side.name, ()) if now - t < 60]
         if len(times) >= RESTARTS:
@@ -1004,9 +1021,8 @@ class Controller:
                 self._loopback(True)  # the call hears the user as is again
             return
         times.append(now)
-        s = self.settings or config.load()
         try:
-            new = self._side(side.name, s)
+            self._make(side.name, self.settings or config.load())
         except Exception as ex:
             log.exception('%s', side.name)
             self.on_state(f'error: {ARROW[side.name]} stopped: {why}; it cannot start again: {ex}')
@@ -1015,13 +1031,59 @@ class Controller:
             elif side.name == 'me':
                 self._loopback(True)  # the call hears the user as is again
             return
+        self.on_state(f'note: {ARROW[side.name]} restarted after an error ({why}); a report without your data is in '
+                      'the tray menu (Crash report…)')
+
+    def _drop(self, side: Side) -> None:
+        self.sides.remove(side)
+        if side.name == 'them':  # before its input stops (the route holds it): the call is heard as usual meanwhile,
+            self._unroute()  # Windows: un-muted; the new side routes it again
+        try:
+            side.stop()
+        except Exception:
+            log.exception('stopping %s', side.name)
+
+    def _make(self, name: str, s: config.Settings) -> Side:
+        new = self._side(name, s)  # raises: the caller says why
         self.sides.append(new)
         new.set_live(self.live)
         new.start()
         if new.name == 'them' and self.devices:  # the call app's sound to the new input (a tap, a loopback, the sink)
             self._route(s)
-        self.on_state(f'note: {ARROW[side.name]} restarted after an error ({why}); a report without your data is in '
-                      'the tray menu (Crash report…)')
+        return new
+
+    def set_languages(self) -> concurrent.futures.Future | None:
+        """The pair changed (tray): while translating, each side is made again for it, as after an error — the devices,
+        the call's route and the microphone loop stay; off, the next start takes the new pair."""
+        return self.submit(self._relanguage)
+
+    def _pair_to_overlay(self, s: config.Settings) -> None:
+        if hasattr(self.overlay, 'set_pair'):  # the rows' fonts (Han in Chinese, Japanese, Korean forms)
+            self.overlay.set_pair(s.my_lang, s.their_lang)
+
+    def _relanguage(self) -> None:
+        if not self.on:
+            return
+        s = self.settings or config.load()
+        self._pair_to_overlay(s)
+        files = {'them': self.them_file, 'me': self.me_file}
+        for name in ('them', 'me'):
+            if not (self.devices or files[name]):
+                continue
+            if old := next((x for x in self.sides if x.name == name), None):
+                self._drop(old)
+            try:
+                self._make(name, s)
+            except Exception as e:
+                log.exception('%s', name)
+                self.on_state(f'error: {ARROW[name]} cannot start for {s.my_lang} ⇄ {s.their_lang}: {e}')
+        self._loopback(not any(x.name == 'me' for x in self.sides))  # no me -> them now: the call hears me as is
+        if not self.sides:
+            self._off()
+            return
+        self.on_state(f'translating ({", ".join(f"{x.name}: {x.engine}" for x in self.sides)}; '
+                      f'languages {s.my_lang} ⇄ {s.their_lang})')
+        self._fonts(s)
 
     def _route(self, s: config.Settings) -> str:
         """The call app's sound into the call sink (Linux) or a tap of it (macOS 14.4+) while translating: the app

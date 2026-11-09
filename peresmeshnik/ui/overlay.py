@@ -15,7 +15,7 @@ import time
 from collections import OrderedDict, deque
 
 from PySide6.QtCore import QRect, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication, QImage, QPainter
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QFontMetrics, QGuiApplication, QImage, QPainter
 from PySide6.QtWidgets import QWidget
 
 from peresmeshnik.engines import Caption, Latency
@@ -25,10 +25,49 @@ GREY, WHITE, BACK = QColor(170, 170, 170), QColor(255, 255, 255), QColor(0, 0, 0
 ME_PREFIX = '» '  # rows of what I said (me -> them)
 FINAL_AFTER_END_S = 1.5  # a phrase's last final caption comes this long after its speech ends, at most
 SHOWN = {'caption': 'subtitle', 'voice': 'voice', 'voice_end': 'voice ends'}  # Latency kinds shown, in this order
+FONT_HINT = {'darwin': 'macOS has them: Font Book → File → Restore Standard Fonts',
+             'win32': 'Settings → Time & language → Language & region → Add a language (its fonts come with it)'}.get(
+    sys.platform, 'e.g. sudo apt install fonts-noto-cjk fonts-noto-core (Noto fonts of your distribution)')
+
+
+# Han characters look different in Chinese, Japanese and Korean (one code point, three glyph forms): a row in one of them
+# is drawn in the first installed font of its own language, not in whatever fallback the system picks for Han (on the
+# Windows runner a Chinese row came out half in a Korean font). The fonts have Latin letters and digits too.
+OWN_FONTS = {
+    'zh': ('Microsoft YaHei', 'PingFang SC', 'Heiti SC', 'Noto Sans CJK SC', 'Source Han Sans SC', 'WenQuanYi Zen Hei',
+           'Droid Sans Fallback', 'SimSun'),
+    'ja': ('Yu Gothic UI', 'Meiryo', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Noto Sans CJK JP', 'Source Han Sans JP',
+           'IPAGothic', 'MS Gothic'),
+    'ko': ('Malgun Gothic', 'Apple SD Gothic Neo', 'Noto Sans CJK KR', 'Source Han Sans KR', 'NanumGothic', 'UnDotum', 'Gulim'),
+}
+
+
+WARM = {'uk': 'Привіт', 'zh': '你好，这是', 'ja': 'こんにちは、カタカナ漢字', 'ko': '안녕하세요', 'ar': 'مرحبا بكم',
+        'de': 'Grüße', 'fr': 'Ça été', 'es': '¿Señor?', 'pt': 'São ação', 'pl': 'Cześć', 'tr': 'Ğüşı', 'it': 'Così'}
+
+
+def missing_fonts(langs) -> list[str]:
+    """Languages whose script no installed font has (Qt's font database): their subtitles would be empty boxes.
+    Arabic needs nothing more: Qt lays out right-to-left text by itself (the painter's direction is automatic)."""
+    from peresmeshnik import languages
+    if QGuiApplication.instance() is None:  # no font database without the GUI (a headless run): nothing to say
+        return []
+    return [x for x in dict.fromkeys(langs)
+            if not QFontDatabase.families(getattr(QFontDatabase.WritingSystem, languages.WRITING.get(x, 'Latin')))]
+
+
+def font_note(langs) -> str:
+    """'' or what to install, for the wizard, the tray and the start of translation."""
+    from peresmeshnik import languages
+    if not (miss := missing_fonts(langs)):
+        return ''
+    return (f'no font for {", ".join(languages.name(x) for x in miss)} on this computer: its subtitles would show empty '
+            f'boxes. Install one: {FONT_HINT}')
 
 
 class SubtitleOverlay(QWidget):
     caption = Signal(str, object)  # (side, Caption), emitted from any thread
+    pair = Signal(str, str)  # (my, their): their fonts load on the GUI thread at translation on, not at the first row
     latency = Signal(str, object)  # (side, Latency), emitted from any thread
     clear = Signal()
 
@@ -56,15 +95,19 @@ class SubtitleOverlay(QWidget):
         w, h = int(scr.width() * 0.7), rows * (self.h_orig + self.h_tr) + 2 * self.pad
         self.setGeometry(scr.x() + (scr.width() - w) // 2, scr.y() + scr.height() - h - 60, w, h)
         self.show_latency = False
+        self.langs = {}  # side -> (language of its originals, of its translations): set_pair
+        self._fonts: dict[str, tuple[QFont, QFont]] = {}  # language -> (original, translation) fonts: own_fonts
         self._rows: OrderedDict[tuple, list] = OrderedDict()  # (side, n) -> [original, translation, {kind: s}]
         self._open: dict[str, int] = {}  # side -> number of its open row, for captions without a clause number
         self._next = 0
         self._final_at: dict = {}  # row -> when its final caption came (a cloud phrase's numbers find their row by it)
         self.clock = time.monotonic
         self._shown: tuple = ()
+        self._sides: tuple = ()  # the side of each row shown
         self.paints, self.updates = 0, 0  # repaints / changes of the visible text
         self.paint_ms: deque[float] = deque(maxlen=10_000)
         self.caption.connect(self._on_caption)
+        self.pair.connect(self._warm)
         self.latency.connect(self._on_latency)
         self.clear.connect(self._on_clear)
         self.on_top = None
@@ -74,6 +117,34 @@ class SubtitleOverlay(QWidget):
 
     def side(self, name: str) -> OverlaySide:
         return OverlaySide(self, name)
+
+    def set_pair(self, my: str, their: str) -> None:
+        """Any thread (the controller's, at translation on and a new pair): the languages of each side's rows, for
+        their fonts at the next paint."""
+        self.langs = {'them': (their, my), 'me': (my, their)}
+        self.pair.emit(my, their)
+
+    def _warm(self, my: str, their: str) -> None:
+        """Load the pair's fonts now: a Chinese or Japanese first row took 85-121 ms to paint cold on the macOS and
+        Windows runners (BENCH stage 6), Latin and Cyrillic are warmed in __init__."""
+        img = QImage(8, 8, QImage.Format_ARGB32_Premultiplied)
+        p = QPainter(img)
+        for lang in (my, their):
+            for f in self.own_fonts(lang):
+                p.setFont(f)
+                p.drawText(0, 8, WARM.get(lang, 'Hello'))
+        p.end()
+
+    def own_fonts(self, lang: str) -> tuple[QFont, QFont]:
+        """GUI thread: the row fonts for a language — Chinese, Japanese, Korean in an installed font of their own."""
+        if lang not in self._fonts:
+            fonts = self.f_orig, self.f_tr
+            if own := next((f for f in OWN_FONTS.get(lang, ()) if f in set(QFontDatabase.families())), None):
+                fonts = tuple(QFont(f) for f in fonts)
+                for f in fonts:
+                    f.setFamily(own)
+            self._fonts[lang] = fonts
+        return self._fonts[lang]
 
     # GUI thread -------------------------------------------------------------------------------------
     def _key(self, side: str, c: Caption) -> tuple:
@@ -130,7 +201,7 @@ class SubtitleOverlay(QWidget):
         shown = tuple((ME_PREFIX if k[0] == 'me' else '', v[0], v[1], self._lat(v[2])) for k, v in self._rows.items())
         if shown == self._shown:
             return False
-        self._shown = shown
+        self._shown, self._sides = shown, tuple(k[0] for k in self._rows)
         self.updates += 1
         if not self.isVisible():
             self.show()
@@ -159,8 +230,10 @@ class SubtitleOverlay(QWidget):
         p.setBrush(BACK)
         p.drawRoundedRect(self.rect(), self.pad, self.pad)
         w, y = self.width() - 2 * self.pad, self.pad + (self.rows - len(self._shown)) * (self.h_orig + self.h_tr)
-        for prefix, orig, tr, lat in self._shown:  # newest at the bottom; long lines keep their end (the latest words)
-            for text, font, color, h in ((orig + lat, self.f_orig, GREY, self.h_orig), (tr, self.f_tr, WHITE, self.h_tr)):
+        for side, (prefix, orig, tr, lat) in zip(self._sides, self._shown):  # newest at the bottom; long lines keep
+            src, tgt = self.langs.get(side, ('', ''))  # their end (the latest words)
+            f_orig, f_tr = self.own_fonts(src)[0], self.own_fonts(tgt)[1]
+            for text, font, color, h in ((orig + lat, f_orig, GREY, self.h_orig), (tr, f_tr, WHITE, self.h_tr)):
                 if text:
                     p.setFont(font)
                     p.setPen(color)

@@ -7,6 +7,7 @@ Qt signals; nothing is polled. Settings are written when the wizard finishes.
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -37,9 +38,10 @@ from PySide6.QtWidgets import (
     QWizardPage,
 )
 
-from peresmeshnik import config, models
+from peresmeshnik import config, languages, models
 from peresmeshnik.languages import needed_models  # noqa: F401 (the models page asks it; tests patch it here)
 from peresmeshnik.local import voicepack
+from peresmeshnik.ui.overlay import font_note
 from peresmeshnik.ui.tray import LANGS, MIC_LABEL, SIDES, device_combo, save_key
 
 LINUX = sys.platform.startswith('linux')
@@ -157,30 +159,43 @@ def tier() -> tuple[str, str]:
 
 
 class LanguagesPage(QWizardPage):
+    """The pair, and per side local or cloud: before anything is downloaded, what each side runs on, why local cannot be
+    (languages.direction), what is downloaded for it, under which licenses, and whether the subtitles' fonts are here."""
+
     def __init__(self, w: SetupWizard):
         super().__init__()
         self.w = w
         s = w.s
         self.setTitle('Languages and engines')
-        what, rec = tier()
+        what, self.rec = tier()
         self.setSubTitle(f'This computer: {what}.')
         f = QFormLayout(self)
         self.my_lang, self.their_lang = QComboBox(), QComboBox()
         for c, v in ((self.my_lang, s.my_lang), (self.their_lang, s.their_lang)):
             for code, name in LANGS.items():
                 c.addItem(name, code)
-            c.setCurrentIndex(c.findData(v))
+            c.setCurrentIndex(max(0, c.findData(v)))
         f.addRow('I speak', self.my_lang)
         f.addRow('They speak', self.their_lang)
-        self.engine = {}
+        self.engine, self.why = {}, {}
         for key, title in SIDES.items():
             c = self.engine[key] = QComboBox()
             c.addItems(config.ENGINES)
-            c.setCurrentText(getattr(s, key) if config.settings_path().exists() else ('local' if key == 'them_to_me' else rec))
+            c.setCurrentText(getattr(s, key) if config.settings_path().exists() else ('local' if key == 'them_to_me' else self.rec))
+            self.why[key] = QLabel()
+            self.why[key].setWordWrap(True)
             f.addRow(title, c)
+            f.addRow('', self.why[key])
         self.subtitles = QCheckBox('Subtitles from the cloud (else from the local ASR: faster, needs ~1 GB of models)')
         self.subtitles.setChecked(s.cloud.subtitles)
         f.addRow('Cloud', self.subtitles)
+        self.download = QLabel()
+        self.download.setWordWrap(True)
+        self.download.setOpenExternalLinks(True)
+        f.addRow('Download', self.download)
+        self.fonts = QLabel()
+        self.fonts.setWordWrap(True)
+        f.addRow(self.fonts)
         self.key = QLineEdit()
         self.key.setEchoMode(QLineEdit.Password)
         self.key.setPlaceholderText('already set' if has_key(s) else 'Gemini API key: aistudio.google.com → Get API key')
@@ -191,13 +206,57 @@ class LanguagesPage(QWizardPage):
         f.addRow(note)
         self.err = QLabel()
         f.addRow(self.err)
+        for c in (self.my_lang, self.their_lang, *self.engine.values()):
+            c.currentIndexChanged.connect(self.refresh)
+        self.subtitles.toggled.connect(self.refresh)
+        self.refresh()
 
-    def validatePage(self) -> bool:  # noqa: N802 (Qt name)
-        s = self.w.s
+    def chosen(self) -> config.Settings:
+        """The settings as this page has them now (the wizard's own are written in validatePage)."""
+        s = copy.deepcopy(self.w.s)
         s.my_lang, s.their_lang = self.my_lang.currentData(), self.their_lang.currentData()
         for key, c in self.engine.items():
             setattr(s, key, c.currentText())
         s.cloud.subtitles = self.subtitles.isChecked()
+        return s
+
+    def refresh(self) -> None:
+        """Per side: local is offered only where it can run (else it says why and the side goes to the cloud), with what
+        runs differently; then the download for this pair with its licenses, and the fonts."""
+        s = self.chosen()
+        for key, c in self.engine.items():
+            d = languages.direction(s, key)
+            item = c.model().item(config.ENGINES.index('local'))
+            item.setEnabled(d.local)
+            if not d.local and c.currentText() == 'local':
+                c.blockSignals(True)
+                c.setCurrentText('cloud')
+                c.blockSignals(False)
+                setattr(s, key, 'cloud')
+            if not d.local:
+                text = f'✘ Not on this computer: {"; ".join(d.why)}. The cloud translates {languages.name(d.src)} → ' \
+                       f'{languages.name(d.tgt)}.'
+            else:
+                text = '✔ Both on this computer and in the cloud.' + ''.join(f' ⚠ {n}.' for n in d.notes if c.currentText() == 'local')
+            if c.currentText() == 'cloud' and languages.cloud_subtitles(s, key) and not s.cloud.subtitles:
+                text += ' Its subtitles come from the cloud too.'
+            if MACOS and key == 'me_to_them':  # BENCH stage 6: no clone keeps up on an M1's CPU (XTTS, LuxTTS measured)
+                text += ' On a Mac your voice goes to the call through the cloud (or a stock voice): no local clone of it ' \
+                        'keeps up here.'
+            self.why[key].setText(text)
+        ms, base = [models.get(i) for i in needed_models(s)], models.root()
+        todo = [m for m in ms if not models.is_fetched(m, base)]
+        lic = {}  # one link per license
+        for m in ms:
+            lic.setdefault(m.license, f'<a href="{m.license_url}">{m.license}</a>'
+                           + (' (noncommercial: you accept it on the models page)' if m.consent else ''))
+        self.download.setText((f'{sum(m.size for m in todo) / 1e6:,.0f} MB for this pair ({len(todo)} of {len(ms)} models '
+                               'not here yet)' if todo else 'Nothing: every model of this pair is here') +
+                              '. Licenses: ' + ', '.join(lic.values()) + '.')
+        self.fonts.setText(f'⚠ Subtitles: {note}' if (note := font_note([s.my_lang, s.their_lang])) else '')
+
+    def validatePage(self) -> bool:  # noqa: N802 (Qt name)
+        s = self.chosen()
         self.w.key = self.key.text().strip()
         if s.my_lang == s.their_lang:
             self.err.setText('Choose two different languages.')
@@ -205,6 +264,12 @@ class LanguagesPage(QWizardPage):
         if 'cloud' in (s.them_to_me, s.me_to_them) and not (self.w.key or has_key(s)):
             self.err.setText('The cloud needs a Gemini API key.')
             return False
+        if bad := [SIDES[k] for k in languages.SIDES if getattr(s, k) == 'local' and not languages.direction(s, k).local]:
+            self.err.setText(f'{", ".join(bad)}: not on this computer for this pair; choose cloud.')
+            return False
+        self.w.s.my_lang, self.w.s.their_lang, self.w.s.cloud.subtitles = s.my_lang, s.their_lang, s.cloud.subtitles
+        for k in languages.SIDES:
+            setattr(self.w.s, k, getattr(s, k))
         if self.w.key:
             save_key(self.w.key, s.cloud)  # the test phrase on a later page already needs it
         return True

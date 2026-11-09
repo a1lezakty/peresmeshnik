@@ -142,14 +142,36 @@ jobs:
           call native\windows\audio\build.cmd "%RUNNER_TEMP%\bin\peresmeshnik-audio.exe" || exit /b 1
           echo PERESMESHNIK_AUDIO=%RUNNER_TEMP%\bin\peresmeshnik-audio.exe>> %GITHUB_ENV%
           "%RUNNER_TEMP%\bin\peresmeshnik-audio.exe" list
+      - uses: actions/cache@v4
+        if: runner.os == 'Linux'
+        with:
+          path: ${{ runner.temp }}/pair-models
+          key: pair-models-${{ hashFiles('peresmeshnik/models.toml', 'peresmeshnik/config.py') }}
+      - name: Models of the new-pair test (de -> ja; stand-ins on the en/ru files until the registry has the pair's own)
+        if: runner.os == 'Linux'
+        env:
+          PERESMESHNIK_MODELS: ${{ runner.temp }}/pair-models
+        run: |
+          ids=$(uv run python -c "from peresmeshnik import config, languages as l; s = config.Settings(my_lang='de', their_lang='ja', them_to_me='local', me_to_them='local'); s.local.clone = 'piper'; print(*(l.needed_models(s) if all(l.direction(s, k).local for k in l.SIDES) else ['silero-vad', 'parakeet-tdt-0.6b-v3', 'opus-mt-en-ru', 'opus-mt-ru-en', 'piper-ru_RU-dmitri-medium', 'piper-en_US-john-medium']))")
+          echo "$ids"
+          uv run peresmeshnik models fetch $ids --accept-licenses
       # includes the idle-CPU watchdogs: the app (tray, overlay, first-run wizard) 60 s idle, and again with
       # the overlay on screen; each fails above 0.13 s of CPU. Linux: Xvfb; macOS, Windows: the runner's desktop
       - run: uv run pytest -q -s -rs --deselect tests/test_macos_audio.py::test_a_killed_helper_lets_the_original_through  # -rs: what was skipped and why
         env:  # macOS, Windows: a synthetic key press or click that does not arrive fails the test instead of skipping it
+          PERESMESHNIK_PAIR_MODELS: ${{ runner.os == 'Linux' && format('{0}/pair-models', runner.temp) || '' }}  # must run
+          PERESMESHNIK_SHOTS: ${{ runner.temp }}/shots  # the overlay with Chinese, Japanese, Korean, Arabic
           PERESMESHNIK_REQUIRE_SYNTHETIC: ${{ runner.os != 'Linux' && '1' || '' }}
           PERESMESHNIK_REQUIRE_MACOS: ${{ runner.os == 'macOS' && '1' || '' }}  # the call-sound tests run, not skip
           PERESMESHNIK_REQUIRE_WINDOWS: ${{ runner.os == 'Windows' && '1' || '' }}  # the Windows call-sound tests run, not skip
           PERESMESHNIK_REQUIRE_PIPEWIRE: ${{ runner.os == 'Linux' && '1' || '' }}  # the echo gate on the real Linux path runs, not skip
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: overlay-${{ matrix.os }}
+          path: ${{ runner.temp }}/shots
+          if-no-files-found: warn
+          retention-days: 30
 
   # working-mode CPU gate: the local pipeline on a 30 s recording (RTF, CPU s per audio s)
   work-gate:

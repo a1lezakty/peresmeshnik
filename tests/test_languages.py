@@ -70,3 +70,4 @@ def test_covers_reads_the_registry_langs(monkeypatch, mid, key, ok):
     fake_registry(monkeypatch, stub('asr-en', 'asr', 'en'), stub('mt-en-ru', 'mt', 'en-ru'), stub('mt-many', 'mt', 'de', 'ja'),
                   stub('vad', 'vad', '*'))
     assert languages.covers(mid, key) is ok
+

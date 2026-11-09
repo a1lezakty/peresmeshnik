@@ -31,11 +31,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from peresmeshnik import config
+from peresmeshnik import config, languages
 
 log = logging.getLogger('peresmeshnik.ui')
 ICONS = Path(__file__).resolve().parents[2] / 'assets' / 'icons'  # ponytail: repo path; packaging (stage 3) bundles them
-LANGS = {'en': 'English', 'ru': 'Русский'}
+LANGS = {c: languages.label(c) for c in languages.LANGS}
 MIC_LABEL = 'Microphone'  # me -> them and the loopback while translation is off
 SIDES = {'them_to_me': 'Them → me', 'me_to_them': 'Me → them'}
 MAC, WIN = sys.platform == 'darwin', sys.platform == 'win32'
@@ -69,6 +69,7 @@ def capture():
 
 class Tray(QObject):
     call_apps = Signal(object)  # (apps playing, error): listed on a thread of its own
+    pair_ready = Signal(object, str)  # (the settings with the new pair, '' or the error): its models, fetched on a thread
 
     def __init__(self, ctl):
         super().__init__()
@@ -98,6 +99,19 @@ class Tray(QObject):
                 a.setData((key, engine))
                 group.addAction(a)
             group.triggered.connect(self._engine_chosen)
+        self.langs: dict[str, QActionGroup] = {}
+        lang_menu = m.addMenu('Languages')
+        for key, title in (('my_lang', 'I speak'), ('their_lang', 'They speak')):
+            sub = lang_menu.addMenu(title)
+            group = self.langs[key] = QActionGroup(sub)
+            for code, label in LANGS.items():
+                a = sub.addAction(label)
+                a.setCheckable(True)
+                a.setData((key, code))
+                group.addAction(a)
+            group.triggered.connect(self._lang_chosen)
+        self.pair_ready.connect(self._pair_ready)
+        self._pair = None  # the pair being fetched now: a later choice wins
         self._call_group = None
         self.call_menu = m.addMenu('Call app')
         self.call_menu.aboutToShow.connect(self._fill_call_menu)
@@ -143,9 +157,10 @@ class Tray(QObject):
         self.show_latency.blockSignals(False)
         if hasattr(overlay := getattr(self.ctl, 'overlay', None), 'set_show_latency'):
             overlay.set_show_latency(s.ui.show_latency)
-        for key, group in self.engines.items():
-            for a in group.actions():
-                a.setChecked(a.data()[1] == getattr(s, key))
+        for groups in (self.engines, self.langs):
+            for key, group in groups.items():
+                for a in group.actions():
+                    a.setChecked(a.data()[1] == getattr(s, key))
         self.live.setChecked(self.ctl.live)
 
     def hotkey_note(self, combo: str, why: str, announce: bool = False) -> None:
@@ -255,6 +270,84 @@ class Tray(QObject):
         setattr(s, key, engine)
         config.save(s)
         self.restart()
+
+    def _lang_chosen(self, action) -> None:
+        key, code = action.data()
+        s = config.load()
+        pair = {'my_lang': s.my_lang, 'their_lang': s.their_lang}
+        if code == pair['their_lang' if key == 'my_lang' else 'my_lang']:  # the other side's language: the pair turns round
+            pair = {'my_lang': pair['their_lang'], 'their_lang': pair['my_lang']}
+        pair[key] = code
+        self.switch_pair(pair['my_lang'], pair['their_lang'])
+
+    def confirm(self, text: str) -> bool:
+        from PySide6.QtWidgets import QMessageBox
+        return QMessageBox.question(None, 'Peresmeshnik', text) == QMessageBox.Yes
+
+    def switch_pair(self, my: str, their: str) -> None:
+        """Another pair without restarting the app: a local side that cannot run for it goes to the cloud (said); its
+        missing models are fetched first (size and licenses said, restricted ones asked) while translation goes on with
+        the old pair; then it is saved and the sides are made again for it (Controller.set_languages)."""
+        from peresmeshnik import models
+        from peresmeshnik.ui.overlay import font_note
+        from peresmeshnik.ui.wizard import has_key
+        s = config.load()
+        s.my_lang, s.their_lang = my, their
+        name = f'{languages.name(my)} ⇄ {languages.name(their)}'
+        notes = []
+        for key in languages.SIDES:
+            if getattr(s, key) == 'local' and not (d := languages.direction(s, key)).local:
+                setattr(s, key, 'cloud')
+                notes.append(f'{SIDES[key]} goes to the cloud ({"; ".join(d.why)})')
+        if 'cloud' in (s.them_to_me, s.me_to_them) and not has_key(s):
+            self.message(f'{name}: not changed — it needs the cloud ({"; ".join(notes) or "chosen"}) and no Gemini key is '
+                         'set (Settings…)')
+            self.sync()
+            return
+        todo = [m for m in map(models.get, languages.needed_models(s)) if not models.is_fetched(m)]
+        lic = ', '.join(dict.fromkeys(m.license for m in todo))
+        restricted = [f'{m.id} ({m.license}, {m.license_url})' for m in todo if m.consent]
+        if restricted and not self.confirm(f'{name} needs models under restricted licenses (noncommercial use only, they bind '
+                                           f'you as the user): {", ".join(restricted)}. Download and accept them?'):
+            self.sync()
+            return
+        if note := font_note([my, their]):
+            notes.append(note)
+        self._pair = s
+        if not todo:
+            return self._pair_ready(s, '', notes)
+        self.message(f'{name}: downloading {sum(m.size for m in todo) / 1e6:,.0f} MB ({lic}); translation goes on with the '
+                     'old pair meanwhile' + ''.join(f'. {n}' for n in notes))
+        self.status.setText(f'downloading the models for {name}')  # the Translation check stays as it is
+
+        def work():
+            try:
+                for m in todo:
+                    models.fetch(m.id)
+                self.pair_ready.emit(s, '')
+            except Exception as e:  # the network: the .part files stay, choosing the pair again resumes them
+                self.pair_ready.emit(s, str(e))
+        threading.Thread(target=work, name='pair-fetch', daemon=True).start()
+
+    def _pair_ready(self, s: config.Settings, err: str, notes=()) -> None:
+        if s is not self._pair:  # another pair was chosen since
+            return
+        self._pair = None
+        name = f'{languages.name(s.my_lang)} ⇄ {languages.name(s.their_lang)}'
+        if err:
+            self.set_state(f'error: {name} not changed: the download failed ({err}); choose it again to resume')
+            self.sync()
+            return
+        saved = config.load()  # the pair and the engines it moved to the cloud; the rest as saved now
+        saved.my_lang, saved.their_lang, saved.them_to_me, saved.me_to_them = s.my_lang, s.their_lang, s.them_to_me, s.me_to_them
+        config.save(saved)
+        self.sync()
+        if notes:
+            self.message(f'{name}: ' + '. '.join(notes))
+        if self.ctl.on:
+            self.ctl.set_languages()
+        else:
+            self.set_state(f'idle, translation off ({name})')
 
     def restart(self) -> None:
         """New settings take effect: a running translation is turned off and on again."""
@@ -417,8 +510,8 @@ class SettingsDialog(QDialog):
 
     def save(self) -> None:
         s = self.s
-        s.my_lang, s.their_lang = self.my_lang.currentData(), self.their_lang.currentData()
-        if s.my_lang == s.their_lang:
+        pair = self.my_lang.currentData(), self.their_lang.currentData()
+        if pair[0] == pair[1]:
             self.note.setText('Choose two different languages.')
             return
         for key, c in self.engine.items():
@@ -436,7 +529,9 @@ class SettingsDialog(QDialog):
             s.ui.headphones, s.ui.mic = self.headphones.currentData(), self.mic.currentData()
         if self.key.text().strip():
             save_key(self.key.text(), s.cloud)
-        config.save(s)
+        config.save(s)  # the pair as it was: a new one is saved once its models are here (Tray.switch_pair)
         self.tray.sync()
         self.tray.restart()
+        if pair != (s.my_lang, s.their_lang):
+            self.tray.switch_pair(*pair)
         self.accept()

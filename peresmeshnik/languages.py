@@ -140,3 +140,27 @@ def needed_models(s) -> list[str]:
         elif not cloud_subtitles(s, side):
             ids += [d.asr, d.mt]
     return list(dict.fromkeys(ids))
+
+
+def table(s=None) -> str:
+    """The README's table (Markdown) of what runs on this computer per language, from the settings' defaults and the
+    registry: `python -m peresmeshnik.languages`."""
+    from peresmeshnik import config, models
+    loc = (s or config.Settings()).local
+    reg = models.registry()
+
+    def cell(i: str) -> str:
+        return i or '— (cloud)'
+    rows = ['| Language | Speech recognition | Stock voice | Your cloned voice | Cloud (Gemini Live) |', '|---|---|---|---|---|']
+    for c in LANGS:
+        clone = loc.clone if covers(loc.clone, c) and reg[loc.clone].role == 'clone' else ''
+        rows.append(f'| {label(c)} | {cell(_pick(loc.asr, c))} | {cell(_pick(loc.tts, c))} | '
+                    f'{clone + " (NVIDIA GPU)" if clone else "— (cloud or a stock voice)"} | {"✔" if c in CLOUD else "—"} |')
+    pairs = sorted(k for k in loc.mt if _pick(loc.mt, k))
+    rows.append(f'\nTranslation on this computer: {", ".join(p.replace("-", " → ") for p in pairs) or "none"}; every other '
+                'pair of the 14 is translated in the cloud.')
+    return '\n'.join(rows)
+
+
+if __name__ == '__main__':
+    print(table())

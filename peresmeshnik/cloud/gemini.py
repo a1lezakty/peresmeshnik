@@ -31,11 +31,11 @@ import numpy as np
 
 from peresmeshnik.config import Cloud
 from peresmeshnik.engines import SAMPLE_RATE, Caption, Latency, Speech
+from peresmeshnik.languages import CLOUD_TRANSCRIBE, CLOUD_TRANSLATE
 
 OUT_RATE = 24_000
 BLOCK = SAMPLE_RATE // 10  # 100 ms, as the Live API recommends
 BACKLOG = 300  # blocks (30 s) kept while a dropped connection is replaced
-LANG = {'en': 'en-US', 'ru': 'ru-RU'}
 CONNECT_S = 5.0  # fail_fast: a connect (socket, TLS, setup) that takes longer counts as failed (measured 0.3-1 s, BENCH)
 SLOW_MIN_BLOCKS = 10  # fail_fast: a phrase is judged "too slow" only after 1 s of speech (not a cough)
 log = logging.getLogger('peresmeshnik.latency')
@@ -168,12 +168,12 @@ class _Link:
         if self.kind == 'transcribe':
             return types.LiveConnectConfig(
                 response_modalities=['TEXT'],
-                input_audio_transcription=types.AudioTranscriptionConfig(language_codes=[LANG.get(self.d.src, self.d.src)]))
+                input_audio_transcription=types.AudioTranscriptionConfig(language_codes=[CLOUD_TRANSCRIBE.get(self.d.src, self.d.src)]))
         return types.LiveConnectConfig(
             response_modalities=['AUDIO'],
             input_audio_transcription=types.AudioTranscriptionConfig(),
             output_audio_transcription=types.AudioTranscriptionConfig(),
-            translation_config=types.TranslationConfig(target_language_code=self.d.tgt),
+            translation_config=types.TranslationConfig(target_language_code=CLOUD_TRANSLATE.get(self.d.tgt, self.d.tgt)),
             session_resumption=types.SessionResumptionConfig(handle=self.handle),
             context_window_compression=types.ContextWindowCompressionConfig(sliding_window=types.SlidingWindow()))
 

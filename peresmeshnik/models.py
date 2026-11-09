@@ -6,7 +6,7 @@ Engines ask for a model's local folder and never download anything themselves:
     folder = models.path('parakeet-tdt-0.6b-v3')   # raises ModelMissing until it is fetched
 
     peresmeshnik models list
-    peresmeshnik models fetch silero-vad parakeet-tdt-0.6b-v3 opus-mt-en-ru [--accept-licenses]
+    peresmeshnik models fetch silero-vad parakeet-tdt-0.6b-v3 quickmt-en-ru [--accept-licenses]
 
 Downloads are plain HTTPS without credentials (public Hugging Face files and this project's
 GitHub releases). A folder counts as fetched once every file matched its hash; the marker
@@ -49,11 +49,13 @@ class Model:
     files: dict  # name -> {'sha256': str, 'size': int}
     consent: bool = False  # noncommercial / territory-limited: explicit acceptance before download
     note: str = ''
+    via: tuple[str, ...] = ()  # a pair through another language: these models one after the other, no files of its own
     needs: str = ''  # 'gpu': runs live only with an NVIDIA GPU; without one languages.direction() does not offer it
+    pivot: bool = False  # mt: the model of its language to or from English for a pair through English
 
     @property
     def size(self) -> int:
-        return sum(f['size'] for f in self.files.values())
+        return sum(get(i).size for i in self.via) if self.via else sum(f['size'] for f in self.files.values())
 
     @property
     def fingerprint(self) -> str:
@@ -62,8 +64,23 @@ class Model:
 
 @cache
 def registry() -> dict[str, Model]:
+    """models.toml, and for every pair X-Y without a row of its own whose X-en and en-Y have a `pivot` row:
+    mt-X-Y-via-en, the two one after the other (not written out)."""
     data = tomllib.loads(resources.files('peresmeshnik').joinpath('models.toml').read_text('utf-8'))
-    return {k: Model(id=k, langs=tuple(v.pop('langs')), **v) for k, v in data.items()}
+    reg = {k: Model(id=k, langs=tuple(v.pop('langs')), via=tuple(v.pop('via', ())), **{'url': '', 'files': {}, **v})
+           for k, v in data.items()}
+    to_en = {m.langs[0][:-3]: m for m in reg.values() if m.pivot and m.langs[0].endswith('-en')}
+    from_en = {m.langs[0][3:]: m for m in reg.values() if m.pivot and m.langs[0].startswith('en-')}
+    for a, first in to_en.items():
+        for b, second in from_en.items():
+            if a != b and not any(f'{a}-{b}' in m.langs for m in reg.values()):
+                rid = f'mt-{a}-{b}-via-en'
+                strict = second if second.consent and not first.consent else first  # its link: the stricter license's
+                note = 'through English: ' + ' + '.join(dict.fromkeys((first.note, second.note)))
+                lic = ' + '.join(dict.fromkeys((first.license, second.license)))  # both bind (CC-BY: credit the author)
+                reg[rid] = Model(rid, 'mt', (f'{a}-{b}',), lic, strict.license_url, '', {},
+                                 first.consent or second.consent, note, (first.id, second.id))
+    return reg
 
 
 def root() -> Path:
@@ -77,22 +94,29 @@ def get(model_id: str) -> Model:
         raise ModelMissing(f'unknown model {model_id!r}; known: {", ".join(registry())}') from None
 
 
+def parts(m: Model) -> list[Model]:
+    """The rows a model runs on: a `via` pair's two, else itself; their licenses are what the user gets."""
+    return [get(i) for i in m.via] or [m]
+
+
 def size(m: Model) -> int:
     """Bytes to download for the model: what the wizard and the tray show for a pair."""
     return m.size
 
 
 def is_fetched(m: Model, base: Path | None = None) -> bool:
+    if m.via:
+        return all(is_fetched(get(i), base) for i in m.via)
     marker = (base or root()) / m.id / MARKER
     return marker.exists() and marker.read_text().strip() == m.fingerprint
 
 
 def path(model_id: str, base: Path | None = None) -> Path:
-    """Local folder of a fetched and verified model. Offline: never downloads."""
+    """Local folder of a fetched and verified model (of a `via` pair: its first model's). Offline: never downloads."""
     m = get(model_id)
     if not is_fetched(m, base):
         raise ModelMissing(f'model {model_id} is not downloaded: peresmeshnik models fetch {model_id}')
-    return (base or root()) / model_id
+    return (base or root()) / (m.via[0] if m.via else model_id)
 
 
 def sha256(file: Path) -> str:
@@ -132,8 +156,9 @@ _locks_lock = threading.Lock()
 
 
 def fetch(model_id: str, base: Path | None = None, progress=lambda n: None, retries: int = 3) -> Path:
-    """Download what is missing, check every SHA-256, then mark the folder as verified. One download of a model at a
-    time in this process (the wizard and the tray may ask together): the second waits and finds it there."""
+    """Download what is missing, check every SHA-256, then mark the folder as verified (a `via` pair: its models). One
+    download of a model at a time in this process (the wizard and the tray may ask together): the second waits and finds
+    it there."""
     with _locks_lock:
         lock = _locks.setdefault(model_id, threading.Lock())
     with lock:
@@ -142,6 +167,13 @@ def fetch(model_id: str, base: Path | None = None, progress=lambda n: None, retr
 
 def _fetch(model_id: str, base: Path | None, progress, retries: int) -> Path:
     m = get(model_id)
+    if m.via:
+        for i in m.via:
+            if is_fetched(get(i), base):  # counted as done: a progress bar over `size` reaches the end
+                progress(get(i).size)
+            else:
+                fetch(i, base, progress, retries)
+        return path(model_id, base)
     folder = (base or root()) / m.id
     if is_fetched(m, base):
         return folder
@@ -149,6 +181,7 @@ def _fetch(model_id: str, base: Path | None, progress, retries: int) -> Path:
     (folder / MARKER).unlink(missing_ok=True)
     for name, f in m.files.items():
         dest = folder / name
+        dest.parent.mkdir(parents=True, exist_ok=True)  # 'onnx/encoder_model_fp16.onnx'
         if dest.exists() and dest.stat().st_size == f['size'] and sha256(dest) == f['sha256']:
             progress(f['size'])
             continue

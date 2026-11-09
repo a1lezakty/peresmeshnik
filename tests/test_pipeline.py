@@ -153,8 +153,29 @@ def test_long_speech_is_cut():
 
 def test_long_speech_gets_translated_partials():
     """Stage 5: before a long clause ends, the words two partials agree on are translated for the subtitle (a
-    caption without the original, not final); the final caption of the clause comes after them."""
-    _, events, _ = translate(np.concatenate([tone(6.0), silence(0.6)]))
+    caption without the original, not final); the final caption of the clause comes after them. The translator keeps up
+    with the words, as in a call (audio at 1x, MT in tens of ms): fed as fast as it goes, a busy machine would let every
+    partial be skipped behind the next one (3-4 runs of 20 under load before)."""
+    done = threading.Event()
+
+    class Mt(UpperMt):
+        def translate(self, *a, **k):
+            try:
+                return super().translate(*a, **k)
+            finally:
+                done.set()
+    d = LocalDirection(EnergyVad(), WordAsr(), Mt(), ToneTts(), 'en', 'ru')
+    d.realtime, put = False, d._clauses.put
+
+    def paced(c, *a, **k):
+        done.clear()
+        put(c, *a, **k)
+        if c is not None and c.get('partial'):
+            assert done.wait(10)
+    d._clauses.put = paced
+    run(d, np.concatenate([tone(6.0), silence(0.6)]))
+    d.finish()
+    events = list(d.events())
     caps = [e for e in events if isinstance(e, Caption)]
     early = [i for i, e in enumerate(caps) if not e.final and e.translation]
     assert early, caps
@@ -235,14 +256,14 @@ class ScriptedAsr:
     def __init__(self, *results):
         self.results, self.calls = list(results), []
 
-    def recognize(self, pcm, lead=True):
+    def recognize(self, pcm, lead=True, lang=None):
         self.calls.append((round(len(pcm) / SAMPLE_RATE, 2), lead))
         return self.results.pop(0) if self.results else Result()
 
 
-def stream_of(asr, seconds):
+def stream_of(asr, seconds, lang='en'):
     from peresmeshnik.local.asr import OnnxAsrStream
-    s = OnnxAsrStream(asr, 'en')
+    s = OnnxAsrStream(asr, lang)
     s.feed(np.zeros(int(seconds * SAMPLE_RATE), np.float32))
     return s
 
@@ -282,6 +303,48 @@ def test_dedup_across_cut_and_empty_final_retry():
     s = stream_of(asr, 3.0)
     assert s.cut(force=True) == 'to cope with'
     assert s.finish() == 'the impacts.'
+
+
+def test_cuts_in_languages_without_spaces_or_case():
+    """ja / zh: no spaces, so any token boundary is a word boundary and a repeat is counted in characters; ar, ko,
+    ja, zh: no capitals, so a sentence end is punctuation before any letter."""
+    asr = ScriptedAsr(Result(['今日は', '晴れ', 'です', '。', '明日', 'も', '晴れ'], [0.2, 0.5, 0.8, 1.0, 1.3, 1.6, 2.0]),
+                      Result(['です', '。', '明日', 'も', '晴れ', 'でしょう', '。'], [0.3, 0.6, 1.1, 1.3, 1.5, 1.8, 2.1]))
+    s = stream_of(asr, 3.0, 'ja')
+    assert s.cut() == '今日は晴れです。'
+    assert s.finish() == '明日も晴れでしょう。'
+    # a forced cut between tokens, the next window repeats its last characters: dropped
+    asr = ScriptedAsr(Result(['我们', '需要', '应对', '气候', '变化'], [0.2, 0.6, 1.0, 1.4, 2.6]),
+                      Result(['应对', '气候', '变化', '的', '影响'], [1.1, 1.3, 1.6, 1.9, 2.2]))
+    s = stream_of(asr, 3.0, 'zh')
+    assert s.cut(force=True) == '我们需要应对'  # '变化' is too near the window end, so is the cut before it
+    assert s.finish() == '气候变化的影响'  # the next window heard '应对' after the cut, not in its context
+    asr = ScriptedAsr(Result([' مرحبا', ' بكم', '.', ' كيف', ' حالكم', ' اليوم'], [0.2, 0.6, 0.9, 1.2, 1.6, 2.0]))
+    assert stream_of(asr, 3.0, 'ar').cut() == 'مرحبا بكم.'
+    asr = ScriptedAsr(Result([' 안녕하세요', '?', ' 저는', ' 학생', '입니다'], [0.2, 0.6, 1.0, 1.4, 2.0]))
+    assert stream_of(asr, 3.0, 'ko').cut() == '안녕하세요?'
+    asr = ScriptedAsr(Result([' مرحبا', '،', ' كيف', ' حالكم', ' اليوم', ' يا', ' اصدقاء'], [0.2, 0.6, 1.2, 1.6, 2.6, 3.0, 4.6]))
+    assert stream_of(asr, 5.0, 'ar').cut(force=True) == 'مرحبا، كيف حالكم اليوم'  # no Arabic comma in the second half
+
+
+def test_a_model_without_timestamps_cuts_at_the_quietest_moment():
+    """Whisper (text only): no cut at punctuation; a forced cut at the quietest 0.1 s of the second half, its words
+    from one more run on the audio before it; the rest is the next clause, its repeat of the cut's words dropped."""
+    from peresmeshnik.local.asr import OnnxAsrStream
+
+    class Text:
+        def __init__(self, text):
+            self.text, self.tokens, self.timestamps = text, None, None
+    asr = ScriptedAsr(Text('one two. three four'), Text('one two three'), Text('three four five'))
+    asr.timed = False
+    s = OnnxAsrStream(asr, 'en')
+    x = np.ones(int(5.0 * SAMPLE_RATE), np.float32)
+    x[int(3.3 * SAMPLE_RATE):int(3.4 * SAMPLE_RATE)] = 0  # the pause between words
+    assert s.feed(x) == 'one two. three four'
+    assert s.cut() is None  # no times: a sentence end in the text says nothing about where it is in the audio
+    assert s.cut(force=True) == 'one two three'
+    assert asr.calls[-1] == (3.35, True) and s.offset == int(3.35 * SAMPLE_RATE) and s.ctx == 0
+    assert s.finish() == 'four five'
 
 
 def test_a_phrase_said_twice_across_a_cut_stays():
@@ -413,3 +476,40 @@ def test_latency_events_in_real_time_and_through_the_live_switch():
     assert set(lat) == {'vad', 'asr', 'caption', 'tts_first', 'voice'}, got
     assert 0.3 <= lat['vad'] <= lat['asr'] <= lat['caption'] <= lat['tts_first'] <= lat['voice'] < 2.0, lat
     assert any(isinstance(e, Speech) for e in got) and any(isinstance(e, Caption) and e.final for e in got)
+
+
+def test_whisper_decodes_a_capped_number_of_tokens():
+    """A window Whisper hears as a loop would take 448 tokens; the language guess (3 tokens) stays as asked."""
+    from peresmeshnik.local.asr import WHISPER_MAX_TOKENS, cap_whisper
+
+    class Inner:
+        def _decoding(self, enc, toks, max_length=448):
+            return max_length
+    model = type('M', (), {})()
+    model.asr = Inner()
+    cap_whisper(model)
+    assert model.asr._decoding(None, None) == WHISPER_MAX_TOKENS and model.asr._decoding(None, None, 3) == 3
+
+
+def test_a_stream_that_will_not_move_back_stops_nothing(monkeypatch):
+    """send_back() raises when the sound server drops the move three times: the router still moves the call's stream,
+    return_strays() still gives the others back and says which failed."""
+    from peresmeshnik.audio import capture_pipewire as cp
+    ps = [{'index': '1', 'key': 'chromium', 'name': 'Chromium', 'sink': cp.CALL_SINK, 'restore': {}},
+          {'index': '2', 'key': 'zoom', 'name': 'Zoom', 'sink': 'alsa', 'restore': {'k': 'v'}},
+          {'index': '3', 'key': 'player', 'name': 'Player', 'sink': cp.CALL_SINK, 'restore': {}}]
+    back = []
+
+    def send_back(index, sink):
+        if index == '1':
+            raise RuntimeError('stream 1 never reached alsa')
+        back.append(index)
+    monkeypatch.setattr(cp, 'players', lambda: ps)
+    monkeypatch.setattr(cp, 'send_back', send_back)
+    monkeypatch.setattr(cp, 'move', lambda index, sink: True)
+    r = cp.CallRouter('zoom')
+    r._proc = object()  # started
+    r._move()
+    assert r.moved == {'2': 'alsa'} and back == ['3']
+    with pytest.raises(RuntimeError, match=r'Chromium: stream 1 never.*\(given back: Player\)'):
+        cp.return_strays()

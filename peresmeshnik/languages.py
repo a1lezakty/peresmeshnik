@@ -101,29 +101,40 @@ def needs_gpu(model_id: str) -> bool:
     return bool(m and m.needs == 'gpu')
 
 
-def gpu() -> bool:
-    return bool(shutil.which('nvidia-smi'))
+ENGINE = {'asr': 'onnxruntime', 'mt': 'CTranslate2'}
+
+
+def gpu(engine: str = '') -> bool:
+    """An NVIDIA GPU (nvidia-smi). With `engine` ('asr': onnxruntime, 'mt': CTranslate2) also that this engine runs on it
+    inside the app: the built .exe and a from-source install have a CPU-only onnxruntime (local/device.py)."""
+    if not shutil.which('nvidia-smi'):
+        return False
+    from peresmeshnik.local import device
+    return {'asr': device.onnx_cuda, 'mt': device.ct2_cuda}.get(engine, lambda: True)()
 
 
 def direction(s, side: str, has_gpu: bool | None = None) -> Direction:
     """What `side` of the pair in settings `s` runs on locally, and why not. A model with `needs = "gpu"` in the
-    registry is not offered without an NVIDIA GPU (`has_gpu` None: look for nvidia-smi): for the ASR, the MT and a stock
-    voice the side is then not local (`why`); for the clone the stock voice speaks instead (`notes`), if there is one."""
+    registry is not offered without an NVIDIA GPU (`has_gpu` None: look for nvidia-smi, and for the ASR and the MT also for
+    CUDA in their engine in the app): for the ASR, the MT and a stock voice the side is then not local (`why`); for the
+    clone the stock voice speaks instead (`notes`), if there is one."""
     from peresmeshnik.voice import STOCK
     src, tgt = (s.their_lang, s.my_lang) if side == 'them_to_me' else (s.my_lang, s.their_lang)
     loc, why, notes = s.local, [], []
-    has_gpu = gpu() if has_gpu is None else has_gpu
+    asked, has_gpu = has_gpu, gpu() if has_gpu is None else has_gpu
 
-    def usable(i: str, missing: str, what: str) -> str:
+    def usable(i: str, missing: str, what: str, engine: str) -> str:
         if not i:
             why.append(missing)
-        elif needs_gpu(i) and not has_gpu:
-            why.append(f'{what} needs an NVIDIA GPU ({i})')
+        elif needs_gpu(i) and not (has_gpu if asked is not None else gpu(engine)):
+            why.append(f'{what} needs an NVIDIA GPU ({i})' if not has_gpu else
+                       f'{what} needs CUDA, and {ENGINE[engine]} in this app runs on the CPU only ({i})')
             return ''
         return i
-    asr = usable(pick(loc.asr, src), f'no local speech recognition for {name(src)}', f'speech recognition for {name(src)}')
+    asr = usable(pick(loc.asr, src), f'no local speech recognition for {name(src)}', f'speech recognition for {name(src)}',
+                 'asr')
     mt = usable(pick(loc.mt, f'{src}-{tgt}'), f'no local translation from {name(src)} to {name(tgt)}',
-                f'translation from {name(src)} to {name(tgt)}')
+                f'translation from {name(src)} to {name(tgt)}', 'mt')
     stock, no_voice = pick(loc.tts, tgt), f'no local voice for {name(tgt)}'
     if stock and needs_gpu(stock) and not has_gpu:
         stock, no_voice = '', f'the voice for {name(tgt)} needs an NVIDIA GPU ({stock})'
@@ -183,8 +194,13 @@ def table(s=None) -> str:
     pairs = [k.replace('-', ' → ') + gpu_mark[needs_gpu(loc.mt[k])] for k in sorted(loc.mt) if k != '*' and pick(loc.mt, k)]
     if (any_pair := loc.mt.get('*', '')) in reg:  # one model for every pair of its languages
         pairs.append(f'any other pair of {", ".join(c for c in LANGS if covers(any_pair, c))}{gpu_mark[needs_gpu(any_pair)]}')
-    rows.append(f'\nTranslation on this computer: {", ".join(pairs) or "none"}; every other pair of the 14 is translated in '
-                'the cloud.')
+    every = [f'{a}-{b}' for a in LANGS for b in LANGS if a != b]
+    if all(pick(loc.mt, k) and not needs_gpu(pick(loc.mt, k)) for k in every):  # 182 pairs: not one by one
+        via = sum(bool(reg[pick(loc.mt, k)].via) for k in every)
+        rows.append(f'\nTranslation on this computer: any pair of the 14 ({via} of the {len(every)} through English).')
+    else:
+        rows.append(f'\nTranslation on this computer: {", ".join(pairs) or "none"}; every other pair of the 14 is translated '
+                    'in the cloud.')
     return '\n'.join(rows)
 
 

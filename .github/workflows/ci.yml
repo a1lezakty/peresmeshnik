@@ -200,7 +200,7 @@ jobs:
       - name: Models (registry, SHA-256 checked)
         env:
           PERESMESHNIK_MODELS: ${{ runner.temp }}/models
-        run: uv run peresmeshnik models fetch silero-vad parakeet-tdt-0.6b-v3 opus-mt-en-ru piper-ru_RU-dmitri-medium
+        run: uv run peresmeshnik models fetch silero-vad parakeet-tdt-0.6b-v3 quickmt-en-ru piper-ru_RU-dmitri-medium
       - name: Working-mode CPU gate
         env:
           PERESMESHNIK_WORK_GATE: '1'
@@ -216,6 +216,14 @@ jobs:
           PERESMESHNIK_WORK_GATE: '1'
           PERESMESHNIK_MODELS: ${{ runner.temp }}/models
         run: uv run pytest -q -s tests/test_call.py tests/test_me_side.py
+      - name: Them to me in the 12 new languages (FLEURS 1515 each - ASR in the stream, MT into Russian, the stock voice)
+        if: runner.os == 'Linux'
+        env:
+          PERESMESHNIK_WORK_GATE: '1'
+          PERESMESHNIK_MODELS: ${{ runner.temp }}/models
+        run: |  # noncommercial voices (tr, ko, ja) accepted for the test run only
+          uv run peresmeshnik models fetch --accept-licenses $(uv run python -c "import sys; sys.path.insert(0, 'tests'); from test_languages_local import MODELS; print(*MODELS)")
+          uv run pytest -q -s -rs tests/test_languages_local.py
       - name: macOS call sound with the models (file -> BlackHole 16ch / a tapped afplay -> subtitles and voice)
         if: runner.os == 'macOS'
         env:

@@ -18,7 +18,7 @@ import numpy as np
 import soundfile as sf
 
 HF = 'https://huggingface.co/datasets'
-FLEURS = HF + '/google/fleurs/resolve/main/data/{l}_{c}/{f}'
+FLEURS = HF + '/google/fleurs/resolve/main/data/{code}/{f}'
 REFS = {
     'en': HF + '/openslr/librispeech_asr/resolve/main/all/test.clean/0000.parquet',
     'ru': HF + '/bond005/rulibrispeech/resolve/main/data/test-00000-of-00001-0e9859b3235b0392.parquet',
@@ -36,16 +36,40 @@ def fetch(url, dst):
     return dst
 
 
-def fleurs(lang, country):
+# FLEURS configs of the languages; their sentences (FLoRes) are the same in every language under the same id
+CODES = {'en': 'en_us', 'ru': 'ru_ru', 'uk': 'uk_ua', 'de': 'de_de', 'fr': 'fr_fr', 'es': 'es_419', 'it': 'it_it',
+         'pt': 'pt_br', 'pl': 'pl_pl', 'tr': 'tr_tr', 'zh': 'cmn_hans_cn', 'ja': 'ja_jp', 'ko': 'ko_kr', 'ar': 'ar_eg'}
+
+
+def fleurs(lang, country=None, split='dev', audio=True):
+    """{sentence id: (wav path, raw text)} of a FLEURS split; `lang` an ISO code of CODES or FLEURS' own with `country`."""
+    code = f'{lang}_{country}' if country else CODES[lang]
     d = ROOT / 'fleurs' / lang
-    tsv = fetch(FLEURS.format(l=lang, c=country, f='dev.tsv'), d / 'dev.tsv')
-    if not (d / 'dev').exists():
-        with tarfile.open(fetch(FLEURS.format(l=lang, c=country, f='audio/dev.tar.gz'), d / 'dev.tar.gz')) as t:
+    tsv = fetch(FLEURS.format(code=code, f=f'{split}.tsv'), d / f'{split}.tsv')
+    if audio and not (d / split).exists():
+        with tarfile.open(fetch(FLEURS.format(code=code, f=f'audio/{split}.tar.gz'), d / f'{split}.tar.gz')) as t:
             t.extractall(d, filter='data')
     rows = {}
     for r in csv.reader(open(tsv, encoding='utf-8'), delimiter='\t', quoting=csv.QUOTE_NONE):
-        rows.setdefault(int(r[0]), (d / 'dev' / r[1], r[2]))  # first recording of each sentence
+        rows.setdefault(int(r[0]), (d / split / r[1], r[2]))  # first recording of each sentence
     return rows
+
+
+# Tatoeba-Challenge test sets (Tatoeba sentences, CC-BY 2.0 FR): short everyday sentences, the call's register
+TATOEBA = 'https://raw.githubusercontent.com/Helsinki-NLP/Tatoeba-Challenge/6faf2dab0b7b01a0e08a114dbacbb7deac54988d/data/test/{pair}/test.txt'
+ISO3 = {'en': 'eng', 'ru': 'rus', 'uk': 'ukr', 'de': 'deu', 'fr': 'fra', 'es': 'spa', 'it': 'ita', 'pt': 'por', 'pl': 'pol',
+        'tr': 'tur', 'zh': 'zho', 'ja': 'jpn', 'ko': 'kor', 'ar': 'ara'}
+
+
+def tatoeba(src, tgt, n):
+    """[(source, reference)] of a Tatoeba test set: `n` spread over it (sorted by the source)."""
+    a, b = sorted((ISO3[src], ISO3[tgt]))
+    rows = [r for r in csv.reader(open(fetch(TATOEBA.format(pair=f'{a}-{b}'), ROOT / 'tatoeba' / f'{a}-{b}.txt'), encoding='utf-8'),
+                                  delimiter='\t', quoting=csv.QUOTE_NONE) if len(r) == 4]
+    if 'zh' in (src, tgt):  # Mandarin in simplified characters (not cmn_Hant, yue, lzh)
+        rows = [r for r in rows if 'cmn_Hans' in r[:2]]
+    pairs = sorted((r[2], r[3]) if ISO3[src] == a else (r[3], r[2]) for r in rows)
+    return pairs[::max(1, len(pairs) // n)][:n]
 
 
 def reference(lang, seconds=40.0):

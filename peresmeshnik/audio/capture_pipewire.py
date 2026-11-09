@@ -135,6 +135,30 @@ def default_sink() -> str:
     return pactl('get-default-sink').strip()
 
 
+def sink_of(index: str) -> str | None:
+    """The sink a stream plays into now ('' while it is not linked), None once it is gone."""
+    sinks = {str(s['index']): s['name'] for s in json.loads(pactl('-f', 'json', 'list', 'sinks') or '[]')}
+    si = next((si for si in json.loads(pactl('-f', 'json', 'list', 'sink-inputs') or '[]') if str(si['index']) == index), None)
+    return None if si is None else sinks.get(str(si['sink']), '')
+
+
+def move(index: str, sink: str, tries: int = 3) -> bool:
+    """Move a stream into `sink` and see it there: True, or False when the stream (or the sink) is gone. WirePlumber
+    may drop a move while pactl says yes (a stream or a sink a moment old: no event, the stream stays; 1 run of ~5
+    of the PipeWire tests here), so a move not seen within 0.5 s goes again; raises if it never lands."""
+    for _ in range(tries):
+        if subprocess.run(['pactl', 'move-sink-input', index, sink], capture_output=True, timeout=10).returncode:
+            return False
+        for _ in range(10):
+            now = sink_of(index)
+            if now is None:
+                return False
+            if now == sink:
+                return True
+            time.sleep(0.05)
+    raise RuntimeError(f'stream {index} never reached {sink}: the sound server dropped the move {tries} times')
+
+
 def send_back(index: str, sink: str) -> None:
     """Move a stream to `sink` if it exists, else to the default sink. Moving to the default sink also makes
     PipeWire / PulseAudio forget the stream's saved target (it follows the default again): WirePlumber
@@ -144,17 +168,23 @@ def send_back(index: str, sink: str) -> None:
         sink = default_sink()
     if sink.startswith('peresmeshnik_'):
         raise RuntimeError(f'the default output is our own {sink}: cannot give the call its sound back')
-    subprocess.run(['pactl', 'move-sink-input', index, sink], capture_output=True, timeout=10)
+    move(index, sink)
 
 
 def return_strays(sink: str = CALL_SINK) -> list[str]:
     """Streams of other apps sitting in our call sink while nothing moved them there (a killed run, or
-    WirePlumber restoring an old move): back to the default output. Returns the apps moved."""
-    moved = []
+    WirePlumber restoring an old move): back to the default output. Returns the apps moved; a stream that does not
+    move does not keep the others: the errors are raised after."""
+    moved, errors = [], []
     for p in players():
         if p['sink'] == sink:
-            send_back(p['index'], '')
-            moved.append(p['name'])
+            try:
+                send_back(p['index'], '')
+                moved.append(p['name'])
+            except RuntimeError as e:
+                errors.append(f'{p["name"]}: {e}')
+    if errors:
+        raise RuntimeError('; '.join(errors) + f' (given back: {", ".join(moved) or "none"})')
     return moved
 
 
@@ -178,7 +208,7 @@ def forget(restore: dict, sink: str = CALL_SINK) -> None:
         target = default_sink()
         if target.startswith('peresmeshnik_'):
             raise RuntimeError(f'the default output is our own {target}')
-        pactl('move-sink-input', index, target)
+        move(index, target)
         time.sleep(0.3)  # WirePlumber saves the new target from the move while the stream is still there
     finally:
         probe.kill()
@@ -228,17 +258,24 @@ class CallRouter:
                     continue
                 if p['key'] != self.app:
                     if p['sink'] == self.sink:  # WirePlumber restored our move under a shared name (Electron apps and the
-                        send_back(p['index'], '')  # Chromium browser are all "Chromium"): not the call app, back it goes
-                        log.info('call sound: %s stream %s is not %s: back to the default output', p['name'], p['index'], self.app)
+                        try:  # Chromium browser are all "Chromium"): not the call app, back it goes
+                            send_back(p['index'], '')
+                            log.info('call sound: %s stream %s is not %s: back to the default output', p['name'], p['index'],
+                                     self.app)
+                        except RuntimeError as e:  # one stream that does not move does not stop the call's
+                            log.warning('call sound: %s', e)
                     continue
                 again = p['index'] in self.moved
                 if again and p['sink'] == self.sink:
                     continue
                 # a new stream that WirePlumber linked to the default right after our move (a race in its policy:
                 # 2 of 30 here) is moved again; it came from where it was the first time
-                if p['sink'] != self.sink and subprocess.run(['pactl', 'move-sink-input', p['index'], self.sink],
-                                                             capture_output=True, timeout=10).returncode:
-                    continue  # gone meanwhile
+                try:
+                    if p['sink'] != self.sink and not move(p['index'], self.sink):
+                        continue  # gone meanwhile
+                except RuntimeError as e:
+                    log.warning('call sound: %s', e)
+                    continue
                 if not again:
                     self._at[p['index']] = time.monotonic()
                     self._keys[p['index']] = p['restore']

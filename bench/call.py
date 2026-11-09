@@ -26,11 +26,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # isort: off
-from peresmeshnik.pipeline import OTHER, LocalDirection, make_local, read_audio, run  # noqa: E402  first: it pins BLAS threads
+from peresmeshnik.pipeline import LocalDirection, make_local, read_audio, run  # noqa: E402  first: it pins BLAS threads
 import numpy as np  # noqa: E402
 # isort: on
 
 from conversation import NoTts, Rows, norm, pct  # noqa: E402
+from data import CODES  # noqa: E402
 
 from common import ROOT, record  # noqa: E402
 
@@ -114,7 +115,7 @@ def make(kind: str, seed: int, pool: list[tuple[str, str]], delay: float = 0.15,
     def clip():
         wav, text = pool[next(pick)]
         x = read_audio(wav)
-        if kind == 'long':  # no pause the VAD would take: the recording's silences cut down to 0.15 s
+        if kind == 'long':  # no pause the VAD would take: the recording's silences cut down to 0.15 s (not 'turns')
             x = squeeze(x)
         return level(x), text
     sc, t = Scenario(240), 0.5
@@ -142,19 +143,19 @@ def make(kind: str, seed: int, pool: list[tuple[str, str]], delay: float = 0.15,
                 sc.segs[-2]['kind'] = kind
             prev = (t, t + len(x) / SR)
             t = prev[1] + rng.uniform(0.4, 1.0)
-    elif kind == 'long':
+    elif kind in ('long', 'turns'):
         for _ in range(5):
             x, text = clip()
             sc.add('them', x, t, text)
-            t += len(x) / SR + rng.uniform(0.05, 0.2)  # under the VAD pause (0.3 s)
+            t += len(x) / SR + (rng.uniform(0.05, 0.2) if kind == 'long' else rng.uniform(0.6, 1.2))  # under / over the VAD pause
     return sc.trim()
 
 
-def gate(sc: Scenario, frame: int = 512) -> tuple[np.ndarray, dict]:
-    """The scenario through the echo gate in its own time: the reference is pushed as it is sent."""
+def gate(sc: Scenario, frame: int = 512, **kw) -> tuple[np.ndarray, dict]:
+    """The scenario through the echo gate in its own time: the reference is pushed as it is sent. `kw`: EchoGate's."""
     from peresmeshnik.audio.echo import HOP, EchoGate, Reference
     ref = Reference()
-    g = EchoGate(ref)
+    g = EchoGate(ref, **kw)
     out = np.empty_like(sc.capture)
     for i in range(0, len(sc.capture), frame):
         t_end = ref.t0 + min(i + frame, len(sc.capture)) / SR
@@ -280,11 +281,19 @@ def overlap(a):
     base.close()
 
 
-def repeats(rows) -> int:
-    """Words a clause repeats from the end of the clause before it (a cut whose window timestamps ran ahead)."""
+def target(a) -> str:
+    """The language they are translated into: --to, else Russian (English for Russian speech), as the app's them -> me."""
+    return a.to or ('en' if a.lang == 'ru' else 'ru')
+
+
+def repeats(rows, lang: str = 'en') -> int:
+    """Words (zh / ja: characters) a clause repeats from the end of the clause before it (a cut whose window timestamps
+    ran ahead)."""
+    from peresmeshnik.local.asr import NO_SPACES, units
+    k = 4 if lang in NO_SPACES else 3
     n = 0
     for a, b in zip(rows, rows[1:]):
-        x, y = norm(a['text']).split()[-3:], norm(b['text']).split()[:3]
+        x, y = units(norm(a['text']), lang)[-k:], units(norm(b['text']), lang)[:k]
         n += next((k for k in range(min(len(x), len(y)), 0, -1) if x[-k:] == y[:k]), 0)
     return n
 
@@ -297,7 +306,7 @@ def long(a):
 
     from peresmeshnik.local import asr
     from peresmeshnik.pipeline import MAX_LAG_S
-    base = make_local(a.lang, OTHER[a.lang], threads=a.threads,  # as the app's them -> me
+    base = make_local(a.lang, target(a), threads=a.threads,  # as the app's them -> me
                       **({'tts': NoTts()} if a.asap else {'max_lag_s': MAX_LAG_S}))
     base.early_s, base.partial_mt = a.early or None, not a.no_partial_mt
     base.max_clause_s = a.max_clause
@@ -305,16 +314,16 @@ def long(a):
     pool = fleurs(a.lang)
     rows, refs, hyps, trs, prefs, sums, rep = [], [], [], [], [], [], 0
     for seed in range(a.seed, a.seed + a.n):
-        sc = make('long', seed, pool)
+        sc = make('turns' if a.turns else 'long', seed, pool)
         r = clauses(base, sc.capture, realtime=not a.asap, summaries=sums)
         rows += r
-        rep += repeats(r)
+        rep += repeats(r, a.lang)
         refs.append(norm(' '.join(s['text'] for s in sc.segs)))
         hyps.append(norm(' '.join(x['text'] for x in r)))
         trs.append(' '.join(x['translation'] for x in r))
-        prefs.append(' '.join(base.mt.translate(s['text'], a.lang, OTHER[a.lang]) for s in sc.segs))
+        prefs.append(' '.join(base.mt.translate(s['text'], a.lang, target(a)) for s in sc.segs))
         print(seed, f'{len(r)} clauses', flush=True)
-    nw = lambda x: max(len(x['text'].split()), 1)  # noqa: E731
+    nw = lambda x: max(len(asr.units(x['text'], a.lang)), 1)  # noqa: E731  words (zh / ja: characters)
     wait = lambda x, i: x['end_s'] - (x['start_s'] + (x['end_s'] - x['start_s']) * (i + 0.5) / nw(x))  # noqa: E731
     caption = [wait(x, i) + x['caption_lag_s'] for x in rows if 'caption_lag_s' in x for i in range(nw(x))]
 
@@ -327,7 +336,14 @@ def long(a):
     voice = [wait(x, i) + x['voice_lag_s'] for x in rows if 'voice_lag_s' in x for i in range(nw(x))]
     first = [x['end_s'] - x['start_s'] + x['caption_lag_s'] for x in rows if 'caption_lag_s' in x]  # its first word
     dur = [x['end_s'] - x['start_s'] for x in rows]
-    record('call', a.variant, scenario='long', lang=a.lang, n=a.n, seed=a.seed, clauses=len(rows), clause_s_p50=pct(dur, 50),
+    out = ROOT / 'call-long' / f'{a.variant}.json'  # the clauses as recognised, against the read text
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({'refs': refs, 'hyps': hyps, 'clauses': [x['text'] for x in rows]}, ensure_ascii=False))
+    from asr import lid  # bench/asr.py: letter trigrams against FLEURS test text of the 14
+    classify, long_enough = lid(), [x['text'] for x in rows if len(asr.units(x['text'], a.lang)) >= (6 if a.lang in asr.NO_SPACES else 4)]
+    other = [t for t in long_enough if classify(t) != a.lang]  # a clause in another language: Parakeet drifting
+    record('call', a.variant, scenario='long', lang=a.lang, to=target(a), clauses=len(rows), clause_s_p50=pct(dur, 50),
+           asr=base.asr.name, n=a.n, seed=a.seed,
            clause_s_p90=pct(dur, 90), caption_span_s_p50=pct(caption, 50), caption_span_s_p90=pct(caption, 90),
            subtitle_span_s_p50=pct(sub, 50), subtitle_span_s_p90=pct(sub, 90), early_s=a.early, partial_mt=not a.no_partial_mt,
            max_clause_s=a.max_clause, mt_rtf=round(float(np.mean([x['mt_rtf'] for x in sums])), 4),
@@ -337,7 +353,10 @@ def long(a):
            voice_span_s_p50=pct(voice, 50), voice_span_s_p90=pct(voice, 90),
            dropped=sum('dropped' in x for x in rows), empty=sum(x['empty'] for x in sums),
            speed_mean=round(float(np.mean([x.get('speed', 1.0) for x in rows])), 3),
-           wer=round(jiwer.wer(refs, hyps), 4), repeated_words=rep, tail_s=asr.TAIL_S, repeat_words=asr.REPEAT_WORDS, asap=a.asap,
+           wer=round(jiwer.wer(refs, hyps), 4), repeated_words=rep,
+           cer=round(jiwer.cer([r.replace(' ', '') for r in refs], [h.replace(' ', '') for h in hyps]), 4),
+           other_lang=round(len(other) / max(len(long_enough), 1), 3), other_samples=other[:3],
+           tail_s=asr.TAIL_S, repeat_words=asr.REPEAT_WORDS, asap=a.asap,
            chrf=round(sacrebleu.corpus_chrf(trs, [prefs]).score, 1),
            reasons={k: sum(x['reason'] == k for x in rows) for k in ('pause', 'punct', 'max', 'eof', 'early')})
     base.close()
@@ -351,7 +370,7 @@ def links(a):
     """Latency per link of them -> me in a call (the echo scenario through the gate, in real time, the app's queue
     policy): seconds from the end of a clause's speech to each link (pipeline.LocalDirection, Latency events)."""
     from peresmeshnik.pipeline import MAX_LAG_S
-    base = make_local(a.lang, OTHER[a.lang], threads=a.threads, max_lag_s=MAX_LAG_S)
+    base = make_local(a.lang, target(a), threads=a.threads, max_lag_s=MAX_LAG_S)
     base.warm_up()
     pool = fleurs(a.lang)
     rows, sums = [], []
@@ -368,8 +387,9 @@ def links(a):
         out[name] = {'p50': pct(xs, 50), 'p90': pct(xs, 90), 'n': len(xs)}
     by_reason = {k: {'n': len(v), 'vad_p50': pct(v, 50), 'vad_p90': pct(v, 90)}
                  for k in ('pause', 'punct', 'max') if (v := [r['vad_lag_s'] for r in rows if r['reason'] == k and 'vad_lag_s' in r])}
-    record('call', a.variant, scenario='links', lang=a.lang, n=a.n, seed=a.seed, clauses=len(rows),
-           dropped=sum('dropped' in r for r in rows), asr_device=base.asr.device, mt_device=getattr(base.mt, 'device', 'cpu'),
+    record('call', a.variant, scenario='links', lang=a.lang, to=target(a), n=a.n, seed=a.seed, clauses=len(rows),
+           dropped=sum('dropped' in r for r in rows), asr=base.asr.name, asr_device=base.asr.device,
+           mt_device=getattr(base.mt, 'device', 'cpu'),
            cuda=device.want(), cpu=platform.processor(),
            links=out, vad_by_reason=by_reason,
            rtf={k: round(float(np.mean([x[k] for x in sums])), 4) for k in sums[0] if k.endswith('_rtf')},
@@ -392,9 +412,11 @@ def main():
     ap.add_argument('--no-partial-mt', action='store_true', help='long: no translated partials')
     ap.add_argument('--max-clause', type=float, default=5.0)
     ap.add_argument('--no-echo-path', action='store_true', help='echo: the far end on a headset (no echo): false suppression only')
+    ap.add_argument('--turns', action='store_true', help='long: the sentences with pauses between them (0.6-1.2 s), a talk not a monologue')
     ap.add_argument('--asap', action='store_true', help='long: fed as fast as it goes (the words only: no lags, same on any load)')
     ap.add_argument('--repeat', type=int, help='local/asr.py REPEAT_WORDS: words of a cut the next clause may repeat (1: before stage 5)')
-    ap.add_argument('--lang', default='en', choices=sorted(OTHER), help='long, links: the language they speak (FLEURS dev)')
+    ap.add_argument('--lang', default='en', choices=sorted(CODES), help='long, links: the language they speak (FLEURS dev)')
+    ap.add_argument('--to', choices=sorted(CODES), help='long, links: the language they are translated into (default: ru; en for ru)')
     ap.add_argument('--tail', type=float, help='local/asr.py TAIL_S: no cut at a word start this near the window end, s')
     a = ap.parse_args()
     from peresmeshnik.local import asr

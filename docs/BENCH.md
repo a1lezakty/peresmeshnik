@@ -1578,6 +1578,9 @@ stage 5).
 - **Taken: `REPEAT_WORDS` 3** (`local/asr.py`): a clause that repeats up to 3 words of the cut before it ("…to cope
   with" | "cope with the impacts": `test_two_people_overlapping_ends` with 0.5 on a 4-core EPYC VM) drops them; with 0.8 the English WER
   0.1447 → 0.1366 (5 repeated words → 0), Russian the same.
+- 2026-11-09: these "as fast as it goes" rows were measured before `00509b7` (a cut's words are dropped only when the
+  next window did not hear them before the cut). Again on main `5918c0d` (rows `main-asap-*`): en 3 → 0.1366 / 70.1 / 0,
+  1 → 0.1447 / 70.1 / 5; ru 0.0839 / 73.0 / 0 with both: the same numbers.
 
 ### Echo of our speech from the far end
 
@@ -1922,3 +1925,249 @@ snapshots of zh ⇄ ja and ko ⇄ ar per OS as the `overlay-<os>` artifact of th
   (no GPU) for a sentence of Han characters never shown before, ~1 ms once they were. Loading the pair's fonts at
   translation on (`overlay.set_pair`) takes 10–30 ms off the first row, not the rest: in a call, new characters keep
   coming, so a CJK subtitle may show up to ~0.1 s later on such a machine. Arabic: right to left by Qt's own layout.
+
+## Stage 6: them → me in 14 languages (S1)
+
+Measured 2026-11-09 on FLEURS (CC-BY-4.0; the same sentences in every language): ASR on dev (the first recording of
+the first 50 sentences), MT on test (= FLoRes devtest, the first 100 sentences), the call scenarios of stage 5 on dev.
+**CPU** = an i7-13700 with each model pinned to 2 physical cores (the app's 2 threads per runtime; `taskset`, 4 such
+lanes at a time), onnxruntime with the app's options (no spinning: three sessions' pools on 2 cores fight otherwise).
+**GPU** = an RTX A4000 (16 GB). Rows: `bench/results/i7-13700-2t.jsonl`, `rtx-a4000.jsonl`.
+
+### Speech recognition per language
+
+`bench/asr.py --fleurs`: WER (CER for zh / ja: no spaces), the cost of one partial on a 1 / 2 / 5 s window (what the
+stream pays every 0.3 s of speech), *other* = results that read as another of the 14 languages (letter trigrams
+against FLEURS test text; a model without a language setting drifting).
+
+| language | model (device) | WER / CER | other: whole / first 1.5 s | window 1 / 2 / 5 s, ms | RSS |
+|---|---|---|---|---|---|
+| uk | Parakeet TDT 0.6B v3 (CPU) | 0.095 / 0.026 | 0 / 0.14 | 155 / 209 / 451 | 1.45 GB |
+| de | Parakeet v3 (CPU) | 0.078 / 0.029 | 0 / 0.18 | 142 / 221 / 476 | 1.49 GB |
+| fr | Parakeet v3 (CPU) | 0.083 / 0.022 | 0.02 / 0.04 | 145 / 220 / 450 | 1.41 GB |
+| fr | FastConformer French (CPU; the default: Parakeet drifts into English in a call, "Calls" below; `linux-x86_64-4c`, Parakeet there 0.080 / 0.021, 127 ms) | 0.148 / 0.067 | 0.02 / 0.10 | 46 / 67 / 176 (EPYC VM) | |
+| es | Parakeet v3 (CPU) | 0.035 / 0.013 | 0.02 / 0.06 | 127 / 200 / 466 | 1.43 GB |
+| it | Parakeet v3 (CPU) | 0.040 / 0.013 | 0 / 0.12 | 118 / 173 / 329 | 1.55 GB |
+| pt | Parakeet v3 (CPU) | 0.053 / 0.023 | 0 / 0.18 | 110 / 189 / 345 | 1.45 GB |
+| pl | Parakeet v3 (CPU) | 0.099 / 0.031 | 0 / 0.16 | 188 / 301 / 882 | 1.43 GB |
+| (en, ru) | Parakeet v3 (CPU) | 0.051, 0.077 | 0, 0 / 0.02, **0.22** | 101 / 175 / 360 | 1.44 GB |
+| (ru) | GigaAM v3 e2e CTC (CPU, the default) | 0.051 / 0.013 | 0 / 0.06 | 63 / 109 / 225 | 0.53 GB |
+| ja | **Parakeet TDT-CTC 0.6B ja** (CPU) | CER 0.052 | 0 / 0.22 | 116 / 173 / 347 | 1.36 GB |
+| ja | Whisper large-v3-turbo (GPU) | CER 0.024 | 0 / 0.28 | 104 / 103 / 141 | 1.89 GB |
+| ar | **FastConformer hybrid large pcd** (CPU) | 0.151 / 0.050 | 0 / 0 | **39 / 72 / 115** | 0.62 GB |
+| ar | Whisper large-v3-turbo (GPU) | 0.137 / 0.038 | 0 / 0 | 115 / 123 / 168 | 1.87 GB |
+| tr | **Whisper large-v3-turbo** (GPU) | 0.078 / 0.023 | 0 / 0.06 | 104 / 108 / 160 | 1.89 GB |
+| tr | Whisper large-v3-turbo int8 (CPU, n = 10) | 0.053 / 0.008 | 0 / 0 | **4647** / 4704 / 5989 | 2.85 GB |
+| tr | Whisper small (GPU / CPU, n = 20) | 0.176 / 0.172 | | 31 / 57 / 130; CPU 1075 / 1708 / 1682 | |
+| tr | Whisper base int8 (CPU) | 0.347 / 0.108 | | 372 / 538 / 919 | 0.55 GB |
+| tr | Parakeet v3 (CPU: not its language) | 0.976 | 0.70 | | |
+| ko | **Whisper large-v3-turbo** (GPU) | CER 0.070 | 0 / 0.08 | 107 / 112 / 151 | 1.89 GB |
+| ko | Citrinet 1024 (call-center data, CPU) | CER 0.281 | | 96 / 145 / 292 | 0.73 GB |
+| zh | **Whisper large-v3-turbo** (GPU) | CER 0.106 | 0.10 / 0.22 | 102 / 103 / 121 | 1.87 GB |
+| zh | Whisper small (GPU) | CER 0.254 (traditional characters) | 0.26 | 28 / 51 / 57 | 1.45 GB |
+| zh | Citrinet 1024 gamma 0.25 (CPU) | CER 0.156 | 0.12 | 283 / 511 / 1074 | 0.75 GB |
+
+- **Taken:** Parakeet v3 for uk, de, fr, es, it, pt, pl; Parakeet TDT-CTC ja and FastConformer ar — live on 2 CPU
+  cores. tr, zh, ko: Whisper large-v3-turbo, **live only on an NVIDIA GPU** (registry `needs = "gpu"`): on the CPU a
+  1 s window costs 4.6 s, small 1.1 s, base is poor (tr WER 0.35); no permissive CTC/TDT model with an onnx-asr export
+  was found for them (Citrinet ko is call-center data: CER 0.28). Without a GPU those sides go to the cloud.
+- *First 1.5 s*: counted only where the reference's as many first words read as the language; 3–4 words still mislead
+  the trigrams (German "read" as Turkish or Italian). The known Parakeet drift shows in Russian (0.22, half of it
+  Ukrainian); what reaches the subtitles is in the call scenarios below (clauses in another language).
+- Whisper through onnx-asr gives text without timestamps: the stream re-runs it on the clause like Parakeet, a long
+  clause is cut at the quietest 0.1 s of its second half (one more run for the words before it), decoding is capped
+  at 128 tokens (base on a CPU once looped to 448 tokens: a 3 s window took 7.2 s).
+- Whisper small writes Chinese in traditional characters (CER against simplified FLEURS 0.25), turbo mostly
+  simplified.
+
+### Stock voices
+
+The app's path (`PiperTts`, the piper-runner process, 2 threads), the 10 shortest of the first 60 FLEURS dev sentences;
+CER = their wavs back through Whisper large-v3-turbo (GPU) in the voice's language.
+
+| language | voice (license) | first audio, ms | RTF | CER / WER |
+|---|---|---|---|---|
+| uk | `ukrainian_tts` medium (CC0) | 192 | 0.043 | 0.067 / 0.26 |
+| uk | `tetiana` high (Apache-2.0 data) — not taken | 1676 | 0.322 | 0.102 / 0.18 |
+| de | `thorsten` medium (CC0) | 219 | 0.051 | 0.018 / 0.07 |
+| fr | `siwis` medium (CC-BY-4.0) | 189 | 0.043 | 0.025 / 0.06 |
+| es | `es_MX-ald` medium (Unlicense; Latin American as FLEURS es-419) | 247 | 0.048 | 0.013 / 0.05 |
+| es | `es_ES-davefx` medium (CC0) — not taken | 214 | 0.045 | 0.009 / 0.06 |
+| it | `paola` medium (CC0 data) | 213 | 0.048 | 0.016 / 0.07 |
+| pt | `pt_BR-faber` medium (CC0) | 349 | 0.082 | 0.017 / 0.05 |
+| pl | `gosia` medium (CC0) | 206 | 0.044 | 0.011 / 0.04 |
+| tr | `dfki` medium (**CC-BY-NC-SA-4.0**, consent) | 199 | 0.044 | 0.029 / 0.08 |
+| ko | `kss` medium (**CC-BY-NC-SA-4.0**, consent) | 207 | 0.041 | 0.077 / 0.26 |
+| ja | `hi_fi_captain` medium (**CC-BY-NC-SA-4.0**, consent; Piper's `[ja]` extra) | 166 | 0.040 | 0.046 (CER) |
+
+zh and ar: no Piper voice with a usable license (MODELS.md) — no local voice, those sides go to the cloud
+(`languages.direction`). Kokoro-82M (Apache-2.0, ja and zh without espeak) is in the backlog.
+
+### Translation (MT)
+
+Method: CTranslate2 int8 on 2 physical cores of the i7-13700 (one model per process, 2 threads; Hy-MT2 Q4_K_M through
+llama-server on the A4000), each clause sentence by sentence in one batch, beam 1, as the app. Cells: **Tatoeba chrF++ /
+FLEURS chrF++ / COMET** · clause ms median (p90). Tatoeba: n = 200 short everyday sentences (median 6 words) of the
+Tatoeba-Challenge test sets (commit 6faf2da, CC-BY 2.0 FR), the call's register; FLEURS: n = 100 test sentences
+(FLoRes devtest, long news-like); COMET: wmt22-comet-da on the FLEURS hypotheses (`bench/mt_comet.py`, the A4000). Clause
+= the first 10 words (zh / ja: 15 characters) of 30 FLEURS sentences. The OPUS-MT rows are our int8 conversions (tc-big
+`*-zle` / `zle-*` for de / fr / es / it / pt / pl, Tatoeba-MT `opus-2021-02-19` for ru ↔ uk); quickmt: its own CTranslate2
+models (float16 → int8 at load). RSS of one model: OPUS-MT base 175 MB, tc-big 460 MB, quickmt 450–610 MB.
+
+X ↔ ru, direct against through English (the default in the last column):
+
+| direction | direct OPUS-MT | through English, quickmt both | through English, OPUS-MT then quickmt | Hy-MT2 1.8B on the A4000 | default |
+|---|---|---|---|---|---|
+| uk → ru | 82.4 / 48.0 / 0.866 · 63 (80) ms | 69.8 / 50.7 / 0.899 · 109 (128) ms | — | 77.5 / 50.0 / 0.910 · 141 (172) ms | direct |
+| ru → uk | 79.6 / 46.1 / 0.888 · 69 (85) ms | 65.2 / 50.1 / 0.915 · 97 (119) ms | — | 74.0 / 47.3 / 0.915 · 154 (182) ms | direct |
+| de → ru | 62.6 / 50.5 / 0.867 · 126 (176) ms | 60.0 / 50.0 / 0.845 · 128 (200) ms | — | 60.8 / 47.6 / 0.879 · 134 (163) ms | direct |
+| ru → de | 68.0 / 52.5 / 0.840 · 136 (168) ms | 60.8 / 51.9 / 0.821 · 140 (167) ms | — | 64.7 / 48.3 / 0.830 · 131 (157) ms | direct |
+| fr → ru | 63.0 / 49.2 / 0.869 · 81 (126) ms | 58.9 / 49.0 / 0.863 · 76 (94) ms | — | 57.9 / 46.3 / 0.870 · 125 (149) ms | direct |
+| ru → fr | 68.1 / 56.6 / 0.825 · 106 (128) ms | 63.6 / 55.9 / 0.817 · 239 (289) ms | — | 60.0 / 52.6 / 0.829 · 128 (143) ms | direct |
+| es → ru | 66.7 / 46.5 / 0.871 · 79 (93) ms | 60.4 / 45.1 / 0.845 · 127 (220) ms | — | 62.4 / 44.3 / 0.875 · 125 (157) ms | direct |
+| ru → es | 70.9 / 47.9 / 0.827 · 97 (126) ms | 66.6 / 45.5 / 0.814 · 131 (176) ms | — | 65.0 / 47.1 / 0.829 · 123 (148) ms | direct |
+| it → ru | 63.7 / 46.5 / 0.861 · 142 (189) ms | 58.5 / 46.8 / 0.863 · 126 (181) ms | — | 57.7 / 45.0 / 0.878 · 126 (155) ms | direct |
+| ru → it | 61.8 / 47.5 / 0.841 · 167 (215) ms | 60.0 / 47.8 / 0.830 · 144 (181) ms | — | 62.4 / 45.9 / 0.853 · 131 (153) ms | direct |
+| pt → ru | 66.3 / 52.4 / 0.875 · 153 (197) ms | 62.8 / 50.4 / 0.864 · 104 (126) ms | — | 64.4 / 48.1 / 0.878 · 126 (148) ms | direct |
+| ru → pt | 64.0 / 57.1 / 0.855 · 143 (179) ms | 63.8 / 56.6 / 0.846 · 178 (226) ms | — | 64.3 / 53.1 / 0.857 · 118 (143) ms | direct |
+| pl → ru | 72.4 / 45.4 / 0.873 · 150 (225) ms | 61.0 / 46.0 / 0.844 · 143 (174) ms | — | 69.1 / 43.9 / 0.877 · 148 (185) ms | direct |
+| ru → pl | 69.2 / 45.2 / 0.882 · 186 (262) ms | 63.0 / 44.4 / 0.870 · 153 (196) ms | — | 68.4 / 44.4 / 0.883 · 152 (175) ms | direct |
+| tr → ru | — | 54.9 / 46.0 / 0.838 · 136 (170) ms | 54.5 / 44.1 / 0.810 · 73 (90) ms | 52.8 / 41.3 / 0.851 · 176 (217) ms | OPUS-MT then quickmt |
+| ru → tr | — | 56.6 / 47.8 / 0.822 · 134 (200) ms | 55.9 / 46.0 / 0.796 · 67 (84) ms | 55.4 / 44.1 / 0.840 · 147 (176) ms | OPUS-MT then quickmt |
+| zh → ru | — | 44.6 / 43.7 / 0.842 · 85 (115) ms | — | 50.1 / 41.6 / 0.878 · 129 (145) ms | quickmt both |
+| ru → zh | — | 24.4 / 20.9 / 0.812 · 184 (239) ms | 23.5 / 19.6 / 0.788 · 71 (86) ms | 27.9 / 21.4 / 0.854 · 74 (95) ms | OPUS-MT then quickmt |
+| ja → ru | 41.8 / 31.1 / 0.715 · 44 (66) ms | 50.0 / 42.1 / 0.845 · 85 (110) ms | — | 50.7 / 37.8 / 0.858 · 103 (154) ms | quickmt both |
+| ru → ja | — | 26.5 / 22.4 / 0.806 · 127 (168) ms | 25.4 / 21.4 / 0.786 · 63 (74) ms | 32.2 / 23.0 / 0.871 · 132 (160) ms | OPUS-MT then quickmt |
+| ko → ru | 49.1 / 34.3 / 0.741 · 104 (156) ms | 53.6 / 42.7 / 0.830 · 153 (180) ms | — | 51.1 / 42.0 / 0.861 · 196 (229) ms | quickmt both |
+| ru → ko | — | 29.2 / 29.6 / 0.832 · 145 (184) ms | 28.7 / 27.5 / 0.808 · 66 (78) ms | 29.6 / 27.4 / 0.859 · 135 (155) ms | OPUS-MT then quickmt |
+| ar → ru | 57.9 / 43.1 / 0.802 · 88 (120) ms | 61.2 / 49.7 / 0.854 · 124 (167) ms | — | 61.1 / 43.8 / 0.854 · 158 (191) ms | quickmt both |
+| ru → ar | 44.5 / 39.5 / 0.778 · 78 (103) ms | 49.8 / 46.8 / 0.817 · 122 (159) ms | 51.2 / 44.3 / 0.800 · 63 (75) ms | 50.3 / 40.8 / 0.833 · 149 (191) ms | OPUS-MT then quickmt |
+
+X ↔ en:
+
+| direction | quickmt | OPUS-MT | default |
+|---|---|---|---|
+| ru → en | 71.9 / 59.5 / 0.859 · 87 (116) ms | 72.1 / 55.3 / 0.832 · 48 (63) ms | OPUS-MT |
+| en → ru | 64.6 / 55.0 / 0.863 · 58 (71) ms | 63.6 / 51.6 / 0.849 · 40 (57) ms | quickmt |
+| uk → en | 73.2 / 62.4 / 0.861 · 44 (51) ms | 75.4 / 51.8 / 0.793 · 56 (75) ms | OPUS-MT |
+| en → uk | 65.2 / 57.1 / 0.883 · 50 (64) ms | 67.6 / 45.0 / 0.800 · 43 (60) ms | quickmt |
+| de → en | 69.5 / 66.3 / 0.880 · 44 (60) ms | 70.9 / 65.0 / 0.877 · 68 (82) ms | OPUS-MT |
+| en → de | 60.9 / 62.2 / 0.856 · 42 (53) ms | 61.3 / 59.4 / 0.833 · 58 (70) ms | quickmt |
+| fr → en | 72.6 / 68.0 / 0.889 · 45 (57) ms | 69.9 / 63.2 / 0.873 · 37 (51) ms | OPUS-MT |
+| en → fr | 70.3 / 68.2 / 0.865 · 64 (94) ms | 68.9 / 68.0 / 0.849 · 73 (103) ms | quickmt |
+| es → en | 75.2 / 57.4 / 0.856 · 36 (48) ms | 74.7 / 57.8 / 0.862 · 44 (55) ms | OPUS-MT |
+| en → es | 71.7 / 53.3 / 0.829 · 52 (67) ms | 74.4 / 54.3 / 0.846 · 51 (66) ms | quickmt |
+| it → en | 81.2 / 59.3 / 0.873 · 35 (45) ms | 81.4 / 57.4 / 0.864 · 73 (93) ms | OPUS-MT |
+| en → it | 75.6 / 55.7 / 0.862 · 43 (56) ms | 73.1 / 53.7 / 0.845 · 58 (75) ms | quickmt |
+| pt → en | 75.3 / 70.9 / 0.886 · 53 (60) ms | 72.6 / 69.6 / 0.884 · 50 (56) ms | OPUS-MT |
+| en → pt | 70.6 / 71.3 / 0.885 · 46 (59) ms | 70.0 / 70.8 / 0.885 · 146 (198) ms | quickmt |
+| pl → en | 64.2 / 54.2 / 0.835 · 55 (69) ms | 65.3 / 51.0 / 0.823 · 55 (71) ms | OPUS-MT |
+| en → pl | 57.6 / 47.7 / 0.834 · 72 (97) ms | 57.2 / 43.4 / 0.801 · 49 (61) ms | quickmt |
+| tr → en | 71.8 / 59.3 / 0.877 · 48 (64) ms | 72.8 / 55.0 / 0.858 · 89 (101) ms | OPUS-MT |
+| en → tr | 65.4 / 59.5 / 0.886 · 39 (53) ms | 63.4 / 58.6 / 0.880 · 101 (134) ms | quickmt |
+| zh → en | 57.2 / 55.3 / 0.858 · 46 (86) ms | 54.5 / 50.1 / 0.837 · 51 (63) ms | quickmt |
+| en → zh | 27.0 / 26.7 / 0.838 · 51 (73) ms | 22.8 / 21.8 / 0.812 · 53 (77) ms | quickmt |
+| ja → en | 53.6 / 55.5 / 0.873 · 31 (40) ms | 52.3 / 44.6 / 0.807 · 40 (51) ms | quickmt |
+| en → ja | 25.2 / 28.2 / 0.850 · 49 (71) ms | 17.6 / 18.5 / 0.805 · 52 (72) ms | quickmt |
+| ko → en | 58.7 / 52.3 / 0.853 · 60 (108) ms | 57.2 / 47.4 / 0.818 · 90 (136) ms | quickmt |
+| en → ko | 30.1 / 37.6 / 0.875 · 42 (64) ms | 2.6 / 2.8 / 0.290 · 104 (134) ms | quickmt |
+| ar → en | 66.7 / 66.0 / 0.876 · 57 (68) ms | 63.9 / 58.9 / 0.838 · 54 (73) ms | quickmt |
+| en → ar | 48.1 / 58.2 / 0.858 · 40 (48) ms | 43.5 / 53.0 / 0.845 · 52 (66) ms | quickmt |
+
+What the numbers above do not show, and what decided the defaults:
+
+- **Through English the speaker's gender and ты / вы get lost.** Conversational phrases written for the check (feminine
+  first person in the past tense or with an adjective, informal and formal address): X → ru, 10 per language — direct
+  OPUS-MT 8–10 / 10 (de 8, fr 9 with tc-big, es 9 with tc-big, it 8, pt 10, pl 10), quickmt through English 3–5 / 10;
+  ru ↔ uk, 20 each way — direct keeps the gender 9 / 9 and 8 / 8, through English 0 / 9 and 1 / 8 («Я готова» → «Я
+  готовий»), and mixes ты / вы in 3–4 of 12.
+- **quickmt X → en makes up a continuation of a one- or two-word reply**: 39 of 41 replies of ru / uk / de / fr / es /
+  it / pt / pl («Да.» → "Yes, I am very", «Ja.» → "I think we're going to get a job.", «Sí.» → "I'm not sure I'll be
+  there.", pl → en adds "✔"); OPUS-MT X → en and the direct X → ru models translate all 41 as replies. Beam 2 or 4,
+  `length_penalty` 0 do not help (pl → en then gives "Skip to content"); cutting a translation to its source's number of
+  sentences costs 0.2–1.6 chrF++ on FLEURS. On Tatoeba a sentence too many in sources of ≤ 4 words: quickmt es → en
+  24 %, it 14.5 %, de 14.3 %, pt 9.1 %, through English pl → ru 16.7 %, es → ru 14.1 %, de → ru 12.8 %; OPUS-MT 0–2 %.
+  ja / ar → en and en → X of quickmt are clean on them.
+- Hence the defaults (`config.Local.mt`, the registry's `pivot` rows): X ↔ ru direct for uk, de, fr, es, it, pt, pl
+  (release `models-2`); X → en OPUS-MT for ru, uk, de, fr, es, it, pt, pl, tr, quickmt for ja, ko, zh, ar; en → X quickmt
+  (en → ru too: 64.6 / 55.0 / 0.863 against OPUS-MT 63.6 / 51.6 / 0.849); every other pair through English from those
+  two. The price where English stays in between: OPUS-MT as the first half costs 1–2 chrF++ on FLEURS and 0.02–0.03
+  COMET (tr → ru 0.810 against 0.838), and is equal on Tatoeba. A user pair with ru on CPU: 156–470 MB for both
+  directions instead of ~1.6 GB of four quickmt models.
+- Hy-MT2 1.8B on an NVIDIA GPU has the best COMET on most pairs (ru → ja 0.871, ru → zh 0.854 against 0.806 / 0.812 through
+  English) at 75–200 ms per clause, but needs llama-server with CUDA in the builds: backlog. NLLB-200 600M (noncommercial)
+  and M2M100 418M: 420–760 ms per clause on the CPU and below the better of direct and through English on FLEURS (de → ru
+  46.5 / 44.1, ru → uk 46.3 / 48.6, uk → ru 47.9 / 49.1); stopped after uk / de / fr / es of 12.
+
+### Calls in the 14 languages
+
+`bench/call.py` (stage 5 scenarios) with `--lang X --to ru|en`, the defaults of this stage (ASR, MT, stock voice per
+language; tr / zh / ko: Whisper turbo, NVIDIA only). `links`: the echo scenario through the gate in real time with the
+app's queue policy, n = 2 (12 turns of theirs), seconds from the end of a clause's speech to its subtitle and to the
+start of its voice. `long --asap`: FLEURS dev sentences of one language back to back with no pause the VAD would take
+(a monologue, n = 3, 5 sentences each; clauses cut at 5 s), and `--turns`: the same with 0.6–1.2 s pauses between
+sentences (a talk, n = 4); WER / CER of the clauses against the read text, chrF of their translations against the
+translation of the read sentences, "another language": clauses of ≥ 4 words (zh / ja: 6 characters) that the letter-
+trigram LID of `bench/asr.py` puts in another language — on short clauses mostly false alarms (es 9.8 %: Spanish
+clauses), a real drift only where the text says so. CPU: 2 lanes of 4 physical cores of the i7-13700 (a side: ASR, MT,
+TTS with 2 threads each); "A4000, two scenarios at once": the two lanes shared the one GPU (ASR and MT on CUDA) — slower
+than the CPU for some languages (pl → ru 1.45 s against 0.57 s), so tr / zh / ko / de / fr ran again one at a time
+(tr → ru subtitle p50 0.39 s against 0.71 s, de → ru 0.48 s against 0.73 s).
+
+| them speak | host | → ru: subtitle s p50 / p90 | → ru: voice s p50 / p90 | → en: subtitle | → en: voice | clauses (dropped ru / en) | RSS MB ru / en |
+|---|---|---|---|---|---|---|---|
+| uk | i7-13700, 2 cores | 0.52 / 1.83 | 1.37 / 2.79 | 0.54 / 1.98 | 1.74 / 2.82 | 34 (0 / 0) | 1608 / 1614 |
+| uk | A4000, two scenarios at once | 0.58 / 2.08 | 1.34 / 2.8 | 0.55 / 2.21 | 1.8 / 3.03 | 34 (0 / 0) | 2271 / 2274 |
+| de | i7-13700, 2 cores | 0.62 / 1.55 | 0.87 / 2.17 | 0.51 / 1.41 | 0.96 / 2.35 | 36 (1 / 1) | 1771 / 1609 |
+| de | A4000, two scenarios at once | 0.73 / 1.34 | 0.95 / 2.51 | 0.7 / 1.55 | 1.19 / 2.53 | 35 (1 / 1) | 2502 / 2281 |
+| de | A4000, one at a time | 0.48 / 1.45 | 0.64 / 2.34 | — | — | 35 (0 / —) | 2504 / — |
+| fr | i7-13700, 2 cores | 0.49 / 1.65 | 1.33 / 3.39 | 0.36 / 1.54 | 1.32 / 2.95 | 37 (1 / 7) | 837 / 626 |
+| fr | A4000, two scenarios at once | 0.32 / 1.32 | 1.16 / 2.91 | 0.31 / 1.31 | 1.2 / 2.92 | 37 (1 / 6) | 1696 / 1430 |
+| fr | A4000, one at a time | 0.32 / 1.32 | 1.16 / 2.97 | — | — | 37 (1 / —) | 1696 / — |
+| es | i7-13700, 2 cores | 0.66 / 1.59 | 1.24 / 2.56 | 0.56 / 1.62 | 1.24 / 2.94 | 48 (0 / 2) | 1798 / 1611 |
+| es | A4000, two scenarios at once | 0.64 / 1.6 | 1.37 / 2.73 | 0.73 / 1.64 | 1.56 / 3.25 | 48 (0 / 2) | 2520 / 2292 |
+| it | i7-13700, 2 cores | 0.51 / 1.63 | 0.88 / 2.18 | 0.53 / 1.56 | 1.0 / 2.62 | 54 (0 / 2) | 1795 / 1625 |
+| it | A4000, two scenarios at once | 0.63 / 1.75 | 0.82 / 2.09 | 0.62 / 1.71 | 1.23 / 2.9 | 54 (1 / 2) | 2512 / 2278 |
+| pt | i7-13700, 2 cores | 0.6 / 1.89 | 0.95 / 2.5 | 0.49 / 1.36 | 0.89 / 2.63 | 54 (2 / 2) | 1777 / 1617 |
+| pt | A4000, two scenarios at once | 1.17 / 2.0 | 1.43 / 2.38 | 1.22 / 1.81 | 1.47 / 2.59 | 55 (1 / 2) | 2510 / 2284 |
+| pl | i7-13700, 2 cores | 0.57 / 2.07 | 1.31 / 2.61 | 0.57 / 1.94 | 1.6 / 3.09 | 38 (3 / 4) | 1751 / 1606 |
+| pl | A4000, two scenarios at once | 1.45 / 2.43 | 2.18 / 2.99 | 1.49 / 2.3 | 2.03 / 2.94 | 38 (3 / 7) | 2505 / 2272 |
+| tr | A4000, two scenarios at once | 0.71 / 2.56 | 2.09 / 3.23 | 0.81 / 2.44 | 2.11 / 3.5 | 41 (1 / 3) | 2357 / 2039 |
+| tr | A4000, one at a time | 0.39 / 2.02 | 1.48 / 2.88 | 0.39 / 2.01 | 1.87 / 3.34 | 41 (0 / 1) | 2356 / 2039 |
+| zh | A4000, two scenarios at once | 0.37 / 0.6 | 0.54 / 2.25 | 0.3 / 0.48 | 0.48 / 2.33 | 40 (0 / 0) | 2255 / 2256 |
+| zh | A4000, one at a time | 0.3 / 0.43 | 0.46 / 2.12 | 0.29 / 0.42 | 0.46 / 2.18 | 40 (0 / 0) | 2255 / 2255 |
+| ja | i7-13700, 2 cores | 0.62 / 1.6 | 1.55 / 3.02 | 0.51 / 1.36 | 1.32 / 2.84 | 41 (2 / 3) | 2008 / 1724 |
+| ja | A4000, two scenarios at once | 0.56 / 1.34 | 1.29 / 2.76 | 0.49 / 1.32 | 1.3 / 2.78 | 41 (2 / 2) | 2492 / 2471 |
+| ko | A4000, two scenarios at once | 0.41 / 2.65 | 0.71 / 2.91 | 0.38 / 2.63 | 0.79 / 2.72 | 43 (1 / 2) | 2466 / 2164 |
+| ko | A4000, one at a time | 0.35 / 2.44 | 0.52 / 2.6 | 0.34 / 2.4 | 0.57 / 2.58 | 43 (1 / 1) | 2466 / 2164 |
+| ar | i7-13700, 2 cores | 1.01 / 1.84 | 1.41 / 3.27 | 0.95 / 1.82 | 1.5 / 3.25 | 58 (3 / 1) | 1264 / 943 |
+| ar | A4000, two scenarios at once | 0.9 / 1.73 | 1.27 / 3.21 | 0.88 / 1.72 | 1.34 / 2.98 | 58 (2 / 2) | 1807 / 1799 |
+
+| them speak → ru | host | monologue: WER / CER / chrF | another language (LID) | cuts pause / punct / max | talk with pauses: WER / CER / chrF |
+|---|---|---|---|---|---|
+| uk | CPU | 0.1564 / 0.0616 / 71.7 | 0.0 | 18 / 4 / 16 | 0.1441 / 0.0574 / 74.5 |
+| de | CPU | 0.1569 / 0.0585 / 62.3 | 0.059 | 19 / 8 / 18 | 0.1017 / 0.0283 / 64.5 |
+| fr | CPU | 0.1558 / 0.0544 / 67.3 | 0.032 | 7 / 8 / 19 | 0.1679 / 0.0665 / 68.7 |
+| es | CPU | 0.0574 / 0.0326 / 74.2 | 0.098 | 21 / 2 / 22 | 0.0352 / 0.0178 / 72.4 |
+| it | CPU | 0.0472 / 0.008 / 58.2 | 0.039 | 21 / 9 / 28 | 0.0625 / 0.0259 / 59.1 |
+| pt | CPU | 0.0875 / 0.0337 / 65.2 | 0.028 | 29 / 2 / 16 | 0.0652 / 0.0257 / 65.6 |
+| pl | CPU | 0.1434 / 0.0483 / 62.5 | 0.0 | 13 / 4 / 19 | 0.1178 / 0.0465 / 67.4 |
+| tr | A4000 | 0.1161 / 0.026 / 59.6 | 0.088 | 23 / 0 / 13 | — |
+| zh | A4000 | — / 0.1113 / 55.9 | 0.241 | 15 / 0 / 16 | — |
+| ja | CPU | — / 0.0682 / 57.1 | 0.028 | 31 / 0 / 11 | — |
+| ko | A4000 | 0.0877 / 0.0238 / 62.7 | 0.027 | 15 / 0 / 25 | — |
+| ar | CPU | 0.2261 / 0.1038 / 57.0 | 0.0 | 14 / 6 / 29 | — |
+
+- **Parakeet drifts into English — in French.** In the monologue Parakeet v3 (no language setting) wrote clauses after a
+  5 s cut in English ("The repas romains à l'antiquité…", "and republicanism, the nationalism and the conviction that
+  the pay", "The force of Lord never present…"): fr WER 0.32, CER 0.164, chrF 57.8 on the i7-13700 (0.31 / 0.176 / 59.0
+  on `linux-x86_64-4c`; the rows say their ASR in `asr`). NVIDIA's FastConformer French (`fastconformer-fr-pc`) does
+  not: 0.156 / 0.054 / 67.3, the fr default now. Its price: on whole FLEURS dev utterances Parakeet is better (WER 0.080
+  against 0.148, CER 0.021 against 0.067, `linux-x86_64-4c`, n = 50), and in the talk with pauses too (0.126 / 0.038 /
+  72.2 against 0.156 / 0.064 / 68.5, `linux-x86_64-4c`) — but it drifted there once as well; a drifted clause is nonsense in Russian, not a word wrong. FastConformer's
+  1 s window: 46 ms against 127 ms. In the other languages the clauses show one such drift in German per run ("Your
+  primary leaves raum is in Flusmündungen") and none in uk / es / it / pt / pl: they stay on Parakeet; their higher WER
+  in the monologue than offline (de 0.157 against 0.078) comes from the 5 s cuts (names and numbers split).
+- **Whisper writes Chinese partly in traditional characters** ("我們對待你他們"; 24 % of the zh clauses taken for another
+  language): the text is right, the script mixed. Converting needs OpenCC (a new dependency): backlog.
+- Peak RSS of a side: 1.6–2.0 GB on the CPU (ASR + MT + the Piper runner); fr with FastConformer 0.6–0.8 GB.

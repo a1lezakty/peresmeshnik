@@ -17,6 +17,7 @@ from peresmeshnik.engines import Voice
 RUNNER = Path(__file__).resolve().parents[2] / 'piper-runner' / 'piper_runner.py'
 # the frozen piper-runner.exe is windowed, but in dev the runner is uv/python (a console program): no flashing window
 CREATE_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+PIPER, PIPER_JA = 'piper-tts==1.8.0', 'piper-tts[ja]==1.8.0'
 LOG_MAX = 1 << 20  # the runner's stderr log starts over past this
 
 
@@ -35,7 +36,15 @@ def voice_path(voice_id: str) -> Path:
 def runner_cmd() -> list[str]:
     if os.environ.get('PERESMESHNIK_PIPER_CMD'):
         return shlex.split(os.environ['PERESMESHNIK_PIPER_CMD'], posix=os.name != 'nt')
-    return [shutil.which('uv') or 'uv', 'run', '--no-project', '--with', 'piper-tts==1.8.0', 'python', str(RUNNER)]
+    return [shutil.which('uv') or 'uv', 'run', '--no-project', '--with', PIPER, 'python', str(RUNNER)]
+
+
+def with_extra(cmd: list[str], onnx: Path) -> list[str]:
+    """A Japanese voice needs Piper's [ja] extra (pyopenjtalk-plus: its own phonemizer instead of espeak)."""
+    cfg = Path(f'{onnx}.json')
+    if not cfg.exists() or json.loads(cfg.read_text('utf-8')).get('phoneme_type') != 'japanese':
+        return cmd
+    return [PIPER_JA if c == PIPER else c for c in cmd]
 
 
 class PiperTts:
@@ -48,7 +57,7 @@ class PiperTts:
         log.parent.mkdir(parents=True, exist_ok=True)
         self._log = open(log, 'ab' if log.exists() and log.stat().st_size < LOG_MAX else 'wb')
         self._log_at = self._log.tell()
-        self._p = subprocess.Popen([*runner_cmd(), str(onnx), '--threads', str(threads)], stdin=subprocess.PIPE,
+        self._p = subprocess.Popen([*with_extra(runner_cmd(), onnx), str(onnx), '--threads', str(threads)], stdin=subprocess.PIPE,
                                    stdout=subprocess.PIPE, stderr=self._log, creationflags=CREATE_NO_WINDOW)
         self.sample_rate = self._u32()
 

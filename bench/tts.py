@@ -2,6 +2,8 @@
 
     python bench/tts.py run joe          # a voice from VOICES
     python bench/tts.py judge joe        # back-transcribe its wavs with faster-whisper small -> CER
+    python bench/tts.py app piper-de_DE-thorsten-medium   # a registry voice as the app runs it (PiperTts, 2 threads)
+    python bench/tts.py judge-app piper-de_DE-thorsten-medium --path WHISPER_DIR --device cuda  # CER via Whisper turbo
 
 Piper is GPL, so it is never imported: it runs as its own process, the upstream CLI from an isolated
 uv tool env ($PIPER_CMD, default `uvx --from piper-tts==1.8.0 piper`), fed one line per sentence.
@@ -36,7 +38,61 @@ VOICES = {  # name: (engine, lang, voice); chosen voices first, lessac/irina wer
 
 
 def sentences(lang, n=10):
+    if lang not in ('en', 'ru'):  # the 10 shortest of the first 60 FLEURS dev sentences
+        from data import fleurs
+        rows = fleurs(lang, audio=False)
+        return sorted((rows[i][1] for i in sorted(rows)[:60]), key=len)[:n]
     return sorted((it[lang]['text'] for it in manifest()), key=len)[:n]
+
+
+def app(voice_id, threads):
+    """A registry voice through the app's PiperTts (the piper-runner process): first audio, RTF, CPU of the tree."""
+    from peresmeshnik import models
+    from peresmeshnik.local.tts import PiperTts
+    lang = models.get(voice_id).langs[0]
+    t0 = time.perf_counter()
+    tts = PiperTts(voice_id, threads=threads)
+    for _ in tts.synth(sentences(lang, 1)[0], lang):  # warm-up
+        pass
+    load_s = time.perf_counter() - t0
+    out = OUT / voice_id
+    out.mkdir(parents=True, exist_ok=True)
+    cpu0, wall0 = tree_cpu_s(tts._p.pid), time.perf_counter()
+    ttfa, total, audio = [], 0.0, 0.0
+    for i, text in enumerate(sentences(lang)):
+        parts, t = [], time.perf_counter()
+        for x in tts.synth(text, lang):
+            if not parts:
+                ttfa.append(time.perf_counter() - t)
+            parts.append(x)
+        total += time.perf_counter() - t
+        x = np.concatenate(parts)
+        audio += len(x) / tts.sample_rate
+        sf.write(out / f'{i}.wav', x, tts.sample_rate)
+    wall, cpu = time.perf_counter() - wall0, tree_cpu_s(tts._p.pid) - cpu0
+    tts.close()
+    record('tts', 'piper-runner', lang=lang, voice=voice_id, threads=threads, n=len(ttfa), load_s=round(load_s, 1),
+           ttfa_ms_median=round(1000 * float(np.median(ttfa))), rtf=round(total / audio, 3), cpu_cores=round(cpu / wall, 2),
+           audio_s=round(audio, 1), data='fleurs-dev' if lang not in ('en', 'ru') else 'set')
+
+
+def judge_app(voice_id, threads, device, path):
+    """CER of `app`'s wavs back through Whisper large-v3-turbo (onnx-asr, the call's language)."""
+    import jiwer
+    from asr import NO_SPACES, load_onnx, norm
+
+    from peresmeshnik import models
+    lang = models.get(voice_id).langs[0]
+    run, _ = load_onnx('whisper', lang, threads, device, path, 'fp16' if device == 'cuda' else 'int8')
+    refs, hyps = [], []
+    chars = (lambda t: t.replace(' ', '')) if lang in NO_SPACES else (lambda t: t)
+    for i, text in enumerate(sentences(lang)):
+        x, sr = sf.read(OUT / voice_id / f'{i}.wav', dtype='float32')
+        x = np.interp(np.arange(0, len(x), sr / 16000), np.arange(len(x)), x).astype(np.float32)  # to 16 kHz
+        refs.append(chars(norm(text)))
+        hyps.append(chars(norm(run(x))))
+    record('tts_cer', 'piper-runner', lang=lang, voice=voice_id, judge='whisper-large-v3-turbo', device=device,
+           cer=round(jiwer.cer(refs, hyps), 4), wer=round(jiwer.wer(refs, hyps), 4), sample=hyps[0][:100])
 
 
 def piper(path, threads):
@@ -105,12 +161,18 @@ def judge(name, threads):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('step', choices=['run', 'judge'])
-    ap.add_argument('voice', choices=list(VOICES))
+    ap.add_argument('step', choices=['run', 'judge', 'app', 'judge-app'])
+    ap.add_argument('voice', help='run, judge: one of ' + ' '.join(VOICES) + '; app, judge-app: a registry voice id')
     ap.add_argument('--threads', type=int, default=4)
+    ap.add_argument('--device', default='cpu')
+    ap.add_argument('--path', help='judge-app: the onnx-community Whisper large-v3-turbo directory')
     a = ap.parse_args()
     if a.step == 'judge':
         return judge(a.voice, a.threads)
+    if a.step == 'app':
+        return app(a.voice, a.threads)
+    if a.step == 'judge-app':
+        return judge_app(a.voice, a.threads, a.device, a.path)
     engine, lang, spec = VOICES[a.voice]
     t0 = time.perf_counter()
     stream = globals()[engine](spec, a.threads)

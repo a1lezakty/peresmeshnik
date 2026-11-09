@@ -17,7 +17,7 @@ url = "https://huggingface.co/istupakov/silero-vad-onnx/resolve/b3e3ee3cce4c11ce
 
 ["parakeet-tdt-0.6b-v3"]  # int8 ONNX for onnx-asr ("nemo-parakeet-tdt-0.6b-v3", quantization="int8")
 role = "asr"
-langs = ["en", "ru"]  # and 23 more European languages
+langs = ["en", "ru", "uk", "de", "fr", "es", "it", "pt", "pl"]  # and 18 more European languages
 license = "CC-BY-4.0"
 license_url = "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3"
 note = "Parakeet TDT 0.6B v3 by NVIDIA, ONNX conversion by istupakov"
@@ -40,6 +40,62 @@ url = "https://huggingface.co/istupakov/gigaam-v3-onnx/resolve/322c3b29492673eb7
 "v3_e2e_ctc.yaml" = { sha256 = "e67eca3a311ad7c8813d36dff6b8eeba7ad3459fd811d6faea2a26535754a358", size = 899 }
 "v3_e2e_ctc_vocab.txt" = { sha256 = "142de7570b3de5b3035ce111a89c228e80e6085273731d944093ddf24fa539cd", size = 2007 }
 "LICENSE.txt" = { sha256 = "f00de6715714c7a63d08639cdbfaa40224eefc407302614bd19f1a8b98c875aa", size = 1070 }
+
+["parakeet-tdt_ctc-0.6b-ja"]  # int8 ONNX for onnx-asr ("nemo-conformer-tdt", quantization="int8"): NVIDIA parakeet-tdt_ctc-0.6b-ja, punctuation included
+role = "asr"
+langs = ["ja"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/nvidia/parakeet-tdt_ctc-0.6b-ja"
+note = "NVIDIA Parakeet TDT-CTC 0.6B ja, ONNX export by OpenVoiceOS"
+url = "https://huggingface.co/OpenVoiceOS/nvidia-parakeet-tdt_ctc-0.6b-ja-onnx/resolve/4353e7b9e2e9ebdd35e85b8140c7351d03c2219c/"
+["parakeet-tdt_ctc-0.6b-ja".files]
+"encoder-model.int8.onnx" = { sha256 = "3c9f3f8840b105fad60ac743e50a2bbe01e467205ea0978f3a3407b2b18148b2", size = 652467248 }
+"decoder_joint-model.int8.onnx" = { sha256 = "1de334dbbf66233309e18b6242b5dbc34005851f282cd89e36597c3cb8564498", size = 11627915 }
+"vocab.txt" = { sha256 = "732f64c53909f2620c713f4106b487d92e6f54a6915b3cd3d1dbd32f9f4f392a", size = 28557 }
+"config.json" = { sha256 = "78ea780965f996730ac39defe6718ff3afee686d03b363e62ebf512cfa8e4728", size = 119 }
+"README.md" = { sha256 = "3d39b98baefede4f602355553fd4330f59156ca9687c10d8df4a8eb330194557", size = 767 }
+
+[fastconformer-ar-pcd]  # int8 ONNX for onnx-asr ("nemo-conformer-ctc", quantization="int8"): punctuation, capitalisation, diacritics
+role = "asr"
+langs = ["ar"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/nvidia/stt_ar_fastconformer_hybrid_large_pcd_v1.0"
+note = "NVIDIA FastConformer hybrid large (Arabic), ONNX export by OpenVoiceOS"
+url = "https://huggingface.co/OpenVoiceOS/stt_ar_fastconformer_hybrid_large_pcd_v1.0_onnx/resolve/c5f78db4d5a8da706ab74cad73481c18b8d736b9/"
+[fastconformer-ar-pcd.files]
+"model.int8.onnx" = { sha256 = "91820d182c2643da79b3a858d980675a442c120a203dac2482ded90da087ebd8", size = 131652238 }
+"vocab.txt" = { sha256 = "9b938381a19a69bb279cdcfc299419f25a049ea1de192e0d10317274a0f20074", size = 12858 }
+"config.json" = { sha256 = "e807f8692efbb65fec1e6356c55e58e9ce023d67f49b0dc36608b1d9d4b59480", size = 96 }
+"README.md" = { sha256 = "8162e2f5c10a5084e63eeb91c6eec2f3a91049d3904257fe1db1bbbc90e28db1", size = 3020 }
+
+[fastconformer-fr-pc]  # int8 ONNX for onnx-asr ("nemo-conformer-ctc", quantization="int8"): French only (Parakeet v3 drifts into English mid-monologue, BENCH stage 6)
+role = "asr"
+langs = ["fr"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/nvidia/stt_fr_fastconformer_hybrid_large_pc"
+note = "NVIDIA FastConformer hybrid large (French), ONNX export by OpenVoiceOS"
+url = "https://huggingface.co/OpenVoiceOS/stt_fr_fastconformer_hybrid_large_pc_onnx/resolve/b05291a0bea9b2ce4c0793117773911f46188918/"
+[fastconformer-fr-pc.files]
+"model.int8.onnx" = { sha256 = "a38933249c5b7e3fb7aeb1a79186088761b27d812fbe2d294329a1549d4aeb64", size = 131652238 }
+"vocab.txt" = { sha256 = "1b0a63466e3847115896e795fd64160e689c68efb63c0b648f7a85d33a9a0c1e", size = 10943 }
+"config.json" = { sha256 = "e807f8692efbb65fec1e6356c55e58e9ce023d67f49b0dc36608b1d9d4b59480", size = 96 }
+"README.md" = { sha256 = "97068907b778ba88245ce281846427567d8ee0450509dd7b247037e4cc8b2346", size = 2978 }
+
+[whisper-large-v3-turbo]  # fp16 ONNX for onnx-asr ("whisper", quantization="fp16"); no live pace on a CPU (a 1 s window: 4.6 s, BENCH stage 6)
+role = "asr"
+langs = ["tr", "zh", "ko"]
+license = "MIT"
+license_url = "https://huggingface.co/openai/whisper-large-v3-turbo"
+note = "OpenAI Whisper large-v3-turbo, ONNX export by onnx-community"
+needs = "gpu"
+url = "https://huggingface.co/onnx-community/whisper-large-v3-turbo/resolve/360ebcde2559d60bb474678be3c1de9ef347d01a/"
+[whisper-large-v3-turbo.files]
+"onnx/encoder_model_fp16.onnx" = { sha256 = "fdadc70836e6b028fd5e580417c312208dad073d2d01e509e2d127c1373399d8", size = 1274342603 }
+"onnx/decoder_model_merged_fp16.onnx" = { sha256 = "fdf10afca73a0c7bf87286cfb96cf7028a9edbc9bb02512509a526f95b126c9d", size = 344227339 }
+"vocab.json" = { sha256 = "e2aa043ef015641d363d8288e7c241c85e36a5c761fb303598e0710233344387", size = 1036558 }
+"added_tokens.json" = { sha256 = "3c51f66c4c21f9e126970078f11ae77a78c74aee8df606ee9daba86e467108e0", size = 34648 }
+"config.json" = { sha256 = "35cd83669f75bc2867f3b3a4461850392d5e308cd6ea951c3700539883c28df1", size = 1332 }
+"README.md" = { sha256 = "19af35fc51ff4eab95ea53a4955af5c2b13f720b802be3191b79fd6f053e4ce7", size = 551 }
 
 [t-one]  # streaming CTC, 300 ms chunks, 8 kHz; onnx-asr "t-tech/t-one"
 role = "asr"
@@ -72,6 +128,7 @@ url = "https://github.com/a1lezakty/peresmeshnik/releases/download/models-1/opus
 
 [opus-mt-ru-en]
 role = "mt"
+pivot = true
 langs = ["ru-en"]
 license = "CC-BY-4.0"
 license_url = "https://github.com/Helsinki-NLP/OPUS-MT-train/tree/master/models/ru-en"
@@ -85,6 +142,814 @@ url = "https://github.com/a1lezakty/peresmeshnik/releases/download/models-1/opus
 "target.spm" = { sha256 = "16bebef1389a0b8ab452772c4e35b9e605e5713f8ac7baa71ca701394eaa086d", size = 802781 }
 "LICENSE" = { sha256 = "945fbcb37deca05bccd7c3ca0e261679f1f5373515504fdbad68f6f3cf6f49b9", size = 18652 }
 "README.md" = { sha256 = "0f10ddd4853633fd7002a75dbfb2a1eff7b7675b5bf8384686dc4d5e16707099", size = 951 }
+
+# OPUS-MT by Helsinki-NLP in the release "models-2", converted by this project to CTranslate2 int8 (ctranslate2 4.8.5):
+# ru<->uk from the original Tatoeba-MT archives (opus-2021-02-19.zip, OpusMTConverter, add_source_eos = true); the others
+# from the Hugging Face weights at the commits of license_url (TransformersConverter; a multi-target model's >>xxx<< token in
+# source_prefix.txt): tc-big X<->ru (through English the speaker's gender and ты / вы get lost) and X->en (clean on one-word
+# replies). With the original README (model card) and the LICENSE text its card names (CC-BY-4.0 / Apache-2.0).
+[opus-mt-ru-uk]
+role = "mt"
+langs = ["ru-uk"]
+license = "CC-BY-4.0"
+license_url = "https://github.com/Helsinki-NLP/Tatoeba-Challenge/tree/master/models/rus-ukr"
+note = "OPUS-MT by Helsinki-NLP (University of Helsinki)"
+url = "https://github.com/a1lezakty/peresmeshnik/releases/download/models-2/opus-mt-ru-uk-"
+[opus-mt-ru-uk.files]
+"config.json" = { sha256 = "152eb448f1020eb55f90971d7b95f61896abee8415d555ca51ae7897ac0a0e68", size = 221 }
+"model.bin" = { sha256 = "59bd84624f644c48458b68a6a062e9fd8b67d8cc0a520feacb01e1268c11e99d", size = 78956877 }
+"shared_vocabulary.json" = { sha256 = "75df911e38c42735f17cc96cde81e286839587cdcb9b9666c0556a175039e4b9", size = 3081635 }
+"source.spm" = { sha256 = "d989ee1653a22aa05280110ca2abaccb8a77b397a64f14576984f0a9f9a8d2ec", size = 1049819 }
+"target.spm" = { sha256 = "1d8d0a245c07efca75da76f0c68e9d61bc9667af1ee81d230faf14869653b234", size = 1031670 }
+"LICENSE" = { sha256 = "945fbcb37deca05bccd7c3ca0e261679f1f5373515504fdbad68f6f3cf6f49b9", size = 18652 }
+"README.md" = { sha256 = "52336fd3900b7f46271c3faa83af81e087c349308861bd53b5c5ad6dd14b1831", size = 761 }
+
+[opus-mt-uk-ru]
+role = "mt"
+langs = ["uk-ru"]
+license = "CC-BY-4.0"
+license_url = "https://github.com/Helsinki-NLP/Tatoeba-Challenge/tree/master/models/ukr-rus"
+note = "OPUS-MT by Helsinki-NLP (University of Helsinki)"
+url = "https://github.com/a1lezakty/peresmeshnik/releases/download/models-2/opus-mt-uk-ru-"
+[opus-mt-uk-ru.files]
+"config.json" = { sha256 = "152eb448f1020eb55f90971d7b95f61896abee8415d555ca51ae7897ac0a0e68", size = 221 }
+"model.bin" = { sha256 = "971a0cbed90148b1dd17a602b2105c8d75db02d524abdce9a07446bc34cccd21", size = 78956877 }
+"shared_vocabulary.json" = { sha256 = "75df911e38c42735f17cc96cde81e286839587cdcb9b9666c0556a175039e4b9", size = 3081635 }
+"source.spm" = { sha256 = "1d8d0a245c07efca75da76f0c68e9d61bc9667af1ee81d230faf14869653b234", size = 1031670 }
+"target.spm" = { sha256 = "d989ee1653a22aa05280110ca2abaccb8a77b397a64f14576984f0a9f9a8d2ec", size = 1049819 }
+"LICENSE" = { sha256 = "945fbcb37deca05bccd7c3ca0e261679f1f5373515504fdbad68f6f3cf6f49b9", size = 18652 }
+"README.md" = { sha256 = "3221bf38fec6cff0a4db97bf44ddf081471a0abe367cd56f73272832ce5e0cc9", size = 761 }
+
+[opus-mt-de-ru]
+role = "mt"
+langs = ["de-ru"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/Helsinki-NLP/opus-mt-tc-big-de-zle/tree/d4db2a2cbaa6c2f1ea57d0ed40924d35767b05f9"
+note = "OPUS-MT tc-big by Helsinki-NLP (University of Helsinki)"
+url = "https://github.com/a1lezakty/peresmeshnik/releases/download/models-2/opus-mt-de-ru-"
+[opus-mt-de-ru.files]
+"config.json" = { sha256 = "8f6496adfc930cbfecbe8281112197705c488fab47d34b4829b06d7f478909af", size = 223 }
+"model.bin" = { sha256 = "2534ced3ddba7feeb35745f4039a4133ac660ffcfd615e45a442471097803cf0", size = 242171023 }
+"shared_vocabulary.json" = { sha256 = "0720e880b4037c44db0d1c88428e8723e61cb6cf053465cc7916a8d7311186df", size = 2087774 }
+"source.spm" = { sha256 = "dde526685600b958138d2b3863bf9b8be10774bf8a99573aede7db619c9b5eb0", size = 822915 }
+"target.spm" = { sha256 = "3341e4c42304e509ef8068c1b0726be116a8ad90b513c62638db210bf47b4fb6", size = 1009491 }
+"source_prefix.txt" = { sha256 = "4a0d4d1b201f43236e09accbccb80177d69273424ac813b8bbe554d3f2d2d954", size = 7 }
+"LICENSE" = { sha256 = "945fbcb37deca05bccd7c3ca0e261679f1f5373515504fdbad68f6f3cf6f49b9", size = 18652 }
+"README.md" = { sha256 = "227eded8d18434e855cc861ffa4f6a3086bb681a9fe1198c9135d49c09514b37", size = 7847 }
+
+[opus-mt-ru-de]
+role = "mt"
+langs = ["ru-de"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/Helsinki-NLP/opus-mt-tc-big-zle-de/tree/b2e247f0c413ca6aa51a32f2f2be8666cf72405e"
+note = "OPUS-MT tc-big by Helsinki-NLP (University of Helsinki)"
+url = "https://github.com/a1lezakty/peresmeshnik/releases/download/models-2/opus-mt-ru-de-"
+[opus-mt-ru-de.files]
+"config.json" = { sha256 = "8f6496adfc930cbfecbe8281112197705c488fab47d34b4829b06d7f478909af", size = 223 }
+"model.bin" = { sha256 = "e9468448e61f8ceb2ab819dc0c0cc2a235febc22d5fb3804e3d86c16b6873227", size = 242207073 }
+"shared_vocabulary.json" = { sha256 = "6af5d5d9ced5fdc4bf84b40c36f19e9e25e251155268be3641e77a14bc15c3f6", size = 2087259 }
+"source.spm" = { sha256 = "ce6c0b9887274cbaef5320aec5db60c5afab66f983723ac4051aa68523f9032f", size = 1008968 }
+"target.spm" = { sha256 = "7c23b510033f9329f8f2c6200a5c8f2cedc03133690dbde920c0f4f14e6a8bda", size = 823197 }
+"LICENSE" = { sha256 = "945fbcb37deca05bccd7c3ca0e261679f1f5373515504fdbad68f6f3cf6f49b9", size = 18652 }
+"README.md" = { sha256 = "9f65675020d0bb0985926995d537cbc39b2798cec5cbcd5a57e646d4455605a0", size = 7350 }
+
+[opus-mt-fr-ru]
+role = "mt"
+langs = ["fr-ru"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/Helsinki-NLP/opus-mt-tc-big-fr-zle/tree/da6e276dbce4e00349f90b7531c4ea8ed34ddb23"
+note = "OPUS-MT tc-big by Helsinki-NLP (University of Helsinki)"
+url = "https://github.com/a1lezakty/peresmeshnik/releases/download/models-2/opus-mt-fr-ru-"
+[opus-mt-fr-ru.files]
+"config.json" = { sha256 = "8f6496adfc930cbfecbe8281112197705c488fab47d34b4829b06d7f478909af", size = 223 }
+"model.bin" = { sha256 = "742263b38109178d319fb67df179e54fe6ce9bed135f80940ee0ee78e440f7ad", size = 242439853 }
+"shared_vocabulary.json" = { sha256 = "c247bc881a6b59efecd163a95de271b394c4d79c2c7eb393b8fbf68f22e02f4d", size = 2198446 }
+"source.spm" = { sha256 = "a552ab37e1013e599492a306a13f3bc6e163549d494ac162efc252f9d201a71f", size = 824258 }
+"target.spm" = { sha256 = "90e397a3ef99dc67d483405e86144399218afb25355aeb8caea483aef9b650b6", size = 1035951 }
+"source_prefix.txt" = { sha256 = "4a0d4d1b201f43236e09accbccb80177d69273424ac813b8bbe554d3f2d2d954", size = 7 }
+"LICENSE" = { sha256 = "945fbcb37deca05bccd7c3ca0e261679f1f5373515504fdbad68f6f3cf6f49b9", size = 18652 }
+"README.md" = { sha256 = "5a09b61e5507d89264c53a405033d38887025cdca5bae8fd0dd73dd9cdd24c4e", size = 7918 }
+
+[opus-mt-ru-fr]
+role = "mt"
+langs = ["ru-fr"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/Helsinki-NLP/opus-mt-tc-big-zle-fr/tree/b6816847cbc31c6d952e493169628bc3e6d1d859"
+note = "OPUS-MT tc-big by Helsinki-NLP (University of Helsinki)"
+url = "https://github.com/a1lezakty/peresmeshnik/releases/download/models-2/opus-mt-ru-fr-"
+[opus-mt-ru-fr.files]
+"config.json" = { sha256 = "8f6496adfc930cbfecbe8281112197705c488fab47d34b4829b06d7f478909af", size = 223 }
+"model.bin" = { sha256 = "1fd45cbfaad4f4508e9c0758f202c5b9876e0de4974cd3a69c961cd22f2884b1", size = 242477963 }
+"shared_vocabulary.json" = { sha256 = "8f2d9e03698afc071649272a4b9024fdf2da33a2616773dc8a8960130e15256a", size = 2196169 }
+"source.spm" = { sha256 = "b661c1ee48af0dbfb5e37fb3835ab6f38a94143d0813114652153603f2b3146b", size = 1034758 }
+"target.spm" = { sha256 = "6fa3c380fb13bb59ef07803ed09620ea0cc6f5600d68640da9bbb919bb0edde2", size = 824805 }
+"LICENSE" = { sha256 = "945fbcb37deca05bccd7c3ca0e261679f1f5373515504fdbad68f6f3cf6f49b9", size = 18652 }
+"README.md" = { sha256 = "56b7e9a3d496f4efbc4dd8eb33331f2e96539946d60ff63f5687eb1a4ce43ac4", size = 7300 }
+
+[opus-mt-es-ru]
+role = "mt"
+langs = ["es-ru"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/Helsinki-NLP/opus-mt-tc-big-es-zle/tree/41559f52681d40ae51d0131dc87ce14bd831d6eb"
+note = "OPUS-MT tc-big by Helsinki-NLP (University of Helsinki)"
+url = "https://github.com/a1lezakty/peresmeshnik/releases/download/models-2/opus-mt-es-ru-"
+[opus-mt-es-ru.files]
+"config.json" = { sha256 = "8f6496adfc930cbfecbe8281112197705c488fab47d34b4829b06d7f478909af", size = 223 }
+"model.bin" = { sha256 = "c3a9a46bd7e5bf421979aa07da4630bebdf98cbbedc2db41fc3748c0e105799e", size = 242630403 }
+"shared_vocabulary.json" = { sha256 = "537da16751ba572f66efcae092e51173940ff59a3b5606453f3eb074a4df8675", size = 2194863 }
+"source.spm" = { sha256 = "5048793a9d6399b4c9b83f566a9dc64ed17b18ca14dbfa57e309ecc13228f6b7", size = 830008 }
+"target.spm" = { sha256 = "40141a59f31f3d8d0cedd7d60733baa6ee82952128d0225f638dbc61a30ec387", size = 1035223 }
+"source_prefix.txt" = { sha256 = "4a0d4d1b201f43236e09accbccb80177d69273424ac813b8bbe554d3f2d2d954", size = 7 }
+"LICENSE" = { sha256 = "945fbcb37deca05bccd7c3ca0e261679f1f5373515504fdbad68f6f3cf6f49b9", size = 18652 }
+"README.md" = { sha256 = "888a856359ad5ff2d73664078977f5bcfd580f85cf756da8244a02effba61fd8", size = 7646 }
+
+[opus-mt-ru-es]
+role = "mt"
+langs = ["ru-es"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/Helsinki-NLP/opus-mt-tc-big-zle-es/tree/03bc140e9c98ccc4b1a9244d8ab45b49d3a8420e"
+note = "OPUS-MT tc-big by Helsinki-NLP (University of Helsinki)"
+url = "https://github.com/a1lezakty/peresmeshnik/releases/download/models-2/opus-mt-ru-es-"
+[opus-mt-ru-es.files]
+"config.json" = { sha256 = "8f6496adfc930cbfecbe8281112197705c488fab47d34b4829b06d7f478909af", size = 223 }
+"model.bin" = { sha256 = "1cf1c26942f74675a7df14355281ec65c37a2d87aa36e8991a37c7c2b6848600", size = 242566543 }
+"shared_vocabulary.json" = { sha256 = "856c51598bbb51d4d5088c4634c428da97db2d32046bcbb66031a6c540a396b6", size = 2211068 }
+"source.spm" = { sha256 = "901ac323ea14a010b9685bc54e7404b46c6ee22244336dc4a97bb769a6fad9fa", size = 1041183 }
+"target.spm" = { sha256 = "4db22e29afbb2ce81168fea4841f1092886b0efd3e36b41fbbe399a05e6f39a9", size = 829840 }
+"LICENSE" = { sha256 = "945fbcb37deca05bccd7c3ca0e261679f1f5373515504fdbad68f6f3cf6f49b9", size = 18652 }
+"README.md" = { sha256 = "9be084b9eafb9073302fc46b42b0f99ccffaa619c6a08fe26caf974bb9f43432", size = 7592 }
+
+[opus-mt-it-ru]
+role = "mt"
+langs = ["it-ru"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/Helsinki-NLP/opus-mt-tc-big-it-zle/tree/18be58942a3ecc5e85d086864989c2f1dff8b5c5"
+note = "OPUS-MT tc-big by Helsinki-NLP (University of Helsinki)"
+url = "https://github.com/a1lezakty/peresmeshnik/releases/download/models-2/opus-mt-it-ru-"
+[opus-mt-it-ru.files]
+"config.json" = { sha256 = "8f6496adfc930cbfecbe8281112197705c488fab47d34b4829b06d7f478909af", size = 223 }
+"model.bin" = { sha256 = "32528347150d0a33d5f5574455ea75a7f3b8a625e028833c05baba1885126a3d", size = 241989743 }
+"shared_vocabulary.json" = { sha256 = "75ca7133e6bc25765613c9f95ac04bfc4a03a080e777e9b0bd7c87d9de17a1f0", size = 2023010 }
+"source.spm" = { sha256 = "5e66a61f38c3f85b94e9f6e47e3467b0ca315db67a5bfa0875cc8619933a4ee8", size = 817116 }
+"target.spm" = { sha256 = "6dda9bcad25c2c922f184225cba8177a7d9be6d936d35864a2c17bdbcbb92f62", size = 992897 }
+"source_prefix.txt" = { sha256 = "4a0d4d1b201f43236e09accbccb80177d69273424ac813b8bbe554d3f2d2d954", size = 7 }
+"LICENSE" = { sha256 = "945fbcb37deca05bccd7c3ca0e261679f1f5373515504fdbad68f6f3cf6f49b9", size = 18652 }
+"README.md" = { sha256 = "4d5754674125c506975b17ffb7d2e5d34c3f53f0c93e1409e6d3f311b90113b0", size = 7030 }
+
+[opus-mt-ru-it]
+role = "mt"
+langs = ["ru-it"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/Helsinki-NLP/opus-mt-tc-big-zle-it/tree/30d97bab194f6a7f1ecbc6e29afb54aa2bc6ded5"
+note = "OPUS-MT tc-big by Helsinki-NLP (University of Helsinki)"
+url = "https://github.com/a1lezakty/peresmeshnik/releases/download/models-2/opus-mt-ru-it-"
+[opus-mt-ru-it.files]
+"config.json" = { sha256 = "8f6496adfc930cbfecbe8281112197705c488fab47d34b4829b06d7f478909af", size = 223 }
+"model.bin" = { sha256 = "64b26ff47c152ed1f5b1cf2a47d950dd40e091afb02438490245f4fff3e2f604", size = 242009313 }
+"shared_vocabulary.json" = { sha256 = "7fc45430d521474cc38ff54ab16e2a60e54dc83e61667ea6309dab028a48d2cd", size = 2018885 }
+"source.spm" = { sha256 = "9aa841167e336fcb86b6c52ef9074103e8aa3975f7dba392cbc2f50f814d92b2", size = 991369 }
+"target.spm" = { sha256 = "92d831168fc04bd759416636e72f3540dea31f349878bb8d4e3fcab5c734eb4a", size = 816995 }
+"LICENSE" = { sha256 = "945fbcb37deca05bccd7c3ca0e261679f1f5373515504fdbad68f6f3cf6f49b9", size = 18652 }
+"README.md" = { sha256 = "3ef19ce865879bffdabb3c890411c2602a522782b654a9156e1ed96ecb7ff906", size = 6893 }
+
+[opus-mt-pt-ru]
+role = "mt"
+langs = ["pt-ru"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/Helsinki-NLP/opus-mt-tc-big-pt-zle/tree/238244a142dbb6248f6c25aed704941c7833c5cb"
+note = "OPUS-MT tc-big by Helsinki-NLP (University of Helsinki)"
+url = "https://github.com/a1lezakty/peresmeshnik/releases/download/models-2/opus-mt-pt-ru-"
+[opus-mt-pt-ru.files]
+"config.json" = { sha256 = "8f6496adfc930cbfecbe8281112197705c488fab47d34b4829b06d7f478909af", size = 223 }
+"model.bin" = { sha256 = "ec71c9f27f0d7defc478407a243e26544ca62c244b61a85e77ba4dbaeb206773", size = 242391443 }
+"shared_vocabulary.json" = { sha256 = "6d78ce45e2cf7d8d84fcd90ccd0804d8e99c3ee2e5a21fc869075325fce5b651", size = 2108607 }
+"source.spm" = { sha256 = "e9a2dea0771e44c2e2d0c09ed2a6f7f1c305fef9556a4eed28cefb2921a1be69", size = 823761 }
+"target.spm" = { sha256 = "56f30f06722151f0e1c0d99891d9a0d6946c0f4b305e87377054119bbe0735eb", size = 1007525 }
+"source_prefix.txt" = { sha256 = "4a0d4d1b201f43236e09accbccb80177d69273424ac813b8bbe554d3f2d2d954", size = 7 }
+"LICENSE" = { sha256 = "945fbcb37deca05bccd7c3ca0e261679f1f5373515504fdbad68f6f3cf6f49b9", size = 18652 }
+"README.md" = { sha256 = "5e58a28fd00e4486127ee2ee10b66c556b73aac80bedb29ad87c4fc9c2673014", size = 6896 }
+
+[opus-mt-ru-pt]
+role = "mt"
+langs = ["ru-pt"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/Helsinki-NLP/opus-mt-tc-big-zle-pt/tree/19ae5bd0582d6360adeb27a6441362b83261e309"
+note = "OPUS-MT tc-big by Helsinki-NLP (University of Helsinki)"
+url = "https://github.com/a1lezakty/peresmeshnik/releases/download/models-2/opus-mt-ru-pt-"
+[opus-mt-ru-pt.files]
+"config.json" = { sha256 = "8f6496adfc930cbfecbe8281112197705c488fab47d34b4829b06d7f478909af", size = 223 }
+"model.bin" = { sha256 = "cc6ccf29234e840c7d9056faff52441b903d6c228babbb4861402da87fd6593d", size = 242392473 }
+"shared_vocabulary.json" = { sha256 = "e1bed62dfb4aa1ebeb2130a973163102a6a0692f7095ce9cb8918e1701f0271f", size = 2108579 }
+"source.spm" = { sha256 = "a1699e46f517b7666064c39fffad71f6b0d7da30029d6f1dad7d9e9a4907d6cf", size = 1007440 }
+"target.spm" = { sha256 = "10eded6500eb7745a1619f128c4663c4f88a854c0874eb7daf9fa39b4e308191", size = 824046 }
+"LICENSE" = { sha256 = "945fbcb37deca05bccd7c3ca0e261679f1f5373515504fdbad68f6f3cf6f49b9", size = 18652 }
+"README.md" = { sha256 = "6e96a60f57cb06c6c18c5701974fb92c482ed6adfa6055153d70b35ef0471a4f", size = 6560 }
+
+[opus-mt-pl-ru]
+role = "mt"
+langs = ["pl-ru"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/Helsinki-NLP/opus-mt-tc-big-zlw-zle/tree/a20a48b6825edab37f3dd1e02562c4f0c7d7f5ee"
+note = "OPUS-MT tc-big by Helsinki-NLP (University of Helsinki)"
+url = "https://github.com/a1lezakty/peresmeshnik/releases/download/models-2/opus-mt-pl-ru-"
+[opus-mt-pl-ru.files]
+"config.json" = { sha256 = "8f6496adfc930cbfecbe8281112197705c488fab47d34b4829b06d7f478909af", size = 223 }
+"model.bin" = { sha256 = "5ec791b80fc0b0813e071513b6a0df34fd7f8db820a6d3ae4b19110d8218b97c", size = 242645853 }
+"shared_vocabulary.json" = { sha256 = "7ef3d353192810948cd59b5307a064885ea7957b94df58c695cda4b7c28c3efc", size = 2134997 }
+"source.spm" = { sha256 = "355a0b36cf3875b624259bb8bb4de72ec71f7476ec2b822a1c4ca1d25db96438", size = 823630 }
+"target.spm" = { sha256 = "553cd1bd0e78c767ead25854e48c4cd1a10b244c70a7cbdce5ccac9c9f945e81", size = 1000034 }
+"source_prefix.txt" = { sha256 = "4a0d4d1b201f43236e09accbccb80177d69273424ac813b8bbe554d3f2d2d954", size = 7 }
+"LICENSE" = { sha256 = "945fbcb37deca05bccd7c3ca0e261679f1f5373515504fdbad68f6f3cf6f49b9", size = 18652 }
+"README.md" = { sha256 = "d8935789348f817f1d7d64ec91cf201ccfb9a82d5fe52ec6d9505af34958b11d", size = 8918 }
+
+[opus-mt-ru-pl]
+role = "mt"
+langs = ["ru-pl"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/Helsinki-NLP/opus-mt-tc-big-zle-zlw/tree/e14020b99526d830084be270a1051dca51090eeb"
+note = "OPUS-MT tc-big by Helsinki-NLP (University of Helsinki)"
+url = "https://github.com/a1lezakty/peresmeshnik/releases/download/models-2/opus-mt-ru-pl-"
+[opus-mt-ru-pl.files]
+"config.json" = { sha256 = "8f6496adfc930cbfecbe8281112197705c488fab47d34b4829b06d7f478909af", size = 223 }
+"model.bin" = { sha256 = "506717fb4f539c6123ee3814d64643e2a0f66944b4380076a060f1de061f5f8c", size = 242646883 }
+"shared_vocabulary.json" = { sha256 = "627207cbe84819ece2f590f5101117caa79a8585d0099d135177517ded52b2d0", size = 2137723 }
+"source.spm" = { sha256 = "8a940b4375cacfb75b1c7e1d27d4b06a5f130dcd026489e1e693d6fd8ed2259e", size = 1000541 }
+"target.spm" = { sha256 = "f0937cb077654ee99bb4f0897f0b672b1ac19564c84d299b772b95d1f871dd1b", size = 824018 }
+"source_prefix.txt" = { sha256 = "01a9ade2a26236a0a0a6ef03e2219ea87db554d9bd8f5315fd3f3bf84f7ecb39", size = 7 }
+"LICENSE" = { sha256 = "945fbcb37deca05bccd7c3ca0e261679f1f5373515504fdbad68f6f3cf6f49b9", size = 18652 }
+"README.md" = { sha256 = "161a92157f21223eaabda5da9c57d7ffc42f55b2f2a49e529745ab9dd2fefc12", size = 8452 }
+
+[opus-mt-uk-en]
+role = "mt"
+pivot = true
+langs = ["uk-en"]
+license = "Apache-2.0"
+license_url = "https://huggingface.co/Helsinki-NLP/opus-mt-uk-en/tree/1b9a2a0d1aa2a329d8476d2be5c7b0b27d5397b0"
+note = "OPUS-MT by Helsinki-NLP (University of Helsinki)"
+url = "https://github.com/a1lezakty/peresmeshnik/releases/download/models-2/opus-mt-uk-en-"
+[opus-mt-uk-en.files]
+"config.json" = { sha256 = "8f6496adfc930cbfecbe8281112197705c488fab47d34b4829b06d7f478909af", size = 223 }
+"model.bin" = { sha256 = "583424b61594e04c63de3f0db830cd8cde70c7481d8eac663650e363bd7fc712", size = 77792355 }
+"shared_vocabulary.json" = { sha256 = "d584fec9ad0a0cc9ab1def128215f314fe6681620885e6fb3a99a812c3ba2cd4", size = 2070876 }
+"source.spm" = { sha256 = "7abd810b2df512e6fe177f8732f6a0b3107614c84cc52aba20d805b4cb0d7b6b", size = 1007605 }
+"target.spm" = { sha256 = "4dc9157e60a15b157c2f3d5f892379b03aed111c9fe8ac7cecba5f2aa56379ef", size = 808645 }
+"LICENSE" = { sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30", size = 11358 }
+"README.md" = { sha256 = "161fd83fe3a548928daab6a6238970f4245e395528f7be37186b0a4b1e370e55", size = 818 }
+
+[opus-mt-de-en]
+role = "mt"
+pivot = true
+langs = ["de-en"]
+license = "Apache-2.0"
+license_url = "https://huggingface.co/Helsinki-NLP/opus-mt-de-en/tree/1a922f3b32a8e809e17a47d4b32142d8105924e5"
+note = "OPUS-MT by Helsinki-NLP (University of Helsinki)"
+url = "https://github.com/a1lezakty/peresmeshnik/releases/download/models-2/opus-mt-de-en-"
+[opus-mt-de-en.files]
+"config.json" = { sha256 = "8f6496adfc930cbfecbe8281112197705c488fab47d34b4829b06d7f478909af", size = 223 }
+"model.bin" = { sha256 = "399ce16d36b721cd166fe973b31c1f1195b92af200665eccd9a7fc62263e02ec", size = 75979635 }
+"shared_vocabulary.json" = { sha256 = "fa4c8d666c582ad39892a2ae5d4ded1b0ddde4b49dc784a7fcbd73940f9fa13e", size = 993828 }
+"source.spm" = { sha256 = "bbd1f495eea99c8e21ae086d9146e0fa7b096c3dfdd9ba07ab8b631889df5c9b", size = 796845 }
+"target.spm" = { sha256 = "678f2a1177d8389f67b66299762dcc4fc567e89b07e212ba91b0c56daecf47ce", size = 768489 }
+"LICENSE" = { sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30", size = 11358 }
+"README.md" = { sha256 = "ae6f262ce3e16c3ee213703b6e89bdc744e6c8d784a1f286a3de8abc86667e89", size = 1372 }
+
+[opus-mt-fr-en]
+role = "mt"
+pivot = true
+langs = ["fr-en"]
+license = "Apache-2.0"
+license_url = "https://huggingface.co/Helsinki-NLP/opus-mt-fr-en/tree/c4aed37b318c763fd177aa449b44e3b783cc6c02"
+note = "OPUS-MT by Helsinki-NLP (University of Helsinki)"
+url = "https://github.com/a1lezakty/peresmeshnik/releases/download/models-2/opus-mt-fr-en-"
+[opus-mt-fr-en.files]
+"config.json" = { sha256 = "8f6496adfc930cbfecbe8281112197705c488fab47d34b4829b06d7f478909af", size = 223 }
+"model.bin" = { sha256 = "8c070c110a94dca4693be7c93ecbfdd09bce99eefbf902b1e7b45cbea2a10fd4", size = 76714395 }
+"shared_vocabulary.json" = { sha256 = "a157eb51a42817dd1ae4bc46cecf66e591ab32641df936da292bd09f2728631b", size = 1052697 }
+"source.spm" = { sha256 = "78d0e717c77053f1c4b856d8661d9cb87c64f083a35418c087b9146300e4f585", size = 802397 }
+"target.spm" = { sha256 = "173e9f493a668fe396d599e28d414a201193094e6ffd7a4678e5aab0f6d3d838", size = 778395 }
+"LICENSE" = { sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30", size = 11358 }
+"README.md" = { sha256 = "a923263e9691f40ce7c9afe5d59f6296051439ae7776a158d18d57258be48195", size = 1250 }
+
+[opus-mt-es-en]
+role = "mt"
+pivot = true
+langs = ["es-en"]
+license = "Apache-2.0"
+license_url = "https://huggingface.co/Helsinki-NLP/opus-mt-es-en/tree/c96e2c5399ebfae4fc43d9669556b9afa74bb69d"
+note = "OPUS-MT by Helsinki-NLP (University of Helsinki)"
+url = "https://github.com/a1lezakty/peresmeshnik/releases/download/models-2/opus-mt-es-en-"
+[opus-mt-es-en.files]
+"config.json" = { sha256 = "8f6496adfc930cbfecbe8281112197705c488fab47d34b4829b06d7f478909af", size = 223 }
+"model.bin" = { sha256 = "44c5adc2c680f27c14c991e5ab7f74f38b41597153f7123bc8f6455f09a3b38b", size = 79567635 }
+"shared_vocabulary.json" = { sha256 = "040e48c9d00734f48506e052695837720bd1f6aa01c70636cde83038362baf19", size = 1276136 }
+"source.spm" = { sha256 = "e236ee6d866b635c0142114f8647f39831f9d92534aa2aad75c942f6a78ad0e3", size = 825924 }
+"target.spm" = { sha256 = "4dd547c24816a335e7b0b2e63376a8f1b3cbfc671eda5ab808dd44fdadaa8791", size = 801636 }
+"LICENSE" = { sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30", size = 11358 }
+"README.md" = { sha256 = "d67ee971854b4c166da1cc281b58fbdc8596e0412441ef71fb0d422263230e0a", size = 2427 }
+
+[opus-mt-it-en]
+role = "mt"
+pivot = true
+langs = ["it-en"]
+license = "Apache-2.0"
+license_url = "https://huggingface.co/Helsinki-NLP/opus-mt-it-en/tree/42556a0848fc726f4d27399f20b19ff6f01afe11"
+note = "OPUS-MT by Helsinki-NLP (University of Helsinki)"
+url = "https://github.com/a1lezakty/peresmeshnik/releases/download/models-2/opus-mt-it-en-"
+[opus-mt-it-en.files]
+"config.json" = { sha256 = "8f6496adfc930cbfecbe8281112197705c488fab47d34b4829b06d7f478909af", size = 223 }
+"model.bin" = { sha256 = "a9e2a6f326679be7f1ed1cebfa070bbc2e78cca6930c12480d82f2e6ca0a7fb2", size = 87564195 }
+"shared_vocabulary.json" = { sha256 = "493ed8b6729325acf56272e0fd96fc2e5db6a098e85b5240e08b6288c5d1d1d4", size = 1979039 }
+"source.spm" = { sha256 = "1bd307e2756991d470e4b40172147f7889b46a323b1a9a2150e66274825b1f21", size = 813709 }
+"target.spm" = { sha256 = "5d0ea845f1daa59c379e797de366607b75594935f7c6d476c933e527bf25e0a8", size = 789549 }
+"LICENSE" = { sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30", size = 11358 }
+"README.md" = { sha256 = "45a950bcb79576832baf346543ac3fe054d4fb2a03f713dc255b27811f4c0cbd", size = 901 }
+
+[opus-mt-pt-en]
+role = "mt"
+pivot = true
+langs = ["pt-en"]
+license = "Apache-2.0"
+license_url = "https://huggingface.co/Helsinki-NLP/opus-mt-ROMANCE-en/tree/e9ca9975e3972afd80732f08ce01d3a1339f47f8"
+note = "OPUS-MT by Helsinki-NLP (University of Helsinki)"
+url = "https://github.com/a1lezakty/peresmeshnik/releases/download/models-2/opus-mt-pt-en-"
+[opus-mt-pt-en.files]
+"config.json" = { sha256 = "8f6496adfc930cbfecbe8281112197705c488fab47d34b4829b06d7f478909af", size = 223 }
+"model.bin" = { sha256 = "a272e9946142e12dc7eb52050977bd480b19e47381f6024eee995f3df05b0412", size = 79567635 }
+"shared_vocabulary.json" = { sha256 = "c48177ccac49fd66ede777976c372d5c0cbae351c5b6676c5ae7957f59e9d646", size = 1146400 }
+"source.spm" = { sha256 = "baeab21ec00d0b490382b82499ef0348235c5a8e75de28aec8290adf62b007c4", size = 800087 }
+"target.spm" = { sha256 = "121d4e0a20cda2052945d790d335f421f7bea7fa6b0ff7fbc9112eed5f12036f", size = 779494 }
+"LICENSE" = { sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30", size = 11358 }
+"README.md" = { sha256 = "9150c322db005f83bbb3c6794754b3896d94e88f2a938d8298f030ad07eef02b", size = 2155 }
+
+[opus-mt-pl-en]
+role = "mt"
+pivot = true
+langs = ["pl-en"]
+license = "Apache-2.0"
+license_url = "https://huggingface.co/Helsinki-NLP/opus-mt-pl-en/tree/7f2bb874fdfb6139f9842b91a9b75c4a6c93401c"
+note = "OPUS-MT by Helsinki-NLP (University of Helsinki)"
+url = "https://github.com/a1lezakty/peresmeshnik/releases/download/models-2/opus-mt-pl-en-"
+[opus-mt-pl-en.files]
+"config.json" = { sha256 = "8f6496adfc930cbfecbe8281112197705c488fab47d34b4829b06d7f478909af", size = 223 }
+"model.bin" = { sha256 = "be07a3d22b868de11b4ce7d911b4be6753fb19417ab4227acfea07206c30398e", size = 78750715 }
+"shared_vocabulary.json" = { sha256 = "1978718a092ba2db2765ca6db1118c6443a4429c33e725337dc06ecb96c3afc3", size = 1209200 }
+"source.spm" = { sha256 = "86b3b5f9de4f5ed9c46321bab1f865e3aa9ddf63094e89b49dd515aeafa79ce4", size = 834921 }
+"target.spm" = { sha256 = "9afaf3a45161adc40b0880d61f6f81f6ca352d68f881bc5d8da2b195023be1e0", size = 785212 }
+"LICENSE" = { sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30", size = 11358 }
+"README.md" = { sha256 = "3fb36ac316fc412aee8ddaca99822757295411584458b3288e46d2693b6cd222", size = 818 }
+
+[opus-mt-tr-en]
+role = "mt"
+pivot = true
+langs = ["tr-en"]
+license = "Apache-2.0"
+license_url = "https://huggingface.co/Helsinki-NLP/opus-mt-tr-en/tree/19c65427cc2af5f191337d4899e0348c4af25902"
+note = "OPUS-MT by Helsinki-NLP (University of Helsinki)"
+url = "https://github.com/a1lezakty/peresmeshnik/releases/download/models-2/opus-mt-tr-en-"
+[opus-mt-tr-en.files]
+"config.json" = { sha256 = "8f6496adfc930cbfecbe8281112197705c488fab47d34b4829b06d7f478909af", size = 223 }
+"model.bin" = { sha256 = "cd59fd05d819d94315b56692c9934732565cf6925594f494fdb182c7534036dc", size = 78209395 }
+"shared_vocabulary.json" = { sha256 = "b18703ef326b780864b2fbfb66d9168b4bc6a0ec0490a7422262647967ecff79", size = 1263120 }
+"source.spm" = { sha256 = "4a6356e3ee892f2896dbf0b5cabeb51fdf16e03c70b0702cefc8b847e504241c", size = 839750 }
+"target.spm" = { sha256 = "4cc15427e50b80e53b7dcf5f4d8a52edfe219b8d8e290c031f5578f5760b335f", size = 796647 }
+"LICENSE" = { sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30", size = 11358 }
+"README.md" = { sha256 = "b8e5d51c40ca2cf0e6d0621092c022093076768b27188cc28f8ee6602fc96bcc", size = 997 }
+
+
+# quickmt (CTranslate2 float16, int8 at load on a CPU): every language to and from English. `pivot`: the model of its
+# language to / from English for a pair through English (models.registry: mt-X-Y-via-en); X->en of ru and the European
+# languages is OPUS-MT (quickmt makes up a continuation of a one-word reply, BENCH stage 6).
+# License in the model card (CC-BY-4.0), no LICENSE file in the repos
+[quickmt-ar-en]
+role = "mt"
+pivot = true
+langs = ["ar-en"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/quickmt/quickmt-ar-en"
+note = "quickmt"
+url = "https://huggingface.co/quickmt/quickmt-ar-en/resolve/a1542c88d817d641a2acf2b8952bc892144882c0/"
+[quickmt-ar-en.files]
+"model.bin" = { sha256 = "2c4e6f5d86de0d9d6c23c54768d7ab6bd20fb7a36099c987368d6a9f45c32da1", size = 407101843 }
+"config.json" = { sha256 = "66edc5d58ceb812a41b4b784497001f815c35400884f40984b19de29e1bc3d69", size = 223 }
+"source_vocabulary.json" = { sha256 = "1d31fe3264650f0e839b072f0d55059934fdd01b016b2616cf5afc66bd4ba8a4", size = 1205230 }
+"target_vocabulary.json" = { sha256 = "b099813467f7c6dbf00414324904782d55dac0f4c4635e440c4d36cb0f383825", size = 546670 }
+"src.spm.model" = { sha256 = "1a510ccfeb5cf06584327b9c2482ed0a4111d06348a56e28d165165b6dabe520", size = 901383 }
+"tgt.spm.model" = { sha256 = "8c793ee4a6d01a8b3fcd24d246a1580febf053747e44eefe99606974957cfdaa", size = 806180 }
+"README.md" = { sha256 = "a2e8bb150582add719f46966d0a0d05aabb5e8f8e5e8ae396d38fbe4e4fc576e", size = 5539 }
+
+[quickmt-de-en]
+role = "mt"
+langs = ["de-en"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/quickmt/quickmt-de-en"
+note = "quickmt"
+url = "https://huggingface.co/quickmt/quickmt-de-en/resolve/6ace72ec968c57d0a2d0545b1f18a8f5801ae705/"
+[quickmt-de-en.files]
+"model.bin" = { sha256 = "50b1a9c0d09d49b71242750ccb8b68d312d976302b7989157b07f7df1ef8dcf3", size = 360843109 }
+"config.json" = { sha256 = "66edc5d58ceb812a41b4b784497001f815c35400884f40984b19de29e1bc3d69", size = 223 }
+"source_vocabulary.json" = { sha256 = "e9fba650962da9f40cf1d08b60d68feeb6750e012c99a10f2581e5a39828c5d6", size = 349437 }
+"target_vocabulary.json" = { sha256 = "fbf038a41890a9dc9cde50e685e7943eb79d53ab868dbd875807572655a2e79e", size = 336680 }
+"src.spm.model" = { sha256 = "4a4a9e3dd26d6562764eb2678f95766afbab48354ddb5b7d63cb7cf7a02cf56a", size = 595491 }
+"tgt.spm.model" = { sha256 = "eaf7051931aaca182561ba5a63c5674424971d0d6001ab57facb194fe6c941bf", size = 586141 }
+"README.md" = { sha256 = "2f488042272d8e2a90a3bc157660fc01fc9bea1081e65a624efe6e6c6721c3f1", size = 4501 }
+
+[quickmt-en-ar]
+role = "mt"
+pivot = true
+langs = ["en-ar"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/quickmt/quickmt-en-ar"
+note = "quickmt"
+url = "https://huggingface.co/quickmt/quickmt-en-ar/resolve/37f2b37486c29b457971295d7711b5ac1869775d/"
+[quickmt-en-ar.files]
+"model.bin" = { sha256 = "2b053bf9e989a3685f902eafac1d8128f8fcf833b90fdd142254f08bd73ca5af", size = 360843109 }
+"config.json" = { sha256 = "66edc5d58ceb812a41b4b784497001f815c35400884f40984b19de29e1bc3d69", size = 223 }
+"source_vocabulary.json" = { sha256 = "59b2accfaba2b0a8171deed0cce56afdf41d5d724da68c63057b2035c512cbbe", size = 339573 }
+"target_vocabulary.json" = { sha256 = "5437c4de92543211144f9319f234bf2bcacda2ea454c3b26453da97d4d76e833", size = 731023 }
+"src.spm.model" = { sha256 = "acf054421b5ed52bd6aee14564fb8595b9a6b492df669e971d43fba9edb33c16", size = 589684 }
+"tgt.spm.model" = { sha256 = "c7b8bf117088a901628696f60ddd15e047057ccbdcf9b0996ca19e2779a234c7", size = 642429 }
+"README.md" = { sha256 = "80d7cb41ac36d907c0759a4b64271b4295093cc954b2abc89d8721f7b79a5e2d", size = 4850 }
+
+[quickmt-en-de]
+role = "mt"
+pivot = true
+langs = ["en-de"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/quickmt/quickmt-en-de"
+note = "quickmt"
+url = "https://huggingface.co/quickmt/quickmt-en-de/resolve/3a8051ab98fd7d24480e2b3e747edb03f87152af/"
+[quickmt-en-de.files]
+"model.bin" = { sha256 = "f376421d5851fd4b130025c5469a1a2772c8950f560d77383548684802d73533", size = 360843109 }
+"config.json" = { sha256 = "66edc5d58ceb812a41b4b784497001f815c35400884f40984b19de29e1bc3d69", size = 223 }
+"source_vocabulary.json" = { sha256 = "fbf038a41890a9dc9cde50e685e7943eb79d53ab868dbd875807572655a2e79e", size = 336680 }
+"target_vocabulary.json" = { sha256 = "e9fba650962da9f40cf1d08b60d68feeb6750e012c99a10f2581e5a39828c5d6", size = 349437 }
+"src.spm.model" = { sha256 = "eaf7051931aaca182561ba5a63c5674424971d0d6001ab57facb194fe6c941bf", size = 586141 }
+"tgt.spm.model" = { sha256 = "4a4a9e3dd26d6562764eb2678f95766afbab48354ddb5b7d63cb7cf7a02cf56a", size = 595491 }
+"README.md" = { sha256 = "4ed4951c514ae1f507cd2b9a80628b85827851c82613399ef49cb5b1376ad0af", size = 4477 }
+
+[quickmt-en-es]
+role = "mt"
+pivot = true
+langs = ["en-es"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/quickmt/quickmt-en-es"
+note = "quickmt"
+url = "https://huggingface.co/quickmt/quickmt-en-es/resolve/430b78899a30bf5a867dffd407c64b028bbaebf4/"
+[quickmt-en-es.files]
+"model.bin" = { sha256 = "a609e71626f9629e7d8cbf76f0961b32f87268e1e4e9548c3ef2de061dece10e", size = 401699775 }
+"config.json" = { sha256 = "66edc5d58ceb812a41b4b784497001f815c35400884f40984b19de29e1bc3d69", size = 223 }
+"source_vocabulary.json" = { sha256 = "b75f147e85a45a5eefa2d216e902e7f56631a5529a2eecf2542fc1f90592c5e8", size = 341401 }
+"target_vocabulary.json" = { sha256 = "e3e561180d2c23b2d4b5453ad4785ac15bae4a5dba047dcf468dce7c09debce7", size = 362373 }
+"src.spm.model" = { sha256 = "c26488c6db0bdca05f0e9e8edf43e8bdb4f78fc5c41c51749f88aefa6a1d030b", size = 593820 }
+"tgt.spm.model" = { sha256 = "515603821dd149cb66b99febbe4bbb05b9c7819943621d1f66c28ca2270a47e9", size = 603700 }
+"README.md" = { sha256 = "d85aa535a3688a8605806e7dd3b88f3c0b4dfebd9aa1fd8db12a8bb8b3d733d6", size = 4607 }
+
+[quickmt-en-fr]
+role = "mt"
+pivot = true
+langs = ["en-fr"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/quickmt/quickmt-en-fr"
+note = "quickmt"
+url = "https://huggingface.co/quickmt/quickmt-en-fr/resolve/ca99647b9788aac9bb9026b0c5026c2ccfaebf14/"
+[quickmt-en-fr.files]
+"model.bin" = { sha256 = "8e9e6b469af7bbafdd6fbbf1cabfabcd278e74b5acb637d4c2ea3e41f004b023", size = 381336824 }
+"config.json" = { sha256 = "f58dee050c641f595c14d9b45fca84206ced9d5220bb71ba4b1fc3670db51e14", size = 222 }
+"shared_vocabulary.json" = { sha256 = "af752754771af57c88f3f15e750b3ab9e7708a6d3b6742952afd0188405e2bf3", size = 905629 }
+"joint.spm.model" = { sha256 = "19bab02bdbc41207bd3fabf86e20e691e978f78725d898c42de586b67cdaed02", size = 1146015 }
+"README.md" = { sha256 = "0045c14b6e995f7750a43f41b869a0628ba0be0dc8070981af15f0d4f6d02c9f", size = 3949 }
+
+[quickmt-en-it]
+role = "mt"
+pivot = true
+langs = ["en-it"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/quickmt/quickmt-en-it"
+note = "quickmt"
+url = "https://huggingface.co/quickmt/quickmt-en-it/resolve/bf1a04b162741cf5fd66d274672f5f0b6e51348c/"
+[quickmt-en-it.files]
+"model.bin" = { sha256 = "def57a69faad1db092d1ac8ad7db1a9ee056e77625ab3dca0d2d1ac22d6c1f37", size = 401699775 }
+"config.json" = { sha256 = "66edc5d58ceb812a41b4b784497001f815c35400884f40984b19de29e1bc3d69", size = 223 }
+"source_vocabulary.json" = { sha256 = "f56126b35292a9b672217719817e171de5e20cf27b372de4b707f79838ce1c2d", size = 334527 }
+"target_vocabulary.json" = { sha256 = "2322709bdc6bda37e56f3a60edf9848eeeda0ba9b11005589f300380778ac635", size = 347173 }
+"src.spm.model" = { sha256 = "352edbef8a5896ac750aa1318696d770c15c85d79116c94b4872086a1de94b2d", size = 586485 }
+"tgt.spm.model" = { sha256 = "47b20d73c2224922ffef2d6f4bbe72810d7f75c80281dcea17515fc25a7a7bb9", size = 598389 }
+"README.md" = { sha256 = "a468bdc28b1f0b38a4723ab03af6d503acf744196ed53fee95093be3aef28432", size = 4668 }
+
+[quickmt-en-ja]
+role = "mt"
+pivot = true
+langs = ["en-ja"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/quickmt/quickmt-en-ja"
+note = "quickmt"
+url = "https://huggingface.co/quickmt/quickmt-en-ja/resolve/c09e98b8438a239a8210060114cea19c426c0559/"
+[quickmt-en-ja.files]
+"model.bin" = { sha256 = "a2653ed557273846433473e87bc35e482d956dd529be02faafc0ab9597816585", size = 401699775 }
+"config.json" = { sha256 = "66edc5d58ceb812a41b4b784497001f815c35400884f40984b19de29e1bc3d69", size = 223 }
+"source_vocabulary.json" = { sha256 = "b896ae8632a0ebb369c5982658c3bd94eefa01e4574ccd659d87272498bbe743", size = 332239 }
+"target_vocabulary.json" = { sha256 = "b130ef6213111d052be24288d6a0ac1eecf2b0bbe54cc4f7d63b56d2bd57c334", size = 435375 }
+"src.spm.model" = { sha256 = "01dc857df9df5987bec61812d1fbc2e78ad530346c09fe3ffaf27184358ab8fd", size = 583983 }
+"tgt.spm.model" = { sha256 = "cbd449d7e92d850f6d36efeafb40cea3a8468f55db0ca751ee4ece0ceb70d19b", size = 583133 }
+"README.md" = { sha256 = "62f2f6c53c4c27332f4cdbab14db4e64ff0b5afe18bb271b261ef7ca24ad74df", size = 4498 }
+
+[quickmt-en-ko]
+role = "mt"
+pivot = true
+langs = ["en-ko"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/quickmt/quickmt-en-ko"
+note = "quickmt"
+url = "https://huggingface.co/quickmt/quickmt-en-ko/resolve/a32fa395ebc7b722a0c021e213ca5fec4065c5df/"
+[quickmt-en-ko.files]
+"model.bin" = { sha256 = "bb5463eeffda398b93efb809168410a194b94d05628ee976a7ab0b50430c1c79", size = 360796810 }
+"config.json" = { sha256 = "66edc5d58ceb812a41b4b784497001f815c35400884f40984b19de29e1bc3d69", size = 223 }
+"source_vocabulary.json" = { sha256 = "23a27f7d11e6c0086ffc298962c0dbbf8a3e0082d70db37a5dbb3e7e83d64b1b", size = 332886 }
+"target_vocabulary.json" = { sha256 = "221124bae5c4ff8fbfc38ff190cc7bf933fc3e52090f34954e75851194a508c7", size = 410879 }
+"src.spm.model" = { sha256 = "ec0fe572b92a529c3fcd8d411f39667ae3cb83ad1a4e41c75f4ad48ea99f5925", size = 583195 }
+"tgt.spm.model" = { sha256 = "70eb68076fe5c8ae7d8b7370aee0a8e713d3dd280d0359a4cfae3890313502dd", size = 570981 }
+"README.md" = { sha256 = "8a1d8ee1d743f418263ba3b0db70c9274badc5e458952f0b76d057c18af9dbbc", size = 4370 }
+
+[quickmt-en-pl]
+role = "mt"
+pivot = true
+langs = ["en-pl"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/quickmt/quickmt-en-pl"
+note = "quickmt"
+url = "https://huggingface.co/quickmt/quickmt-en-pl/resolve/6209580ce1fe525214f29fc39725007b73410109/"
+[quickmt-en-pl.files]
+"model.bin" = { sha256 = "7f02e09d52f04f77cb6b2da251235149053387812e3cfb73afb99882483cee72", size = 401699775 }
+"config.json" = { sha256 = "66edc5d58ceb812a41b4b784497001f815c35400884f40984b19de29e1bc3d69", size = 223 }
+"source_vocabulary.json" = { sha256 = "360491222a324bb7ecfce3789b7c30d400e861daf1b766ac03263e7740edf2d3", size = 332684 }
+"target_vocabulary.json" = { sha256 = "9c0e7f04ee081a22910848dfa23d7d39b356f6887a2cd966e2b4fa6a67f6f4f5", size = 381704 }
+"src.spm.model" = { sha256 = "83fa4a21ff8359b8827f033977c0e563fd0786ba84bbc93d4a1e22a0dd81ee7f", size = 585058 }
+"tgt.spm.model" = { sha256 = "b6ad874c44613df56fb48be31fb64b6b5fc96a14a7888e802b0f91dbf98a8836", size = 605240 }
+"README.md" = { sha256 = "a4e7fb74b9c60ea837a2ae412690391b2e9c0ae6597f17ebcdbed2247a2765d3", size = 4429 }
+
+[quickmt-en-pt]
+role = "mt"
+pivot = true
+langs = ["en-pt"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/quickmt/quickmt-en-pt"
+note = "quickmt"
+url = "https://huggingface.co/quickmt/quickmt-en-pt/resolve/3b4cf7a68fa57a195486da65e112b431b54360de/"
+[quickmt-en-pt.files]
+"model.bin" = { sha256 = "71de96d32c6a7a2551eba0354117b053783bc13b4d1d08fd2c7e0176c79157bc", size = 401699775 }
+"config.json" = { sha256 = "66edc5d58ceb812a41b4b784497001f815c35400884f40984b19de29e1bc3d69", size = 223 }
+"source_vocabulary.json" = { sha256 = "759ea90a02aa75a11e58b45008b0e74c4420c985cd5286cb5e4e9782e550bd16", size = 335280 }
+"target_vocabulary.json" = { sha256 = "53f8269e59df78b488299d951914efefee56d049a48661074b928b8e3b27a700", size = 367379 }
+"src.spm.model" = { sha256 = "78491a281ebde4ebda824d711469fdaf02970c4d5d3a0ff55e4cbb73c6f6f888", size = 587171 }
+"tgt.spm.model" = { sha256 = "582204569977759a46b4636cf0ead18bb981cd2ca7d9d42a15962072835b6d25", size = 600641 }
+"README.md" = { sha256 = "165a6c541d24ea82320e1e6b2246768bc7488a9ffd1e2b23608417bfd558a146", size = 3463 }
+
+[quickmt-en-ru]
+role = "mt"
+pivot = true
+langs = ["en-ru"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/quickmt/quickmt-en-ru"
+note = "quickmt"
+url = "https://huggingface.co/quickmt/quickmt-en-ru/resolve/c1d88c45631270d507ec1a5bf6da1a0813f85cc1/"
+[quickmt-en-ru.files]
+"model.bin" = { sha256 = "50494f42dc8bfde6d5ac722c9a39421d12a0e25c30b993c6377d626759674935", size = 401699775 }
+"config.json" = { sha256 = "66edc5d58ceb812a41b4b784497001f815c35400884f40984b19de29e1bc3d69", size = 223 }
+"source_vocabulary.json" = { sha256 = "31879e77b23566883bd5bf97578debf459db708e92765d021d3e594d7de285cc", size = 340412 }
+"target_vocabulary.json" = { sha256 = "3e909e7f2fbc25aed300a9b1b7e1bf4801e0e008ca9b6c927bc77685e5e681f7", size = 994826 }
+"src.spm.model" = { sha256 = "a02eda49b9085bb516903b522f5123f22a730b2be29337202ff8280b786a680e", size = 592273 }
+"tgt.spm.model" = { sha256 = "b428315194a0eebf6e69c4424ea2e78a1c03e20982eccd4e6eb446ca128124ec", size = 730304 }
+"README.md" = { sha256 = "e1333f666cb5d7e630dc551ccf5d4d4ebe5b1b8ac54c59d53075aabdbc1f95f1", size = 5018 }
+
+[quickmt-en-tr]
+role = "mt"
+pivot = true
+langs = ["en-tr"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/quickmt/quickmt-en-tr"
+note = "quickmt"
+url = "https://huggingface.co/quickmt/quickmt-en-tr/resolve/32ae64a2a1373c6057dac8d641cba8e10d0549c6/"
+[quickmt-en-tr.files]
+"model.bin" = { sha256 = "79394af8333ac9a41cda7813cd7e00c3c324e228aac34dcb7d03afce146ef5d2", size = 401699775 }
+"config.json" = { sha256 = "66edc5d58ceb812a41b4b784497001f815c35400884f40984b19de29e1bc3d69", size = 223 }
+"source_vocabulary.json" = { sha256 = "d4c23c0b330328199b2bc2dfed7eff3ae8b163314b0ee6d24f8a03f60687b55e", size = 335254 }
+"target_vocabulary.json" = { sha256 = "e8ae340558f907c249f17fd82c002e742b3a0cebb96f2cd72561749cdbaee521", size = 407444 }
+"src.spm.model" = { sha256 = "5c4b6f8bf657c61b0219015022eba70ae06f19c7ae4ac9bd7dbacdb9bafa2ea4", size = 586127 }
+"tgt.spm.model" = { sha256 = "453f064230753d99aecab739b8de017e91836692acd2566812de6f96ffa83f26", size = 604393 }
+"README.md" = { sha256 = "e309b713870be46e17a1013a8d96331089b56dd6aa51ce9ba6f393ec5cf2ca04", size = 4459 }
+
+[quickmt-en-uk]
+role = "mt"
+pivot = true
+langs = ["en-uk"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/quickmt/quickmt-en-uk"
+note = "quickmt"
+url = "https://huggingface.co/quickmt/quickmt-en-uk/resolve/a73137905668a904476c3458f7556b8139fd92fc/"
+[quickmt-en-uk.files]
+"model.bin" = { sha256 = "cb2733a7d715e4747e3ee8ca04098ce3d9d03272e686357ab7a0d9fea6ac09cc", size = 202004997 }
+"config.json" = { sha256 = "11a0ad8c092d04b20673078caaf87f9018a629b5c73f9dda1ad5aa65a06774b8", size = 221 }
+"source_vocabulary.json" = { sha256 = "d18998201aac9524a01409cc08aa852719315115584a6ff2363adbbd591335f8", size = 544492 }
+"target_vocabulary.json" = { sha256 = "3169f45b282d046abd7756105092c974851c289d20c2fab066d4d84fd3bffe6b", size = 1548875 }
+"src.spm.model" = { sha256 = "b4a711986816af3b2072bc648ce419a3c9aa7b466e241539732ea7ed7c23a335", size = 804561 }
+"tgt.spm.model" = { sha256 = "1135e847f628b43e825ab0c64b11989bb51636c3d16e079c17ccbdfdc3619d55", size = 1014232 }
+"README.md" = { sha256 = "430b8701fd027ece719ee1f70cd19263a6b32565edc659e7ff7e471e54baeb47", size = 4617 }
+
+[quickmt-en-zh]
+role = "mt"
+pivot = true
+langs = ["en-zh"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/quickmt/quickmt-en-zh"
+note = "quickmt"
+url = "https://huggingface.co/quickmt/quickmt-en-zh/resolve/f48b69e53866b717607b59f94350e9aae3ed021c/"
+[quickmt-en-zh.files]
+"model.bin" = { sha256 = "433e7c41b63223f2d4600c740ce2a00a1bbe6dba1190a5fc10e8cc245e2ef387", size = 409972810 }
+"config.json" = { sha256 = "66edc5d58ceb812a41b4b784497001f815c35400884f40984b19de29e1bc3d69", size = 223 }
+"source_vocabulary.json" = { sha256 = "3c0b368639ef67a374f38e572fe5a0cb001fc0ec99f16787065258be59179a10", size = 542122 }
+"target_vocabulary.json" = { sha256 = "a3ef04026e4342b7ccc88dececdcdddbca0835b087ac2e7a9a54b08c01ff6d9f", size = 590619 }
+"src.spm.model" = { sha256 = "c373f1d78753313b0dbc337058bf8450e1fdd6fe662a49e0941affce44ec14c5", size = 800955 }
+"tgt.spm.model" = { sha256 = "23d03d562fc3f8fe57e497dac0ece4827c254675a80c103fc4bb4040638ceb67", size = 733978 }
+"README.md" = { sha256 = "67d76ab2546bfbd92b59816725786ae4fb905c8d3dc2ba0acdf9aaaf987bb9d5", size = 3864 }
+
+[quickmt-es-en]
+role = "mt"
+langs = ["es-en"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/quickmt/quickmt-es-en"
+note = "quickmt"
+url = "https://huggingface.co/quickmt/quickmt-es-en/resolve/56dc7a38e1929685ce12302f75cbeb153fe32709/"
+[quickmt-es-en.files]
+"model.bin" = { sha256 = "309bbb55ecb269d151a6cf72db8df85d8f28a5e79e0510f3b9cdcf2fdcac8cb8", size = 401699775 }
+"config.json" = { sha256 = "66edc5d58ceb812a41b4b784497001f815c35400884f40984b19de29e1bc3d69", size = 223 }
+"source_vocabulary.json" = { sha256 = "e3e561180d2c23b2d4b5453ad4785ac15bae4a5dba047dcf468dce7c09debce7", size = 362373 }
+"target_vocabulary.json" = { sha256 = "b75f147e85a45a5eefa2d216e902e7f56631a5529a2eecf2542fc1f90592c5e8", size = 341401 }
+"src.spm.model" = { sha256 = "515603821dd149cb66b99febbe4bbb05b9c7819943621d1f66c28ca2270a47e9", size = 603700 }
+"tgt.spm.model" = { sha256 = "c26488c6db0bdca05f0e9e8edf43e8bdb4f78fc5c41c51749f88aefa6a1d030b", size = 593820 }
+"README.md" = { sha256 = "236a7310939223fb9b1edb1ffe28d498c8f45bf4a799db442e1fc85c53696405", size = 4614 }
+
+[quickmt-fr-en]
+role = "mt"
+langs = ["fr-en"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/quickmt/quickmt-fr-en"
+note = "quickmt"
+url = "https://huggingface.co/quickmt/quickmt-fr-en/resolve/ba92e016536cea8568e9e37d34e1d4f74836ee84/"
+[quickmt-fr-en.files]
+"model.bin" = { sha256 = "c0657044846861a905f959bb4950a155e0a41c2bf6187a2c47fa86e2a79d3582", size = 407101843 }
+"config.json" = { sha256 = "66edc5d58ceb812a41b4b784497001f815c35400884f40984b19de29e1bc3d69", size = 223 }
+"source_vocabulary.json" = { sha256 = "2db04eb1c1e54445849650261a574f040310eac9a1a83ad0f53b46bda47f704c", size = 583802 }
+"target_vocabulary.json" = { sha256 = "870a0475551dd81f82a410f7bade1d1be07441e603bd4bd43dd7601741d2edfe", size = 538710 }
+"src.spm.model" = { sha256 = "1e41eb3cab1f4e5caf55370cd23362ace5839cec791411da61d159365b6a6451", size = 816271 }
+"tgt.spm.model" = { sha256 = "ce51817f4aabdac074cccee54167581e681e9cbade82b563d70d64f7be958e4d", size = 799063 }
+"README.md" = { sha256 = "e96ac8ae6ab3fca4ea40f879d6b6f68b1abcefb74b32b19a45cc8bc2bfc9dfa0", size = 5532 }
+
+[quickmt-it-en]
+role = "mt"
+langs = ["it-en"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/quickmt/quickmt-it-en"
+note = "quickmt"
+url = "https://huggingface.co/quickmt/quickmt-it-en/resolve/f21714952095425f37d644d66266ff57711a6108/"
+[quickmt-it-en.files]
+"model.bin" = { sha256 = "21873987a0bbc65658e63823a4637b9e15b2a98030b84e9fb42a5c2566bfcd5c", size = 401699775 }
+"config.json" = { sha256 = "66edc5d58ceb812a41b4b784497001f815c35400884f40984b19de29e1bc3d69", size = 223 }
+"source_vocabulary.json" = { sha256 = "2322709bdc6bda37e56f3a60edf9848eeeda0ba9b11005589f300380778ac635", size = 347173 }
+"target_vocabulary.json" = { sha256 = "f56126b35292a9b672217719817e171de5e20cf27b372de4b707f79838ce1c2d", size = 334527 }
+"src.spm.model" = { sha256 = "47b20d73c2224922ffef2d6f4bbe72810d7f75c80281dcea17515fc25a7a7bb9", size = 598389 }
+"tgt.spm.model" = { sha256 = "352edbef8a5896ac750aa1318696d770c15c85d79116c94b4872086a1de94b2d", size = 586485 }
+"README.md" = { sha256 = "2b7fa7699f5f8321bbe06e9070ba8cf51da1710e9ce973e643b3c5fb57c00c26", size = 4726 }
+
+[quickmt-ja-en]
+role = "mt"
+pivot = true
+langs = ["ja-en"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/quickmt/quickmt-ja-en"
+note = "quickmt"
+url = "https://huggingface.co/quickmt/quickmt-ja-en/resolve/e9ae594ff322d95254d730867c6166b25fd2c704/"
+[quickmt-ja-en.files]
+"model.bin" = { sha256 = "d11276f68986d951edc1e5b4b634e00f1f9c493eb14519598be975630965eb47", size = 407101843 }
+"config.json" = { sha256 = "66edc5d58ceb812a41b4b784497001f815c35400884f40984b19de29e1bc3d69", size = 223 }
+"source_vocabulary.json" = { sha256 = "991033d8ce6387bea59e2eb5baa1619a0fd7f0fdba00829d6b36de41664cfecd", size = 749282 }
+"target_vocabulary.json" = { sha256 = "ddf086241bf6d962dabbc1eb8cfb07dfdacc4dfb68864ff82d6ebe842959abf8", size = 538306 }
+"src.spm.model" = { sha256 = "438e5f7fd498d76b057ca8b6759470b82eb3855b81a67718face917407b31ff5", size = 816774 }
+"tgt.spm.model" = { sha256 = "d2e58f48c0d030d6b4e6b183ebca7068704ef9cce640f090abfea4ac9ea11da0", size = 797948 }
+"README.md" = { sha256 = "a5550c9595007831513a2d9a9c3d97046d00b5aeb65ca04059f3313571b5b694", size = 5506 }
+
+[quickmt-ko-en]
+role = "mt"
+pivot = true
+langs = ["ko-en"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/quickmt/quickmt-ko-en"
+note = "quickmt"
+url = "https://huggingface.co/quickmt/quickmt-ko-en/resolve/5d6841fc859fb40acbf9b90837b72b9becd3b577/"
+[quickmt-ko-en.files]
+"model.bin" = { sha256 = "55376acbd84170d15cba374cb42db4d318f3795ea1b20cfb808fd88bb5bdc2b0", size = 360796810 }
+"config.json" = { sha256 = "66edc5d58ceb812a41b4b784497001f815c35400884f40984b19de29e1bc3d69", size = 223 }
+"source_vocabulary.json" = { sha256 = "221124bae5c4ff8fbfc38ff190cc7bf933fc3e52090f34954e75851194a508c7", size = 410879 }
+"target_vocabulary.json" = { sha256 = "23a27f7d11e6c0086ffc298962c0dbbf8a3e0082d70db37a5dbb3e7e83d64b1b", size = 332886 }
+"src.spm.model" = { sha256 = "70eb68076fe5c8ae7d8b7370aee0a8e713d3dd280d0359a4cfae3890313502dd", size = 570981 }
+"tgt.spm.model" = { sha256 = "ec0fe572b92a529c3fcd8d411f39667ae3cb83ad1a4e41c75f4ad48ea99f5925", size = 583195 }
+"README.md" = { sha256 = "74c68fb1846f04581d8dfd9693db441a741cf061aac8bdd421d84cb5648a60ee", size = 4707 }
+
+[quickmt-pl-en]
+role = "mt"
+langs = ["pl-en"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/quickmt/quickmt-pl-en"
+note = "quickmt"
+url = "https://huggingface.co/quickmt/quickmt-pl-en/resolve/f005b2eadaa97f15c52fdb3a5b661558b78157f3/"
+[quickmt-pl-en.files]
+"model.bin" = { sha256 = "2e939c36e6aa38dfa320166a55b3adbfa17bcfd918a560bfb8b3ba6991ac16c2", size = 401699775 }
+"config.json" = { sha256 = "66edc5d58ceb812a41b4b784497001f815c35400884f40984b19de29e1bc3d69", size = 223 }
+"source_vocabulary.json" = { sha256 = "9c0e7f04ee081a22910848dfa23d7d39b356f6887a2cd966e2b4fa6a67f6f4f5", size = 381704 }
+"target_vocabulary.json" = { sha256 = "360491222a324bb7ecfce3789b7c30d400e861daf1b766ac03263e7740edf2d3", size = 332684 }
+"src.spm.model" = { sha256 = "b6ad874c44613df56fb48be31fb64b6b5fc96a14a7888e802b0f91dbf98a8836", size = 605240 }
+"tgt.spm.model" = { sha256 = "83fa4a21ff8359b8827f033977c0e563fd0786ba84bbc93d4a1e22a0dd81ee7f", size = 585058 }
+"README.md" = { sha256 = "2d72b0635d185812150957a08ff2f0e0266534e6758441c2ba998cc27e01bc7e", size = 4731 }
+
+[quickmt-pt-en]
+role = "mt"
+langs = ["pt-en"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/quickmt/quickmt-pt-en"
+note = "quickmt"
+url = "https://huggingface.co/quickmt/quickmt-pt-en/resolve/8a0cbbfe1a071a975193aad506a038b363440450/"
+[quickmt-pt-en.files]
+"model.bin" = { sha256 = "280031a6870098ef8b80d7ffa7cd1c4ea77e6eb05fdb8a90fa46b60e11ba11fc", size = 401699775 }
+"config.json" = { sha256 = "66edc5d58ceb812a41b4b784497001f815c35400884f40984b19de29e1bc3d69", size = 223 }
+"source_vocabulary.json" = { sha256 = "53f8269e59df78b488299d951914efefee56d049a48661074b928b8e3b27a700", size = 367379 }
+"target_vocabulary.json" = { sha256 = "759ea90a02aa75a11e58b45008b0e74c4420c985cd5286cb5e4e9782e550bd16", size = 335280 }
+"src.spm.model" = { sha256 = "582204569977759a46b4636cf0ead18bb981cd2ca7d9d42a15962072835b6d25", size = 600641 }
+"tgt.spm.model" = { sha256 = "78491a281ebde4ebda824d711469fdaf02970c4d5d3a0ff55e4cbb73c6f6f888", size = 587171 }
+"README.md" = { sha256 = "b16a2c8b3171f9a586dfd676906f7ac32d44cf4f497e3f999e57f5c537e65514", size = 4563 }
+
+[quickmt-ru-en]
+role = "mt"
+langs = ["ru-en"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/quickmt/quickmt-ru-en"
+note = "quickmt"
+url = "https://huggingface.co/quickmt/quickmt-ru-en/resolve/00eb1d00e3157e554c3e0571f0ebf8203befa04e/"
+[quickmt-ru-en.files]
+"model.bin" = { sha256 = "b5763ea697321bcf849602ce30734f3970f9848501b87d139e34558101e16be4", size = 409915789 }
+"config.json" = { sha256 = "66edc5d58ceb812a41b4b784497001f815c35400884f40984b19de29e1bc3d69", size = 223 }
+"source_vocabulary.json" = { sha256 = "b90db48777538d9fe3f3775af670d8f4586fc9332e1ece76fe173312e86386cb", size = 1627059 }
+"target_vocabulary.json" = { sha256 = "cdaea8601928e29874fe39f9205d8903a41389fff171512d51024afd2719fec5", size = 545846 }
+"src.spm.model" = { sha256 = "48ee9d46612f7b3f98038c2adb193693bff996a2fa7ed38d3f37502148a2592a", size = 1037835 }
+"tgt.spm.model" = { sha256 = "d97bf2a98454f5f5ea8231376fba1c5172d56e5454e4d310f299f10410d21629", size = 805620 }
+"README.md" = { sha256 = "eba6b3524e483c9941ccec7298d491435a2e2765114f2d2ba65d8575713ab441", size = 4707 }
+
+[quickmt-tr-en]
+role = "mt"
+langs = ["tr-en"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/quickmt/quickmt-tr-en"
+note = "quickmt"
+url = "https://huggingface.co/quickmt/quickmt-tr-en/resolve/b6635b1f14ca99098802711078e2f0966ee741d2/"
+[quickmt-tr-en.files]
+"model.bin" = { sha256 = "7151fa84b90fe90dc99dae1f7bba3c0b416d3d70cc3ce0ae80f60c543c625745", size = 401699775 }
+"config.json" = { sha256 = "66edc5d58ceb812a41b4b784497001f815c35400884f40984b19de29e1bc3d69", size = 223 }
+"source_vocabulary.json" = { sha256 = "e8ae340558f907c249f17fd82c002e742b3a0cebb96f2cd72561749cdbaee521", size = 407444 }
+"target_vocabulary.json" = { sha256 = "d4c23c0b330328199b2bc2dfed7eff3ae8b163314b0ee6d24f8a03f60687b55e", size = 335254 }
+"src.spm.model" = { sha256 = "453f064230753d99aecab739b8de017e91836692acd2566812de6f96ffa83f26", size = 604393 }
+"tgt.spm.model" = { sha256 = "5c4b6f8bf657c61b0219015022eba70ae06f19c7ae4ac9bd7dbacdb9bafa2ea4", size = 586127 }
+"README.md" = { sha256 = "fe695d918b07dca385c7d5c4574ddae4b02d46f32895247cdc439d84e4bc8fb7", size = 4518 }
+
+[quickmt-uk-en]
+role = "mt"
+langs = ["uk-en"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/quickmt/quickmt-uk-en"
+note = "quickmt"
+url = "https://huggingface.co/quickmt/quickmt-uk-en/resolve/bdaf7852b51d6287440c9f24a5a27d514e97ae6e/"
+[quickmt-uk-en.files]
+"model.bin" = { sha256 = "d63c061e3a0eed8b61527ded6a9e5f8a74364983c454ee4652cc995a1eb612be", size = 202004997 }
+"config.json" = { sha256 = "11a0ad8c092d04b20673078caaf87f9018a629b5c73f9dda1ad5aa65a06774b8", size = 221 }
+"source_vocabulary.json" = { sha256 = "3169f45b282d046abd7756105092c974851c289d20c2fab066d4d84fd3bffe6b", size = 1548875 }
+"target_vocabulary.json" = { sha256 = "d18998201aac9524a01409cc08aa852719315115584a6ff2363adbbd591335f8", size = 544492 }
+"src.spm.model" = { sha256 = "f4ae41ace20c5b2b4287ac9d402cf93f6f857901b10ae1b20f22544073ce1c85", size = 1014232 }
+"tgt.spm.model" = { sha256 = "832da24581d0516be8980cba35eab07fb575e703da700a919aac92d9c5c31311", size = 804561 }
+"README.md" = { sha256 = "a4efdaff0aca552a38a7bba307768a10245fd810f9220f4775886fa5341fe38d", size = 4426 }
+
+[quickmt-zh-en]
+role = "mt"
+pivot = true
+langs = ["zh-en"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/quickmt/quickmt-zh-en"
+note = "quickmt"
+url = "https://huggingface.co/quickmt/quickmt-zh-en/resolve/c27cc8024e01a047733a1e34796e2ab19d74b237/"
+[quickmt-zh-en.files]
+"model.bin" = { sha256 = "e7cac9c2bc585e476d8fe47af11ed76723d4b5cf69ccef8f5ff821fb3ec05000", size = 407101843 }
+"config.json" = { sha256 = "66edc5d58ceb812a41b4b784497001f815c35400884f40984b19de29e1bc3d69", size = 223 }
+"source_vocabulary.json" = { sha256 = "f535f57bbdb306027e9ebbe8d8a41a9f9d3b9465279c903b42de7e50186ad522", size = 554957 }
+"target_vocabulary.json" = { sha256 = "578cfc6b44f8e22a8556a19487adbc5b3935ecfaad310bc2dd79ad2b93c5b9f3", size = 532214 }
+"src.spm.model" = { sha256 = "56159dc3a8607805f0e3f2cf4c91f37ee221e91fb824ebb362622d22185872cb", size = 720056 }
+"tgt.spm.model" = { sha256 = "c23dc1aa66b7b98263da867137a7eb41d5e4573984fb100c0b295f3010381823", size = 792100 }
+"README.md" = { sha256 = "39f59cf36cffa070245974275247a036efdf432cfd0a21a656dba88c53c392cc", size = 5321 }
 
 # Piper voices (the voice data license is what matters; Piper itself is GPL and runs as its own process)
 [piper-en_US-john-medium]
@@ -119,6 +984,119 @@ url = "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109
 "ru_RU-dmitri-medium.onnx" = { sha256 = "f073356ebc4bd0f80c5af58df2953a5988bd5bdab1eb38635ce960b071fbefcb", size = 63201294 }
 "ru_RU-dmitri-medium.onnx.json" = { sha256 = "667ef3117bc642c2892dff7690d8bdc8ca4228aeaa783b2dc1416df632855e0d", size = 4824 }
 "MODEL_CARD" = { sha256 = "6d59c756776d57860232cea6484e1b2ea1fc1c8d2c3446ef246f706fd9875821", size = 277 }
+
+[piper-uk_UA-ukrainian_tts-medium]
+role = "tts"
+langs = ["uk"]
+license = "CC0-1.0"
+license_url = "https://huggingface.co/rhasspy/piper-voices/blob/main/uk/uk_UA/ukrainian_tts/medium/MODEL_CARD"
+url = "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/uk/uk_UA/ukrainian_tts/medium/"
+[piper-uk_UA-ukrainian_tts-medium.files]
+"uk_UA-ukrainian_tts-medium.onnx" = { sha256 = "7920419ac5f6fd8b6450520f24b52ed5a319cb53dd018fbcd71c9e079cbac84f", size = 76735663 }
+"uk_UA-ukrainian_tts-medium.onnx.json" = { sha256 = "4e96e72917ca9b94edc77d6ccfee03a73f450ba2fc1ca93c2e562bc014e5aa55", size = 2002 }
+"MODEL_CARD" = { sha256 = "ce09d0c9d1d90cdc98d1ea8a4ecbdeb5e937d44593876e4194302c5eabbaad9d", size = 267 }
+
+[piper-de_DE-thorsten-medium]
+role = "tts"
+langs = ["de"]
+license = "CC0-1.0"
+license_url = "https://huggingface.co/rhasspy/piper-voices/blob/main/de/de_DE/thorsten/medium/MODEL_CARD"
+url = "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/de/de_DE/thorsten/medium/"
+[piper-de_DE-thorsten-medium.files]
+"de_DE-thorsten-medium.onnx" = { sha256 = "7e64762d8e5118bb578f2eea6207e1a35a8e0c30595010b666f983fc87bb7819", size = 63201294 }
+"de_DE-thorsten-medium.onnx.json" = { sha256 = "974adee790533adb273a1ac88f49027d2a1b8f0f2cf4905954a4791e79264e85", size = 4819 }
+"MODEL_CARD" = { sha256 = "5196b5ab0794e6056263a1f37c18bec407b61ac187529bee29d1c366871e5c9e", size = 285 }
+
+[piper-fr_FR-siwis-medium]
+role = "tts"
+langs = ["fr"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/rhasspy/piper-voices/blob/main/fr/fr_FR/siwis/medium/MODEL_CARD"
+url = "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/fr/fr_FR/siwis/medium/"
+[piper-fr_FR-siwis-medium.files]
+"fr_FR-siwis-medium.onnx" = { sha256 = "641d1ab097da2b81128c076810edb052b385decc8be3381814802a64a73baf99", size = 63201294 }
+"fr_FR-siwis-medium.onnx.json" = { sha256 = "39479916c2db192b5ac9764daddd0c744d83e023ad890c6976c0633ae4df8959", size = 4875 }
+"MODEL_CARD" = { sha256 = "bd8b8d079d4d3d2c4cc20345889bbcd586d72f021a132f93357a763eb5232cce", size = 284 }
+
+[piper-es_MX-ald-medium]
+role = "tts"
+langs = ["es"]
+license = "Unlicense"
+license_url = "https://huggingface.co/rhasspy/piper-voices/blob/main/es/es_MX/ald/medium/MODEL_CARD"
+url = "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/es/es_MX/ald/medium/"
+[piper-es_MX-ald-medium.files]
+"es_MX-ald-medium.onnx" = { sha256 = "019b3803293c93e34a206dd2e53a3889209a514e786fd7144f7b70196c579b63", size = 63201294 }
+"es_MX-ald-medium.onnx.json" = { sha256 = "5a71498158e04afc8099bfd019c7e87c68eb9d042505a2b1a87e5c1ac2b1a61d", size = 4878 }
+"MODEL_CARD" = { sha256 = "1f0694ceb3f1e78c1e2ee0e2d5da40f19f965bc638e1b4fb4fca9bdca420d713", size = 320 }
+
+[piper-it_IT-paola-medium]  # the card says "See URL": its dataset (paolapersico1/Voice-Dataset-Italian) is cc0-1.0
+role = "tts"
+langs = ["it"]
+license = "CC0-1.0"
+license_url = "https://huggingface.co/rhasspy/piper-voices/blob/main/it/it_IT/paola/medium/MODEL_CARD"
+url = "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/it/it_IT/paola/medium/"
+[piper-it_IT-paola-medium.files]
+"it_IT-paola-medium.onnx" = { sha256 = "6fc918b5a0ea6137382833dddfa567bffbe6a5060c02043c87192ee59c04210c", size = 63511038 }
+"it_IT-paola-medium.onnx.json" = { sha256 = "aea19c0a7fce29fbc359b93f10e7902854401e4c95ae2ea328ae516b15d296cf", size = 7099 }
+"MODEL_CARD" = { sha256 = "c53fd0070dc93b438edbce06728eb83759ba030fff0cce523209ee4a0a6363c0", size = 303 }
+
+[piper-pt_BR-faber-medium]
+role = "tts"
+langs = ["pt"]
+license = "CC0-1.0"
+license_url = "https://huggingface.co/rhasspy/piper-voices/blob/main/pt/pt_BR/faber/medium/MODEL_CARD"
+url = "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/pt/pt_BR/faber/medium/"
+[piper-pt_BR-faber-medium.files]
+"pt_BR-faber-medium.onnx" = { sha256 = "858555e3a064209c57088fe6bd70c4c3dc54d03eaa00c45d5ecaf43a33f95aa7", size = 63201294 }
+"pt_BR-faber-medium.onnx.json" = { sha256 = "7e694de195ae3fc36dd732c445eb04fb49b649854893cb5506b978f0d50a1d6f", size = 4855 }
+"MODEL_CARD" = { sha256 = "01f1a5bcfd0538782726059ae407eae9c2dd1b5b35f7298fd53a68de91afe563", size = 279 }
+
+[piper-pl_PL-gosia-medium]
+role = "tts"
+langs = ["pl"]
+license = "CC0-1.0"
+license_url = "https://huggingface.co/rhasspy/piper-voices/blob/main/pl/pl_PL/gosia/medium/MODEL_CARD"
+url = "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/pl/pl_PL/gosia/medium/"
+[piper-pl_PL-gosia-medium.files]
+"pl_PL-gosia-medium.onnx" = { sha256 = "38f66464240ed74f186e6b7dc13c6e3b22e023426299f25c2b3cc9dfa9373fbc", size = 63201294 }
+"pl_PL-gosia-medium.onnx.json" = { sha256 = "1aefb31a9d53ffe44a8163ff73ec833acb7a6253848f6bb0403d8a66f9c7510d", size = 4814 }
+"MODEL_CARD" = { sha256 = "6b4de033dfff0da758bbe4d438fd87fbd917ab843bdd83f591fa0f32b8eb5780", size = 275 }
+
+[piper-tr_TR-dfki-medium]
+role = "tts"
+langs = ["tr"]
+license = "CC-BY-NC-SA-4.0"
+license_url = "https://huggingface.co/rhasspy/piper-voices/blob/main/tr/tr_TR/dfki/medium/MODEL_CARD"
+consent = true
+url = "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/tr/tr_TR/dfki/medium/"
+[piper-tr_TR-dfki-medium.files]
+"tr_TR-dfki-medium.onnx" = { sha256 = "2844717f524ab965d3fe86e60562cbb601d3e456836efcc2196cc3a14112a8fb", size = 63201294 }
+"tr_TR-dfki-medium.onnx.json" = { sha256 = "13ebd7810f1b61b5027583cf3131a0a233b6ea81c38f2200ebc4ff41c3cca039", size = 4960 }
+"MODEL_CARD" = { sha256 = "a3e08c57b9c6d428f8e4fb146512c8b1fb96a68c99d43820ed1dfea6d39cb35f", size = 319 }
+
+[piper-ko_KR-kss-medium]
+role = "tts"
+langs = ["ko"]
+license = "CC-BY-NC-SA-4.0"
+license_url = "https://huggingface.co/rhasspy/piper-voices/blob/main/ko/ko_KR/kss/medium/MODEL_CARD"
+consent = true
+url = "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/ko/ko_KR/kss/medium/"
+[piper-ko_KR-kss-medium.files]
+"ko_KR-kss-medium.onnx" = { sha256 = "624fd774e26895f24bebae1bd9a3379e3394baeade4b584924f83e414096e2c9", size = 63221984 }
+"ko_KR-kss-medium.onnx.json" = { sha256 = "153b5619d0580f824a59108d83ca19434de410eb8e4fe80325b58684fdc8a1df", size = 5232 }
+"MODEL_CARD" = { sha256 = "792db9e4889b69bf56bf49ed584809292110e16bf1fc904ff2b99faf8f778d6d", size = 333 }
+
+[piper-ja_JP-hi_fi_captain-medium]
+role = "tts"
+langs = ["ja"]
+license = "CC-BY-NC-SA-4.0"
+license_url = "https://huggingface.co/rhasspy/piper-voices/blob/main/ja/ja_JP/hi_fi_captain/medium/MODEL_CARD"
+consent = true
+url = "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/ja/ja_JP/hi_fi_captain/medium/"
+[piper-ja_JP-hi_fi_captain-medium.files]
+"ja_JP-hi_fi_captain-medium.onnx" = { sha256 = "5eafa1610fc7a0ff2e7fde9cbe0972d876266e23d8db331727eb2466f19460eb", size = 76753841 }
+"ja_JP-hi_fi_captain-medium.onnx.json" = { sha256 = "fe9aeda38318607ba114926d1d7ee7d56295f9af3774a99a42b36f4354cabf27", size = 5301 }
+"MODEL_CARD" = { sha256 = "26dcad3474c39c7fc394c1e57e60121c90832afa9f43e7942faa7c51e1e81905", size = 361 }
 
 [xtts-v2]  # voice clone (coqui-tts); needs the optional voice pack with torch
 role = "clone"

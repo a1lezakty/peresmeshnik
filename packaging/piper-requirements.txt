@@ -1,5 +1,8 @@
 # The Piper runner's own packages (GPL-3.0 piper-tts and its one extra dependency), hash-pinned:
 # build.sh installs them with --no-deps (onnxruntime and numpy come from uv.lock).
+# pyopenjtalk-plus (MIT) is Piper's [ja] extra, for the Japanese voice; it imports sudachipy (Apache-2.0) but the runner
+# never opens Sudachi's dictionary (sudachidict-core, 192 MB: left out, piper_runner.no_sudachi); pydantic and
+# typing-extensions come from uv.lock. Wheels: macOS (universal2, arm64), Linux x86_64, Windows.
 piper-tts==1.8.0 \
     --hash=sha256:98c7dd791b2be0f8732e5c9cefd86c54200ac0360e43c643c937bf18ac0e941a \
     --hash=sha256:33e7425933e9290fe651ae127916ed1ca6104cfa3d94e9049295dd3a5c449382 \
@@ -10,3 +13,12 @@ piper-tts==1.8.0 \
 pathvalidate==3.3.1 \
     --hash=sha256:5263baab691f8e1af96092fa5137ee17df5bdfbd6cff1fcac4d6ef4bc2e1735f \
     --hash=sha256:b18c07212bfead624345bb8e1d6141cdcf15a39736994ea0b94035ad2b1ba177
+pyopenjtalk-plus==0.4.1.post10 \
+    --hash=sha256:86dc600d96a2c558e7e5d4cf9e5f3bbb58d3da082e16442955f84bfff588f930 \
+    --hash=sha256:d5ad80a032b9bb8cbc2c8e89f6022a1b1ed27edfb4eeb61ec66ece0d4df417cb \
+    --hash=sha256:c3c033fae4ef69311885781191bf213662e56f19ec415736e05b26f60a20e5d6
+sudachipy==0.7.0 \
+    --hash=sha256:6be34e856c99498e990904f7155e1a102f675cf5edfdaf7a396f26d71ce4b333 \
+    --hash=sha256:0e60cefd3a7a9680206ae160bf86d266d0d60e434adac2384f8c7a6dfb0f3ba7 \
+    --hash=sha256:dfc90631aa2276d2165e1995bc94b56c9f5bc27b875f43fb7d67e4a3b7346d4f \
+    --hash=sha256:8d0429db2d02d408daa7dccd062a6d8c2984a07f8e448b49a3ea694377617658

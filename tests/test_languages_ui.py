@@ -2,6 +2,7 @@
 switches the pair without restarting the app (its models fetched first, then the sides made again), the overlay draws
 Chinese, Japanese, Korean and Arabic (right to left) — a snapshot per OS for CI. Pairs whose real models are not in the
 registry yet run on stand-ins (`test_languages.stub`)."""
+import dataclasses
 import hashlib
 import os
 import sys
@@ -22,6 +23,7 @@ from peresmeshnik import config, languages, models  # noqa: E402
 from peresmeshnik.engines import Caption, Speech  # noqa: E402
 
 app = QApplication.instance() or QApplication([])
+REGISTRY = models.registry()  # the real one, before a test puts its own in
 STAND_INS = {'asr': ('asr-de', 'asr-ja'), 'mt': ('mt-de-ja', 'mt-ja-de'), 'tts': ('tts-de', 'tts-ja')}
 
 
@@ -32,10 +34,21 @@ def settle(seconds=0.05):
         time.sleep(0.005)
 
 
+def before_stage6(reg: dict) -> dict:
+    """The registry with real models only for en and ru, as before stage 6 (S1 put models for the other 12 languages
+    into it): a language here has none but its stand-ins."""
+    out = {}
+    for k, m in reg.items():
+        langs = m.langs if m.role in ('vad', 'clone') else tuple(p for p in m.langs if set(p.split('-')) <= {'en', 'ru'})
+        if langs:
+            out[k] = dataclasses.replace(m, langs=langs)
+    return out
+
+
 def stand_ins(monkeypatch, url='https://example.invalid/', files=None, consent=()):
     """German and Japanese on stand-in models (served by `url`); `wire(s)` puts them into settings. Silero VAD counts as
     downloaded: a test never fetches a real model."""
-    reg = dict(models.registry())
+    reg = before_stage6(REGISTRY)
     for role, ids in STAND_INS.items():
         for mid in ids:
             reg[mid] = models.Model(mid, role, (mid.split('-', 1)[1],), 'CPML' if mid in consent else 'MIT',
@@ -58,6 +71,7 @@ def test_languages_page_says_before_the_download_what_runs_where(tmp_path, monke
     monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
     monkeypatch.setenv('PERESMESHNIK_MODELS', str(tmp_path / 'models'))
     monkeypatch.setenv('GEMINI_API_KEY', 'a-key')
+    monkeypatch.setattr(models, 'registry', lambda: before_stage6(REGISTRY))
     page = wizard.LanguagesPage(type('W', (), {'s': config.Settings(them_to_me='local', me_to_them='local')})())
     assert page.my_lang.count() == 14 and page.my_lang.itemText(page.my_lang.findData('ja')) == '日本語 (Japanese)'
     page.my_lang.setCurrentIndex(page.my_lang.findData('de'))
@@ -531,6 +545,7 @@ def test_arabic_from_the_cloud_is_said_to_be_egyptian(tmp_path, monkeypatch):
     from peresmeshnik.ui import wizard
     monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
     monkeypatch.setenv('PERESMESHNIK_MODELS', str(tmp_path / 'models'))
+    monkeypatch.setattr(models, 'registry', lambda: before_stage6(REGISTRY))
     page = wizard.LanguagesPage(type('W', (), {'s': config.Settings()})())
     page.their_lang.setCurrentIndex(page.their_lang.findData('ar'))
     assert 'Egyptian Arabic' in page.why['them_to_me'].text() and 'Egyptian' not in page.why['me_to_them'].text()

@@ -28,7 +28,7 @@ behind the speech before it). Per clause one JSON line goes to the
 from the end of the clause's speech to its caption, to its synthesized audio and to the estimated
 start of its playback (the output plays speech back to back, so a clause can wait behind the last).
 
-    peresmeshnik models fetch silero-vad parakeet-tdt-0.6b-v3 opus-mt-en-ru piper-ru_RU-dmitri-medium
+    peresmeshnik models fetch silero-vad parakeet-tdt-0.6b-v3 quickmt-en-ru piper-ru_RU-dmitri-medium
     peresmeshnik run --in call.wav [--from en] [--to ru] [--out speech.wav] [--log latency.jsonl]
     peresmeshnik run --in call.wav --pipewire --play   # Linux: file -> "Peresmeshnik Call" sink -> monitor
     peresmeshnik run --in call.wav --blackhole --play "BlackHole 2ch"   # macOS: file -> BlackHole 16ch -> capture
@@ -49,11 +49,12 @@ from collections import defaultdict
 import numpy as np  # BLAS threads: pinned in peresmeshnik/__init__.py, which runs first
 
 from peresmeshnik.engines import SAMPLE_RATE, Caption, Latency, Speech, Voice
-from peresmeshnik.local.asr import _key
+from peresmeshnik.local.asr import NO_SPACES, _key, join, units
 
 log = logging.getLogger('peresmeshnik.latency')
-OTHER = {'en': 'ru', 'ru': 'en'}
-HELLO = {'en': 'Hello.', 'ru': 'Привет.'}
+# the warm-up phrase of each of the 14 languages (languages.LANGS)
+HELLO = {'en': 'Hello.', 'ru': 'Привет.', 'uk': 'Привіт.', 'de': 'Hallo.', 'fr': 'Bonjour.', 'es': 'Hola.', 'it': 'Ciao.',
+         'pt': 'Olá.', 'pl': 'Cześć.', 'tr': 'Merhaba.', 'zh': '你好。', 'ja': 'こんにちは。', 'ko': '안녕하세요.', 'ar': 'مرحبا.'}
 MAX_BEHIND_S = 0.15
 MAX_LAG_S = 4.0  # them -> me: voice starting later than this after its clause ended is dropped (BENCH stage 2: queue policy)
 FAST_AFTER_S = 0.5  # voice this far behind its clause end is sped up ...
@@ -173,11 +174,11 @@ side has no subtitles of what was dropped; them -> me takes MAX_LAG_S."""
                 if partial:
                     self._events.put(Caption(partial, clause=n))
                     if self.partial_mt:  # the words two partials agree on (the stable prefix): translated for the subtitle
-                        words = partial.split()
+                        words = units(partial, self.src)  # zh / ja: characters
                         k = next((i for i, (a, b) in enumerate(zip(words, prev)) if _key(a) != _key(b)), min(len(words), len(prev)))
                         prev = words
-                        if k >= sent + 2:
-                            self._clauses.put({'partial': True, 'clause': n, 'text': ' '.join(words[:k]),
+                        if k >= sent + (4 if self.src in NO_SPACES else 2):
+                            self._clauses.put({'partial': True, 'clause': n, 'text': join(words[:k], self.src),
                                                'end_s': round(pos / SAMPLE_RATE, 2), 'end_wall': self._wall(pos)})
                             sent = k
                 if kind == 'end':
@@ -354,8 +355,8 @@ def cli(argv=None) -> int:
     from peresmeshnik.local.asr import ONNX_ASR
     ap = argparse.ArgumentParser(prog='peresmeshnik run', description='Translate a recording through the local pipeline.')
     ap.add_argument('--in', dest='inp', required=True, help='audio file (any rate, mixed to mono)')
-    ap.add_argument('--from', dest='src', default='en', choices=sorted(OTHER))
-    ap.add_argument('--to', dest='tgt', choices=sorted(OTHER), help='default: the other language')
+    ap.add_argument('--from', dest='src', default='en', choices=sorted(HELLO), help='one of the 14 languages (default en)')
+    ap.add_argument('--to', dest='tgt', choices=sorted(HELLO), help='default: ru, or en from ru')
     ap.add_argument('--asr', choices=sorted(ONNX_ASR), help='ASR model (default: settings [local] asr for the language)')
     ap.add_argument('--threads', type=int, help='threads per engine (default: settings [local] threads)')
     ap.add_argument('--realtime', action='store_true', help='feed the file at its own pace (real lags in the log)')
@@ -371,7 +372,7 @@ def cli(argv=None) -> int:
                     help=f'with --realtime / --pipewire: drop speech that would start later than this after its clause, s '
                          f'(0 = say everything; default {MAX_LAG_S:g})')
     a = ap.parse_args(argv)
-    tgt = a.tgt or OTHER[a.src]
+    tgt = a.tgt or ('en' if a.src == 'ru' else 'ru')
     if tgt == a.src:
         ap.error('--from and --to are the same language')
     if not os.path.isfile(a.inp):

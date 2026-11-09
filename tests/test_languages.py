@@ -110,6 +110,29 @@ def test_a_model_that_needs_a_gpu_is_not_offered_without_one(monkeypatch):
     assert languages.direction(s, 'me_to_them', has_gpu=True).tts == 'tts-ja'
 
 
+def test_a_gpu_model_is_not_offered_where_its_engine_has_no_cuda(monkeypatch):
+    """An NVIDIA GPU, but onnxruntime without CUDA (the built .exe, a from-source install): Whisper turbo for Turkish
+    is not offered (on the CPU 4.6 s per 1 s window, BENCH stage 6), said why; built anyway, OnnxAsr refuses it."""
+    from peresmeshnik.local import asr, device
+    monkeypatch.setattr(languages.shutil, 'which', lambda name: '/usr/bin/nvidia-smi')
+    monkeypatch.setattr(device, 'onnx_cuda', lambda: False)
+    s = config.Settings(my_lang='ru', their_lang='tr')
+    them = languages.direction(s, 'them_to_me')
+    assert not them.local and len(them.why) == 1
+    assert them.why[0].endswith('needs CUDA, and onnxruntime in this app runs on the CPU only (whisper-large-v3-turbo)')
+    monkeypatch.setattr(device, 'onnx_cuda', lambda: True)
+    assert languages.direction(s, 'them_to_me').asr == 'whisper-large-v3-turbo'
+    monkeypatch.setattr(device, 'onnx_providers', lambda: ['CPUExecutionProvider'])
+    with pytest.raises(RuntimeError, match='only on CUDA'):
+        asr.OnnxAsr('whisper-large-v3-turbo')
+
+    def loaded(*a, **k):
+        raise LookupError('past the CUDA check')
+    monkeypatch.setattr(models, 'path', loaded)
+    with pytest.raises(LookupError):  # an offline check (the wizard's clone check): slow on the CPU is fine
+        asr.OnnxAsr('whisper-large-v3-turbo', live=False)
+
+
 def test_star_is_one_model_for_every_pair_it_has(monkeypatch):
     """`'*'` in a [local] table: the model for every language or pair its registry langs have; an own key wins."""
     fake_registry(monkeypatch, stub('mt-many', 'mt', 'de', 'ja', 'en'), stub('mt-de-ja', 'mt', 'de-ja'))

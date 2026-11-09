@@ -111,7 +111,7 @@ def procs():
 
 
 def test_call_router_moves_the_call_app_and_gives_it_back(speakers, procs):
-    from peresmeshnik.audio.capture_pipewire import CallRouter, apps, guess_call_app, pactl, players, return_strays
+    from peresmeshnik.audio.capture_pipewire import CallRouter, apps, guess_call_app, move, players, return_strays
     spk, mods = speakers
     call = call_sink(mods)
     player('TelegramDesktop', 'Telegram', procs)
@@ -135,7 +135,7 @@ def test_call_router_moves_the_call_app_and_gives_it_back(speakers, procs):
     assert sinks_of('Telegram', 3) == [spk] * 3
     # left in our sink by a killed run: back to the default output
     web = next(p['index'] for p in players() if p['key'] == 'chrome')
-    pactl('move-sink-input', web, call)
+    move(web, call)  # pactl alone: the sound server may drop it (a sink a moment old)
     wait_sinks('chrome', [call])
     assert return_strays(call) == [f'Google Chrome {RUN}']
     wait_sinks('chrome', [spk])
@@ -181,14 +181,14 @@ def test_call_router_leaves_the_browser_under_the_same_name(speakers, procs):
     wait_sinks('electron-call', [spk])
 
 def test_call_router_back_to_the_default_when_its_device_is_gone(speakers, procs):
-    from peresmeshnik.audio.capture_pipewire import CallRouter, pactl, players
+    from peresmeshnik.audio.capture_pipewire import CallRouter, move, pactl, players
     spk, mods = speakers
     call = call_sink(mods)
     headset = pactl('load-module', 'module-null-sink', 'sink_name=test_headset').strip()
     try:
         player('zoom', 'zoom', procs)
         sinks_of('zoom')
-        pactl('move-sink-input', next(p['index'] for p in players() if p['key'] == 'zoom'), 'test_headset')
+        move(next(p['index'] for p in players() if p['key'] == 'zoom'), 'test_headset')
         wait_sinks('zoom', ['test_headset'])
         r = CallRouter('zoom', call)
         r.start()
@@ -200,6 +200,32 @@ def test_call_router_back_to_the_default_when_its_device_is_gone(speakers, procs
     finally:
         if headset:
             pactl('unload-module', headset)
+
+
+def test_a_move_the_sound_server_drops_goes_again(speakers, procs, monkeypatch):
+    """pactl says yes and the stream stays where it was (WirePlumber dropped the move: a stream or a sink a moment
+    old): the move goes again, on the way in and on the way back."""
+    from peresmeshnik.audio.capture_pipewire import CallRouter
+    spk, mods = speakers
+    call = call_sink(mods)
+    player('Skype', 'skypeforlinux', procs)
+    assert sinks_of('skypeforlinux') == [spk]
+    run, dropped = subprocess.run, []
+
+    def drop_first(args, *a, **kw):  # the first move of each stream to each sink is "done" and nothing happens
+        if list(args[:2]) == ['pactl', 'move-sink-input'] and tuple(args[2:]) not in dropped:
+            dropped.append(tuple(args[2:]))
+            return subprocess.CompletedProcess(args, 0, b'', b'')
+        return run(args, *a, **kw)
+    monkeypatch.setattr(subprocess, 'run', drop_first)
+    r = CallRouter('skypeforlinux', call)
+    r.start()
+    try:
+        assert sinks_of('skypeforlinux') == [call]
+    finally:
+        r.stop()
+    assert sinks_of('skypeforlinux') == [spk]
+    assert [sink for _, sink in dropped] == [call, spk]
 
 
 def test_app_moves_the_call_on_and_back_off_and_on_exit(speakers, procs, monkeypatch, tmp_path):

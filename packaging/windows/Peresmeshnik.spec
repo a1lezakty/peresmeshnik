@@ -26,8 +26,10 @@ shutil.copyfile(CONF['warnfile'], Path(CONF['warnfile']).with_name('warn-app.txt
 piper = Analysis(
     [str(Path(SPECPATH) / 'piper_entry.py')],  # piper-runner/piper_runner.py's main(); an error exits, no dialog
     pathex=[str(ROOT / 'piper-runner')],
-    hiddenimports=collect_submodules('piper', filter=lambda n: '.train' not in n),
-    datas=collect_data_files('piper', excludes=['train/**', 'img/**', 'templates/**']),
+    # pyopenjtalk: its compiled OpenJTalk module imports pure-Python ones the analysis cannot see
+    hiddenimports=collect_submodules('piper', filter=lambda n: '.train' not in n) + collect_submodules('pyopenjtalk'),
+    datas=[*collect_data_files('piper', excludes=['train/**', 'img/**', 'templates/**']),
+           *collect_data_files('pyopenjtalk', excludes=['htsvoice/**'])],  # the Japanese voice: OpenJTalk's dictionary
     excludes=EXCLUDES + ['PySide6', 'peresmeshnik'],
 )
 # not shipped: Mesa's software OpenGL (20 MB; the app draws with QWidget's raster engine, never OpenGL); PortAudio for other

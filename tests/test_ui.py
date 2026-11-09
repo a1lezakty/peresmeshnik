@@ -199,7 +199,7 @@ def test_selftest_finds_the_chirp_only_when_it_is_there():
 def test_wizard_asks_for_the_right_models():
     from peresmeshnik.ui.wizard import needed_models
     s = config.Settings()  # them -> me local, me -> them cloud with local subtitles
-    assert needed_models(s) == ['silero-vad', 'parakeet-tdt-0.6b-v3', 'opus-mt-en-ru', 'piper-ru_RU-dmitri-medium',
+    assert needed_models(s) == ['silero-vad', 'parakeet-tdt-0.6b-v3', s.local.mt['en-ru'], 'piper-ru_RU-dmitri-medium',
                                 'gigaam-v3-e2e-ctc', 'opus-mt-ru-en']
     s.cloud.subtitles, s.them_to_me = True, 'cloud'
     assert needed_models(s) == ['silero-vad']

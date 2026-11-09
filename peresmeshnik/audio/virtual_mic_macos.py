@@ -17,6 +17,8 @@ NAME = macos.BLACKHOLE
 
 class VirtualMic(_VirtualMic):
     """AudioOut into BlackHole 2ch; BlackHoleMissing (with how to install it) when it is not there."""
+    name = NAME
+    reopen = (7,)  # the helper ends with 7 when BlackHole 2ch changes its rate: the next one plays at the new rate
 
     def _make(self) -> list[str]:
         self.device = macos.blackhole()

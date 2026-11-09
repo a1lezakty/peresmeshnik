@@ -15,7 +15,8 @@
 // rate change of the device reopens it. record and loop end when stdin closes (the app is gone: no microphone stays
 // open). Events on stderr, a line each: "using <uid>\t<name>", "lost <uid>\t<name>", "none"; loop also "idle" (nobody
 // records DEV: the microphone is closed, no orange dot, AirPods keep their music profile) and "call" (somebody does).
-// Exit codes: 0 done, 2 usage, 3 no such device, 4 the device went away, 5 Core Audio error, 6 no microphone permission.
+// Exit codes: 0 done, 2 usage, 3 no such device, 4 the device went away, 5 Core Audio error, 6 no microphone permission,
+// 7 (play) the output's sample rate changed: start it again (it reads the new rate). loop follows a rate change itself.
 // SIGTERM / SIGINT / SIGHUP end it cleanly: every IOProc is stopped before the exit. A process that just dies (SIGKILL)
 // with its IOProc running can leave its last IO buffer in coreaudiod's mix, repeated: seen on the CI runner, a 10.7 ms
 // buffer looping in BlackHole with no process left. So the app stops helpers with SIGTERM, never SIGKILL.
@@ -35,9 +36,10 @@ func say(_ s: String) {
     fputs(s + "\n", stderr)
 }
 
-/// The IOProcs running now: stopped before any exit.
+/// The IOProcs running now: stopped before any exit; so are the aggregate devices we made.
 let ioLock = NSLock()
 var ioProcs: [AudioObjectID: [AudioDeviceIOProcID]] = [:]
+var aggregates: [AudioObjectID] = []
 
 func started(_ dev: AudioObjectID, _ proc: AudioDeviceIOProcID) {
     ioLock.lock()
@@ -64,7 +66,10 @@ func quit(_ code: Int32) -> Never {
         }
     }
     ioProcs = [:]
-    exit(code)  // under the lock: no IOProc starts or stops after this
+    for a in aggregates { AudioHardwareDestroyAggregateDevice(a) }
+    // _exit, not exit: exit() flushes stdout, which a pump thread may hold in a blocked write (once in ~400 stops a
+    // helper hung there). stderr is line-buffered, stdout flushed after each write. Under the lock: nothing starts after.
+    _exit(code)
 }
 
 func die(_ code: Int32, _ s: String) -> Never {
@@ -148,10 +153,23 @@ func find(_ key: String, input: Bool, in all: [Device] = devices()) -> Device? {
     return side.first { $0.uid == key } ?? side.first { $0.name == key }
 }
 
+/// A property listener block; `remove()` takes it off (else they pile up: one per call, per device change).
+struct Listener {
+    let obj: AudioObjectID, a: AudioObjectPropertyAddress, q: DispatchQueue, block: AudioObjectPropertyListenerBlock
+
+    func remove() {
+        var a = a
+        AudioObjectRemovePropertyListenerBlock(obj, &a, q, block)
+    }
+}
+
+@discardableResult
 func listen(_ obj: AudioObjectID, _ sel: AudioObjectPropertySelector, _ q: DispatchQueue,
-            _ scope: AudioObjectPropertyScope = global, _ f: @escaping () -> Void) {
+            _ scope: AudioObjectPropertyScope = global, _ f: @escaping () -> Void) -> Listener {
     var a = addr(sel, scope)
-    AudioObjectAddPropertyListenerBlock(obj, &a, q) { _, _ in f() }
+    let block: AudioObjectPropertyListenerBlock = { _, _ in f() }
+    AudioObjectAddPropertyListenerBlock(obj, &a, q, block)
+    return Listener(obj: obj, a: a, q: q, block: block)
 }
 
 /// Our IO cycle on this device (per process). The loop takes 1024 frames (21 ms at 48 kHz, half the wake-ups of the
@@ -283,11 +301,17 @@ final class Capture {
                 if let d = b.mData { memset(d, 0, Int(b.mDataByteSize)) }
             }
         }
-        guard st == noErr, let proc, AudioDeviceStart(dev.id, proc) == noErr else {
+        guard st == noErr, let proc else {
             say("cannot open \(dev.name) (\(st))")
             return nil
         }
-        started(dev.id, proc)
+        started(dev.id, proc)  // before it runs: a quit() meanwhile stops it too
+        let go = AudioDeviceStart(dev.id, proc)
+        guard go == noErr else {
+            stopIO(dev.id, proc)  // and destroys its IOProcID
+            say("cannot start \(dev.name) (\(go))")
+            return nil
+        }
     }
 
     func stop() {
@@ -333,11 +357,17 @@ final class Render {
             }
             pulled?.signal()
         }
-        guard st == noErr, let proc, AudioDeviceStart(dev.id, proc) == noErr else {
+        guard st == noErr, let proc else {
             say("cannot open \(dev.name) (\(st))")
             return nil
         }
-        started(dev.id, proc)
+        started(dev.id, proc)  // before it runs: a quit() meanwhile stops it too
+        let go = AudioDeviceStart(dev.id, proc)
+        guard go == noErr else {
+            stopIO(dev.id, proc)  // and destroys its IOProcID
+            say("cannot start \(dev.name) (\(go))")
+            return nil
+        }
     }
 
     func stop() {
@@ -356,6 +386,7 @@ final class Input {
     private let lock = NSLock()
     private var cap: Capture?
     private var said = ""
+    private var listeners: [Listener] = [], rateListener: Listener?
     private(set) var stopped = false
 
     init(saved: String, follow: Bool, exclude: String = "", cycle: UInt32 = 0) {
@@ -363,8 +394,8 @@ final class Input {
         self.follow = follow || saved.isEmpty
         self.exclude = exclude
         self.cycle = cycle
-        listen(system, kAudioHardwarePropertyDevices, q) { [weak self] in self?.update() }
-        listen(system, kAudioHardwarePropertyDefaultInputDevice, q) { [weak self] in self?.update() }
+        listeners = [listen(system, kAudioHardwarePropertyDevices, q) { [weak self] in self?.update() },
+                     listen(system, kAudioHardwarePropertyDefaultInputDevice, q) { [weak self] in self?.update() }]
         q.sync { update() }
     }
 
@@ -378,6 +409,10 @@ final class Input {
             cap?.stop()
             setCap(nil)
             stopped = true
+            for l in listeners { l.remove() }
+            rateListener?.remove()
+            listeners = []
+            rateListener = nil
         }
         wake.signal()
     }
@@ -412,7 +447,8 @@ final class Input {
             event("none")
             return
         }
-        listen(d.id, kAudioDevicePropertyNominalSampleRate, q) { [weak self] in self?.update() }
+        rateListener?.remove()
+        rateListener = listen(d.id, kAudioDevicePropertyNominalSampleRate, q) { [weak self] in self?.update() }
         setCap(c)
         event("using \(d.label)")
         wake.signal()
@@ -437,7 +473,7 @@ final class Input {
 final class Readers {
     private let dev: AudioObjectID, me = getpid(), changed: (Bool) -> Void
     private let q = DispatchQueue(label: "readers")
-    private var watched = Set<AudioObjectID>(), reading = false
+    private var watched: [AudioObjectID: [Listener]] = [:], reading = false
     let supported: Bool
 
     init(_ dev: AudioObjectID, _ changed: @escaping (Bool) -> Void) {
@@ -451,10 +487,15 @@ final class Readers {
 
     private func update() {  // on q
         var any = false
-        for p in objects(system, kAudioHardwarePropertyProcessObjectList) {
-            if watched.insert(p).inserted {
-                listen(p, kAudioProcessPropertyIsRunningInput, q) { [weak self] in self?.update() }
-                listen(p, kAudioProcessPropertyDevices, q, kAudioObjectPropertyScopeInput) { [weak self] in self?.update() }
+        let now = objects(system, kAudioHardwarePropertyProcessObjectList)
+        for (p, ls) in watched where !now.contains(p) {  // that process is gone
+            for l in ls { l.remove() }
+            watched[p] = nil
+        }
+        for p in now {
+            if watched[p] == nil {
+                watched[p] = [listen(p, kAudioProcessPropertyIsRunningInput, q) { [weak self] in self?.update() },
+                              listen(p, kAudioProcessPropertyDevices, q, kAudioObjectPropertyScopeInput) { [weak self] in self?.update() }]
             }
             if get(p, kAudioProcessPropertyPID, pid_t(0)) == me { continue }
             if get(p, kAudioProcessPropertyIsRunningInput, UInt32(0)) == 1,
@@ -574,28 +615,47 @@ case "record":
     dispatchMain()
 
 case "loop":
-    let target = output(opt("--to"))
+    var target = output(opt("--to"))
     needMicrophone()
     watchGone(target)
     let from = opt("--from", "") ?? ""
-    let ring = Ring(Int(target.rate / 2))
-    let keep = Int(target.rate * 0.06)  // at most 60 ms queued: the mic and the target run on two clocks
     var running: (Render, Input)?
+    let runLock = NSLock()  // run() from the readers' queue, a rate change from its own
+    func start() {
+        say("call")
+        target = device(target.id)  // its rate now: a call app or Audio MIDI Setup may have changed it meanwhile
+        let ring = Ring(Int(target.rate / 2))
+        let keep = Int(target.rate * 0.06)  // at most 60 ms queued: the mic and the target run on two clocks
+        guard let render = Render(target, from: ring, prime: Int(target.rate * 0.02), cycle: 1024) else { return }
+        let input = Input(saved: from, follow: true, exclude: target.uid, cycle: 1024)
+        pump(input, rate: target.rate) { p, n in
+            ring.write(p, n)
+            if ring.count > keep { ring.trim(to: keep / 2) }
+        }
+        running = (render, input)
+    }
+    func end() {
+        guard let r = running else { return }
+        r.1.stop()  // the microphone, then the output
+        r.0.stop()
+        running = nil
+        say("idle")
+    }
     func run(_ on: Bool) {
+        runLock.lock()
+        defer { runLock.unlock() }
         if on, running == nil {
-            say("call")
-            guard let render = Render(target, from: ring, prime: Int(target.rate * 0.02), cycle: 1024) else { return }
-            let input = Input(saved: from, follow: true, exclude: target.uid, cycle: 1024)
-            pump(input, rate: target.rate) { p, n in
-                ring.write(p, n)
-                if ring.count > keep { ring.trim(to: keep / 2) }
-            }
-            running = (render, input)
-        } else if !on, let (render, input) = running {
-            input.stop()
-            render.stop()
-            running = nil
-            say("idle")
+            start()
+        } else if !on {
+            end()
+        }
+    }
+    listen(target.id, kAudioDevicePropertyNominalSampleRate, DispatchQueue(label: "rate")) {
+        runLock.lock()
+        defer { runLock.unlock() }
+        if let r = running, device(target.id).rate != r.0.dev.rate {  // at the new rate, else a wrong speed and pitch
+            end()
+            start()
         }
     }
     var readers: AnyObject?
@@ -618,8 +678,15 @@ case "play":
     let from = rate(24000)
     guard let ms = Double(opt("--latency", "0")!), ms >= 0, ms < 1000 else { die(2, "bad --latency") }
     watchGone(target)
+    listen(target.id, kAudioDevicePropertyNominalSampleRate, DispatchQueue(label: "rate")) {
+        if device(target.id).rate != target.rate { die(7, "the rate of \(target.name) changed") }  // the app starts us again
+    }
     let ring = Ring(Int(target.rate / 4))  // a full ring blocks stdin: the writer waits as on a pipe
     let pulled = DispatchSemaphore(value: 0)
+    func nextCycle() {  // signalled on every IO cycle, waited on only now and then: the next one, not a backlog
+        while pulled.wait(timeout: .now()) == .success {}
+        pulled.wait()
+    }
     guard let render = Render(target, from: ring, prime: Int(target.rate * ms / 1000), pulled: pulled) else {
         die(5, "cannot play into \(target.name)")
     }
@@ -636,7 +703,7 @@ case "play":
                 var done = 0
                 while done < k {
                     done += ring.write(p + done, k - done)
-                    if done < k { pulled.wait() }
+                    if done < k { nextCycle() }
                 }
             }
         }
@@ -644,7 +711,7 @@ case "play":
         have -= whole
     }
     render.drain.on = true
-    while ring.count > 0 { pulled.wait() }
+    while ring.count > 0 { nextCycle() }
     usleep(60_000)  // the last IO buffer
     quit(0)
 
@@ -660,11 +727,13 @@ case "aggregate":
     var id = AudioObjectID(0)
     let st = AudioHardwareCreateAggregateDevice(desc as CFDictionary, &id)
     guard st == noErr else { die(5, "cannot create the aggregate device (\(st))") }
+    ioLock.lock()
+    aggregates.append(id)  // quit() removes it, on SIGTERM too
+    ioLock.unlock()
     print("created \(id)")
     fflush(stdout)
     var b = [UInt8](repeating: 0, count: 64)
     while read(0, &b, b.count) > 0 {}
-    AudioHardwareDestroyAggregateDevice(id)
     quit(0)
 
 default:

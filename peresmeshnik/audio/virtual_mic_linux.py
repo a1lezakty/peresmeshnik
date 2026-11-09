@@ -40,6 +40,8 @@ def _remove_stale() -> None:
 
 class VirtualMic:
     """AudioOut into "Peresmeshnik Mic"."""
+    name = NAME
+    reopen: tuple[int, ...] = ()  # exit codes after which the next play() just opens a new stream (macOS: the rate changed)
 
     def __init__(self, latency_ms: int = 40):
         self.latency_ms = latency_ms
@@ -93,6 +95,11 @@ class VirtualMic:
     def play(self, pcm: np.ndarray, sample_rate: int) -> None:
         data = np.ascontiguousarray(pcm, dtype='<f4').tobytes()
         with self._lock:
+            if self._proc is not None and self._proc.poll() is not None:  # it ended by itself: the writer swallows that
+                p, self._proc = self._proc, None
+                if p.returncode not in self.reopen:  # the device went away (macOS: 4), a sound server error (5): say so
+                    err = p.stderr.read().decode(errors='replace').strip().splitlines() if p.stderr else []
+                    raise RuntimeError(f'{self.name}: the playback stopped ({err[-1] if err else f"exit {p.returncode}"})')
             if self._proc is not None and sample_rate != self._sr:  # new rate: the old stream plays out first
                 self._q.put((self._proc, None, 0.0))
                 self._proc = None

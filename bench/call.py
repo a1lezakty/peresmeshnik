@@ -221,7 +221,8 @@ def echo(a):
         for k, v in s.items():
             tot.setdefault(k, []).append(v)
     sums = {k: sum(v) for k, v in tot.items() if k.endswith(('_out', '_utterances', 'blocks'))}
-    means = {k: round(float(np.mean([x for x in v if x is not None])), 4) for k, v in tot.items() if k.endswith(('recall', 'zeroed'))}
+    means = {k: round(float(np.mean(xs)), 4) if (xs := [x for x in v if x is not None]) else None  # None: JSON, not NaN
+             for k, v in tot.items() if k.endswith(('recall', 'zeroed'))}
     ours = sums.get('ours_utterances', 0)
     record('call', 'echo-gate' if a.gate else 'none', scenario='echo', n=a.n, seed=a.seed, delay_s=a.delay, gain_db=a.gain,
            echo_path=not a.no_echo_path, echo_translated=round(sums.get('ours_out', 0) / ours, 3) if ours else None,

@@ -57,8 +57,10 @@ def separate(a):
         from common import peak_rss_mb
         stats.append({'seed': seed, 'audio_s': round(len(x) / SR, 1), 'rtf': round(dt / (len(x) / SR), 4), 'peak_rss_mb': peak_rss_mb()})
         print(json.dumps(stats[-1]), flush=True)
-    (out / 'separate.json').write_text(json.dumps({'device': a.device, 'threads': a.threads, 'chunk_s': a.chunk,
-                                                   'runs': stats}), 'utf-8')
+    meta = {'device': a.device, 'threads': a.threads, 'chunk_s': a.chunk, 'runs': stats}
+    (out / 'separate.json').write_text(json.dumps(meta), 'utf-8')
+    from common import record
+    record('separation', 'tiger-speech', mode='separate', scenario='overlap', **meta)  # its cost, on this host
 
 
 def score(a):
@@ -95,7 +97,9 @@ def score(a):
                      'by_kind': {k: {'n': sum(1 for q, _ in xs if q == k), 'lost': sum(1 for q, x in xs if q == k and x < 0.5),
                                      'recall': round(sum(x for q, x in xs if q == k) / max(sum(1 for q, _ in xs if q == k), 1), 3)}
                                  for k in sorted({q for q, _ in xs})}}
-    record('separation', 'tiger-speech', scenario='overlap', separate=meta, duplicated_words=round(dup / max(words, 1), 3), **res)
+    # on the host that scores (the pipeline, CPU); `separate` says where the streams were separated
+    record('separation', 'tiger-speech', mode='score', scenario='overlap', separate=meta,
+           duplicated_words=round(dup / max(words, 1), 3), **res)
 
 
 def main():

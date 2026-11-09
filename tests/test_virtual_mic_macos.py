@@ -62,7 +62,9 @@ def test_the_call_device_and_virtual_inputs_are_no_microphone(monkeypatch):
             {**dev, 'uid': 'ZoomAudioDevice', 'name': 'ZoomAudioDevice', 'transport': 'virt'},
             {**dev, 'uid': 'BlackHole16ch_UID', 'name': 'BlackHole 16ch', 'transport': 'virt', 'outputs': 16},
             {**dev, 'uid': 'peresmeshnik-test-mic', 'name': 'Test Mic', 'transport': 'grup'}]
-    monkeypatch.setattr(selftest, 'MACOS', True)
+    monkeypatch.setattr(selftest, 'HELPER', True)
+    monkeypatch.setattr(selftest, 'WINDOWS', False)
+    monkeypatch.setattr(sys, 'platform', 'darwin')  # mic.native() picks audio/macos.py (on the Windows runner too)
     monkeypatch.setattr(macos, 'devices', lambda: devs)
     # saved earlier (or by hand) as the microphone: refused when it opens, with the reason
     with pytest.raises(ValueError, match='ZoomAudioDevice is a virtual device, not your microphone'):
@@ -438,6 +440,59 @@ def test_live_voice_with_a_dead_output_says_so(monkeypatch):
     side.stop()
     assert errors == ['error: them: BlackHole 2ch: the playback stopped (peresmeshnik-audio: BlackHole 2ch went away)']
     assert plays == [320]
+
+
+def test_live_voice_plays_again_when_the_output_is_back(monkeypatch):
+    """The output fails (BlackHole 2ch gone), then is back: the tray heard it once; the live voice plays again by
+    itself (a new stream every RETRY_S on the frames that come), without a second message for a stream that fails
+    right after it opened."""
+    from peresmeshnik import app, config
+    s = config.Settings()
+    s.them_to_me = 'local'
+    errors, plays, fails = [], [], [3]  # the output fails its first three tries
+
+    class Direction:
+        def feed(self, pcm):
+            pass
+
+        def events(self):
+            yield from ()
+
+        def close(self):
+            pass
+
+    class FlakyOut:
+        def play(self, pcm, sr):
+            if fails[0]:
+                fails[0] -= 1
+                raise RuntimeError('BlackHole 2ch: the playback stopped (exit 4)')
+            plays.append(len(pcm))
+
+        def flush(self):
+            pass
+
+        def stop(self):
+            pass
+
+    class In:
+        def start(self, cb):
+            self.cb = cb
+
+        def stop(self):
+            pass
+    inp = In()
+    monkeypatch.setattr(app.Side, 'RETRY_S', 0.05)
+    monkeypatch.setattr(app.Side, '_local', lambda self, s: Direction())
+    side = app.Side('them', s, inp, FlakyOut(), type('O', (), {'show': lambda self, c: None})(), errors.append)
+    side.start()
+    side.set_live(True)
+    for _ in range(40):  # 0.4 s of 10 ms frames
+        inp.cb(np.zeros(160, np.float32))
+        time.sleep(0.01)
+    assert wait_for(lambda: side._live_q.empty())
+    side.stop()
+    assert errors == ['error: them: BlackHole 2ch: the playback stopped (exit 4)']  # once for the whole outage
+    assert fails == [0] and len(plays) > 10  # it plays again
 
 
 def test_followed_says_which_microphone_plays_meanwhile():

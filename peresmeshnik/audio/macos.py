@@ -52,6 +52,10 @@ def is_blackhole(key: str) -> bool:
     return key in (BLACKHOLE, BLACKHOLE_UID)
 
 
+def is_ours(d: dict) -> bool:
+    return is_blackhole(d['uid']) or is_blackhole(d['name'])
+
+
 def blackhole(devs: list[dict] | None = None) -> dict:
     """The BlackHole 2ch device, else BlackHoleMissing with how to install it."""
     for d in devices() if devs is None else devs:
@@ -82,6 +86,9 @@ def not_blackhole(key: str, what: str = 'microphone') -> str:
         kind = 'an aggregate device' if d['transport'] == 'grup' else 'a virtual device'
         raise ValueError(f'{d["name"]} is {kind}, not your microphone: choose your real microphone in the settings')
     return key
+
+
+not_virtual = not_blackhole  # the name shared with audio/windows.py
 
 
 def spawn(*args: str, stdout=subprocess.PIPE, stdin=subprocess.PIPE) -> subprocess.Popen:

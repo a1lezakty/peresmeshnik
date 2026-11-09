@@ -279,3 +279,42 @@ def test_hotkey_switches_live_voice_without_a_click(tmp_path, fade_ms):
     print(f'fade {fade_ms:.0f} ms: jump at the seams {", ".join(f"{j:.1f}" for j in jumps)} x the tones\' own')
     if fade_ms:
         assert max(jumps) < 3
+
+
+def test_record_counts_sound_not_wall_time(monkeypatch):
+    """The voice recording asks for 3 s of sound: a microphone that starts late (the helper, ~0.5 s) still gives 3 s;
+    one that goes away gives what came, START_S later at the most (it was 2.5 s of 3 on the macOS runner)."""
+    import threading
+    import time
+
+    import numpy as np
+
+    from peresmeshnik.audio import mic as mic_mod
+
+    class LateMic:
+        def __init__(self, device, sample_rate, stop_after=None):
+            self.sr, self.stop_after, self.stopped = sample_rate, stop_after, threading.Event()
+
+        def start(self, on_frames):
+            def run():
+                time.sleep(0.5)  # the helper starting
+                sent = 0
+                while not self.stopped.wait(0.02):
+                    if self.stop_after is not None and sent >= self.stop_after * self.sr:
+                        return
+                    on_frames(np.full(self.sr // 50, 0.1, np.float32))
+                    sent += self.sr // 50
+            threading.Thread(target=run, daemon=True).start()
+
+        def stop(self):
+            self.stopped.set()
+
+    progress = []
+    monkeypatch.setattr(mic_mod, 'Mic', lambda device, sample_rate: LateMic(device, sample_rate))
+    x = mic_mod.record(1.5, sample_rate=8000, on_progress=progress.append)
+    assert len(x) == 12000 and progress == [1, 1.5]
+    monkeypatch.setattr(mic_mod, 'START_S', 0.5)
+    monkeypatch.setattr(mic_mod, 'Mic', lambda device, sample_rate: LateMic(device, sample_rate, stop_after=0.4))
+    t = time.monotonic()
+    x = mic_mod.record(1.5, sample_rate=8000)
+    assert abs(len(x) - 3200) <= 160 and time.monotonic() - t < 1.5 + 0.5 + 0.5

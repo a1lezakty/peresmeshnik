@@ -1,0 +1,8 @@
+# The voice pack on Windows (NVIDIA): what the runner needs; the stage-1 pins (bench/requirements-tts-clone-xtts.txt)
+# with the CUDA 12.8 builds of torch. Compiled for the embeddable CPython 3.12 amd64 by voice-runner/lock.py.
+torch==2.8.0+cu128
+torchaudio==2.8.0+cu128
+coqui-tts==0.28.0
+transformers==5.22.2
+six==1.17.0  # imported by TTS.tts.utils.text.punctuation but not declared by coqui-tts 0.28.0
+soundfile==0.14.0

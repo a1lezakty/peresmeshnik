@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import time
+import types
 
 import numpy as np
 import pytest
@@ -38,7 +39,9 @@ def speech_like(seconds, sr=24_000, seed=0):
 
 @pytest.fixture
 def page(tmp_path, monkeypatch):
+    from peresmeshnik.ui import wizard
     from peresmeshnik.ui.wizard import VoicePage
+    monkeypatch.setattr(wizard, 'WINDOWS', False)  # the page without the voice pack (the Windows runner too): see windows()
     monkeypatch.setattr(voice, 'voices_dir', lambda: tmp_path / 'voices')
     s = config.Settings()
     s.me_to_them = 'local'
@@ -125,7 +128,7 @@ def test_clone_check(page, tmp_path, monkeypatch, hears, sim, verdict):
     sf.write(good, speech_like(45), 24_000)
     page.import_file(str(good))
     pump(lambda: not page.running)
-    monkeypatch.setitem(sys.modules, 'peresmeshnik.local.clone', types.SimpleNamespace(XttsClone=lambda *a, **k: FakeClone(sim)))
+    monkeypatch.setitem(sys.modules, 'peresmeshnik.local.clone', types.SimpleNamespace(make_clone=lambda *a, **k: FakeClone(sim)))
     from peresmeshnik import models
     from peresmeshnik.local import asr
     monkeypatch.setattr(asr, 'OnnxAsr', lambda *a, **k: FakeAsr(list(hears)))
@@ -186,3 +189,110 @@ def test_stock_voice_instead_of_the_clone(page, monkeypatch):
     assert made == [((s.my_lang, s.their_lang), {'settings': s})]  # no clone, no voice profile
     page.stock.setChecked(False)
     assert s.local.clone == 'xtts-v2' and not page.isComplete()
+
+
+# --- the voice pack (Windows): the GPU decides, the page installs the pack
+
+@pytest.mark.parametrize('smi, vram, rec', [
+    ('12288\n', 12.0, 'local'), ('4096\n', 4.0, 'cloud'), ('4096\n8192\n', 8.0, 'local'),
+    ('NVIDIA-SMI has failed because it could not communicate with the NVIDIA driver.\n', 0.0, 'cloud'), (None, 0.0, 'cloud'),
+])
+def test_tier_by_vram(tmp_path, monkeypatch, smi, vram, rec):
+    from peresmeshnik.ui import wizard
+    monkeypatch.setattr(wizard.shutil, 'which', lambda name: 'nvidia-smi' if smi is not None and name == 'nvidia-smi' else None)
+    monkeypatch.setattr(wizard.subprocess, 'run', lambda cmd, **k: types.SimpleNamespace(  # a script would not run on Windows
+        stdout=smi if cmd[1:] == ['--query-gpu=memory.total', '--format=csv,noheader,nounits'] else ''))
+    assert wizard.gpu_vram_gb() == vram
+    what, r = wizard.tier()
+    assert r == rec and (f'an NVIDIA GPU with {vram:.0f} GB' if vram else 'no NVIDIA GPU') in what
+
+
+@pytest.fixture
+def windows(page, tmp_path, monkeypatch):
+    """The voice page as on Windows, with `vram` GB and the voice pack folder in tmp_path."""
+    from peresmeshnik.ui import wizard
+    monkeypatch.setattr(wizard, 'WINDOWS', True)
+    monkeypatch.delenv('PERESMESHNIK_VOICE_CMD', raising=False)
+    monkeypatch.setattr(wizard.voicepack, 'folder', lambda: tmp_path / 'voice-pack')
+
+    def at(vram):
+        monkeypatch.setattr(wizard, 'gpu_vram_gb', lambda: vram)
+        page.initializePage()
+        return page
+    return at
+
+
+@pytest.mark.parametrize('vram, says', [(0.0, 'this computer has no NVIDIA GPU'),
+                                        (4.0, 'this computer has an NVIDIA GPU with 4 GB')])
+def test_no_gpu_for_the_clone_says_why(windows, vram, says):
+    page = windows(vram)
+    assert page.pack() == 'gpu' and says in page.pack_out.text() and 'stock voice' in page.pack_out.text()
+    assert page.pack_button.isHidden() and page.pack_consent.isHidden() and not page.pack_out.isHidden()
+    page.stock.setChecked(True)
+    assert page.pack() == '' and page.pack_out.isHidden()
+
+
+def test_install_the_pack_from_the_page(windows, monkeypatch, tmp_path):
+    from peresmeshnik.ui import wizard
+    page = windows(8.0)
+    assert page.pack() == 'none' and not page.pack_button.isHidden() and page.pack_button.text() == 'Install the voice pack'
+    assert 'GB to download' in page.pack_out.text() and 'GB on disk' in page.pack_out.text()
+    assert 'noncommercial' in page.pack_consent.text() and not page.pack_consent.isHidden()
+    assert not page.pack_button.isEnabled()  # the licenses (CPML) first: nothing is downloaded before
+    monkeypatch.setattr(wizard.voicepack, 'install', lambda *a: pytest.fail('installed without the consent'))
+    page.install_pack()
+    assert not page.packing
+    page.pack_consent.setChecked(True)
+    assert page.pack_button.isEnabled()
+    good = tmp_path / 'me.wav'
+    sf.write(good, speech_like(45), 24_000)
+    page.import_file(str(good))
+    pump(lambda: not page.running)
+    assert not page.check_button.isEnabled()  # no pack yet: the check would only say so
+
+    def install(progress, cancel):  # downloads 1 GB of 4, then waits for Cancel
+        progress('cleaning', 0, 0)
+        progress('downloading', 10 ** 9, 4 * 10 ** 9, 'torch.whl')
+        assert cancel.wait(20)
+        raise wizard.voicepack.Cancelled
+    monkeypatch.setattr(wizard.voicepack, 'install', install)
+    page.install_pack()
+    pump(lambda: 'Downloading' in page.pack_out.text())
+    assert page.pack() == 'installing' and not page.isComplete() and not page.stock.isEnabled()
+    assert not page.pack_bar.isHidden() and page.pack_bar.value() == 250 and not page.pack_cancel.isHidden()
+    assert page.pack_out.text() == 'Downloading the voice pack: 1.00 of 4.00 GB (torch.whl)'
+    page.pack_cancel.click()
+    pump(lambda: not page.packing)
+    (tmp_path / 'voice-pack.download').mkdir()  # what the real install leaves after a cancel
+    page._show_pack()
+    assert page.pack_out.text().startswith('Cancelled: what is downloaded stays for the next try. The voice pack install '
+                                           'did not finish') and page.pack_button.text() == 'Resume the install'
+    assert page.isComplete() and page.pack_cancel.isHidden()
+
+    def done(progress, cancel):
+        (tmp_path / 'voice-pack').mkdir()
+        (tmp_path / 'voice-pack' / '.complete').write_text(wizard.voicepack.identity())
+    monkeypatch.setattr(wizard.voicepack, 'install', done)
+    page.install_pack()
+    pump(lambda: not page.packing)
+    assert page.pack() == 'ready' and page.pack_out.text() == 'The voice pack is installed.' and page.pack_button.isHidden()
+    assert page.check_button.isEnabled()  # the clone check now goes through the pack's runner
+
+
+def test_an_error_and_an_outdated_pack(windows, monkeypatch, tmp_path):
+    from peresmeshnik.ui import wizard
+    page = windows(8.0)
+    page.pack_consent.setChecked(True)
+
+    def full(progress, cancel):
+        raise wizard.voicepack.PackError('the voice pack needs 12.6 GB free on C:\\, there are 3.1 GB')
+    monkeypatch.setattr(wizard.voicepack, 'install', full)
+    page.install_pack()
+    pump(lambda: not page.packing)
+    assert page.pack_out.text().startswith('error: the voice pack needs 12.6 GB free on C:\\, there are 3.1 GB. The clone')
+    (tmp_path / 'voice-pack').mkdir()
+    (tmp_path / 'voice-pack' / '.complete').write_text('the lock of an older app\n')
+    page.pack_note = ''
+    page._show_pack()
+    assert page.pack() == 'outdated' and 'installed for another version' in page.pack_out.text()
+    assert page.pack_button.text() == 'Install the voice pack'

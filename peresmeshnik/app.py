@@ -438,6 +438,7 @@ def remove_stale() -> None:
 
 class Side:
     """One direction with its input, output and subtitles. `name` is 'them' (them -> me) or 'me'."""
+    RETRY_S = 2.0  # the live voice's output failed: tried again at most this often (on the frames that come anyway)
     on_failure = None  # (why, exception): the controller restarts the side; None: the tray hears it
     _stopping = False
 
@@ -447,7 +448,8 @@ class Side:
         self.echo, self._gate = echo, None
         self.src, self.tgt = (s.their_lang, s.my_lang) if name == 'them' else (s.my_lang, s.their_lang)
         self.engine = s.them_to_me if name == 'them' else s.me_to_them
-        self.live = False
+        self.live, self.settings = False, s
+        self._lock = threading.Lock()  # stop() vs a fallback voice being made mid-call
         self.on_talk = lambda: None  # 'me': I am talking (a partial caption of BARGE_IN_WORDS): barge-in on the other side
         self.directions = []  # (direction, takes its captions, takes its speech)
         self._threads: list[threading.Thread] = []
@@ -474,17 +476,55 @@ class Side:
                 raise RuntimeError('me -> them local needs your voice: enroll it first (python -m peresmeshnik.voice enroll), '
                                    'or switch "Me -> them" to cloud')
             from peresmeshnik import models, voice
+            from peresmeshnik.local.clone import make_clone
+            model_dir, v = models.path(s.local.clone), voice.load(s.local.voice)  # missing: said as usual, no fallback
             try:
-                from peresmeshnik.local.clone import XttsClone
-            except ImportError as e:
-                raise RuntimeError(f'me -> them local needs the voice pack (torch, coqui-tts): {e}; '
-                                   'or switch "Me -> them" to cloud') from e
-            d = make_local(self.src, self.tgt, settings=s, tts=XttsClone(models.path(s.local.clone), threads=s.local.threads),
-                           voice=voice.load(s.local.voice))
-        if (self.name == 'them' or s.local.clone == STOCK) and (tts := getattr(d, 'tts', None)) is not None:
-            from peresmeshnik.local.tts import PiperTts  # the Piper runner dies: only it starts again
+                tts = make_clone(model_dir, threads=s.local.threads)
+            except RuntimeError as e:  # no voice pack, no CUDA, its runner did not start
+                return self._fallback(s, e)
+            d = make_local(self.src, self.tgt, settings=s, tts=tts, voice=v)
+            try:
+                d.warm_up()
+            except RuntimeError as e:  # out of VRAM on the first phrase, the runner died
+                d.close()
+                return self._fallback(s, e)
+            return d
+        return self._stock(d, s)
+
+    def _stock(self, d, s: config.Settings):
+        """A side that speaks with Piper, warmed up. The Piper runner dies: only it starts again."""
+        if (tts := getattr(d, 'tts', None)) is not None:
+            from peresmeshnik.local.tts import PiperTts
             d.tts = crash.Respawn(lambda: PiperTts(s.local.tts[self.tgt], threads=s.local.threads), self._tts_respawned, tts)
         d.warm_up()
+        return d
+
+    def _fallback(self, s: config.Settings, why):
+        """The clone cannot speak: the stock voice (voice.STOCK), still local; said once. Not the cloud, even with a
+        key: local was chosen, so the user's voice does not leave the machine unasked."""
+        from peresmeshnik.pipeline import make_local
+        d = self._stock(make_local(self.src, self.tgt, settings=s), s)
+        self.on_error(f'error: {self.name}: the voice clone is off ({why}); a stock voice speaks instead')
+        return d
+
+    def _clone_died(self, dead):
+        """Mid-call the clone's worker died (its runner crashed, out of VRAM): the rest of the call in the fallback voice."""
+        dead.close()
+        try:
+            d = self._fallback(self.settings, dead._error)
+        except Exception as e:
+            log.exception('%s: no fallback voice', self.name)
+            self.on_error(f'error: {self.name}: the voice clone stopped ({dead._error}) and no other voice starts: {e}')
+            return None
+        if not getattr(d, 'supports_live', False):
+            from peresmeshnik.audio.mic import LiveSwitch
+            d = LiveSwitch(d)
+        with self._lock:
+            if self._stopping:  # translation went off meanwhile
+                d.close()
+                return None
+            self.directions[0] = (d, True, True)
+        d.set_live(self.live)
         return d
 
     def _cloud(self, s: config.Settings):
@@ -517,15 +557,24 @@ class Side:
             d.feed(pcm)
 
     def _pass_through(self) -> None:
-        dead = False  # the output failed: the tray was told; frames still leave the queue
+        failed = 0.0  # when the output last failed (0: it works); the tray hears it once per outage
         while (pcm := self._live_q.get()) is not None:
-            if self.live and not dead:  # frames queued just before switching back are dropped
-                try:
-                    self.out.play(pcm, SAMPLE_RATE)
-                except Exception as e:  # BlackHole 2ch gone (VirtualMic says why): the tray, not only a traceback
+            if not self.live:  # frames queued just before switching back are dropped
+                continue
+            now = time.monotonic()
+            if failed and now - failed < self.RETRY_S:  # still out: the frame goes, the queue does not grow
+                continue
+            try:
+                self.out.play(pcm, SAMPLE_RATE)  # after a failure: a new stream, so a device that is back plays again
+            except Exception as e:  # BlackHole 2ch gone (VirtualMic says why): the tray, not only a traceback
+                if not failed:
                     log.exception('%s: live voice failed', self.name)
                     self.on_error(f'error: {self.name}: {e}')
-                    dead = True
+                failed = now
+                continue
+            if failed and now - failed > 2 * self.RETRY_S:  # it has played for a while: the outage is over
+                log.info('%s: the live voice plays again', self.name)
+                failed = 0.0
 
     @property
     def _supports_live(self) -> bool:
@@ -546,6 +595,11 @@ class Side:
             if self._stopping:
                 return
             inner = getattr(d, 'inner', d)  # LiveSwitch's
+            if self.name == 'me' and self.engine == 'local' and getattr(inner, 'voice', None) is not None \
+                    and getattr(inner, '_error', None) is not None:  # the clone died: the rest of the call in a stock voice
+                if (d := self._clone_died(inner)) is not None:
+                    self._consume(d, True, True)
+                return
             if hasattr(inner, 'finish'):
                 inner.finish()  # raises with the error of a worker that died (the Piper runner gone, a bug)
             raise RuntimeError('its events ended by themselves')
@@ -578,7 +632,8 @@ class Side:
         self.live = on
 
     def stop(self) -> None:
-        self._stopping = True
+        with self._lock:
+            self._stopping = True
         self.inp.stop()
         if self._gate:
             self._gate.close()
@@ -635,6 +690,9 @@ class Controller:
         elif self._vmic is None and sys.platform == 'darwin':  # BlackHole 2ch, the user's (BlackHoleMissing says how)
             from peresmeshnik.audio.virtual_mic_macos import VirtualMic
             self._vmic = VirtualMic()
+        elif self._vmic is None and sys.platform == 'win32':  # VB-Cable, the user's (CableMissing says how)
+            from peresmeshnik.audio.virtual_mic_windows import VirtualMic
+            self._vmic = VirtualMic()
         return self._vmic
 
     def set_translation(self, on: bool) -> concurrent.futures.Future:
@@ -645,9 +703,10 @@ class Controller:
         call's sound once; until translation is on, the real microphone is looped into the virtual one."""
         if self.devices and sys.platform == 'darwin':
             self._startup_call_macos()
-            self._startup_macos()
+            self._startup_vmic()
         if self.devices and sys.platform == 'win32':
             self._startup_call_windows()
+            self._startup_vmic()
         if not (self.devices and sys.platform.startswith('linux')):
             return
         errors = []
@@ -683,8 +742,9 @@ class Controller:
         if code:
             self.startup_error = '; '.join(x for x in (self.startup_error, why) if x)
 
-    def _startup_macos(self) -> None:
-        """macOS: BlackHole 2ch is the user's (nothing to make); the loop starts. Missing: the tray says how to install."""
+    def _startup_vmic(self) -> None:
+        """macOS, Windows: BlackHole 2ch / VB-Cable is the user's (nothing to make); the loop starts. Missing: the tray
+        says how to install."""
         try:
             self.virtual_mic()
         except Exception as e:
@@ -714,8 +774,8 @@ class Controller:
         call hears the user as is; translation on: our me -> them direction speaks there instead."""
         if not self.devices or self._vmic is None:  # only the app's own devices (startup), not files or tests
             return
-        if sys.platform == 'darwin':
-            return self._loop_macos(on)
+        if sys.platform in ('darwin', 'win32'):
+            return self._loop_helper(on)
         try:  # found by its arguments, not a kept id: it goes away with its microphone, and PipeWire reuses ids
             loops = [m.split('\t')[0] for m in pactl('list', 'short', 'modules').splitlines()
                      if '\tmodule-loopback\t' in m and f'sink={MIC_SINK}' in m]
@@ -731,10 +791,12 @@ class Controller:
             if on:
                 self.on_state(f'error: the call will not hear your microphone while translation is off: {e}')
 
-    def _loop_macos(self, on: bool) -> None:
-        """macOS: the helper's loop "microphone -> BlackHole 2ch" (none of our CPU). It opens the microphone only while
-        a call app records BlackHole 2ch (macOS 14+), so no orange dot and no AirPods call profile outside a call."""
-        from peresmeshnik.audio import macos
+    def _loop_helper(self, on: bool) -> None:
+        """macOS, Windows: the helper's loop "microphone -> BlackHole 2ch / CABLE Input" (none of our CPU). It opens the
+        microphone only while a call app records the virtual microphone (macOS 14+; Windows: an active audio session on
+        CABLE Output), so no orange dot or microphone icon and no AirPods / headset call profile outside a call."""
+        from peresmeshnik.audio.mic import native
+        helper = native()
         loop = self._loop
         if on and loop and loop.poll() is None:
             return
@@ -750,8 +812,9 @@ class Controller:
             return
         why = 'error: the call will not hear your microphone while translation is off: '
         try:
-            mic = macos.not_blackhole((self.settings or config.load()).ui.mic)
-            self._loop = p = macos.spawn('loop', '--from', mic, '--to', self._vmic.device['uid'], stdout=subprocess.DEVNULL)
+            mic = helper.not_virtual((self.settings or config.load()).ui.mic)
+            watch = ['--watch', self._vmic.call_mic['uid']] if sys.platform == 'win32' else []  # macOS: the same device
+            self._loop = p = helper.spawn('loop', '--from', mic, '--to', self._vmic.device['uid'], *watch, stdout=subprocess.DEVNULL)
         except Exception as e:
             log.warning('microphone loop: %s', e)
             self.on_state(why + str(e))
@@ -765,7 +828,7 @@ class Controller:
                 log.info('microphone loop: %s', line.decode(errors='replace').strip())
             ready.set()
             if p.wait() and p is self._loop:  # ended by itself
-                self.on_state(why + (macos.NO_PERMISSION if p.returncode == 6 else f'the loop ended ({p.returncode})'))
+                self.on_state(why + (helper.NO_PERMISSION if p.returncode == 6 else f'the loop ended ({p.returncode})'))
         threading.Thread(target=watch, name='mic-loop', daemon=True).start()
         ready.wait(3)  # its first word ("idle": set up, waiting for a call): its start belongs to ours, not to the idle
 
@@ -964,7 +1027,7 @@ class Controller:
             inp = PipeWireCapture(self._call.name, make_sink=False,  # the app's sink, kept for its whole run
                                   on_end=lambda why: self.failed(inp, f'the call sound capture stopped: {why}'))
             return inp
-        if sys.platform == 'darwin':  # the helper keeps to the saved microphone or the default one by itself
+        if sys.platform in ('darwin', 'win32'):  # the helper keeps to the saved microphone or the default one by itself
             from peresmeshnik.audio.mic import followed
             return followed(s.ui.mic, self.on_state)
         mic_source(s.ui.mic, self._mic)  # no microphone now: this side says why, the other one still starts

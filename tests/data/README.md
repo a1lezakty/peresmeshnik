@@ -10,3 +10,6 @@ FLEURS: Conneau et al., 2022, https://huggingface.co/datasets/google/fleurs, lic
 `ours-en.ogg`: 22 s, made the same way from FLEURS dev ids 1511, 1513, 1521 (other people than in
 `call-en.ogg`): "our" speech in the call scenarios (tests/test_echo.py, tests/test_call.py), texts in
 `ours-en.txt`.
+
+`pack-tiny.json` (from `requirements-tiny.in` by `voice-runner/lock.py --dir tests/data tiny`): a real voice pack of
+numpy and soundfile on the embeddable CPython 3.12, for the Windows CI test `test_voice_pack_windows.py`.

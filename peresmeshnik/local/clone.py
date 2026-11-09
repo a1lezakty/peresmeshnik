@@ -1,9 +1,11 @@
 """Voice-clone TTS for "me -> them": XTTS-v2 behind `Tts` and `VoiceCloner`.
 
 Part of the optional voice pack (torch + coqui-tts; weights under the noncommercial Coqui Public
-Model License, docs/MODELS.md): the base app never imports this module. On NVIDIA it streams faster
-than real time (docs/BENCH.md); on CPU it is slower than real time, so the direction falls behind
-and its queue policy has to drop clauses. Nothing here pretends otherwise.
+Model License, docs/MODELS.md): this module imports neither; `make_clone` picks where XTTS runs. With the voice
+pack installed (Windows, NVIDIA) it is a process of its own on the pack's Python (VoicePackClone, voice-runner/);
+in a source install with torch and coqui-tts it runs in this process (XttsClone); the model code of both is
+local/xtts.py. On NVIDIA it streams faster than real time (docs/BENCH.md); on CPU it is slower than real time,
+so the direction falls behind and its queue policy has to drop clauses. Nothing here pretends otherwise.
 
     python -m peresmeshnik.local.clone --voice ~/.local/share/Peresmeshnik/voices/me --model-dir DIR --lang en "Hello"
 
@@ -12,8 +14,14 @@ registry's `xtts-v2` folder (`peresmeshnik models fetch xtts-v2`).
 """
 from __future__ import annotations
 
+import base64
 import contextlib
-import re
+import json
+import os
+import shlex
+import struct
+import subprocess
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -21,147 +29,154 @@ import numpy as np
 
 from peresmeshnik import voice as profiles
 from peresmeshnik.engines import Voice
+from peresmeshnik.local import voicepack, xtts
+from peresmeshnik.local.xtts import SR, budget_samples, cap_pauses, guard, split_text  # noqa: F401  (re-exported)
 
-SR = 24_000
-COND_SR, REF_S = 22_050, 30  # XTTS conditions on at most 30 s at 22.05 kHz
-PAUSE_S, QUIET_DB = 0.4, -40.0  # XTTS sometimes stops for 1-2.5 s mid-sentence; longer pauses are cut to this
-SLOW_CPS = 8.0  # spoken chars per second; real XTTS speech is 12-20 (BENCH): a safety net for runaway generation
-FADE = SR // 100
-
-
-def split_text(text: str, limit: int) -> list[str]:
-    """Pieces of at most `limit` chars (XTTS's per-language limit), cut at sentence and clause ends."""
-    pieces = []
-    for p in re.split(r'(?<=[.!?;:,])\s+', ' '.join(text.split())):
-        while len(p) > limit:  # no punctuation for too long: cut at a space
-            cut = p.rfind(' ', 0, limit)
-            cut = cut if cut > 0 else limit
-            pieces.append(p[:cut])
-            p = p[cut:].strip()
-        pieces.append(p)
-    parts: list[str] = []
-    for p in pieces:
-        if parts and len(parts[-1]) + 1 + len(p) <= limit:
-            parts[-1] += ' ' + p
-        else:
-            parts.append(p)
-    return [p for p in parts if re.search(r'\w', p)]
+RUNNER = voicepack.runner_dir() / 'voice_runner.py'  # ships with the app: it always matches it
+ERR = 0xFFFFFFFF  # voice_runner.py: a synth reply that ends with an error
 
 
-def spoken_len(text: str) -> int:
-    """Text length as spoken: a digit reads as ~5 letters, an abbreviation letter by letter."""
-    return len(re.sub(r'\d', 'xxxxx', re.sub(r'\b[A-ZА-ЯЁ]{2,}\b', lambda m: m.group() * 3, text)))
+class CloneUnavailable(RuntimeError):
+    """The clone cannot speak here: no voice pack, no CUDA, the runner did not start or died. The app falls back."""
 
 
-def budget_samples(text: str, sr: int = SR) -> int:
-    """Length guard: XTTS sometimes keeps talking after the text (babble); cut past this."""
-    return int((1.0 + spoken_len(text) / SLOW_CPS) * sr)
-
-
-def cap_pauses(chunks: Iterator[np.ndarray], sr: int = SR, max_s: float = PAUSE_S) -> Iterator[np.ndarray]:
-    """Shorten silences longer than `max_s` (20 ms frames below QUIET_DB) while the chunks stream by."""
-    frame = sr // 50
-    limit, run, rest = int(max_s * 50), 0, np.zeros(0, np.float32)
-    for c in chunks:
-        x = np.concatenate([rest, c])
-        n = len(x) // frame * frame
-        rest, f = x[n:], x[:n].reshape(-1, frame)
-        keep = np.ones(len(f), bool)
-        for i, quiet in enumerate(10 * np.log10(np.mean(f ** 2, axis=1) + 1e-10) < QUIET_DB):
-            run = run + 1 if quiet else 0
-            keep[i] = run <= limit
-        if keep.any():
-            yield f[keep].ravel()
-    if len(rest):
-        yield rest
-
-
-def guard(chunks: Iterator[np.ndarray], limit: int) -> Iterator[np.ndarray]:
-    """Pass chunks through until `limit` samples, then cut with a short fade."""
-    for c in chunks:
-        if len(c) >= limit:
-            c = c[:limit].copy()
-            n = min(FADE, len(c))
-            c[len(c) - n:] *= np.linspace(1, 0, n, dtype=np.float32)
-            yield c
-            return
-        limit -= len(c)
-        yield c
-
-
-class XttsClone:
-    sample_rate = SR
-
-    def __init__(self, model_dir: Path | str, device: str | None = None, threads: int = 2,
-                 temperature: float = 0.75, top_p: float = 0.85):
-        import torch
-        torch.set_num_threads(threads)
-        with contextlib.suppress(RuntimeError):  # allowed once per process
-            torch.set_num_interop_threads(1)
-        from TTS.tts.configs.xtts_config import XttsConfig
-        from TTS.tts.models.xtts import Xtts
-        cfg = XttsConfig()
-        cfg.load_json(str(Path(model_dir) / 'config.json'))
-        self.model = Xtts.init_from_config(cfg)
-        self.model.load_checkpoint(cfg, checkpoint_dir=str(model_dir), eval=True)
-        self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
-        self.model.to(self.device)
-        self.temperature, self.top_p = temperature, top_p
-        self._latents: dict[str, tuple] = {}
-
-    def latents(self, voice: Voice) -> tuple:
-        """XTTS conditioning of a profile: cached in memory and as `xtts.pt` next to the recording."""
-        key = str(voice.path)
-        if key not in self._latents:
-            import torch
-            f = Path(voice.path) / 'xtts.pt'
-            if f.exists():
-                lat = torch.load(f, map_location='cpu')
-            else:
-                lat = self._condition(*profiles.read_audio(Path(voice.path) / 'reference.wav'))
-                torch.save(lat, f)
-            self._latents[key] = (lat['gpt'].to(self.device), lat['spk'].to(self.device))
-        return self._latents[key]
-
-    def _audio(self, pcm: np.ndarray, sr: int):
-        import torch
-        import torchaudio.functional as F
-        x = torch.from_numpy(np.asarray(pcm, dtype=np.float32))[None]
-        return F.resample(x, sr, COND_SR)[:, :COND_SR * REF_S].to(self.device)
-
-    def _condition(self, pcm: np.ndarray, sr: int) -> dict:
-        x = self._audio(pcm, sr)
-        gpt = self.model.get_gpt_cond_latents(x, COND_SR, length=6, chunk_length=6)
-        spk = self.model.get_speaker_embedding(x, COND_SR)
-        return {'gpt': gpt.cpu(), 'spk': spk.cpu()}
-
-    def similarity(self, voice: Voice, pcm: np.ndarray, sr: int) -> float:
-        """How much `pcm` sounds like the profile: cosine of XTTS's own speaker embeddings (its speaker encoder, no
-        extra model or license). Thresholds and how it compares with an independent judge (ECAPA): BENCH."""
-        import torch
-        ref = self.latents(voice)[1].flatten().float()
-        with torch.inference_mode():
-            emb = self.model.get_speaker_embedding(self._audio(pcm, sr), COND_SR).flatten().float()
-        return float(torch.nn.functional.cosine_similarity(ref, emb.to(ref.device), dim=0))
+class XttsClone(xtts.Engine):
+    """XTTS-v2 in this process: a source install with torch and coqui-tts in its own environment."""
 
     def enroll(self, pcm: np.ndarray, sample_rate: int, transcript: str | None = None, name: str = 'me',
                lang: str = 'ru', root: Path | None = None) -> Voice:
         v = profiles.save(pcm, sample_rate, name, lang, transcript, root)
-        self._latents.pop(str(v.path), None)  # a new recording of the same profile: condition again
+        self.forget(v)  # a new recording of the same profile: condition again
         self.latents(v)
         return Voice(name=v.name, engine='xtts', path=v.path, meta=v.meta)
+
+
+def voice_cmd() -> list[str] | None:
+    """How to start the voice pack's runner: $PERESMESHNIK_VOICE_CMD, else the installed pack of this app version in
+    <data dir>/voice-pack (local/voicepack.py) with its own python.exe; None: no such pack here."""
+    if os.environ.get('PERESMESHNIK_VOICE_CMD'):
+        return shlex.split(os.environ['PERESMESHNIK_VOICE_CMD'], posix=os.name != 'nt')
+    if voicepack.state() == 'ready':
+        return [str(voicepack.python()), str(RUNNER)]
+    return None
+
+
+def make_clone(model_dir: Path | str, threads: int = 2):
+    """The clone engine of this install (the app, voice.py and the wizard): the voice pack's runner where there is one,
+    else XTTS in this process. Raises CloneUnavailable with the reason when neither can speak."""
+    if cmd := voice_cmd():
+        return VoicePackClone(model_dir, threads, cmd)
+    if (st := voicepack.state()) != 'none':  # never an incompatible or half-installed pack
+        raise CloneUnavailable({'outdated': 'the voice pack was installed for another version of the app',
+                                'partial': 'the voice pack install did not finish'}[st] + ': install it again in the setup '
+                               'wizard (Your voice)')
+    try:
+        return XttsClone(model_dir, threads=threads)
+    except ImportError as e:
+        raise CloneUnavailable(f'the voice clone needs the voice pack (torch, coqui-tts): {e}') from e
+
+
+class VoicePackClone:
+    """XttsClone's interface over the voice pack's runner (voice-runner/voice_runner.py: the protocol is there).
+    `info`: what the runner got (device, torch, VRAM). A runner that fails at start raises CloneUnavailable; one that
+    dies later makes the call raise RuntimeError, so the direction ends with a message instead of hanging."""
+
+    def __init__(self, model_dir: Path | str, threads: int = 2, cmd: list[str] | None = None, start_s: float = 120.0):
+        cmd = [*(cmd or voice_cmd() or []), '--model-dir', str(model_dir), '--threads', str(threads)]
+        try:  # no console window from a windowed app on Windows (python.exe is a console program)
+            self._p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        except OSError as e:
+            raise CloneUnavailable(f'the voice pack did not start ({cmd[0]}): {e}') from e
+        head: list[bytes] = []
+        t = threading.Thread(target=lambda: head.append(self._p.stdout.readline()), daemon=True)
+        t.start()
+        t.join(start_s)  # loading takes ~10 s; a runner stuck in CUDA init must not hold the app
+        line = head[0] if head else None
+        try:
+            info = json.loads(line) if line and line.strip() else {}
+        except ValueError:  # something else wrote to its stdout first
+            info = {'error': f'not a voice pack runner: {line[:80]!r}'}
+        if 'sample_rate' not in info:
+            self._p.kill()
+            code = self._p.wait()
+            why = info.get('error') or (f'exited ({code})' if line is not None else f'no answer in {start_s:g} s')
+            raise CloneUnavailable(f'the voice pack did not start: {why}')
+        self.sample_rate, self.info, self._id = info.pop('sample_rate'), info, 0
+
+    def _send(self, req: dict) -> int:
+        self._id += 1
+        try:
+            self._p.stdin.write(json.dumps({'id': self._id, **req}).encode() + b'\n')
+            self._p.stdin.flush()
+        except OSError:
+            raise RuntimeError(f'the voice pack exited ({self._p.wait()})') from None
+        return self._id
+
+    def _read(self, n: int) -> bytes:
+        b = self._p.stdout.read(n)
+        if len(b) < n:
+            raise RuntimeError(f'the voice pack exited ({self._p.wait()})')
+        return b
+
+    def _u32(self) -> int:
+        return struct.unpack('<I', self._read(4))[0]
+
+    def _reply(self) -> dict:
+        r = json.loads(self._p.stdout.readline() or b'{}')
+        if not r:
+            raise RuntimeError(f'the voice pack exited ({self._p.wait()})')
+        if 'error' in r:
+            raise RuntimeError(f'the voice pack: {r["error"]}')
+        return r
 
     def synth(self, text: str, lang: str, voice: Voice | None = None) -> Iterator[np.ndarray]:
         if voice is None:
             raise ValueError('the clone engine speaks only in an enrolled voice')
-        gpt, spk = self.latents(voice)
-        for part in split_text(text, self.model.tokenizer.char_limits.get(lang, 250)):
-            gen = self.model.inference_stream(part, lang, gpt, spk, temperature=self.temperature, top_p=self.top_p,
-                                              enable_text_splitting=False)
-            try:
-                yield from guard(cap_pauses(c.float().cpu().numpy() for c in gen), budget_samples(part))
-            finally:
-                gen.close()  # stops generation on a cut or when the caller stops listening (barge-in)
+        rid = self._send({'cmd': 'synth', 'text': text, 'lang': lang, 'voice': str(voice.path)})
+        try:
+            while n := self._u32():
+                if n == ERR:
+                    self._reply()
+                yield np.frombuffer(self._read(n), '<f4')
+        except GeneratorExit:  # the caller stopped (barge-in): the runner stops at its next chunk; the rest is read away
+            self._send({'cmd': 'stop', 'id': rid})
+            while n := self._u32():
+                if n == ERR:
+                    self._p.stdout.readline()
+                    break
+                self._read(n)
+            raise
+
+    def latents(self, voice: Voice, fresh: bool = False) -> Path:
+        """Conditioning of a profile, computed by the runner and cached as `xtts.pt` next to the recording."""
+        self._send({'cmd': 'latents', 'voice': str(voice.path), 'fresh': fresh})
+        self._reply()
+        return Path(voice.path) / 'xtts.pt'
+
+    def similarity(self, voice: Voice, pcm: np.ndarray, sr: int) -> float:
+        b = base64.b64encode(np.asarray(pcm, '<f4').tobytes()).decode()
+        self._send({'cmd': 'similarity', 'voice': str(voice.path), 'pcm': b, 'sr': sr})
+        return float(self._reply()['similarity'])
+
+    def stats(self) -> dict:
+        """What the runner sees now: VRAM free and the peak so far (bench/voice_pack.py)."""
+        self._send({'cmd': 'info'})
+        return self._reply()
+
+    def enroll(self, pcm: np.ndarray, sample_rate: int, transcript: str | None = None, name: str = 'me',
+               lang: str = 'ru', root: Path | None = None) -> Voice:
+        v = profiles.save(pcm, sample_rate, name, lang, transcript, root)
+        self.latents(v, fresh=True)
+        return Voice(name=v.name, engine='xtts', path=v.path, meta=v.meta)
+
+    def close(self) -> None:
+        with contextlib.suppress(OSError):  # a dead runner: the pipe is broken already
+            self._p.stdin.close()
+        try:
+            self._p.wait(10)
+        except subprocess.TimeoutExpired:
+            self._p.kill()
 
 
 def main(argv=None) -> None:
@@ -175,10 +190,10 @@ def main(argv=None) -> None:
     ap.add_argument('--lang', default='en')
     ap.add_argument('--out', type=Path, default=Path('clone.wav'))
     ap.add_argument('--model-dir', type=Path, required=True, help='XTTS-v2 folder')
-    ap.add_argument('--device')
+    ap.add_argument('--device', help='in this process on this device (default: the voice pack where installed)')
     ap.add_argument('--threads', type=int, default=2)
     a = ap.parse_args(argv)
-    eng = XttsClone(a.model_dir, a.device, a.threads)
+    eng = XttsClone(a.model_dir, a.device, a.threads) if a.device else make_clone(a.model_dir, a.threads)
     v = profiles.load(a.voice.name, a.voice.parent)
     t0, chunks = time.perf_counter(), []
     for c in eng.synth(a.text, a.lang, v):

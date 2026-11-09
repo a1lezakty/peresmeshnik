@@ -529,8 +529,8 @@ def test_default_devices_that_are_ours_are_refused(monkeypatch):
     from peresmeshnik import app as app_mod
     with pytest.raises(RuntimeError, match='our own device'):
         app_mod.not_ours('peresmeshnik_mic_sink.monitor', 'default input')
-    if sys.platform == 'darwin':
-        pytest.skip('the rest is PipeWire: on macOS BlackHole 2ch is refused in tests/test_virtual_mic_macos.py')
+    if sys.platform in ('darwin', 'win32'):
+        pytest.skip('the rest is PipeWire: BlackHole 2ch / CABLE Output are refused in tests/test_virtual_mic_{macos,windows}.py')
     monkeypatch.setattr(app_mod, 'pactl', lambda *a: 'peresmeshnik_mic_sink.monitor\n' if a == ('get-default-source',) else '')
     ctl = app_mod.Controller(None, lambda st: None)
     with pytest.raises(RuntimeError, match='our own device'):

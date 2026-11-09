@@ -170,8 +170,7 @@ def run(a):
     np.save(out / 'events.npy', np.array(events, np.int64).reshape(-1, 3))
     meta = {'variant': a.variant, 'sr': sink.sr, 'device': tts.device, 'said': [{k: u[k] for k in ('text', 'chunks', 'arrive')}
                                                                                for u in tts.said],
-            'rows': rows, 'captions': captions, 'summary': d.summary(), 'env': {k: v for k, v in os.environ.items()
-                                                                              if k.startswith('PERESMESHNIK_')}}
+            'rows': rows, 'captions': captions, 'summary': d.summary()}
     (out / 'run.json').write_text(json.dumps(meta, ensure_ascii=False, indent=0), encoding='utf-8')
     d.close()
     print(out, len(tts.said), 'utterances', len(events), 'output frames')
@@ -344,7 +343,7 @@ def score(a):
                  pause_in_sentence_b2b_p50=pct(b2b_frag, 50), b2b_after_sentence=len(b2b_sent),
                  voice_lag_p50=pct(voice_lag, 50), voice_lag_p90=pct(voice_lag, 90),
                  tts_first_ms_p50=pct([r['tts_first_ms'] for r in rows.values() if 'tts_first_ms' in r], 50),
-                 stream_peak=round(float(np.abs(x).max()), 3), env=meta.get('env'))
+                 stream_peak=round(float(np.abs(x).max()), 3))
     (out / 'score.json').write_text(json.dumps({'row': row, 'clauses': per, 'gaps': gaps}, ensure_ascii=False, indent=0),
                                     encoding='utf-8')
     print(json.dumps(row, ensure_ascii=False))

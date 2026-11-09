@@ -12,6 +12,7 @@ import pytest
 
 from peresmeshnik import voice
 from peresmeshnik.local.clone import SR, XttsClone, budget_samples, cap_pauses, guard, split_text
+from peresmeshnik.local.xtts import FADE_IN, SENTENCE_PAUSE_S, closed, shape
 
 REF_RU = Path(os.environ.get('BENCH_DATA', 'bench-data')) / 'set' / 'ref_ru.wav'  # LibriVox reader (bench/data.py), if present
 
@@ -187,3 +188,28 @@ def test_cap_pauses_streams_and_keeps_speech():
     out = np.concatenate(list(cap_pauses(iter(np.array_split(x, 37)))))  # odd chunk edges
     assert len(out) == pytest.approx(3 * SR + 0.4 * SR + 0.2 * SR, abs=SR // 50)  # 2 s gap -> 0.4 s, 0.2 s kept
     assert np.sum(out ** 2) == pytest.approx(np.sum(x ** 2))  # no speech lost
+
+
+@pytest.mark.parametrize('sentence_end', [True, False])
+def test_shape_fades_in_and_pauses_after_a_sentence(sentence_end):
+    """XTTS starts mid-waveform (a click when the stream steps from silence into it) and ends a sentence with ~0.16 s of
+    silence (back to back with the next clause: no pause, BENCH stage 5)."""
+    talk = (0.5 + 0.3 * np.sin(2 * np.pi * 200 * np.arange(SR) / SR)).astype(np.float32)  # starts at full level
+    tail = np.zeros(int(0.16 * SR), np.float32)
+    chunks = [talk[:SR // 3], talk[SR // 3:], tail]
+    out = list(shape(iter([c.copy() for c in chunks]), sentence_end))
+    x = np.concatenate(out)
+    assert abs(x[0]) < 0.5 / FADE_IN * 2 and np.max(np.abs(np.diff(x[:FADE_IN]))) < 0.05  # no step at the start
+    assert np.array_equal(x[FADE_IN:len(talk)], talk[FADE_IN:])  # the rest untouched
+    assert len(out) == 3 + sentence_end  # streams: the chunks as they came, then the pause
+    silence = len(x) - len(talk)
+    assert silence == (round(SENTENCE_PAUSE_S * SR) if sentence_end else len(tail))
+    long = list(shape(iter([talk, np.zeros(SR, np.float32)]), True))  # a long enough silence already: nothing added
+    assert len(long) == 2
+
+
+def test_a_fragment_ends_with_a_comma():
+    assert closed('number of those opposed to the') == 'number of those opposed to the,'
+    assert closed('  education   and ') == 'education and,'
+    for done in ('Hello.', 'Really?', 'Wait!', 'and so,', 'as follows:', 'He said "yes."', 'Он сказал «да».', ''):
+        assert closed(done) == done

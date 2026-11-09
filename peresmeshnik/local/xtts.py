@@ -18,6 +18,8 @@ COND_SR, REF_S = 22_050, 30  # XTTS conditions on at most 30 s at 22.05 kHz
 PAUSE_S, QUIET_DB = 0.4, -40.0  # XTTS sometimes stops for 1-2.5 s mid-sentence; longer pauses are cut to this
 SLOW_CPS = 8.0  # spoken chars per second; real XTTS speech is 12-20 (BENCH): a safety net for runaway generation
 FADE = SR // 100
+FADE_IN = SR // 200  # XTTS starts mid-waveform: half of its utterances stepped -33..-10 dB under their peak (a click, BENCH)
+SENTENCE_PAUSE_S = 0.35  # silence after a sentence: queued clauses played back to back had 0.1-0.16 s between sentences
 
 
 def split_text(text: str, limit: int) -> list[str]:
@@ -37,6 +39,13 @@ def split_text(text: str, limit: int) -> list[str]:
         else:
             parts.append(p)
     return [p for p in parts if re.search(r'\w', p)]
+
+
+def closed(text: str) -> str:
+    """A clause cut mid-sentence ("... opposed to the") ends with a comma for XTTS: without one it went on with a
+    word or two of its own in 6 of 102 such clauses, with a comma in none (a period: 6; BENCH stage 5)."""
+    text = ' '.join(text.split())
+    return text if not text or re.search(r'[.!?…,;:]["»”)]*$', text) else text + ','
 
 
 def spoken_len(text: str) -> int:
@@ -78,6 +87,24 @@ def guard(chunks: Iterator[np.ndarray], limit: int) -> Iterator[np.ndarray]:
             return
         limit -= len(c)
         yield c
+
+
+def shape(chunks: Iterator[np.ndarray], sentence_end: bool, sr: int = SR) -> Iterator[np.ndarray]:
+    """One generation's audio: faded in over FADE_IN (no click at its start), and after a sentence silence up to
+    SENTENCE_PAUSE_S at its end (the next clause may follow back to back). Streams: nothing is held back."""
+    frame, first, quiet = sr // 100, True, 0  # quiet: samples of silence at the end so far
+    for c in chunks:
+        if first and len(c):
+            c, first = c.copy(), False
+            n = min(FADE_IN, len(c))
+            c[:n] *= np.linspace(0, 1, n + 1, dtype=np.float32)[1:]
+        k = len(c) // frame
+        f = 10 * np.log10(np.mean(c[len(c) - k * frame:].reshape(k, frame) ** 2, axis=1) + 1e-10) if k else np.zeros(0)
+        loud = np.nonzero(f >= QUIET_DB)[0]
+        quiet = quiet + len(c) if not len(loud) else (k - 1 - loud[-1]) * frame
+        yield c
+    if sentence_end and (pad := int(SENTENCE_PAUSE_S * sr) - quiet) > 0:
+        yield np.zeros(pad, np.float32)
 
 
 def read_audio(path: Path) -> tuple[np.ndarray, int]:
@@ -154,11 +181,12 @@ class Engine:
         if voice is None:
             raise ValueError('the clone engine speaks only in an enrolled voice')
         gpt, spk = self.latents(voice)
-        for part in split_text(text, self.model.tokenizer.char_limits.get(lang, 250)):
+        for part in split_text(closed(text), self.model.tokenizer.char_limits.get(lang, 250)):
             gen = self.model.inference_stream(part, lang, gpt, spk, temperature=self.temperature, top_p=self.top_p,
                                               enable_text_splitting=False)
             try:
-                yield from guard(cap_pauses(c.float().cpu().numpy() for c in gen), budget_samples(part))
+                yield from shape(guard(cap_pauses(c.float().cpu().numpy() for c in gen), budget_samples(part)),
+                                 bool(re.search(r'[.!?…]["»”)]*$', part)))
             finally:
                 gen.close()  # stops generation on a cut or when the caller stops listening (barge-in)
 

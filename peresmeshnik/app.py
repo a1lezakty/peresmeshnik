@@ -446,7 +446,7 @@ def clone_rtf(tts, lang: str, voice) -> float:
     lang = lang if lang in TEST_PHRASES else 'en'
     t0, n = time.perf_counter(), 0
     for chunk in tts.synth(TEST_PHRASES[lang][0], lang, voice):
-        n += len(chunk)
+        n += len(chunk) if chunk.any() else 0  # not the pause after the sentence (xtts.shape): it costs nothing
     return (time.perf_counter() - t0) / max(n / tts.sample_rate, 1e-3)
 
 

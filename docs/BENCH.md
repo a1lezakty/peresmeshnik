@@ -8,15 +8,16 @@ by `python bench/report.py`. Measured 2026-11-07.
 | Host tag | Machine | Used for |
 |---|---|---|
 | `macos-15` | GitHub Actions `macos-15` runner: Apple M1 (Virtual), 3 cores, 7 GB; torch MPS unavailable ("paravirtual device does not support Metal 2.0"), onnxruntime lists CoreML | the **M1** column: lower bound for a real M1 8 GB (which has 4 performance + 4 efficiency cores) |
-| `vast-a-cpu4` | AMD Ryzen 5 5600X, **4 threads**, CUDA hidden (shared Vast server) | **x86 CPU** laptop stand-in |
+| `vast-a-cpu4` | AMD Ryzen 5 5600X, **4 threads**, CUDA hidden (a shared rented server) | **x86 CPU** laptop stand-in |
 | `vast-a-rtx3060` | same server, NVIDIA RTX 3060 12 GB | the **NVIDIA** tier |
-| `vast-c-cpu8`, `vast-c-a4000` | Intel i7-13700, 8 threads / NVIDIA RTX A4000 16 GB (shared Vast server) | voice-clone TTS (too big for the other hosts) |
-| `linux-x86_64-4c` | the dev server, AMD EPYC-Genoa, 4 cores, 7.6 GB (shared, at times swapping) | Gemini Live runs (network only); Piper voices; one early XTTS run (pessimistic); stage 1 PipeWire runs |
-| `vast-b-pipeline` | AMD Ryzen 9 7950X3D (shared Vast server), the app's 2 threads per engine | stage 1 pipeline: cost, quality, real-time lags |
+| `vast-c-cpu8`, `vast-c-a4000` | Intel i7-13700, 8 threads / NVIDIA RTX A4000 16 GB (a shared rented server) | voice-clone TTS (too big for the other hosts) |
+| `linux-x86_64-4c` | a VM, AMD EPYC-Genoa, 4 cores, 7.6 GB (shared, at times swapping) | Gemini Live runs (network only); Piper voices; one early XTTS run (pessimistic); stage 1 PipeWire runs |
+| `vast-b-pipeline` | AMD Ryzen 9 7950X3D (a shared rented server), the app's 2 threads per engine | stage 1 pipeline: cost, quality, real-time lags |
 | `ubuntu-latest`, `windows-latest` | GitHub Actions runners, 4 vCPU | stage 1 working-mode gate (with `macos-15`) |
+| `i7-13700-2t`, `rtx-a4000` | the i7-13700 server above, 2 threads per run, at most 8 at once / its RTX A4000 | stage 5 call scenarios |
 
 All CPU runs pin every thread pool (`--threads`, `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`) and
-run under `nice`; the Vast servers host other services, so absolute times can be a few percent
+run under `nice`; the rented servers host other services, so absolute times can be a few percent
 noisy. One model per process, so `peak_rss_mb` is that model's own footprint.
 
 ## Data
@@ -169,7 +170,7 @@ reference: *This new environment has different resources and different competito
 Piper (GPL) runs as its own process through the upstream CLI, never imported; that CLI has no
 thread option and its onnxruntime pool takes one thread per physical core (`taskset` does not
 bound it), so `threads` for Piper rows is the host's core count. The chosen voices (`john`,
-`joe`, `dmitri`; `denis` rejected for intelligibility) were measured on the dev server
+`joe`, `dmitri`; `denis` rejected for intelligibility) were measured on the 4-core VM
 (`linux-x86_64-4c`, 4 cores, shared): one run there under load gave 380–470 ms for
 `irina`/`dmitri`, the rerun 231–267 ms is kept. On that host the chosen voices are within ~30 % of
 `lessac`/`irina`, which are the Piper voices measured on `macos-15` and `vast-a-cpu4` (those rows
@@ -249,7 +250,7 @@ Details: [`bench/notes/tts_clone.md`](../bench/notes/tts_clone.md).
 Measured 2026-11-07 for stage 1. Hosts: `rtx3060-laptop` = a GPU host with an NVIDIA RTX 3060
 Laptop 12 GB (shared with other work: CUDA memory cap 0.6, 2 CPU threads); `ryzen-7950x3d-8t` /
 `ryzen-7950x3d-2t` = the same host's AMD Ryzen 9 7950X3D with 8 / 2 threads, CUDA hidden;
-`linux-x86_64-4c` = the 4-core dev server (PipeWire, pipeline, virtual mic), which was also
+`linux-x86_64-4c` = the 4-core VM (PipeWire, pipeline, virtual mic), which was also
 running other heavy work, so its pipeline times are pessimistic. Same references, sentences and
 judge as the table above.
 
@@ -308,7 +309,7 @@ sentence starts transcribing a babble that the cap moved closer to the speech (+
 speech 20.3 s, −25.6 dBFS, 14.4 dB above the background → OK with a noise warning (fail below
 12 dB). The profile from it gives the same-language similarity above, so the thresholds do not
 reject a usable home recording. Recording through PortAudio → PipeWire (`enroll --record 35`)
-works on the dev server.
+works on the 4-core VM.
 
 **Virtual microphone** (`peresmeshnik.audio.virtual_mic_linux`, PipeWire 1.0.5 + pipewire-pulse):
 a tone round trip keeps frequency, level and length; play → audio at the `Peresmeshnik Mic`
@@ -320,7 +321,7 @@ tail), so the writer closes it only after the written audio has played. The stre
 
 **End to end** (`bench/me_them.py run --remote`, re-run 2026-11-08 on the merged local pipeline):
 33 s of the "me" reader in Russian (other lines than the enrollment) → `LocalDirection` with the
-app's defaults (Silero VAD, GigaAM v3 for Russian, OPUS-MT ru-en, 2 threads, on the dev server)
+app's defaults (Silero VAD, GigaAM v3 for Russian, OPUS-MT ru-en, 2 threads, on the 4-core VM)
 and the clone TTS on the GPU host behind a pipe (`me_them.py serve`) → `Peresmeshnik Mic` →
 recorded back from the source → Whisper-small. Per clause, from the end of its speech: `caption`
 (ASR + MT), `clone audio` = first clone audio here (`synth_lag_s`: caption + clone first audio incl.
@@ -347,11 +348,11 @@ was due to play.
   a pre-merge pipeline (Parakeet for Russian, captions put out by the speak worker) had captions
   at 2.2–5.1 s with the GPU clone and growing to 16 s with the CPU one.
 - Clauses cut at 5 s (`max`) get their caption at 1.3–2.9 s, clauses closed by a pause at
-  0.34–0.97 s; the dev server was lightly loaded this time (load average ~1).
+  0.34–0.97 s; the 4-core VM was lightly loaded this time (load average ~1).
 
 ### Cloud: Gemini Live
 
-Measured from the dev server (Europe), Saturday 20:14–20:45 UTC, three runs per cell for
+Measured from the 4-core VM (Europe), Saturday 20:14–20:45 UTC, three runs per cell for
 `utterance`. Audio streamed in 100 ms chunks at real-time pace. Times are seconds, `median / p90`:
 `first_out_from_start_s` = first translated audio (translate) or first text (transcribe) after
 the speech starts; `done_after_end_s` = translated audio done (translate) or final text
@@ -545,7 +546,7 @@ letter):
   (only Whisper and Canary take one) and on short windows drifts into Ukrainian ("примінив
   слізоточий газ"), which OPUS-MT ru-en then turns into invented text. Streamed GigaAM: WER 6.6 %
   against Parakeet's 10.8 % (offline 5.8 % against 8.4 %), at a third of the memory and 0.40
-  against 0.59 CPU s per audio s in real time on B; chrF 53.5 against 53.9.
+  against 0.59 CPU s per audio s in real time on the 7950X3D; chrF 53.5 against 53.9.
 - The MT length cap and the repeat ban change chrF by 0–0.2 points: they stop loops ("I'm not
   sure if I'm not sure…"), not every invention. OPUS-MT ru-en also invents on a clause fragment
   that starts lowercase and ends with a full stop: "страдающим от глобального потепления для
@@ -586,7 +587,7 @@ both recordings, measured 2026-11-08:
   the screen.
 ## Stage 2: the app shell (tray, overlay, hotkey, wizard)
 
-Measured 2026-11-08 on `linux-x86_64-4c` (this dev server, 4 cores, shared with other work; every
+Measured 2026-11-08 on `linux-x86_64-4c` (a 4-core VM, shared with other work; every
 run under `nice -n 19`), under Xvfb 1280×800 with `stalonetray` as the system tray and an own
 PipeWire session (null sinks as headphones and microphone), and on the GitHub runners
 (`macos-15`, `windows-latest`: their own desktop; `ubuntu-latest`: Xvfb + stalonetray).
@@ -610,7 +611,7 @@ the gate and fixed: a tray balloon at start (macOS posts a notification: 0.092 �
 idle line coming before the wizard was built (0.308 → 0.104 s); the text cursor does not blink
 (`QApplication.setCursorFlashTime(0)`), since a blinking cursor repaints its field twice a second.
 
-The working-mode gate (`work-gate`, the local pipeline on the 30 s call; S3 does not touch it) stayed
+The working-mode gate (`work-gate`, the local pipeline on the 30 s call; not touched by this stage) stayed
 green on every stage-2 push; on fe5cb0f RTF / CPU s per audio s: ubuntu-latest 0.628 / 1.25 (Xeon),
 windows-latest 0.635 / 1.277, macos-15 0.381 / 0.722, against limits 1.0 / 2.0 — within the 2×
 runner spread seen in stage 1 (0.27–0.67 / 0.55–1.32).
@@ -637,7 +638,7 @@ loading); the overlay now paints its fonts once into an image at start, so capti
 | launch → "idle" (tray, overlay, virtual mic, hotkey), warm file cache, median of 5 | 0.31 s (0.27–0.34), RSS 74 MB |
 | the same with the first-run wizard open | 0.39 s (0.34–0.41), RSS 88 MB |
 | translation on → ready: them → me local (Parakeet en + OPUS-MT + Piper, warmed up), me → them cloud (Gemini connect) with local subtitles (GigaAM ru + OPUS-MT) | 6.2–6.3 s (2 runs) |
-| me → them local through `app.Side` on `rtx3060-laptop` (server B): GigaAM + OPUS-MT + XTTS-v2 on the GPU, warmed up | 10.4 s |
+| me → them local through `app.Side` on `rtx3060-laptop` (the 7950X3D server): GigaAM + OPUS-MT + XTTS-v2 on the GPU, warmed up | 10.4 s |
 
 ### Hotkey, self-test, wizard
 
@@ -652,8 +653,8 @@ loading); the overlay now paints its fonts once into an image at start, so capti
   through `Request.Response`) against a fake portal on a private D-Bus; only our session's
   `Activated` fires, on the GUI thread. A real portal (GNOME ≥ 48, KDE 6) is not checked here.
 - **Loopback self-test** on the virtual devices: a 0.4 s chirp at −12 dBFS is found by
-  cross-correlation with match 0.97–1.00 at −15 dBFS through the call capture sink (S1's capture,
-  16 kHz), the virtual mic (S2's, recorded from "Peresmeshnik Mic") and the headphones sink's
+  cross-correlation with match 0.97–1.00 at −15 dBFS through the call capture sink (the call capture,
+  16 kHz), the virtual mic (recorded from "Peresmeshnik Mic") and the headphones sink's
   monitor; microphone level −23 dBFS (a test tone); silence, noise and a steady tone score < 0.1.
   Same on `ubuntu-latest` (match 1.00).
 - **Wizard, every Linux page** (`tests/test_app_linux.py`, `PERESMESHNIK_E2E=1`): 35 s from the
@@ -663,7 +664,7 @@ loading); the overlay now paints its fonts once into an image at start, so capti
   "This is the fifth Martei Serb in four years.", Gemini voice 3.2 s after the start), settings saved.
   Downloads: silero-vad from Hugging Face through the models page; a cut download resumes with HTTP
   Range (`tests/test_ui.py`, local server). The project's GitHub release `models-1` answered 502 and
-  timed out from this server and from server B for ~30 min (11:10–11:40 UTC); OPUS-MT was taken from
+  timed out from this VM and from the 7950X3D server for ~30 min (11:10–11:40 UTC); OPUS-MT was taken from
   the stage-1 cache (same SHA-256 pins).
 - **me → them local** (clone) through the app's wiring, `rtx3060-laptop`: the 30 s Russian test call →
   7 clauses with translation in the subtitles (first at 6.5 s, i.e. right after the first sentence),
@@ -767,7 +768,7 @@ it, transcribed by Whisper small.
 | after the input ended, the last speech done in | 2.0 s |
 
 The lag after the caption is the playback queue (speech of a clause waits for the one before, as in
-stage 1) plus the 60 ms cushion of the switch; S1's queue policy works on it. With `LiveSwitch` the speech
+stage 1) plus the 60 ms cushion of the switch; the queue policy works on it. With `LiveSwitch` the speech
 is re-chunked, so the per-clause lag is taken from the first new onset after the caption, not from the
 clause's own first chunk (approximate when clauses run back to back).
 
@@ -826,9 +827,9 @@ local me → them translates the button is off: a second clone would not fit nex
 
 ## Stage 2: the call's sound, both directions, the voice queue (S1)
 
-Measured 2026-11-08 on `vast-b-stage2` (server B: Ryzen 9 7950X3D, 32 threads, RTX 3060 Laptop
-12 GB; every run under `nice -n 15`, up to 6 at once) and `linux-x86_64-4c` (this dev server, 4
-cores, shared; an own PipeWire session). Scripts: [`bench/conversation.py`](../bench/conversation.py)
+Measured 2026-11-08 on `vast-b-stage2` (Ryzen 9 7950X3D, 32 threads, RTX 3060 Laptop
+12 GB; every run under `nice -n 15`, up to 6 at once) and `linux-x86_64-4c` (a 4-core VM,
+shared; an own PipeWire session). Scripts: [`bench/conversation.py`](../bench/conversation.py)
 (segmentation and the voice lag), [`bench/app_both.py`](../bench/app_both.py) (both directions).
 
 ### Moving the call's sound
@@ -970,7 +971,7 @@ Their 30 s recording (`call-en.ogg`) and mine (`call-ru.ogg`), mine starting `ov
 theirs (15 = half of each overlaps, 0 = both talk all the time). **B**: the app's two sides
 (`app.Side`, the barge-in wiring as in the app) in one process from the files — them → me local
 (Parakeet + OPUS-MT + Piper), me → them local (GigaAM + OPUS-MT + XTTS-v2 on the GPU, the voice of
-S2's tests). **This dev server** (no GPU, no clone): the real app (`peresmeshnik app --on`, Qt
+the clone's tests). **The 4-core VM** (no GPU, no clone): the real app (`peresmeshnik app --on`, Qt
 offscreen) through its PipeWire devices: a fake call app (`pacat` with its own
 `application.process.binary`, chosen as `ui.call_app`) starts playing after translation is on and
 is moved into "Peresmeshnik Call" by the app; my recording plays into a virtual microphone (the
@@ -986,14 +987,14 @@ is the cloud (Gemini Live) with local subtitles (GigaAM), the 8 GB default. CPU 
 | vast-b-stage2 | them local + me local (app.Side, files) | 0 | 0.557 | 0.83 | 3389 → 3545 | 2212 | 3.4 / 17.2 | 4 |
 | linux-x86_64-4c | them local + me cloud | 15 | 0.992 | 1.12 | 1739 → 1962 | — | 7.2 / 14.9 | 1 late + 4 barge-in |
 
-- Both sides at once cost about the sum of each: on B 0.46 + 0.37 cores alone, 0.61–0.83 together
+- Both sides at once cost about the sum of each: on the 7950X3D 0.46 + 0.37 cores alone, 0.61–0.83 together
   (CPU per second of input 0.56–0.57), 3.5–3.7 GB of RAM and 2.2 GB of VRAM; here 1.12 cores of 4
   and 2.0 GB with the cloud for my side (whose local subtitles run GigaAM).
 - While I talk their translated voice is cut (barge-in): with both talking all the time (overlap
   0) little of it is heard; the subtitles keep every clause. My own voice into the call is never
   dropped (no queue policy for me → them: the other side has no subtitles).
 - Found on the way: the app imported numpy before the pipeline pinned the BLAS threads, so
-  OpenBLAS took every core — them → me alone cost 3.0 CPU s per audio s on B (2.24 cores) instead
+  OpenBLAS took every core — them → me alone cost 3.0 CPU s per audio s on the 7950X3D (2.24 cores) instead
   of 0.61–0.81, both sides together 2.1–2.2 instead of 0.56–0.60. The working-mode gate did not
   see it: it runs `peresmeshnik run`, which imports in the right order. The thread pins now live in the
   package's `__init__`, and a test checks them after `import peresmeshnik.app`.
@@ -1081,7 +1082,7 @@ Two runs each (two commits, the same code paths):
 - Both paths give subtitles and the voice at about the same cost (0.8–1.1 CPU s per audio s, 1.2 GB); the runs
   differ more than the paths: the runner's 3 cores are noisy, the partial ASR alone takes 0.40–0.52 of real time.
 - Half of the clauses' voice was dropped by the 4 s policy on both paths: a 30 s monologue read without pauses,
-  Russian speech longer than the English and a 3-core runner. Their subtitles are all there. On B (stage 2) the same
+  Russian speech longer than the English and a 3-core runner. Their subtitles are all there. On the 7950X3D (stage 2) the same
   policy dropped 1.8–5.4 % of the words on continuous read speech.
 - The idle gate on `macos-15` with the app's start asking the helper once (`check`): 0.008–0.016 s CPU in 60 s
   (limit 0.13); the first 15 s after "idle" 0.08–0.15 s (not gated).
@@ -1126,7 +1127,7 @@ unplugged there) it is called directly while a tone goes BlackHole 16ch → `Bla
 - Real Core Audio notifications (round 1): an aggregate device made and destroyed by another process stands in for
   the headphones (`tests/macos/fakedevice.swift`). The saved one comes back: `Arrival`, a refresh, the output moves to
   it in 0.38 s; unplugged: `Watch` tells in 0.08 s, the default plays again. Saved headphones Core Audio has and
-  PortAudio does not see even after its refresh: the default plays meanwhile. The microphone (S2) is no PortAudio
+  PortAudio does not see even after its refresh: the default plays meanwhile. The microphone is no PortAudio
   stream on macOS (the Core Audio helper), so a refresh does not stop it (`test_the_microphone_is_kept_by_a_refresh`).
 
 ## Stage 3: me → them on macOS (BlackHole 2ch, the microphone, the clone)
@@ -1334,7 +1335,7 @@ else ran on it), so it includes the CUDA context and cuDNN/cuBLAS (~0.3 GB).
 - CUDA roughly halves the ASR real-time factor (the partial ASR is the heaviest them → me link) and cuts the MT to
   near nothing; the median subtitle lag drops by ~0.07–0.11 s. The clauses and their text are the same on both.
 - **It fits in 6 GB.** them → me on CUDA is 0.5–0.6 GB (models int8 + the CUDA context): on a 6 GB card it leaves
-  room for S2's clone (me → them). Both directions together in 6 GB is S2's measurement.
+  room for the clone (me → them). Both directions together in 6 GB: measured with the clone.
 - onnxruntime logs "Memcpy nodes are added … for CUDAExecutionProvider" for these int8 graphs (some ops stay on the
   CPU, so there are host↔device copies): CUDA still wins, but an fp16/CUDA-native build would win more. Not pursued —
   the int8 models are shared with the CPU path and the registry.
@@ -1372,7 +1373,7 @@ Tests: `tests/test_windows_audio.py`.
 
 Measured 2026-11-09. The fallback against a fake Gemini Live server (`tests/fake_gemini.py`: a real WebSocket over TLS
 for the real google-genai client; its "translator" answers each block 1 s later, as a tone for speech and zeros for
-silence), with the real local path (Parakeet v3 + OPUS-MT en-ru + Piper `dmitri`) on the dev server (4 cores, CPU),
+silence), with the real local path (Parakeet v3 + OPUS-MT en-ru + Piper `dmitri`) on a 4-core VM (CPU),
 the 30 s test call (`tests/data/call-en.ogg`) fed in real time, the fault 8 s in (`bench/fallback.py`, 3 runs each).
 Not measured: a real Gemini outage in a call, a real quota (USER-CHECKS).
 
@@ -1394,7 +1395,7 @@ tells whether 6 s falls back too early.
 
 The same faults with the pipeline's fake engines and a 0.3 s "translator" (`tests/test_fallback.py`, CI on all three
 OSes): drop → decision 0.20 s, quota 0.20 s, too slow 2.08 s with a 2 s limit, back 0.61 s after the phrase's first
-partial subtitle on the dev server. On the CI runners (PR #13):
+partial subtitle on the 4-core VM. On the CI runners (PR #13):
 
 | runner | drop | quota | too slow (limit 2 s) | back |
 |---|---|---|---|---|
@@ -1411,7 +1412,7 @@ partial subtitle on the dev server. On the CI runners (PR #13):
 | a side whose direction dies 4 times in a row | 3 restarts (one message each, the report named in it), then off with "failed 4 times within a minute"; 4 reports; the app goes on |
 | the Piper runner (a real helper process) killed while them → me translates the 30 s call | only the runner starts again (`crash.Respawn`), one message, one report ("the voice helper died"); the side speaks again 5.6, 5.7, 6.0, 6.2 s after the kill on the dev server (the next clause of the call; most of it is waiting for that clause), 5.8–10.0 s on the CI runners (work-gate job, 3 runs each: ubuntu 9.5, 9.7, 5.8 s; macOS 9.7, 10.0, 9.2 s; windows 8.7, 7.6, 7.6 s). Before (the whole side made again: new ASR, MT, runner and warm-up) 15.1–16.3 s there, 13.2–21.3 s on the CI runners |
 | GitHub issue link | under 8000 characters; a long report is cut there and copied whole to the clipboard |
-| idle CPU with the hooks and the log file (`tests/test_idle_cpu.py`, dev server under Xvfb) | 0.010 s in 60 s (limit 0.13 s) |
+| idle CPU with the hooks and the log file (`tests/test_idle_cpu.py`, the 4-core VM under Xvfb) | 0.010 s in 60 s (limit 0.13 s) |
 
 ### taskkill right after the start (Windows)
 
@@ -1440,13 +1441,13 @@ given delay and level; they answer, a third of the time over us), **overlap** (t
 overlap 0.3–1.5 s, and some that start together), **long** (one person, sentences back to back with every silence
 cut to 0.15 s: no pause the VAD takes). A scenario is a seed; only numbers come here. Engines as in the app: Silero
 VAD, Parakeet v3 int8, OPUS-MT en-ru, Piper `dmitri`, 2 threads, the app's queue policy (cap 4 s) where the voice is
-measured. **C** = the dev server C (16 cores, runs with 2 threads each, at most 8 threads at once; CPU unless said);
+measured. **i7** = a 16-core x86 server (Intel i7-13700; runs with 2 threads each, at most 8 threads at once; CPU unless said);
 **runners** = the CI job work-gate (`tests/test_call.py` on the recordings of `tests/data`: 3 of our sentences, 3 of
 theirs). Real calls, a real loudspeaker at the far end, real people over each other: USER-CHECKS «Этап 5 / S1».
 
 ### Latency per link (them → me)
 
-**links** on C: the echo scenario (n = 4: 24 of our utterances, 24 of theirs) through the gate, in real time with
+**links** on the i7: the echo scenario (n = 4: 24 of our utterances, 24 of theirs) through the gate, in real time with
 Piper and the queue policy; *runners*: `test_latency_per_link` (3 + 3 sentences, one scenario). Seconds from the end
 of a clause's speech (where the clause ends in the audio) to: *VAD* — the end is known (a pause of 0.3 s, or the ASR
 cuts the clause); *ASR* — its final text; *caption* — its translated subtitle; *TTS* — the first synthesized audio;
@@ -1456,28 +1457,28 @@ clause, nothing queued); the stage's target: subtitle ≤ 0.5 s, voice ≤ 1.5 s
 | where | clauses (dropped) | VAD p50 / p90 | ASR | caption | TTS first | voice |
 |---|---|---|---|---|---|---|
 | budget (§4, x86 / M1) | | 0.30 | ≈ 0.43 | ≈ 0.5 / 0.55–0.65 | ≈ 0.65 / 0.8–0.9 | target ≤ 1.5 |
-| C, CPU, 2 threads | 80 (3) | 0.36 / 1.42 | 0.40 / 1.42 | **0.43** / 1.47 | 0.50 / 1.59 | **1.18** / 2.54 |
-| C, A4000 (ASR and MT on CUDA, Piper on the CPU) | 82 (5) | 0.37 / 1.47 | 0.43 / 1.47 | **0.43** / 1.48 | 0.50 / 1.53 | **1.13** / 2.47 |
+| i7, CPU, 2 threads | 80 (3) | 0.36 / 1.42 | 0.40 / 1.42 | **0.43** / 1.47 | 0.50 / 1.59 | **1.18** / 2.54 |
+| RTX A4000 (ASR and MT on CUDA, Piper on the CPU) | 82 (5) | 0.37 / 1.47 | 0.43 / 1.47 | **0.43** / 1.48 | 0.50 / 1.53 | **1.13** / 2.47 |
 | runner Linux (4 vCPU) | 12 (2) | 0.41 / 1.34 | 0.48 / 1.34 | 0.55 / 1.55 | 0.53 / 2.04 | 0.53 / 2.04 |
 | runner macOS (M1, 3 cores) | 12 (2) | 0.32 / 0.99 | 0.38 / 0.99 | 0.40 / 1.28 | 0.49 / 1.69 | 0.49 / 1.69 |
 | runner Windows (4 vCPU) | 12 (2) | 0.44 / 1.40 | 0.56 / 1.40 | 0.63 / 1.70 | 0.66 / 2.27 | 0.66 / 2.40 |
 
-- Medians: the subtitle is within the target on C and the M1 runner (0.40–0.43 s), 0.55–0.63 s on the shared 4 vCPU
+- Medians: the subtitle is within the target on the i7 and the M1 runner (0.40–0.43 s), 0.55–0.63 s on the shared 4 vCPU
   Linux and Windows runners; once the end is known, the final ASR and MT add 0.07–0.19 s to it. *Dropped* = the
   queue policy skipped the voice (its subtitle shown); a dropped clause has no TTS or voice number.
-- **The worst link is the end of a clause without a pause.** By how the clause ended (C, CPU): a pause (58 of
+- **The worst link is the end of a clause without a pause.** By how the clause ended (i7, CPU): a pause (58 of
   80) VAD 0.29 / 0.48 s; the 5 s limit (19) 1.27 / 1.87 s; a sentence end the ASR punctuates (3) 1.20 / 1.45 s. A
   cut takes only words that start ≥ `TAIL_S` before the window end (there the model squeezes the last words
   together; 0.8 s since stage 1), so such a clause is known ≥ `TAIL_S` after its last word.
 - **The A4000 changes nothing here** (within 0.07 s of the CPU): the links are bound by when the clause end is
   known and by the voice queue, not by compute. MT RTF 0.0068 → 0.0019 on CUDA; the partial ASR (int8 graph, host ↔
   device copies, see "them → me on CUDA vs CPU") 0.20 on 2 CPU threads, 0.22 on CUDA.
-- The voice p50 (1.18 s on C) is the queue: their sentences are 5–12 s (p10–p90, median 8 s), cut into
+- The voice p50 (1.18 s on the i7) is the queue: their sentences are 5–12 s (p10–p90, median 8 s), cut into
   clauses back to back, and a clause's voice waits for the one before it (its TTS first audio is there at 0.5 s).
-  The p90 above the target (2.5 s on C) is that wait plus the clauses known late (above). On the runners (one
+  The p90 above the target (2.5 s on the i7) is that wait plus the clauses known late (above). On the runners (one
   scenario, 12 clauses) the voice p50 is its TTS first audio.
 
-**`TAIL_S` 0.5 measured, not taken.** Both values on C at the same time (2 threads each), English (Parakeet) and
+**`TAIL_S` 0.5 measured, not taken.** Both values on the i7 at the same time (2 threads each), English (Parakeet) and
 Russian (GigaAM → English, Piper `john`): **links** n = 4 as above, in real time; **long** n = 6 (the monologue of
 "Long phrases", 30 sentences, 27–37 clauses cut at the 5 s limit) in real time and, for the words alone, fed as fast
 as it goes (`--asap`: the same on any load). *Repeated* = words a clause repeats from the end of the one before it
@@ -1501,13 +1502,13 @@ stage 5).
   0.5 is no better in English (chrF −1.5) and mixed in Russian (WER +0.002, chrF +1.2). Not taken: the gain is only
   in the p90, and the quality is not shown to hold.
 - **Taken: `REPEAT_WORDS` 3** (`local/asr.py`): a clause that repeats up to 3 words of the cut before it ("…to cope
-  with" | "cope with the impacts": `test_two_people_overlapping_ends` with 0.5 on the dev box) drops them; with 0.8 the English WER
+  with" | "cope with the impacts": `test_two_people_overlapping_ends` with 0.5 on a 4-core EPYC VM) drops them; with 0.8 the English WER
   0.1447 → 0.1366 (5 repeated words → 0), Russian the same.
 
 ### Echo of our speech from the far end
 
-**echo** on C, n = 6 (36 of our utterances and 36 of theirs per row, a third of their turns over our echo), fed as
-fast as it goes; the gate runs in the scenario's own time with the reference pushed as it is sent. *echo translated*
+**echo** on the i7, n = 6 (36 of our utterances and 36 of theirs per row, a third of their turns over our echo), fed as
+fast as it goes, the delay searched up to 1.0 s (2.0 s now: the same within 0.2 %, below); the gate runs in the scenario's own time with the reference pushed as it is sent. *echo translated*
 = our utterances that come out as a clause (≥ 2 and ≥ 25 % of their content words); *their recall* = their content
 words out; *zeroed* = 16 ms blocks the gate zeroed, of their speech (false suppression) and of our echo alone.
 
@@ -1525,23 +1526,29 @@ words out; *zeroed* = 16 ms blocks the gate zeroed, of their speech (false suppr
   passes by design); in 34–36 of 36 utterances that is too little for a clause.
 - **Through the devices** (`tests/test_echo_pipewire.py`, Linux: `VirtualMic` through `Referenced` → a far end that
   records "Peresmeshnik Mic", plays it back 150 ms later 12 dB quieter between its own sentences into "Peresmeshnik
-  Call" → the capture → `Threaded` gate): echo zeroed 90–100 % per phrase, their speech 0 %, on the dev server and
+  Call" → the capture → `Threaded` gate): echo zeroed 90–100 % per phrase, their speech 0 %, on a 4-core EPYC VM and
   the ubuntu runner. Before the reference kept speech queued ahead (a TTS hands out seconds at once) it was 46 %.
 - Runners (`test_echo_is_not_translated`, 3 + 3 sentences, one over our echo): echo translated 2 of 3 → 0, their
   recall 0.871 → 0.871 (Linux, macOS, Windows). Without models (`tests/test_echo.py`, every OS): echo blocks zeroed
   94–100 % at 50/150/300 ms and −6/−20 dB, their blocks 0 %, double talk 0.2 %, no echo path 0.
-- CPU: 0.25 ms per 16 ms block while the reference sounds (1.6 % of a core; was 1.35 ms before the delay search went
-  to every 4th block), nothing while it is silent.
+- CPU: nothing while the reference is silent; while it sounds, per 16 ms block on one core of a 4-core EPYC VM
+  (`echo_max_delay_s`, the delays searched): 1.0 s — 0.21 ms (1.3 % of a core; it was 1.35 ms before the delay
+  search went to every 4th block), 1.5 s — 0.28 ms, **2.0 s (the app's) — 0.34 ms (2.1 %)**.
+- **A long round trip** (two networks, two jitter buffers, device buffers): with the search up to 2 s the echo at
+  0.6 / 0.9 / 1.4 / 1.9 s is zeroed 96–99 % (it was 0 beyond 1.0 s), their speech 0 %; at 2.5 s (beyond) the echo
+  passes and nothing else is zeroed (`tests/test_echo.py`, 3 + 3 sentences). Frames of 100 / 160 / 320 / 512
+  samples: 96.5–97.3 % (a frame shorter than a block, as BlackHole at 96 kHz gives, was 2–21 % before the fix).
+  Double talk over an echo at −6 / −12 dB: 0.29 / 0.19 % of their blocks zeroed.
 
 ### Long phrases: translated partials
 
-**long** on C, n = 6 (30 sentences, 6 monologues of ~45 s), real time. *subtitle* = a word → its translation on
+**long** on the i7, n = 6 (30 sentences, 6 monologues of ~45 s), real time. *subtitle* = a word → its translation on
 screen (the first translated partial that has it, or its clause's final caption); *caption* = a word → its clause's
 final caption (before stage 5 the only translation on screen); *first word* = a clause's first word → its first
 translated subtitle; *voice* = a word → its clause's voice starts; words spread evenly over their clause. WER of the
 clauses against the sentences, chrF of the clauses' translations against the MT of whole sentences
 (pseudo-reference). `early` = a clause is also cut at a comma from that length (≥ 1 s before the comma). `TAIL_S`
-0.8 here (0.5 now: "Latency per link").
+0.8, as in the app ("Latency per link").
 
 | variant | clauses | subtitle p50 / p90, s | caption p50 / p90, s | first word, s | voice p50 / p90, s | WER | chrF | dropped | MT RTF (+ partials) |
 |---|---|---|---|---|---|---|---|---|---|
@@ -1552,17 +1559,22 @@ clauses against the sentences, chrF of the clauses' translations against the MT 
 | + early 3.0 s | 84 | 1.48 / 3.10 | 2.57 / 4.64 | 2.04 | 3.16 / 5.11 | 0.143 | 68.3 | 6 | 0.017 + 0.022 |
 | + early 2.5 s, max clause 4 s | 97 | 1.42 / 2.80 | 2.20 / 3.67 | 1.97 | 2.75 / 4.06 | 0.159 | 66.9 | 1 | 0.017 + 0.019 |
 
-- The translated partials take a word's translation on screen from 2.5 to 1.4 s (p90 4.6 → 2.9 s) at the same WER;
-  chrF differs by ~1 between real-time runs of one variant (cuts move with timing). They cost 2–2.5 % of a core.
+- The translated partials take a word's translation on screen from 2.5 to 1.4 s (p90 4.6 → 2.9 s) at the same WER,
+  and they do not change the final text: fed as fast as it goes (`--asap`, the same on any load) with and without them
+  WER 0.1366 = 0.1366, chrF 70.1 = 70.1. In real time the cuts move with the load: three runs of each, 4 at once,
+  without 68.4 / 69.9 / 71.5, with 68.1 / 69.7 / 68.9 (WER 0.112–0.148 and 0.129–0.146), so the single 71.4 → 70.0
+  above is within one setting's spread (3.1). They cost 2–2.5 % of a core.
 - Cutting clauses earlier for the voice gains it 0.05–0.2 s (a comma from 2–3 s) or 0.5 s (a 4 s limit) and costs
-  2–5 chrF and 0.02–0.03 WER (fragments): not taken. The voice of a monologue is bound by its clauses, not by a link.
+  chrF: fed as fast as it goes 70.1 → 66.7 (a comma from 2.0 or 2.5 s), 67.1 (3.0 s), 65.1 (2.5 s and a 4 s limit),
+  WER 0.1366 → 0.1463 / 0.1285 / 0.1675 (fragments): not taken. The voice of a monologue is bound by its clauses,
+  not by a link.
 - Runners (`test_long_phrases_get_earlier_subtitles`, 4 sentences, real time): subtitle p50 before → after
   3.16 → 1.41 s (Windows), 2.99 → 1.29 s (macOS M1), 3.00 → 1.37 s (Linux), WER 0.065 = 0.065 (Windows: 0.081 →
   0.065; the clauses cut differently in real time).
 
 ### Two people at once (the far end)
 
-**overlap** on C, n = 6 (48 utterances: per scenario 4 pairs where one starts 0.3–1.5 s before the other ends, 4
+**overlap** on the i7, n = 6 (48 utterances: per scenario 4 pairs where one starts 0.3–1.5 s before the other ends, 4
 pairs that start within 0.5 s of each other), fed as fast as it goes; *with voice* = n = 4 in real time with Piper
 and the queue policy. *lost* = an utterance with < 50 % of its content words out; *merged* = a clause with ≥ 2
 content words of each of two people; *empty* = clauses the ASR returned nothing for.
@@ -1609,4 +1621,4 @@ tone back on its speakers.
 A new tap does not lift it and the app has no rights to restart coreaudiod: the reason it shows now says to restart the call
 app or `sudo killall coreaudiod` (README). In CI the SIGKILL test now runs in its own step first and coreaudiod is
 restarted after it: the rest of the macOS set passed in 10 of 10 runs; with the test in its old place 5 of 6 (one
-device test after it failed; a run of S3 had 4 such failures).
+device test after it failed; an earlier CI run had 4 such failures).

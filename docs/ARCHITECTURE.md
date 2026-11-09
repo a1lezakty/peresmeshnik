@@ -499,7 +499,7 @@ RTF; the user can override it in settings.
   `VoicePackClone` over a pipe, the Piper runner's protocol): the app's process never loads torch
   (no second OpenMP or CUDA runtime in it), and a runner that dies or hangs ends the direction,
   which falls back to the local stock voice. The wizard checks the GPU first (≥ 6 GB, compute
-  capability ≥ 7.0, driver ≥ 572.30). Them → me stays on the CPU (onnxruntime, CTranslate2).
+  capability ≥ 6.1, driver ≥ 572.30). Them → me stays on the CPU (onnxruntime, CTranslate2).
 - GPU: macOS uses CoreML/Metal where it pays (llama.cpp Metal, onnxruntime CoreML EP). On Linux a
   source install with torch and coqui-tts runs the clone in-process (`XttsClone`).
 - Piper (GPL, with espeak-ng) is never imported: it runs as its own process. Its upstream CLI has

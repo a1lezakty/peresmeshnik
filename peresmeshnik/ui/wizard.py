@@ -77,7 +77,7 @@ PACK_CONSENT = ('I accept the licenses of the voice pack: PyTorch (BSD-3-Clause)
 
 
 MIN_DRIVER = (572, 30)  # Windows: CUDA 12.8's driver (the pack's torch 2.8.0+cu128; NVIDIA's CUDA 12.8 release notes)
-MIN_CC = 7.0  # the pack's torch is built for sm_70 .. sm_120 (torch.cuda.get_arch_list()): no Pascal (GTX 10xx) or older
+MIN_CC = 6.1  # the pack's Windows torch is built for sm_61 .. sm_120 (its _cuda_getArchFlags, the voice-pack job)
 
 
 class Gpu(NamedTuple):
@@ -142,7 +142,7 @@ def gpu_refusal(g: Gpu) -> str:
                 'update it from nvidia.com/drivers (or the NVIDIA app), then open this page again.')
     if g.cc and g.cc < MIN_CC:
         return (f'This NVIDIA GPU is too old for the voice pack (compute capability {g.cc:g}; it needs {MIN_CC:g} or newer: '
-                'GeForce GTX 16xx, RTX 20xx and later).')
+                'GeForce GTX 10xx and later).')
     return ''
 
 

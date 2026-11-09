@@ -265,7 +265,8 @@ def fake_smi(monkeypatch, out, old=None):
     ('8192, 566.36, 8.6\n', None, 'needs NVIDIA driver 572.30 or newer; this computer has 566.36'),
     ('Field "compute_cap" is not a valid field to query.\n', '8192, 472.12\n',
      'needs NVIDIA driver 572.30 or newer; this computer has 472.12'),
-    ('8192, 572.83, 6.1\n', None, 'too old for the voice pack (compute capability 6.1; it needs 7 or newer'),
+    ('8192, 572.83, 6.1\n', None, ''),  # Pascal (GTX 1070): the Windows torch has sm_61
+    ('6144, 572.83, 5.2\n', None, 'too old for the voice pack (compute capability 5.2; it needs 6.1 or newer'),
     ('NVIDIA-SMI has failed because it could not communicate with the NVIDIA driver.\n', None,
      'The NVIDIA driver does not answer (NVIDIA-SMI has failed'),
 ])

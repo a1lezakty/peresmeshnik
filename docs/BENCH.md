@@ -1697,6 +1697,129 @@ app or `sudo killall coreaudiod` (README). In CI the SIGKILL test now runs in it
 restarted after it: the rest of the macOS set passed in 10 of 10 runs; with the test in its old place 5 of 6 (one
 device test after it failed; an earlier CI run had 4 such failures).
 
+## Stage 5: the me → them voice as the call hears it, the echo in my microphone (S2)
+
+Measured 2026-11-09. Nobody uses the app live yet: my side of a call is rebuilt from recordings. **My turns**: 30
+FLEURS ru dev sentences (other people, CC-BY-4.0) at −26 dBFS with pauses of 0.6–1.2 s (367 s), fed in real time
+through the app's path: Silero VAD, GigaAM v3, OPUS-MT ru-en, XTTS-v2 in the process (`XttsClone`, CUDA, 2 threads),
+LiveSwitch, a device that plays into memory in real time — the stream the virtual mic gets, at 24 kHz, with where each
+clause and each TTS chunk landed (`bench/me_voice.py run`). Scored by `bench/me_voice.py score`: ECAPA (SpeechBrain)
+against the voice's recording, Whisper-small CER against the clause's text (and the words heard after it: a *tail*),
+BS.1770 loudness (pyloudnorm). Hosts: **A4000** = an RTX A4000 (16 GB, its GPU shared with another job), the final rows;
+RTX 3060 12 GB (a second host, the same picture). The voice: the "me" profile of the earlier stages (a LibriVox reader).
+
+### The clone's voice in the stream (A4000, 90 clauses, before = main f077e58)
+
+| | before | after |
+|---|---|---|
+| a clause starts with a step (> −40 dB under its peak: a click) | **57 of 90** (the step −33…−10 dB) | **0** |
+| a click where two clauses meet back to back | 15 of 36 | 0 of 42 |
+| inside a clause, where TTS chunks meet (> 2 × the signal's own steps) | 0 of 293 | 0 |
+| a hole inside a clause (its next audio late) | 0 | 1 (0.09 s) |
+| pause after a sentence, clauses back to back (p50, min) | 0.15 s (0.11) | **0.36 s** (0.34) |
+| pause inside a sentence (a clause cut at 5 s), back to back | 0.15 s | 0.17 s |
+| loudness of a clause against the turn of mine it came from (p50, \|…\| p90) | **+7.7 LU** (8.7) | **+0.1 LU** (2.9) |
+| clause loudness (p50; p10–p90) | −17.7 LUFS (1.7 LU) | −25.1 LUFS (4.3 LU: it follows my level, which moves between the 30 people of the scenario) |
+| peak of the stream | 0.972 | 0.62 |
+| ECAPA similarity to my voice (mean, p10) | 0.354 (0.284) | 0.356 (0.277) |
+| CER (Whisper small) | 2.24 % | 2.86 % (see below) |
+| clauses with a tail | 5 | 2 |
+| voice after the clause's end, p50 / p90 | 1.96 / 3.21 s | 1.72 / 3.25 s |
+| clone's first audio, p50 (a GPU shared with another job: it varies) | 224 ms | 166 ms |
+
+- The RTX 3060 (main): a click at 46 of 90 clause starts, 37 back to back with 0.16 s after a sentence (min 0.09),
+  +7.6 LU against my turn, peak 0.978, ECAPA 0.363, CER 2.45 %, 3 tails, voice p50 / p90 1.70 / 3.22 s: the same picture.
+- **The clicks are XTTS's own**: its audio starts mid-waveform. `xtts.shape` fades each generation in over 5 ms. The
+  seams inside a clause were clean already (coqui crossfades its stream chunks).
+- **Pauses**: XTTS ends a sentence with ~0.16 s of silence, so clauses queued back to back (36–42 of 89 here: a long
+  turn is translated while the one before it is still said) ran sentences together. After a sentence the clone now pads
+  its silence to 0.35 s; inside a sentence it stays short. It costs only queued clauses: the voice p90 +0.04 s here
+  (+0.15 s in the run before the comma below; the p50 moves with the run, ±0.25 s).
+- **Loudness**: the clone (and Piper, below) spoke ~8 dB louder than a microphone at a call's level with peaks near
+  full scale, so the hotkey's crossfade jumped. LiveSwitch now brings the speech to my live voice's level (`mic.Level`
+  of the microphone's 32 ms frames and the speech's, pauses not counted; gain within −30…+10 dB, peaks ≤ 0.95). In this
+  scenario each turn is another person, so the gain follows a level that jumps between turns (the |…| p90 2.9 LU is the
+  first clause of a new person); one speaker on one microphone is steadier.
+- **CER 2.24 → 2.86 %** is the sampling of XTTS, not the changes: the difference is in short names and fragments that
+  XTTS says differently each time ("Vlas." → "class" / "where's the sky", "Canyitas."), and "8%." heard as "8 percent"
+  counts as an error; the first word is wrong in 7 and 9 of 90. The same audio of the *before* run with only the 5 ms
+  fade-in applied: CER 2.24 → 2.46 %, all 8 more edits in one clause and at its end (Whisper's beam on a changed input;
+  with a 2 ms fade 4 clauses go the other way), the first word heard the same in 89 of 90 ("health care" /
+  "healthcare"), tails 5 = 5: the fade does not eat the first sound.
+
+### XTTS's tails: how a cut clause ends
+
+The clause texts of the *before* run said again, 3 times each (A4000): 56 that end a sentence as they are, the 34 that
+end without a sentence's punctuation (cut at 5 s or at a comma) as they are, with a comma, with a period.
+
+| text | syntheses | with a tail (words after the text) | CER |
+|---|---|---|---|
+| sentences, as they are | 168 | 6 (some are the judge: "8%." → "8 percent") | 3.71 % |
+| fragments, as they are ("… opposed to the") | 102 | 6 ("… the vile", "… and then") | 1.86 % |
+| fragments + "," | 102 | **0** | 1.70 % |
+| fragments + "." | 102 | 6 | 2.30 % |
+
+A fragment that ends in a function word makes XTTS go on with a word of its own; a comma stops it (a period does not,
+and gives a sentence's falling end). `xtts.closed`: a clause cut mid-sentence ends with a comma for the clone.
+
+### The stock voice through the app's path (CI runners)
+
+`tests/test_me_side.py::test_my_voice_at_the_live_level` (work-gate, every OS): my turns (`tests/data/call-en.ogg`,
+30 s, English) in real time through LocalDirection (Parakeet, OPUS-MT en-ru, Piper `dmitri`) and LiveSwitch into a
+device in memory; level = power mean of 20 ms frames above −45 dBFS.
+
+| runner | my voice | Piper as it comes | out to the virtual mic | peak, as it comes → out |
+|---|---|---|---|---|
+| ubuntu-latest | −24.0 dB | −17.1 dB | −25.0 dB | 1.00 → 0.54 |
+| macos-15 | −24.0 dB | −17.3 dB | −24.8 dB | 1.00 → 0.47 |
+| windows-latest | −24.0 dB | −17.4 dB | −25.0 dB | 1.00 → 0.50 |
+| the 4-core VM | −24.0 dB | −17.6 dB | −24.6 dB | 1.00 → 0.48 |
+
+### The echo of the translation in my microphone (speakers, no headphones)
+
+`bench/mic_echo.py` on the 4-core VM, n = 6 (per row 36 utterances from the speakers and 36 of mine; I answer 0.6–1.2 s
+after the speakers stop, every third time 0.5–1.5 s before they stop). The speakers say their translation (Piper
+`dmitri` reading FLEURS ru sentences); the microphone hears it through laptop speakers (200–8000 Hz), a room (a few
+reflections and a tail of `rt60`), `delay` after `play()` and at `gain` against my own voice; my turns are FLEURS ru
+recordings at −26 dBFS. Through the me → them side's subtitles (GigaAM, OPUS-MT ru-en): *echo translated* = speaker
+utterances that come out as a clause (≥ 2 and ≥ 25 % of their content words); *false barge-ins* = clauses of ≥ 3 words
+made of the echo alone (my partial subtitle that long cuts the translation I hear); *my recall* = my content words out.
+The gate is S1's (`audio/echo.py`, the app's `EchoGate(mic_echo)` on the 'me' side), first at its threshold
+`rho_on` 0.5:
+
+| speakers → microphone | echo translated: no gate → gate | false barge-ins | my recall | my blocks zeroed | echo blocks zeroed |
+|---|---|---|---|---|---|
+| 0 dB, 80 ms, RT60 0.4 s | 36 of 36 (100 %) → **0** | 59 → **0** | 0.929 → 0.922 | 0.94 % | 96 % |
+| −6 dB | 36 → 0 | 56 → 0 | 0.929 → 0.925 | 0.68 % | 96 % |
+| −12 dB | 36 → 0 | 53 → 0 | 0.927 → 0.927 | 0.57 % | 96 % |
+| +6 dB (louder than me) | 36 → 0 | 57 → 0 | 0.927 → 0.916 | 1.17 % | 96 % |
+| 250 ms (a slow output) | 36 → 0 | 59 → 0 | 0.929 → 0.920 | 0.95 % | 96 % |
+| a reverberant room, RT60 0.8 s | 36 → **2** | 57 → **6** | 0.928 → 0.924 | 0.53 % | 73 % |
+| headphones (nothing comes back) | — | 0 → 0 | 0.929 → 0.929 | 0 | — |
+
+The reverberant room smears the echo's spectrum and the correlation of the band envelopes falls under 0.5; the
+reverb's tail, the margin and the excess share did not help (`tail_s` 0.15–0.45: 81 % of the echo blocks either way,
+without models). **The microphone's gate now has `[local] mic_echo_rho_on` = 0.4** (the call side keeps 0.5):
+
+| speakers → microphone, `rho_on` 0.4 | echo translated: no gate → gate | false barge-ins | my recall | my blocks zeroed | echo blocks zeroed |
+|---|---|---|---|---|---|
+| 0 dB, 80 ms, RT60 0.4 s | 36 → 0 | 58 → 0 | 0.924 → 0.916 | 0.95 % | 96 % |
+| a reverberant room, RT60 0.8 s | 36 → **0** (was 2) | 55 → **0** (was 6) | 0.928 → 0.920 | 0.72 % | 92 % (was 73 %) |
+| +6 dB | 36 → 0 | 60 → 0 | 0.929 → 0.913 | 1.29 % | 97 % |
+| headphones | — | 0 → 0 | 0.927 → 0.927 | 0.16 % | — |
+
+My recall moves by 0.005–0.016 with the gate; the same scenario without the gate gave 0.929 and 0.924 in two runs
+(the pipeline's own spread). Louder speakers than my voice (+6 dB) cost the most: a block of my speech over the echo
+passes only where it is clearly above the echo. For the call side (S1's, unchanged; FLEURS en, 150 ms, −6 dB, n = 6)
+0.4 would give: echo translated 2.8 % → 0, their recall 0.907 → 0.909, their blocks zeroed 0.13 → 0.25 %, no echo path
+the same.
+
+On the runners (`tests/test_me_side.py`, work-gate, the recordings of tests/data: 3 played, 3 of mine, one over the
+end of the played one; 0 dB, RT60 0.4 s): echo translated 3 of 3 → 0, false barge-ins 7 → 0, my recall 0.871 = 0.871
+on Linux, macOS and Windows; without models (every OS, `rho_on` 0.4): echo blocks zeroed 91 % (0 dB), 89 % (RT60
+0.8 s; 81 % at 0.5), mine ≤ 0.4 %, with headphones 0. A real laptop's speakers and microphone, its own processing and a
+real room: USER-CHECKS «Этап 5 / S2».
+
 ## Stage 6: the LuxTTS spike on the M1 runner, languages in the shell (S3)
 
 ### LuxTTS for me → them on an 8 GB Mac: not taken

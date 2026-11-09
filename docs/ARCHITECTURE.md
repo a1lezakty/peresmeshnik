@@ -306,7 +306,10 @@ silence. Where the other person talks over our echo the block passes; an echo la
 not found and is translated like speech. No adaptive filter and no dependency: robust to codecs,
 loudspeakers and a drifting delay; ~2 % of a core while the reference sounds, nothing while it is
 silent. The reference keeps 4 s behind and up to 30 s ahead (a TTS hands out seconds of speech at
-once). No gate where there is no echo path: a file as the input, the wizard's test phrase.
+once). No gate where there is no echo path: a file as the input, the wizard's test phrase. On the microphone (speakers
+instead of headphones: the echo as loud as my voice, a room's reverb) the same gate keeps the translation from going
+back to them and its partial subtitle from cutting what I hear (barge-in), with a lower correlation threshold,
+`[local] mic_echo_rho_on` = 0.4 (a reverberant room smears the echo's spectrum; the call side keeps 0.5): BENCH, stage 5 S2.
 
 **Setup wizard (first run, re-runnable from the tray):**
 1. Language pair and mode (local / cloud), tier detected from the hardware (§9), model download
@@ -344,7 +347,10 @@ engine again. A cloud direction speaks with Gemini and takes its subtitles from 
 (`cloud.subtitles = false`, faster, §4) or from Gemini. The hotkey calls `Direction.set_live` where a
 direction supports it; the me → them direction, local or cloud, is wrapped in `LiveSwitch`
 (`audio/mic.py`): its output is clocked by the microphone's frames, so the queued translation stays in
-the process, and each switch is a 30 ms equal-power crossfade, no click (BENCH). While live, the side's
+the process, and each switch is a 30 ms equal-power crossfade, no click (BENCH). The translated speech is brought to
+the level of my live voice (`Level` of the microphone's and the speech's 32 ms frames, pauses not counted; the gain
+within −30…+10 dB, peaks ≤ 0.95): the clone and Piper spoke ~9 dB louder than a microphone at a call's level, with peaks
+near full scale, so the crossfade jumped in loudness (BENCH, stage 5 S2). While live, the side's
 other directions (the local subtitles of a cloud me → them) get no input, only a pause that closes their
 open clause: nothing is translated. For any other direction
 (them → me for now) the app sends the input straight to the output and skips it (a hard switch). The overlay keeps the last two clauses (rows keyed by clause
@@ -535,7 +541,9 @@ RTF; the user can override it in settings.
    stage 3 measures XTTS/Chatterbox on a real M1 Pro. Fallback: cloud for me → them.
    Research (stage 5): fast TTS + our own timbre converter on FocalCodec.
 2. **Clone quality.** XTTS adds garbage tails after the sentence (most of its CER) → length and
-   energy guard; cross-lingual similarity is modest (0.35–0.44); CosyVoice3 truncates Russian.
+   energy guard; cross-lingual similarity is modest (0.35–0.44); CosyVoice3 truncates Russian. Its utterances start
+   mid-waveform (a click at half of the clause starts) and end a sentence with ~0.16 s of silence, so queued clauses ran
+   sentences together: `xtts.shape` fades each in over 5 ms and pads a sentence end to 0.35 s (BENCH, stage 5 S2).
 3. **Gemini Live.** Preview models; the voice lags ~3.2 s and up to 6 s in long en → ru speech;
    `audio_stream_end` cuts the end of a translation (never send it to translate); connections
    last ~10 min (server GoAway at ~540 s), sessions 15 min → handled in stage 1: hand-over at a

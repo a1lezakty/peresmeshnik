@@ -55,10 +55,57 @@ def test_echo_is_zeroed_their_speech_is_not(delay, gain_db):
     assert s['their_blocks_zeroed'] <= 0.02, s
 
 
-def test_double_talk_keeps_their_speech():
-    _, s = gate(scenario(0.15, -12, double_talk=True))
+@pytest.mark.parametrize('frame', [100, 160, 320, 512])
+def test_any_frame_size(frame):
+    """Captures hand on frames of any size (BlackHole at 96 kHz: ~170 samples at 16 kHz): a frame shorter than a block
+    is zeroed whole when the gate says echo."""
+    _, s = gate(scenario(0.15, -12), frame=frame)
+    print(frame, s)
+    assert s['echo_blocks_zeroed'] >= 0.85, s
+    assert s['their_blocks_zeroed'] <= 0.02, s
+
+
+@pytest.mark.parametrize('delay', [0.6, 0.9, 1.4])
+def test_a_long_round_trip(delay):
+    """A call's round trip (two networks, two jitter buffers, device buffers) can be over 1 s."""
+    _, s = gate(scenario(delay, -12))
+    print(delay, s)
+    assert s['echo_blocks_zeroed'] >= 0.85, s
+    assert s['their_blocks_zeroed'] <= 0.02, s
+
+
+def test_beyond_the_limit_the_echo_passes():
+    """An echo later than `echo_max_delay_s` (2 s) is not found: it is translated as speech, nothing else is zeroed."""
+    _, s = gate(scenario(2.5, -12))
     print(s)
-    assert s['their_blocks_zeroed'] <= 0.05, s
+    assert s['echo_blocks_zeroed'] <= 0.05, s
+    assert s['their_blocks_zeroed'] == 0, s
+
+
+@pytest.mark.parametrize('gain_db', [-6, -12])
+def test_double_talk_keeps_their_speech(gain_db):
+    _, s = gate(scenario(0.15, gain_db, double_talk=True))
+    print(gain_db, s)
+    assert s['their_blocks_zeroed'] <= 0.01, s
+
+
+def test_the_clock_resyncs_after_a_gap_in_the_capture():
+    """A capture that stops for a while (its helper restarted) and goes on: the gate's time of the audio follows,
+    else for ~2 s it would look for the echo in the wrong place of the reference."""
+    ref = Reference()
+    ref.loud_until = np.inf  # the gate works on every frame
+    g = EchoGate(ref)
+    t = ref.t0 + 1.0
+    for burst in range(20):  # bursts of 4 frames, up to 0.1 s late: no gap
+        for k in range(4):
+            g.process(np.zeros(512, np.float32), t + (4 * burst + k + 1) * 512 / SR + (0.1 if k < 3 else 0.0))
+    t += 80 * 512 / SR
+    assert abs(g._hist[-1][0] - (t - HOP / 2 / SR)) < 0.02
+    t += 1.5  # 1.5 s that never come
+    for _ in range(3):
+        t += 512 / SR
+        g.process(np.zeros(512, np.float32), t)
+    assert abs(g._hist[-1][0] - (t - HOP / 2 / SR)) < 0.02, g._hist[-1][0] - t
 
 
 def test_no_echo_path_no_suppression():
@@ -118,3 +165,87 @@ def test_threaded_gate_passes_audio_if_it_fails():
     assert done.wait(5)
     th.close()
     assert all(g.all() for g in got)
+
+
+def test_threaded_gate_goes_on_after_on_frames_fails():
+    got, done = [], threading.Event()
+
+    def on_frames(pcm):
+        got.append(pcm)
+        if len(got) == 1:
+            raise RuntimeError('the side choked once')
+        if len(got) == 3:
+            done.set()
+    th = Threaded(EchoGate(Reference()), on_frames)
+    for _ in range(3):
+        th(np.ones(HOP, np.float32))
+    assert done.wait(5)
+    th.close()
+    assert th._lost == 1
+
+
+class _Out:
+    def __init__(self, name='out'):
+        self.name, self.flushed = name, 0
+
+    def play(self, pcm, sr):
+        pass
+
+    def flush(self):
+        self.flushed += 1
+
+    def resolve(self):
+        pass
+
+    def stop(self):
+        pass
+
+
+def _controller(monkeypatch, **kw):
+    from peresmeshnik import app
+    monkeypatch.setattr(app, 'Headphones', lambda *a, **k: _Out('headphones'))
+    ctl = app.Controller(type('O', (), {'side': lambda self, name: None})(), lambda state: None, **kw)
+    monkeypatch.setattr(ctl, 'virtual_mic', lambda: _Out('virtual mic'))
+    monkeypatch.setattr(ctl, '_input', lambda name, s: object())
+    made = {}
+    monkeypatch.setattr(app, 'Side', lambda name, s, inp, out, overlay, on_state, echo=None:
+                        made.setdefault(name, type('S', (), {'name': name, 'out': out, 'echo': echo})()))
+    return ctl, made
+
+
+def test_each_side_gates_with_the_other_sides_output(monkeypatch):
+    """'them' plays into the headphones (the microphone's echo), 'me' into the call (the far end's echo); each side's
+    gate takes the reference of the other side's output."""
+    from peresmeshnik import config
+    s = config.Settings()
+    s.local.echo_max_delay_s = 1.5
+    ctl, made = _controller(monkeypatch)
+    assert ctl._output('them', s).ref is ctl.mic_echo and ctl._output('me', s).ref is ctl.call_echo
+    them, me = ctl._side('them', s), ctl._side('me', s)
+    assert them.echo.ref is ctl.call_echo and me.echo.ref is ctl.mic_echo
+    assert them.out.ref is ctl.mic_echo and me.out.ref is ctl.call_echo
+    assert them.echo.delays.max() == pytest.approx(1.5, abs=0.02)
+
+
+def test_no_gate_for_a_file_or_the_wizards_test(monkeypatch, tmp_path):
+    from peresmeshnik import config
+    s = config.Settings()
+    ctl, made = _controller(monkeypatch, test=True)
+    assert ctl._side('them', s).echo is None
+    import soundfile as sf
+    sf.write(tmp_path / 'call.wav', np.zeros(SR, np.float32), SR)
+    ctl, made = _controller(monkeypatch, them_file=str(tmp_path / 'call.wav'))
+    assert ctl._side('them', s).echo is None and ctl._side('me', s).echo is not None
+
+
+def test_barge_in_and_live_cut_the_reference():
+    """Side.interrupt() and set_live() flush the output: what was queued will not play, so the reference forgets it."""
+    from peresmeshnik import app
+    for act in (lambda side: side.interrupt(), lambda side: side.set_live(True)):
+        ref = Reference()
+        side = app.Side.__new__(app.Side)
+        side.name, side.live, side.directions, side.out = 'them', False, [(object(), True, True)], Referenced(_Out(), ref)
+        side.out.play(np.ones(SR * 2, np.float32), SR)  # 2 s of speech queued from now
+        act(side)
+        now = time.perf_counter()
+        assert side.out.out.flushed == 1 and not ref.window(now + 0.05, now + 1.0).any()

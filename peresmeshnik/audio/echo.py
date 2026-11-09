@@ -35,6 +35,7 @@ _WIN = np.hanning(HOP).astype(np.float32)
 FLOOR = -9.0  # log10 band power of silence (speech at -26 dBFS is ~ -4 .. -6 per band)
 LOUD = FLOOR + 2.0  # a block of the reference that can make an echo
 SEARCH_EVERY = 4  # blocks between delay searches (64 ms): the echo path changes slower than that
+GAP_S = 0.5  # audio this much later than its samples counted: the capture lost samples (restarted), its clock resyncs
 
 
 def bands(blocks: np.ndarray) -> np.ndarray:
@@ -49,7 +50,7 @@ class Reference:
     the PCM of that time (zeros where nothing played), `features(times)` the bands of the blocks at those times.
     A TTS hands out seconds of speech at once: the ring also holds up to `ahead_s` queued before it plays."""
 
-    def __init__(self, seconds: float = 2.0, ahead_s: float = 30.0):
+    def __init__(self, seconds: float = 4.0, ahead_s: float = 30.0):  # 4 s back: a gate's delays up to 2.8 s
         self.n = int((seconds + ahead_s) * SR) // HOP * HOP
         self._pcm = np.zeros(self.n, np.float32)
         self._feat = np.full((self.n // HOP, len(_BANDS)), FLOOR, np.float32)
@@ -116,7 +117,7 @@ class EchoGate:
     counts blocks. The delay is searched in [min_delay_s, max_delay_s] over the last `window_s` of capture.
     One thread calls process() (a pipeline worker, never an audio callback)."""
 
-    def __init__(self, ref: Reference, max_delay_s: float = 1.0, min_delay_s: float = -0.1, window_s: float = 1.0,
+    def __init__(self, ref: Reference, max_delay_s: float = 2.0, min_delay_s: float = -0.1, window_s: float = 1.0,
                  tail_s: float = 0.15, rho_on: float = 0.5, margin_db: float = 6.0, excess: float = 0.25):
         self.ref = ref
         self.delays = np.arange(round(min_delay_s * SR / HOP), round(max_delay_s * SR / HOP) + 1) * HOP / SR
@@ -136,7 +137,10 @@ class EchoGate:
         # captures hand audio on in bursts (parec: several frames at once): the audio's own clock is the samples
         # counted, put where they came with the least delay over the last ~2 s
         self._fed += n
-        self._offsets.append((clock() if t_end is None else t_end) - self._fed / SR)
+        off = (clock() if t_end is None else t_end) - self._fed / SR
+        if self._offsets and off - min(self._offsets) > GAP_S:  # a gap (a helper restarted): the old times are off
+            self._offsets.clear()
+        self._offsets.append(off)
         t_end = min(self._offsets) + self._fed / SR
         if t_end - n / SR - self.span[1] > self.ref.loud_until:  # nothing we played can be in this audio
             self._hist.clear()
@@ -160,7 +164,7 @@ class EchoGate:
                     a = i * HOP - (len(x) - n)
                     out[max(a, 0):max(a + HOP, 0)] = 0
         if self.gated and len(self._carry):  # the start of the next block: the decision holds until it is known
-            out[n - len(self._carry):] = 0
+            out[max(n - len(self._carry), 0):] = 0  # a frame shorter than the carry is all of it
         return out
 
     def _decide(self, tc: float, f: np.ndarray) -> bool:
@@ -221,10 +225,11 @@ class Referenced:
 
 class Threaded:
     """`EchoGate` on its own thread between an audio callback (it only enqueues: `self(pcm)`) and `on_frames`.
-    If the gate fails, the audio passes ungated (logged once): an echo is better than a deaf side."""
+    If the gate fails, the audio passes ungated (logged once): an echo is better than a deaf side. If `on_frames`
+    fails on a frame, that frame is lost (logged once) and the next ones go on."""
 
     def __init__(self, gate: EchoGate, on_frames):
-        self.gate, self.on_frames, self._failed = gate, on_frames, False
+        self.gate, self.on_frames, self._failed, self._lost = gate, on_frames, False, 0
         self._q: queue.Queue = queue.Queue()
         self._thread = threading.Thread(target=self._run, name='echo-gate', daemon=True)
         self._thread.start()
@@ -241,7 +246,12 @@ class Threaded:
                 except Exception:
                     logging.getLogger('peresmeshnik').exception('echo gate failed: the audio passes ungated')
                     self._failed = True
-            self.on_frames(pcm)
+            try:
+                self.on_frames(pcm)
+            except Exception:
+                self._lost += 1
+                if self._lost == 1:
+                    logging.getLogger('peresmeshnik').exception('after the echo gate: a frame was lost')
 
     def close(self) -> None:
         self._q.put(None)

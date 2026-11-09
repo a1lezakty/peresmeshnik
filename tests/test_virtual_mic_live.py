@@ -138,20 +138,22 @@ def test_stalled_input_says_the_rest():
 
 
 def test_live_voice_feeds_only_the_switch(monkeypatch):
-    """me -> them in the cloud with local subtitles: while live, the subtitles' direction gets no input (nothing is
-    translated, no CPU), only a pause that closes its open clause; back to translation, both are fed again."""
-    from peresmeshnik import config, pipeline
+    """me -> them in the cloud with local subtitles (one cloud/fallback.Fallback holding both): while live, neither the
+    voice's nor the subtitles' direction gets input (nothing is translated, no CPU), only a pause that closes their open
+    clause; back to translation, both are fed again."""
+    from peresmeshnik import config
     from peresmeshnik.app import Side
+    from peresmeshnik.cloud.fallback import Fallback
     s = config.Settings()
     s.me_to_them, s.cloud.subtitles = 'cloud', False
     voice_dir, captions = FakeDirection(), FakeDirection()
-    captions.warm_up = lambda: None
-    monkeypatch.setattr(Side, '_cloud', lambda self, s: voice_dir)
-    monkeypatch.setattr(pipeline, 'make_local', lambda *a, **k: captions)
+    captions.warm_up, captions.mt = (lambda: None), None
+    both = Fallback('me', 'en', False, make_cloud=lambda: voice_dir, make_local=lambda tts: captions, make_tts=lambda: None)
+    monkeypatch.setattr(Side, '_cloud', lambda self, s: both)
     out = type('O', (), {'play': lambda *a: None, 'flush': lambda *a: None, 'stop': lambda *a: None})()
     inp = type('I', (), {'start': lambda self, cb: setattr(self, 'cb', cb), 'stop': lambda self: None})()
     side = Side('me', s, inp, out, type('V', (), {'show': lambda self, c: None})())
-    assert isinstance(side.directions[0][0], LiveSwitch) and side.directions[1][0] is captions
+    assert isinstance(side.directions[0][0], LiveSwitch) and side.directions[0][0].inner is both
     side.start()
     frame = np.zeros(512, np.float32)
     inp.cb(frame)

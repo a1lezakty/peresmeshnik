@@ -1,8 +1,6 @@
 # PyInstaller spec: Peresmeshnik for Windows (x64), one folder, with the Piper runner as a second program beside it.
 # Build: packaging/windows/build.sh (it also adds the licenses, the .zip and the Inno Setup installer).
-import importlib.util
 import shutil
-import sys
 from pathlib import Path
 
 from PyInstaller.config import CONF
@@ -11,20 +9,10 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy
 ROOT = Path(SPECPATH).parents[1]
 EXCLUDES = ['torch', 'torchaudio', 'TTS', 'tkinter', 'matplotlib', 'pytest', 'IPython', 'jeepney']  # no torch: §10
 
-# the whole standard library: the voice pack (torch, TTS) runs on this interpreter and imports stdlib modules our own
-# code never does (unittest.mock, cProfile, ...)
-SKIP = {'tkinter', '_tkinter', 'turtle', 'turtledemo', 'idlelib', 'test', 'ensurepip', 'lib2to3', 'pydoc_data', 'venv', 'this', 'antigravity'}
-STDLIB = []
-for name in sorted(sys.stdlib_module_names - SKIP):
-    spec = importlib.util.find_spec(name)
-    if spec is None:  # POSIX-only modules
-        continue
-    STDLIB += collect_submodules(name, filter=lambda n: '.test' not in n) if spec.submodule_search_locations else [name]
-
 app = Analysis(
     [str(ROOT / 'packaging' / 'entry.py')],
     pathex=[str(ROOT)],
-    hiddenimports=collect_submodules('peresmeshnik') + STDLIB,  # commands and engines are imported by name, when used
+    hiddenimports=collect_submodules('peresmeshnik'),  # commands and engines are imported by name, when used
     datas=[(str(ROOT / 'peresmeshnik' / 'models.toml'), 'peresmeshnik'),
            (str(ROOT / 'peresmeshnik' / 'ui' / 'samples'), 'peresmeshnik/ui/samples'),
            (str(ROOT / 'assets' / 'icons'), 'assets/icons'),  # ui/tray.py finds them two levels above itself

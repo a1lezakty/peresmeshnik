@@ -51,6 +51,10 @@ class Cloud:
     transcribe_model: str = 'gemini-3.5-transcribe-live'
     subtitles: bool = False  # cloud subtitles from transcribe-live; default: local ASR (faster, BENCH)
     reconnect_s: float = 540.0  # hand over to a fresh connection before the server's ~10 min limit
+    # "too slow": no translated voice this long after a phrase began -> the side goes local until the cloud is back
+    # (the first translated voice after a phrase began: p90 3.3-4.6 s, max 4.7 s measured, BENCH). A drop, an error or
+    # the quota: at once
+    fallback_after_s: float = 6.0
 
 
 @dataclass
@@ -59,6 +63,7 @@ class Ui:
     mic: str = ''  # me -> them input ('' = system default)
     headphones: str = ''  # them -> me output sink ('' = system default)
     call_app: str = ''  # them -> me: the call app moved to "Peresmeshnik Call" (process binary, else app name; '' = none)
+    show_latency: bool = False  # the overlay shows per clause: end of its speech -> its subtitle, -> its voice
 
 
 @dataclass

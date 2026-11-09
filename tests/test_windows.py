@@ -525,6 +525,21 @@ def test_closing_the_wizard_by_its_x_keeps_the_app(tmp_path):
             p.kill()
 
 
+def test_wm_close_to_a_hidden_helper_of_qt_quits(tmp_path):
+    """taskkill with no window on screen (right after the start, the wizard not shown yet) posts WM_CLOSE to a hidden
+    window, maybe one of Qt's helpers ('_q_titlebar' of the wizard's title bar metrics): the app quits (it stayed, with
+    the wizard, in 10 of 40 runs from the Start menu shortcut, BENCH stage 5)."""
+    p, _ = _start(tmp_path, wizard=True)
+    try:
+        helper = [h for h in toplevel() if pid_of(h) in tree(p.pid) and describe(h).startswith("'_q_titlebar'")]
+        assert helper, [describe(h) for h in toplevel() if pid_of(h) in tree(p.pid)]
+        assert user32.PostMessageW(helper[0], 0x0010, 0, 0)  # WM_CLOSE, posted as taskkill does
+        assert p.wait(15) == 0
+    finally:
+        if p.poll() is None:
+            p.kill()
+
+
 def test_wizard_pages_show_all_their_text(tmp_path, monkeypatch):
     """QWizard's Windows style sized the pages without their wrapped text: the last lines were cut off. Every page."""
     from PySide6.QtWidgets import QLabel

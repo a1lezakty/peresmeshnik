@@ -32,12 +32,14 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from peresmeshnik import __version__, config
+from peresmeshnik import __version__, config, crash
 from peresmeshnik.audio import c_locale
 from peresmeshnik.audio.resample import Resampler
-from peresmeshnik.engines import SAMPLE_RATE, Caption, Speech
+from peresmeshnik.engines import SAMPLE_RATE, Caption, Latency, Speech
 
 log = logging.getLogger('peresmeshnik.app')
+ARROW = {'them': 'them → me', 'me': 'me → them'}
+RESTARTS = 3  # a side that fails this often within a minute stays off, with the reason
 OURS = 'peresmeshnik_'  # every PipeWire device the app makes starts with this
 MIC_SINK = 'peresmeshnik_mic_sink'  # = audio/virtual_mic_linux.SINK, without importing it on other OSes
 BARGE_IN_WORDS = 3  # my clause has this many words: I talk over their voice (fewer: "yeah", "ага" while listening)
@@ -52,14 +54,6 @@ def not_ours(name: str, what: str) -> str:
     if name.startswith(OURS):
         raise RuntimeError(f'the {what} is our own device {name}: choose your real device in the settings or the system')
     return name
-
-
-class NoTts:
-    """TTS that says nothing: a local pipeline that only makes subtitles (cloud voice, local captions)."""
-    sample_rate = SAMPLE_RATE
-
-    def synth(self, text, lang, voice=None):
-        return iter(())
 
 
 class FileIn:
@@ -112,6 +106,7 @@ class Headphones:
         if sys.platform == 'win32':
             from peresmeshnik.audio import winaudio
             names = winaudio.output_names()
+            crash.private(*names)
             is_cable = lambda n: 'CABLE' in n.upper()  # noqa: E731  VB-Cable is the call's mic side, not headphones
             if self.sink and self.sink != exclude and self.sink in names:
                 name = self.sink
@@ -144,8 +139,10 @@ class Headphones:
             if name == capture_macos.CALL_DEVICE and capture_macos.path() == 'blackhole':  # the call would hear itself
                 raise RuntimeError(f'the headphones are {name}, the call app\'s speaker: choose your real headphones in the '
                                    'settings or the system')
+            crash.private(name)
             return name
         names = [line.split('\t')[1] for line in pactl('list', 'short', 'sinks').splitlines() if '\t' in line]
+        crash.private(*names)
         if self.sink in names:
             return self.sink
         return not_ours(pactl('get-default-sink').strip(), 'default output')
@@ -269,6 +266,7 @@ def mic_source(saved: str, fallback: str = '') -> str:
     PipeWire source when it is there, else the default input, else `fallback` (the default from before our devices
     existed); never one of ours (the app would hear itself)."""
     names = [line.split('\t')[1] for line in pactl('list', 'short', 'sources').splitlines() if '\t' in line]
+    crash.private(*names)
     if saved and (saved in names or saved.startswith(OURS)):
         return not_ours(saved, 'microphone')
     now = pactl('get-default-source').strip()
@@ -439,6 +437,8 @@ def remove_stale() -> None:
 
 class Side:
     """One direction with its input, output and subtitles. `name` is 'them' (them -> me) or 'me'."""
+    on_failure = None  # (why, exception): the controller restarts the side; None: the tray hears it
+    _stopping = False
 
     def __init__(self, name: str, s: config.Settings, inp, out, overlay, on_error=lambda text: None):
         self.name, self.inp, self.out, self.overlay, self.on_error = name, inp, out, overlay, on_error
@@ -451,23 +451,8 @@ class Side:
         self._live_q: queue.Queue = queue.Queue()  # the live pass-through, played on its own thread
         if self.engine == 'local':
             self.directions.append((self._local(s), True, True))
-        else:
-            voice = self._cloud(s)
-            local_captions = None
-            if not s.cloud.subtitles:  # subtitles from the local ASR (faster than the cloud's, ARCHITECTURE §4)
-                from peresmeshnik import models
-                from peresmeshnik.pipeline import make_local
-                try:
-                    local_captions = make_local(self.src, self.tgt, tts=NoTts(), settings=s)
-                    local_captions.warm_up()
-                except models.ModelMissing as e:
-                    log.warning('%s: local subtitles need %s; the cloud transcripts are shown instead', name, e)
-                except BaseException:
-                    voice.close()  # its Live session is already open
-                    raise
-            self.directions.append((voice, local_captions is None, True))
-            if local_captions:
-                self.directions.append((local_captions, True, False))
+        else:  # Gemini speaks; the local path makes the subtitles and speaks when the cloud fails (cloud/fallback.py)
+            self.directions.append((self._cloud(s), True, True))
         d, captions, speech = self.directions[0]
         if name == 'me' and not getattr(d, 'supports_live', False):  # "translation <-> live voice" crossfaded (S2)
             from peresmeshnik.audio.mic import LiveSwitch
@@ -475,10 +460,11 @@ class Side:
 
     def _local(self, s: config.Settings):
         from peresmeshnik.pipeline import make_local
+        from peresmeshnik.voice import STOCK
         if self.name == 'them':
             from peresmeshnik.pipeline import MAX_LAG_S
             d = make_local(self.src, self.tgt, settings=s, max_lag_s=MAX_LAG_S)  # the queue policy: subtitles keep the rest
-        elif s.local.clone == 'piper':  # voice.STOCK: a stock voice, live where the clone falls behind (an 8 GB Mac, BENCH)
+        elif s.local.clone == STOCK:  # a stock voice, live where the clone falls behind (an 8 GB Mac, BENCH)
             d = make_local(self.src, self.tgt, settings=s)
         else:
             if not s.local.voice:
@@ -492,17 +478,24 @@ class Side:
                                    'or switch "Me -> them" to cloud') from e
             d = make_local(self.src, self.tgt, settings=s, tts=XttsClone(models.path(s.local.clone), threads=s.local.threads),
                            voice=voice.load(s.local.voice))
+        if (self.name == 'them' or s.local.clone == STOCK) and (tts := getattr(d, 'tts', None)) is not None:
+            from peresmeshnik.local.tts import PiperTts  # the Piper runner dies: only it starts again
+            d.tts = crash.Respawn(lambda: PiperTts(s.local.tts[self.tgt], threads=s.local.threads), self._tts_respawned, tts)
         d.warm_up()
         return d
 
     def _cloud(self, s: config.Settings):
-        from peresmeshnik.cloud import api_key
-        from peresmeshnik.cloud.gemini import GeminiDirection
+        from peresmeshnik.cloud import api_key, fallback
         try:
             key = api_key(s.cloud)
         except SystemExit as e:  # the CLI's way to say "no key"
             raise RuntimeError(str(e)) from None
-        return GeminiDirection(self.src, self.tgt, key, s.cloud)
+        return fallback.make(self.name, s, key, on_state=self.on_error, on_respawn=self._tts_respawned)
+
+    def _tts_respawned(self, e: BaseException) -> None:  # the speak worker's thread: the voice goes on, the side too
+        crash.report(f'{ARROW[self.name]}: the voice helper died', e, quiet=True)
+        self.on_error(f'note: {ARROW[self.name]}: the voice helper stopped ({e}) and was started again; a report '
+                      'without your data is in the tray menu (Crash report…)')
 
     def start(self) -> None:
         for target, args in [(self._consume, d) for d in self.directions] + [(self._pass_through, ())]:
@@ -537,14 +530,28 @@ class Side:
         try:
             for e in d.events():
                 if isinstance(e, Caption) and captions:
+                    crash.said(e.original, e.translation, final=e.final)  # kept out of any crash report
                     self.overlay.show(e)
                     if not e.final and len(e.original.split()) >= BARGE_IN_WORDS:
                         self.on_talk()
                 elif isinstance(e, Speech) and speech and (not self.live or self._supports_live):
                     self.out.play(e.pcm, e.sample_rate)
-        except Exception as e:  # a dead session (key revoked, quota, network) must show in the tray, not only in the log
+                elif isinstance(e, Latency) and captions and hasattr(self.overlay, 'latency'):
+                    self.overlay.latency(e)
+            if self._stopping:
+                return
+            inner = getattr(d, 'inner', d)  # LiveSwitch's
+            if hasattr(inner, 'finish'):
+                inner.finish()  # raises with the error of a worker that died (the Piper runner gone, a bug)
+            raise RuntimeError('its events ended by themselves')
+        except Exception as e:  # a dead direction must show in the tray, not only in the log
+            if self._stopping:
+                return
             log.exception('%s: direction failed', self.name)
-            self.on_error(f'error: {self.name}: {e}')
+            if self.on_failure:
+                self.on_failure(f'the translation failed ({type(e).__name__}: {e})', e)
+            else:
+                self.on_error(f'error: {self.name}: {e}')
 
     def interrupt(self) -> None:
         """Barge-in: the user talks over this side's voice. What is not heard yet goes; the subtitles stay."""
@@ -566,6 +573,7 @@ class Side:
         self.live = on
 
     def stop(self) -> None:
+        self._stopping = True
         self.inp.stop()
         self._live_q.put(None)
         for d, _, _ in self.directions:
@@ -593,6 +601,7 @@ class Controller:
         self._vmic = self._call = self._router = self._loop = None
         self._through = self._through_arrival = None  # macOS < 14.4, translation off: the call app's speaker on to the headphones
         self._mic = ''  # the default input as it was before our devices existed
+        self._restarts: dict[str, list[float]] = {}  # side -> times of its restarts in the last minute
 
     def submit(self, fn, *args):
         """None once quit() shut the control thread down (a Core Audio notification can still come then)."""
@@ -762,17 +771,12 @@ class Controller:
         for name in ('them', 'me'):  # a side that cannot start (no key, no voice pack, no device) does not stop the other
             if self.devices or files[name]:
                 try:
-                    inp = FileIn(files[name]) if files[name] else self._input(name, s)
-                    self.sides.append(Side(name, s, inp, self._output(name, s), self.overlay.side(name), self.on_state))
+                    self.sides.append(self._side(name, s))
                 except Exception as e:
                     log.exception('%s', name)
                     failed.append(f'{name}: {e}')
         if any(x.name == 'me' for x in self.sides):
             self._loopback(False)  # the call hears the user until the translation is ready
-        them = next((x for x in self.sides if x.name == 'them'), None)
-        for x in self.sides:
-            if x.name == 'me' and them is not None:
-                x.on_talk = them.interrupt
         self._through_stop()  # BlackHole 16ch goes to the translation now
         for side in self.sides:
             side.set_live(self.live)
@@ -786,6 +790,66 @@ class Controller:
                           f'ready in {time.perf_counter() - t:.1f} s)')
         if call.startswith('call app: none'):
             self.on_state('error: choose the call app in the tray menu (Call app): until then the call is not translated')
+
+    def _side(self, name: str, s: config.Settings) -> Side:
+        inp = FileIn(f) if (f := {'them': self.them_file, 'me': self.me_file}[name]) else self._input(name, s)
+        side = Side(name, s, inp, self._output(name, s), self.overlay.side(name), self.on_state)
+        side.on_failure = lambda why, e: self.submit(self._restart, side, why, e)
+        if name == 'me':  # I talk over their voice: barge-in on the them -> me side of now
+            side.on_talk = lambda: [x.interrupt() for x in self.sides if x.name == 'them']
+        return side
+
+    def failed(self, inp, why: str, restart: bool = True) -> None:
+        """An input ended under its side (the call sound helper gone; any thread): that side restarts; a late end of an
+        input whose side was restarted since does nothing. `restart` False (no helper died: the call app is not
+        running): the route is undone, so the call is heard as usual, and the tray says why."""
+        def run():
+            side = next((x for x in self.sides if x.inp is inp), None)
+            if side is None:
+                return
+            if restart:
+                self._restart(side, why, None)
+            else:
+                self._unroute()
+                self.on_state(f'error: {why}')
+        self.submit(run)
+
+    def _restart(self, side: Side, why: str, e: BaseException | None) -> None:
+        """The control thread: a side whose direction died or whose input ended starts again, with one message and a
+        report without the user's data; after RESTARTS within a minute it stays off and says why."""
+        if side not in self.sides or not self.on:
+            return
+        crash.report(f'{ARROW[side.name]}: {why}', e, self.settings, quiet=True)  # the message below names it
+        self.sides.remove(side)
+        if side.name == 'them':  # before its input stops (the route holds it): the call is heard as usual meanwhile,
+            self._unroute()  # Windows: un-muted; the new side routes it again
+        try:
+            side.stop()
+        except Exception:
+            log.exception('stopping %s', side.name)
+        now = time.monotonic()
+        times = self._restarts[side.name] = [t for t in self._restarts.get(side.name, ()) if now - t < 60]
+        if len(times) >= RESTARTS:
+            self.on_state(f'error: {ARROW[side.name]} stopped: it failed {RESTARTS + 1} times within a minute ({why}). '
+                          'A report without your data is in the tray menu (Crash report…)')
+            if not self.sides:
+                self._off()
+            return
+        times.append(now)
+        s = self.settings or config.load()
+        try:
+            new = self._side(side.name, s)
+        except Exception as ex:
+            log.exception('%s', side.name)
+            self.on_state(f'error: {ARROW[side.name]} stopped: {why}; it cannot start again: {ex}')
+            return
+        self.sides.append(new)
+        new.set_live(self.live)
+        new.start()
+        if new.name == 'them' and self.devices:  # the call app's sound to the new input (a tap, a loopback, the sink)
+            self._route(s)
+        self.on_state(f'note: {ARROW[side.name]} restarted after an error ({why}); a report without your data is in '
+                      'the tray menu (Crash report…)')
 
     def _route(self, s: config.Settings) -> str:
         """The call app's sound into the call sink (Linux) or a tap of it (macOS 14.4+) while translating: the app
@@ -809,6 +873,7 @@ class Controller:
             app = s.ui.call_app
             if not app and (app := guess_call_app()):
                 self._save_call_app(app)
+            crash.private(app)
             if not app:
                 return 'call app: none; '
             if tap is not None:
@@ -838,10 +903,6 @@ class Controller:
                 log.exception('call routing')
                 self.on_state(f'error: give the call sound back by hand (pavucontrol): {e}')
 
-    def _them_loopback_ended(self, why: str) -> None:  # the control thread (from the loopback's on_end)
-        self._unroute()  # router.stop un-mutes the call app (restore_call), so the call is heard as usual
-        self.on_state(f'error: the call sound capture stopped: {why}')
-
     def _save_call_app(self, app: str) -> None:
         if self.settings is not None:
             self.settings.ui.call_app = app
@@ -864,27 +925,32 @@ class Controller:
         s = s or self.settings or config.load()
         if name == 'them' and sys.platform == 'win32':
             from peresmeshnik.audio import capture_windows
-            # the loopback ended (helper exited, call app restarted): hand it to the control thread to un-mute and report
-            on_end = lambda why: self.submit(self._them_loopback_ended, why)  # noqa: E731
             code, why = capture_windows.check()
             if code:
                 raise RuntimeError(why)
-            return capture_windows.ProcessLoopback(on_end=on_end)  # the app is chosen in _route, after the start
+            # the loopback ended: its helper died -> the side restarts (un-muted meanwhile, _restart); the call app is
+            # not running (not yet, or closed: "<app> is not running", capture_windows) -> no restart, only un-muted
+            tap = capture_windows.ProcessLoopback(on_end=lambda why: self.failed(
+                tap, f'the call sound capture stopped: {why}', restart=not why.endswith(' is not running')))
+            return tap  # the app is chosen in _route, after the start
         if name == 'them' and sys.platform == 'darwin':
             from peresmeshnik.audio import capture_macos
-            on_end = lambda why: self.on_state(f'error: the call sound capture stopped: {why}')  # noqa: E731
+            on_end = lambda why: self.failed(inp, f'the call sound capture stopped: {why}')  # noqa: E731
             if capture_macos.path() == 'blackhole':
-                return capture_macos.BlackHoleIn(on_end=on_end)
+                inp = capture_macos.BlackHoleIn(on_end=on_end)
+                return inp
             code, why = capture_macos.check()
             if code:
                 raise RuntimeError(why)
-            return capture_macos.ProcessTap(on_end=on_end)  # the app is chosen in _route, after the start
+            inp = capture_macos.ProcessTap(on_end=on_end)  # the app is chosen in _route, after the start
+            return inp
         if name == 'them':
             if self._call is None:
                 raise RuntimeError(f'no call sink ({self.startup_error or "no sound server"})')
             from peresmeshnik.audio.capture_pipewire import PipeWireCapture
-            return PipeWireCapture(self._call.name, make_sink=False,  # the app's sink, kept for its whole run
-                                   on_end=lambda why: self.on_state(f'error: the call sound capture stopped: {why}'))
+            inp = PipeWireCapture(self._call.name, make_sink=False,  # the app's sink, kept for its whole run
+                                  on_end=lambda why: self.failed(inp, f'the call sound capture stopped: {why}'))
+            return inp
         if sys.platform == 'darwin':  # the helper keeps to the saved microphone or the default one by itself
             from peresmeshnik.audio.mic import followed
             return followed(s.ui.mic, self.on_state)
@@ -1048,6 +1114,12 @@ def cli(argv=None) -> int:
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO if a.verbose else logging.WARNING, stream=sys.stderr,
                         format='%(asctime)s %(name)s %(message)s')
+    try:
+        settings = config.load()
+    except Exception as e:  # the app still starts; the settings window says it again
+        log.warning('settings: %s', e)
+        settings = None
+    earlier = crash.install(settings, a.verbose)  # the log file, the hooks; hard crashes of the last run as reports
     sys.stdout.reconfigure(encoding='utf-8')
     if use_xwayland():
         log.info('Wayland session: the overlay runs through XWayland')
@@ -1082,6 +1154,7 @@ def cli(argv=None) -> int:
     class Bridge(QObject):
         state = Signal(str)  # from the control thread to the GUI thread
         started = Signal()
+        report = Signal(str, bool)  # a crash report was written (any thread): its path, quiet
 
         @Slot()
         def wake(self):  # a queued call: the GUI loop runs once more
@@ -1094,6 +1167,8 @@ def cli(argv=None) -> int:
     ctl = Controller(overlay, bridge.state.emit, a.them_file, a.me_file)
     tray = Tray(ctl)
     bridge.state.connect(tray.set_state)
+    bridge.report.connect(tray.report_ready)
+    crash.on_report.append(lambda p, quiet: bridge.report.emit(str(p), quiet))
     bridge.state.connect(lambda st: print(st, flush=True))  # tests and the idle watchdog read these lines
 
     def toggle_live():
@@ -1130,6 +1205,8 @@ def cli(argv=None) -> int:
             bridge.state.emit(f'Peresmeshnik {__version__}: idle, translation off')
             if ctl.startup_error:
                 tray.message(ctl.startup_error)
+            for p in earlier:  # the last run crashed
+                tray.report_ready(str(p), why='Peresmeshnik stopped unexpectedly last time')
     dispatcher.aboutToBlock.connect(announce)
     if a.on:
         QTimer.singleShot(0, lambda: tray.set_translation(True))
@@ -1137,6 +1214,7 @@ def cli(argv=None) -> int:
     qapp.aboutToQuit.connect(lambda: log.info('overlay: %s', overlay.stats()))
     qapp.aboutToQuit.connect(binding.close)
     qapp.aboutToQuit.connect(lock.unlock)
+    qapp.aboutToQuit.connect(crash.uninstall)  # a clean exit: no fault file for the next start
     _quit_on_signals(qapp)
     return qapp.exec()
 

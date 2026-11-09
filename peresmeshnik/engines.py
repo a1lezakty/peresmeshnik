@@ -36,6 +36,17 @@ class Speech:
 
 
 @dataclass
+class Latency:
+    """A latency of one clause, in a direction's `events()`: seconds from the end of the clause's speech to `what`:
+    'caption' (its translated subtitle is out), 'voice' (its translated voice starts playing); the local pipeline may add
+    its links ('vad', 'asr', 'mt', 'tts_first', 'out'). `clause` as in `Caption` (-1: a cloud direction, no number).
+    Consumers skip the kinds they do not know; the overlay shows them only with `ui.show_latency`."""
+    clause: int
+    what: str
+    s: float
+
+
+@dataclass
 class Voice:
     """The user's cloned voice: made once from a 30-60 s recording, stored in the user data dir."""
     name: str
@@ -87,7 +98,7 @@ class Direction(Protocol):
     """One translation direction ("them -> me" or "me -> them") behind one interface:
     local = Vad + Asr + Translator + Tts composed by the pipeline; cloud = one Gemini Live session."""
     def feed(self, pcm: np.ndarray) -> None: ...
-    def events(self) -> Iterator[Caption | Speech]: ...  # blocks until the next event
+    def events(self) -> Iterator[Caption | Speech | Latency]: ...  # blocks until the next event
     def close(self) -> None: ...  # free models / close the session; idle again
 
     supports_live: bool = False  # True where set_live() works; the app checks getattr(d, 'supports_live', False)

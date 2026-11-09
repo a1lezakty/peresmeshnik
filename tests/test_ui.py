@@ -73,7 +73,7 @@ def test_overlay_rows():
     them.show(Caption('two', clause=1))  # the partial of clause 1 comes before the final of 0
     them.show(Caption('One.', 'Один.', final=True, clause=0))
     settle()
-    assert [r[1:] for r in o._shown] == [('One.', 'Один.'), ('two', '')]
+    assert [r[1:3] for r in o._shown] == [('One.', 'Один.'), ('two', '')]
     # cloud captions have no clause number: partials grow one row, a final closes it,
     # a translation goes to the oldest row of that side still without one
     o._on_clear()
@@ -82,7 +82,42 @@ def test_overlay_rows():
     me.show(Caption('Как'))
     me.show(Caption('Привет всем.', 'Hello everyone.', final=True))
     settle()
-    assert [r for r in o._shown] == [('» ', 'Привет всем.', 'Hello everyone.'), ('» ', 'Как', '')]
+    assert [r for r in o._shown] == [('» ', 'Привет всем.', 'Hello everyone.', ''), ('» ', 'Как', '', '')]
+
+
+def test_overlay_shows_latency_only_when_asked():
+    """Show latency (tray, ui.show_latency): the clause's numbers at the end of its original; off by default; the
+    pipeline's own links are not shown; a cloud phrase's go to its row (the newest final by the phrase's end)."""
+    from peresmeshnik.engines import Latency
+    o = SubtitleOverlay(rows=2)
+    them, me = o.side('them'), o.side('me')
+    them.show(Caption('One.', 'Один.', final=True, clause=0))
+    them.latency(Latency(0, 'caption', 0.42))
+    them.latency(Latency(0, 'voice', 1.31))
+    them.latency(Latency(0, 'asr', 0.12))
+    settle()
+    assert o._shown[0][3] == '' and o.updates == 1  # off: no number, no repaint
+    o.show_latency = True
+    them.latency(Latency(0, 'voice', 1.3))
+    settle()
+    assert o._shown[0][3] == '  ⏱ subtitle +0.42 s · voice +1.30 s'
+    clock = [100.0]
+    o.clock = lambda: clock[0]
+    me.show(Caption('Привет.', 'Hello.', final=True))  # phrase A: ended at 99.6, final at 100
+    clock[0] = 102.0
+    me.show(Caption('Как', '', final=False))  # phrase B begins
+    clock[0] = 103.0
+    me.latency(Latency(-1, 'voice_end', 3.4))  # A's voice ended 3.4 s after A: A's row, not B's (the newest)
+    settle()
+    assert [x[3] for x in o._shown[-2:]] == ['  ⏱ voice ends +3.40 s', ''], o._shown
+    clock[0] = 104.0
+    me.show(Caption('Как дела?', 'How are you?', final=True))
+    clock[0] = 107.5
+    me.latency(Latency(-1, 'voice_end', 3.0))
+    settle()
+    assert o._shown[-1][3] == '  ⏱ voice ends +3.00 s', o._shown
+    o.set_show_latency(False)  # the tray's switch: off at once, no new subtitle needed
+    assert all(x[3] == '' for x in o._shown), o._shown
 
 
 class FakeDirection:
@@ -438,16 +473,18 @@ def test_side_reports_a_dead_direction_and_closes_the_cloud_on_a_failed_start(mo
     assert errors == ['error: them: quota exceeded']
 
     s.them_to_me, s.cloud.subtitles = 'cloud', False  # cloud voice + local subtitles that fail to load
-    cloud = FakeDirection()
-    monkeypatch.setattr(Side, '_cloud', lambda self, s: cloud)
+    opened = []
     from peresmeshnik import pipeline
+    from peresmeshnik.cloud import gemini
+    monkeypatch.setenv('GEMINI_API_KEY', 'not-a-key')
+    monkeypatch.setattr(gemini, 'GeminiDirection', lambda *a, **k: opened.append(1) or FakeDirection())
 
     def broken(*a, **k):
         raise RuntimeError('onnxruntime: bad model file')
     monkeypatch.setattr(pipeline, 'make_local', broken)
     with pytest.raises(RuntimeError, match='bad model'):
         Side('them', s, FakeIn(), FakeOut(), None)
-    assert cloud.closed.is_set()  # its session does not stay open
+    assert not opened  # no session left open: the local path is made first
 
 
 def test_supports_live_direction_gets_the_switch_and_keeps_its_input(monkeypatch):

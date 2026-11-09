@@ -11,8 +11,8 @@ import sys
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Signal
-from PySide6.QtGui import QActionGroup, QIcon, QKeySequence
+from PySide6.QtCore import QObject, QUrl, Signal
+from PySide6.QtGui import QActionGroup, QDesktopServices, QGuiApplication, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMenu,
+    QPlainTextEdit,
     QPushButton,
     QSpinBox,
     QSystemTrayIcon,
@@ -104,6 +105,11 @@ class Tray(QObject):
         m.addSeparator()
         m.addAction('Settings…', self.open_settings)
         m.addAction('Setup wizard…', self.open_wizard)
+        self.show_latency = m.addAction('Show latency')  # per clause in the subtitles: end of speech -> subtitle, -> voice
+        self.show_latency.setCheckable(True)
+        self.show_latency.toggled.connect(self._latency_chosen)
+        self.crash = m.addAction('Crash report…', self.open_report)
+        self.crash.setVisible(bool(_reports()))
         m.addSeparator()
         m.addAction('Quit', self._quit)
         self.sync()
@@ -132,6 +138,11 @@ class Tray(QObject):
     def sync(self) -> None:
         """Menu checks from the settings and the controller (after a change elsewhere)."""
         s = config.load()
+        self.show_latency.blockSignals(True)
+        self.show_latency.setChecked(s.ui.show_latency)
+        self.show_latency.blockSignals(False)
+        if hasattr(overlay := getattr(self.ctl, 'overlay', None), 'set_show_latency'):
+            overlay.set_show_latency(s.ui.show_latency)
         for key, group in self.engines.items():
             for a in group.actions():
                 a.setChecked(a.data()[1] == getattr(s, key))
@@ -157,9 +168,11 @@ class Tray(QObject):
         self.icon.setToolTip(f'Peresmeshnik: {state}')
         if self.fallback:
             self.fallback_status.setText(state)
-        on = state.startswith(('warming up', 'translating'))
-        self.live.setEnabled(self.ctl.on or state.startswith('translating'))
+        on = state.startswith(('warming up', 'translating', 'note'))
+        self.live.setEnabled(self.ctl.on or state.startswith(('translating', 'note')))
         self.live.setChecked(self.ctl.live)
+        if state.startswith('note'):  # translation goes on, differently (a cloud side went local, or back): said once
+            self.message(state.removeprefix('note: '))
         if not state.startswith('error'):
             self.translation.blockSignals(True)
             self.translation.setChecked(on)
@@ -169,6 +182,23 @@ class Tray(QObject):
             self.translation.setChecked(self.ctl.on)
             self.translation.blockSignals(False)
             self.message(state)
+
+    def report_ready(self, path: str, quiet: bool = False, why: str = 'An error was recorded') -> None:
+        """A crash report is there (crash.py): the menu item shows; one message per report, none when the app's own
+        message about it says so already (`quiet`: a side restarted)."""
+        self.crash.setVisible(True)
+        if not quiet:
+            self.message(f'{why}. A report without your data (nothing is sent): tray menu → Crash report…')
+
+    def open_report(self) -> None:
+        if reports := _reports():
+            self._show(ReportDialog(reports[-1]))
+
+    def _latency_chosen(self, on: bool) -> None:
+        s = config.load()
+        s.ui.show_latency = on
+        config.save(s)
+        self.sync()
 
     def set_translation(self, on: bool) -> None:
         self.translation.blockSignals(True)
@@ -252,6 +282,44 @@ class Tray(QObject):
     def _quit(self) -> None:
         from PySide6.QtWidgets import QApplication
         QApplication.quit()
+
+
+def _reports() -> list[Path]:
+    from peresmeshnik import crash
+    return sorted(crash.reports_dir().glob('crash-*.txt')) if crash.reports_dir().is_dir() else []
+
+
+class ReportDialog(QDialog):
+    """The newest crash report as it is, to read before sending: copy it, or open a GitHub issue with it."""
+
+    def __init__(self, path: Path):
+        super().__init__()
+        self.path, self.text = path, path.read_text('utf-8', 'replace')
+        self.setWindowTitle('Peresmeshnik crash report')
+        self.resize(760, 520)
+        lay = QVBoxLayout(self)
+        note = QLabel('The app sends nothing. This report has no subtitles, audio, device names or keys: read it, then '
+                      'copy it or open a GitHub issue with it and send it yourself.')
+        note.setWordWrap(True)
+        view = QPlainTextEdit(self.text)
+        view.setReadOnly(True)
+        b = QDialogButtonBox(QDialogButtonBox.Close)
+        for title, fn in (('Copy', self.copy), ('Open a GitHub issue', self.issue), ('Show the folder', self.folder)):
+            b.addButton(title, QDialogButtonBox.ActionRole).clicked.connect(fn)
+        b.rejected.connect(self.reject)
+        for w in (note, view, b):
+            lay.addWidget(w)
+
+    def copy(self) -> None:
+        QGuiApplication.clipboard().setText(self.text)
+
+    def issue(self) -> None:
+        from peresmeshnik import crash
+        self.copy()  # the link may carry only its start
+        QDesktopServices.openUrl(QUrl(crash.issue_url(self.text), QUrl.TolerantMode))
+
+    def folder(self) -> None:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.path.parent)))
 
 
 class _Window(QWidget):

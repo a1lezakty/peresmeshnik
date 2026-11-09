@@ -77,6 +77,24 @@ to the same events. Settings choose per direction. Typical mixes: on an 8 GB Mac
 local (cheap) and *me → them* in the cloud, because no local clone runs in real time there (§6);
 with an NVIDIA GPU both local, since only the local path speaks in a true clone of my voice.
 
+**Cloud fallback** (`cloud/fallback.py`, stage 5). A cloud side is one `Fallback` direction: Gemini speaks, and the
+local path (VAD + ASR + MT: the side's subtitles, unless `cloud.subtitles`) runs beside it with its voice muted (a TTS
+wrapper says a clause only when it was translated while the side was local; Piper is loaded ahead, the clone only when
+needed). `GeminiDirection(fail_fast=True)` ends with `CloudDown` when the cloud cannot serve now: the connection was lost
+and one new one failed (network, an API error, the quota: one connect try, 5 s at most), or a phrase with ≥ 1 s of
+speech got no translated voice `cloud.fallback_after_s` (6 s; the first translated voice after a phrase began measured p90 3.3–4.6 s, max 4.7 s) after it began. Then the
+local voice takes over at once: the clause in progress and the ones after it, and the muted clauses of the last seconds
+that the cloud had not said. That is estimated from the cloud's voice: its last voiced chunk minus its measured lag
+(done after end), so a clause whose speech ended before that point counts as said (±0.5 s: one short clause at most is
+said twice or not at all). With cloud subtitles the local path is made at that moment and gets the kept input (15 s)
+from the cut. Back, with no timer: when a phrase starts (a local partial subtitle) and the pause since the last try has
+passed (30 s, doubling to 15 min while the cloud stays down), a new session is opened with nothing sent; at the start
+of the next phrase, if it is up, the input goes to the cloud from that phrase's first syllable (from 1 s before its
+first partial, not before the last final subtitle) and the local voice is muted from that clause on. With no local path
+at all there are no phrases to wait for: the next input after the pause tries, and a session that is up is used at once.
+One tray message per switch; no local path (models, the voice pack, no NVIDIA GPU for the clone): the reason, not
+silence. Numbers: BENCH, stage 5.
+
 ## 4. Latency budget
 
 Definitions: **subtitle latency** = a word is spoken → its original text is on screen.
@@ -191,6 +209,24 @@ Measured with both directions at once (BENCH, stage 2): on the 7950X3D with an R
 Engines load when translation turns on (cached models: OPUS-MT 0.3 s, Parakeet 2–7 s, XTTS ~10 s),
 so the first switch-on shows "warming up".
 
+**Crash reports** (`crash.py`, stage 5). At the app's start: the run's log, already cleaned, goes to
+`<data dir>/logs/peresmeshnik.log` (two files of 512 KB); an unhandled exception (any thread, a Qt slot) writes
+`<data dir>/reports/crash-<time>.txt` at once; a hard crash is written by `faulthandler` into `reports/fault-<pid>.txt`
+and made a report at the next start (a clean exit removes it; on Windows only a fatal exception counts: faulthandler
+logs handled SEH codes too). A dead Piper runner is started again alone (`crash.Respawn`: the clause is said by the new
+one if none of it was; the ASR and MT models stay loaded), at most 3 times a minute. A side whose direction dies
+otherwise (a pipeline worker) or whose input ends under it (the call sound helper; its route is undone first, so the
+call is heard as usual meanwhile, then made for the new input) writes a report and starts again; after 3 restarts
+within a minute it stays off and says why. A call app that is not running (Windows: translation on before it starts,
+or it closed) is no failure: the route is undone, the call is heard as usual and the tray says why; nothing restarts. One tray message each time (the report is named in it). A report: version, OS, CPU, RAM, GPU, the engines and models of the settings
+(downloaded or not), the stack, the last 200 log lines. Never in it: what was said, audio, device and call app names,
+the voice's name, keys, the user's name. A log line keeps its format string and only its numbers (every log call of the
+app passes data as arguments); the latency JSON keeps only numbers; exception texts and the stack lose the private
+values known (the settings' devices, call app, voice; the voice profiles; the devices seen this run and listed at the
+report; the key and anything shaped like one; the home folder, the user name) and the last subtitles, whole and word by
+word (≥ 4 letters). Nothing is sent: the tray's **Crash report…** shows it, copies it and opens a GitHub issue page with
+it. Idle cost: none (no thread, no timer; a fault file left open).
+
 ## 6. Engine choice per tier
 
 | Link | Choice | Why (BENCH.md) | Not chosen |
@@ -251,7 +287,7 @@ me → them runs, a second clone would not fit). A bad take is not kept; a good 
 on Finish only (a draft `voices/<name>.new` until then, Cancel drops it).
 
 **App shell** (`app.py`, `ui/`). The tray menu: translation on/off, live voice (the hotkey's
-fallback), local / cloud per direction, settings, wizard, quit; without a system tray (GNOME without
+fallback), local / cloud per direction, settings, wizard, show latency, a crash report when there is one, quit; without a system tray (GNOME without
 the AppIndicator extension) the same menu sits on a button in a small window. Translation on loads
 the engines on one control thread ("warming up"), then opens capture; off closes every stream and
 engine again. A cloud direction speaks with Gemini and takes its subtitles from the local ASR + MT
@@ -263,7 +299,8 @@ other directions (the local subtitles of a cloud me → them) get no input, only
 open clause: nothing is translated. For any other direction
 (them → me for now) the app sends the input straight to the output and skips it (a hard switch). The overlay keeps the last two clauses (rows keyed by clause
 number; cloud captions without one attach to the side's open row) and repaints only when the visible
-text changes. On Wayland the windows go through XWayland (`QT_QPA_PLATFORM=xcb` unless it is set):
+text changes. "Show latency" in the tray (`ui.show_latency`, off by default) ends each original line with the clause's
+`Latency` events (engines.py): end of its speech → its subtitle, → its voice; a cloud phrase: → the end of its voice. On Wayland the windows go through XWayland (`QT_QPA_PLATFORM=xcb` unless it is set):
 a Wayland client cannot keep itself on top or let clicks through. Hotkey: X11 grab on X11; on
 Wayland the GlobalShortcuts portal (bound off the GUI thread, a new portal session for each change
 of the key, since a session binds once), whose desktop dialog may change the key. When there is no
@@ -446,7 +483,7 @@ RTF; the user can override it in settings.
    `audio_stream_end` cuts the end of a translation (never send it to translate); connections
    last ~10 min (server GoAway at ~540 s), sessions 15 min → handled in stage 1: hand-over at a
    quiet moment with the resumption handle and context compression, dead sessions replaced (BENCH,
-   stage 1); the free tier refuses connections beyond a few at once (seen at 8); paid tier bills
+   stage 1); an outage, the quota or a slow answer → the side goes local and back (§3, stage 5); the free tier refuses connections beyond a few at once (seen at 8); paid tier bills
    open time incl. silence (~$0.037/min translate); on the free tier Google uses the data — the app says so and suggests
    a paid key for real calls.
 4. **Real calls ≠ FLEURS.** Read speech here; calls bring codecs, noise, overlap and accents —

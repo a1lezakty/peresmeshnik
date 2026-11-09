@@ -532,7 +532,8 @@ def test_devices_refresh_keeps_the_streams_with_a_short_gap(tmp_path):
         q.put(None)
         t_play.join(5)
         hp.stop()
-        call.kill()
+        call.terminate()
+        call.wait(5)
         if before:
             set_default_output(before)
     gap = longest_quiet_s(x, sr)
@@ -668,8 +669,11 @@ def test_headphones_unknown_to_portaudio_play_on_the_default_meanwhile(fakedevic
 
 
 PLAYER = '''
-import sys, numpy as np, sounddevice as sd
+import signal, sys, numpy as np, sounddevice as sd
 from peresmeshnik.audio.coreaudio import stream_args
+# SIGTERM ends it cleanly (PortAudio closes the stream at exit): killed while playing, its last 1024-frame buffer could
+# stay looping in BlackHole 16ch for the rest of the runner's session (seen: 423 Hz, every later test hears it)
+signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
 args = stream_args(sys.argv[1])
 sr = args.pop('samplerate')
 x = (0.3 * np.sin(2 * np.pi * 440 * np.arange(int(float(sys.argv[2]) * sr)) / sr)).astype(np.float32)
@@ -729,7 +733,8 @@ def test_pass_through_plays_on_the_default_while_portaudio_does_not_see_the_save
     finally:
         ctl.submit(ctl._through_stop).result()
         if call:
-            call.kill()
+            call.terminate()
+            call.wait(5)
         if before:
             set_default_output(before)
     print(f'pass-through, saved headphones unknown to PortAudio: {looped} refresh(es) in 2 s, on {SPEAKERS2} rms '
@@ -760,7 +765,8 @@ def test_pass_through_that_cannot_open_says_so():
     finally:
         through.stop()
         if call:
-            call.kill()
+            call.terminate()
+            call.wait(5)
     print(f'pass-through cannot open: {ended}')
     assert 'no output device' in ended[0]
 

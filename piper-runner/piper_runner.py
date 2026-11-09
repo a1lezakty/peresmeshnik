@@ -13,15 +13,34 @@ byte count plus float32 LE mono PCM; 0 ends it.
 """
 import argparse
 import json
+import os
 import struct
 import sys
 
-import onnxruntime as rt
-from piper import PiperVoice
-from piper.config import PiperConfig, SynthesisConfig
+
+def usable_stderr() -> None:
+    """The app gives the runner a log file as stderr; started from a windowed program without one, stderr can be a pipe
+    nobody reads (or None), and the first warning or error printed there would raise OSError and kill the runner or
+    hide the reason. Then it goes nowhere instead."""
+    try:
+        sys.stderr.write('piper-runner: started\n')
+        sys.stderr.flush()
+    except AttributeError:  # no stderr at all
+        sys.stderr = open(os.devnull, 'w')
+    except (OSError, ValueError):  # its descriptor (and what the C libraries write there) to nowhere
+        try:
+            fd = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(fd, sys.stderr.fileno())
+            os.close(fd)
+            sys.stderr.flush()
+        except (OSError, ValueError):
+            sys.stderr = open(os.devnull, 'w')
 
 
 def main():
+    import onnxruntime as rt
+    from piper import PiperVoice
+    from piper.config import PiperConfig, SynthesisConfig
     ap = argparse.ArgumentParser()
     ap.add_argument('voice', help='path to a Piper .onnx voice; its .onnx.json sits next to it')
     ap.add_argument('--threads', type=int, default=2)
@@ -47,4 +66,5 @@ def main():
 
 
 if __name__ == '__main__':
+    usable_stderr()
     main()

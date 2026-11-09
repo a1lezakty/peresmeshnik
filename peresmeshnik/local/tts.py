@@ -17,6 +17,13 @@ from peresmeshnik.engines import Voice
 RUNNER = Path(__file__).resolve().parents[2] / 'piper-runner' / 'piper_runner.py'
 # the frozen piper-runner.exe is windowed, but in dev the runner is uv/python (a console program): no flashing window
 CREATE_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+LOG_MAX = 1 << 20  # the runner's stderr log starts over past this
+
+
+def log_file() -> Path:
+    """The runner's stderr: a windowed app has none to give it (its warnings and the reason it died go here)."""
+    from peresmeshnik import config
+    return config.data_dir() / 'logs' / 'piper-runner.log'
 
 
 def voice_path(voice_id: str) -> Path:
@@ -37,14 +44,18 @@ class PiperTts:
     def __init__(self, voice_id: str = 'piper-ru_RU-dmitri-medium', threads: int = 2):
         self.voice_id = voice_id
         onnx = voice_path(voice_id)
+        log = log_file()
+        log.parent.mkdir(parents=True, exist_ok=True)
+        self._log = open(log, 'ab' if log.exists() and log.stat().st_size < LOG_MAX else 'wb')
+        self._log_at = self._log.tell()
         self._p = subprocess.Popen([*runner_cmd(), str(onnx), '--threads', str(threads)], stdin=subprocess.PIPE,
-                                   stdout=subprocess.PIPE, creationflags=CREATE_NO_WINDOW)
+                                   stdout=subprocess.PIPE, stderr=self._log, creationflags=CREATE_NO_WINDOW)
         self.sample_rate = self._u32()
 
     def _read(self, n: int) -> bytes:
         b = self._p.stdout.read(n)
-        if len(b) < n:
-            raise RuntimeError(f'piper runner exited ({self._p.poll()})')
+        if len(b) < n:  # the reason is in its log, not here: an error of Piper's can quote what was said (reports)
+            raise RuntimeError(f'piper runner exited ({self._p.poll()}): the reason is in logs/piper-runner.log')
         return b
 
     def _u32(self) -> int:
@@ -68,3 +79,4 @@ class PiperTts:
             self._p.wait(5)
         except subprocess.TimeoutExpired:
             self._p.kill()
+        self._log.close()

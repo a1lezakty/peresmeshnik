@@ -1786,7 +1786,10 @@ device in memory; level = power mean of 20 ms frames above −45 dBFS.
 | macos-15 | −24.0 dB | −17.3 dB | −24.8 dB | 1.00 → 0.47 |
 | windows-latest | −24.0 dB | −17.4 dB | −25.0 dB | 1.00 → 0.50 |
 | the 4-core VM | −24.0 dB | −17.6 dB | −24.6 dB | 1.00 → 0.48 |
-| the 4-core VM, review round 1 (`Level`: power mean, noise floor, the speech's over ~3 s) | −24.0 dB | −17.3 dB | −23.8 dB | 1.00 → 0.56 |
+| ubuntu-latest, review round 1 (`Level`: power mean, noise floor, the speech's over ~3 s; ci on ddb4936) | −24.0 dB | −17.4 dB | −24.0 dB | 1.00 → 0.55 |
+| macos-15, review round 1 | −24.0 dB | −17.7 dB | −23.5 dB | 1.00 → 0.61 |
+| windows-latest, review round 1 | −24.0 dB | −17.3 dB | −23.7 dB | 1.00 → 0.54 |
+| the 4-core VM, review round 1 | −24.0 dB | −17.3 dB | −23.8 dB | 1.00 → 0.56 |
 
 ### The level: room noise before my first word, the cloud's short chunks, a new voice (review, round 1)
 
@@ -1801,7 +1804,7 @@ their mean in dB: with the floor's cut the mean in dB of a real microphone (`cal
 1–3 dB against the speech's, and Piper went out 2.5 dB over my voice in the test above (−21.5 against −24.0). And
 the speech's level now follows over ~3 s of speech, as the microphone's (it was ~1 s): Piper says a clause in one
 chunk, and a level with a 1 s memory, read at the chunk's end, was that of its quieter last second (−19.7 against the
-chunk's −18.0): Piper went out 1.7–1.8 dB over my voice on the CI runners; now 0.2 dB on the 4-core VM. The price: a
+chunk's −18.0): Piper went out 1.7–1.8 dB over my voice on the CI runners; now 0.0–0.5 dB (table above). The price: a
 louder new voice is followed in 2.6 s, not 1.6 s (below).
 `tests/test_virtual_mic_live.py`, no models: speech = 0.6 s syllables and 0.16 s pauses down to the room's noise; the
 translation is noise at −17 dB (the cloud's chunks at −30 dB); "before" is 295a7eb's `mic.py` on the same signals.

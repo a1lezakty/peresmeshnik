@@ -309,7 +309,7 @@ silent. The reference keeps 4 s behind and up to 30 s ahead (a TTS hands out sec
 once). No gate where there is no echo path: a file as the input, the wizard's test phrase. On the microphone (speakers
 instead of headphones: the echo as loud as my voice, a room's reverb) the same gate keeps the translation from going
 back to them and its partial subtitle from cutting what I hear (barge-in), with a lower correlation threshold,
-`[local] mic_echo_rho_on` = 0.4 (a reverberant room smears the echo's spectrum; the call side keeps 0.5): BENCH, stage 5 S2.
+`[local] mic_echo_rho_on` = 0.4, kept within 0.2…0.8 at load (a reverberant room smears the echo's spectrum; the call side keeps 0.5): BENCH, stage 5 S2.
 
 **Setup wizard (first run, re-runnable from the tray):**
 1. Language pair and mode (local / cloud), tier detected from the hardware (§9), model download
@@ -348,9 +348,12 @@ engine again. A cloud direction speaks with Gemini and takes its subtitles from 
 direction supports it; the me → them direction, local or cloud, is wrapped in `LiveSwitch`
 (`audio/mic.py`): its output is clocked by the microphone's frames, so the queued translation stays in
 the process, and each switch is a 30 ms equal-power crossfade, no click (BENCH). The translated speech is brought to
-the level of my live voice (`Level` of the microphone's and the speech's 32 ms frames, pauses not counted; the gain
-within −30…+10 dB, peaks ≤ 0.95): the clone and Piper spoke ~9 dB louder than a microphone at a call's level, with peaks
-near full scale, so the crossfade jumped in loudness (BENCH, stage 5 S2). While live, the side's
+the level of my live voice (`Level`: the power mean of the microphone's and the speech's 32 ms frames, pauses not counted; the
+microphone's only 12 dB above its noise floor, so a minute of room noise before my first word is not my level, and
+−26 dBFS until 1 s of my speech; the speech's starts over when a new voice is > 15 dB quieter, the cloud's fallback;
+the gain within −30…+10 dB, peaks ≤ 0.95: a lower gain eases down over ≤ 5 ms of the queued speech, a higher one comes
+back at 20 dB/s): the clone and Piper spoke ~9 dB louder than a microphone at a call's level, with peaks near full
+scale, so the crossfade jumped in loudness (BENCH, stage 5 S2). While live, the side's
 other directions (the local subtitles of a cloud me → them) get no input, only a pause that closes their
 open clause: nothing is translated. For any other direction
 (them → me for now) the app sends the input straight to the output and skips it (a hard switch). The overlay keeps the last two clauses (rows keyed by clause

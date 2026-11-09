@@ -1727,6 +1727,10 @@ RTX 3060 12 GB (a second host, the same picture). The voice: the "me" profile of
 | voice after the clause's end, p50 / p90 | 1.96 / 3.21 s | 1.72 / 3.25 s |
 | clone's first audio, p50 (a GPU shared with another job: it varies) | 224 ms | 166 ms |
 
+The code after review round 1 (`Level`: power mean, noise floor; the eased limiter, below), on the RTX 3060: clause
+against my turn −0.05 LU p50, |…| p90 1.7 LU; clause loudness −25.6 LUFS (p10–p90 2.5 LU); peak 0.46; clicks 0 / 0 /
+0; pause after a sentence back to back 0.35 s (min 0.34); 1 tail; ECAPA 0.355; CER 2.72 %; 1 hole (0.10 s).
+
 - The RTX 3060 (main): a click at 46 of 90 clause starts, 37 back to back with 0.16 s after a sentence (min 0.09),
   +7.6 LU against my turn, peak 0.978, ECAPA 0.363, CER 2.45 %, 3 tails, voice p50 / p90 1.70 / 3.22 s: the same picture.
 - **The clicks are XTTS's own**: its audio starts mid-waveform. `xtts.shape` fades each generation in over 5 ms. The
@@ -1737,7 +1741,8 @@ RTX 3060 12 GB (a second host, the same picture). The voice: the "me" profile of
   (+0.15 s in the run before the comma below; the p50 moves with the run, ±0.25 s).
 - **Loudness**: the clone (and Piper, below) spoke ~8 dB louder than a microphone at a call's level with peaks near
   full scale, so the hotkey's crossfade jumped. LiveSwitch now brings the speech to my live voice's level (`mic.Level`
-  of the microphone's 32 ms frames and the speech's, pauses not counted; gain within −30…+10 dB, peaks ≤ 0.95). In this
+  of the microphone's 32 ms frames and the speech's: a power mean, pauses and room noise not counted; gain within −30…+10 dB,
+  peaks ≤ 0.95). In this
   scenario each turn is another person, so the gain follows a level that jumps between turns (the |…| p90 2.9 LU is the
   first clause of a new person); one speaker on one microphone is steadier.
 - **CER 2.24 → 2.86 %** is the sampling of XTTS, not the changes: the difference is in short names and fragments that
@@ -1774,6 +1779,32 @@ device in memory; level = power mean of 20 ms frames above −45 dBFS.
 | macos-15 | −24.0 dB | −17.3 dB | −24.8 dB | 1.00 → 0.47 |
 | windows-latest | −24.0 dB | −17.4 dB | −25.0 dB | 1.00 → 0.50 |
 | the 4-core VM | −24.0 dB | −17.6 dB | −24.6 dB | 1.00 → 0.48 |
+| the 4-core VM, review round 1 (`Level`: power mean, noise floor) | −24.0 dB | −17.4 dB | −22.7 dB | 1.00 → 0.62 |
+
+### The level: room noise before my first word, the cloud's short chunks, a new voice (review, round 1)
+
+Translation goes on and the other side speaks first, so my microphone carries only the room's noise for a minute:
+`mic.Level` counted every frame above −60 dBFS, learnt the noise as my level and sent my first clauses 13–18 dB quiet
+(LiveSwitch is made anew each time translation goes on). Now a microphone frame counts only 12 dB above the noise
+floor (the quietest frame of the last 3 s) and LEVEL_DB (−26) stands until 1 s of such speech. The gain held down by a
+peak dropped at once at the chunk's start; now it eases down over ≤ 5 ms of the speech queued before the chunk and comes
+back at 20 dB/s. A voice > 15 dB quieter than the level was never followed; now 1 s of it starts the level over (the
+clone's own soft runs reach 0.67 s: 0 restarts in its 6 min stream). The level is now the frames' power mean, not
+their mean in dB: with the floor's cut the mean in dB of a real microphone (`call-en.ogg`, its floor −51…−58 dB) rose
+1–3 dB against the speech's, and Piper went out 2.5 dB over my voice in the test above (−21.5 against −24.0).
+`tests/test_virtual_mic_live.py`, no models: speech = 0.6 s syllables and 0.16 s pauses down to the room's noise; the
+translation is noise at −17 dB (the cloud's chunks at −30 dB); "before" is 295a7eb's `mic.py` on the same signals.
+
+| scenario | before | after |
+|---|---|---|
+| a minute of room noise at −55 / −50 dB, 2 s of me at −26 dB, then the first clause | **−43.6 / −40.5 dB** | −25.7 / −25.5 dB |
+| the same with me at −18 dB | −40.6 / −37.5 dB | −17.9 / −17.8 dB |
+| the cloud's 20–40 ms chunks at the +10 dB gain, a peak 2 samples into every third: the gain's biggest step from one sample to the next | **6.0 dB** (at a seam) | 0.07 dB |
+| … the gain's swing after the start | 6.0 dB | 1.4 dB |
+| a new voice in the same LiveSwitch (the cloud's fallback), 12 dB louder: back within 2 dB of my level after | 1.6 s | 0.9 s |
+| … 16 dB quieter | **never** (−41.8 dB after 4 s) | 1.7 s |
+
+The cloud's own level through LiveSwitch is not measured (this machine has no Gemini key): USER-CHECKS.
 
 ### The echo of the translation in my microphone (speakers, no headphones)
 

@@ -2,9 +2,9 @@
 
 Beside the executable (Contents/MacOS on macOS, the install folder on Windows): piper-runner (the Piper TTS runner,
 its own GPL-3.0 program: the app talks to it over a pipe, ARCHITECTURE §10) and the call app's sound helper:
-peresmeshnik-tap (macOS, the Core Audio process tap), peresmeshnik-loopback.exe (Windows, WASAPI process loopback).
-A voice pack in <data dir>/voice-pack (torch with CUDA for the local voice clone) is importable after the bundle's own
-packages, once complete: whatever installs it writes voice-pack/.complete last, so a half-installed one is ignored.
+peresmeshnik-tap (macOS, the Core Audio process tap), peresmeshnik-loopback.exe (Windows, WASAPI process loopback), and
+the me -> them sound helper peresmeshnik-audio.exe (Windows; on macOS audio/macos.py finds it beside the executable).
+The voice pack (the CUDA clone) is its own process with its own Python: nothing of it is imported here.
 """
 import os
 import shlex
@@ -21,19 +21,13 @@ if (p := here / 'peresmeshnik-tap').exists():
     os.environ.setdefault('PERESMESHNIK_TAP', str(p))
 if (p := here / 'peresmeshnik-loopback.exe').exists():
     os.environ.setdefault('PERESMESHNIK_LOOPBACK', str(p))
+if (p := here / 'peresmeshnik-audio.exe').exists():
+    os.environ.setdefault('PERESMESHNIK_AUDIO', str(p))
 sys.argv = [a for a in sys.argv if not a.startswith('-psn_')]  # an old Finder adds its process serial number
 piped = sys.stderr is not None  # Windows: a console, a pipe or a file; a windowed .exe from Explorer has none
 for name in ('stdout', 'stderr'):  # no stdio (None): print() and logging write nowhere instead of failing
     if getattr(sys, name) is None:
         setattr(sys, name, open(os.devnull, 'w', encoding='utf-8'))
-
-from peresmeshnik import config  # noqa: E402
-
-pack = config.data_dir() / 'voice-pack'
-if (pack / '.complete').is_file():  # the voice pack: after the bundle's own packages (they win), its DLLs found
-    sys.path.append(str(pack))
-    if hasattr(os, 'add_dll_directory'):
-        dll_dirs = [os.add_dll_directory(str(d)) for d in [pack / 'torch' / 'lib', *pack.glob('nvidia/*/bin')] if d.is_dir()]
 
 from peresmeshnik.__main__ import main  # noqa: E402
 

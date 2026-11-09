@@ -22,6 +22,13 @@ elif [ "${REQUIRE_LOOPBACK:-}" = 1 ]; then  # a release without the call's sound
   echo 'no native/windows/loopback/build.cmd: the call sound helper is missing' >&2
   exit 1
 fi
+if [ -f native/windows/audio/build.cmd ]; then  # me -> them: the microphone, CABLE Input and the loop (S2, MSVC), the same way
+  MSYS_NO_PATHCONV=1 cmd /c 'native\windows\audio\build.cmd' "$(cygpath -wa "$APP/peresmeshnik-audio.exe")"
+  test -f "$APP/peresmeshnik-audio.exe"
+elif [ "${REQUIRE_LOOPBACK:-}" = 1 ]; then  # the release guard: without it the call hears nothing of the translation
+  echo 'no native/windows/audio/build.cmd: the me -> them sound helper is missing' >&2
+  exit 1
+fi
 # the GPL check (the app's own Analysis must not import piper; the spec copies its warnings before piper's) and the licenses
 $PY packaging/licenses.py "$APP/licenses" build/pyinstaller/Peresmeshnik/warn-app.txt piper-runner.exe
 

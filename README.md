@@ -138,6 +138,10 @@ The macOS and Windows apps bundle a Piper TTS runner ([`piper-runner/`](piper-ru
 to over a pipe. Its license and those of the other bundled packages are in
 `Peresmeshnik.app/Contents/Resources/licenses/` and in the `licenses` folder of the Windows install.
 
+The Windows voice pack (your own voice on an NVIDIA GPU, downloaded by the wizard after you accept its licenses) is a
+Python of its own with PyTorch (BSD-3-Clause) and coqui-tts (MPL-2.0); the XTTS-v2 model it runs is under the
+[Coqui Public Model License](https://coqui.ai/cpml) (noncommercial only).
+
 ---
 
 **По-русски.** Пересмешник — переводчик звонков в реальном времени. Собеседника вы слышите

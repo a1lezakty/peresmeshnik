@@ -20,7 +20,9 @@ SENTENCE_END = tuple('.?!;')
 LEAD_S = 0.5
 TAIL_S = 0.8  # timestamps of the last ~0.8 s of a window run ahead of the audio (0.5: BENCH stage 5, not taken)
 MIN_PART_S = 1.0  # an early cut at a comma leaves at least this much speech before it
-REPEAT_WORDS = 3  # the next clause may repeat up to this many of a cut's last words ("to cope with" | "cope with the")
+# the next clause may repeat up to this many of a cut's last words ("to cope with" | "cope with the"): dropped when
+# its own window did not hear them in the context before the cut (there "Thank you. | Thank you very much" is said twice)
+REPEAT_WORDS = 3
 
 
 def _on_cuda(model) -> bool:
@@ -108,6 +110,7 @@ class OnnxAsrStream:
         self._since = 0  # samples fed since the last partial
         self._last = None  # (tokens, timestamps in s from self.pcm[0]) of the clause in the last good partial
         self._last_at = 0  # len(self.pcm) when it was made
+        self._heard = self._last_heard = ()  # last words of the context in the last run / in the last good partial
         self._tail = ()  # last words emitted by cut(): window timestamps are approximate, the next clause may repeat them
         self.cut_at = ''  # where the last cut() cut: 'sentence', 'comma' or 'word'
 
@@ -119,9 +122,11 @@ class OnnxAsrStream:
     def _run(self) -> tuple[list[str], list[float]]:
         r = self.asr.recognize(self.pcm, self.offset == 0)
         toks, ts = r.tokens or [], r.timestamps or []
+        self._heard = ()
         if self.ctx:  # drop the words of the context
             start = self.ctx / SAMPLE_RATE - 0.08
             i = next((i for i, (tok, t) in enumerate(zip(toks, ts)) if t >= start and tok.startswith(' ')), len(toks))
+            self._heard = tuple(_key(w) for w in _text(toks[:i]).split()[-REPEAT_WORDS:])
             toks, ts = toks[i:], ts[i:]
         return toks, ts
 
@@ -136,7 +141,7 @@ class OnnxAsrStream:
         toks, ts = self._run()
         if not (text := _text(toks)):  # Parakeet now and then returns '' for a window; keep the last good partial
             return None
-        self._last, self._last_at = (toks, ts), len(self.pcm)
+        self._last, self._last_at, self._last_heard = (toks, ts), len(self.pcm), self._heard
         return text if text != prev else None
 
     def cut(self, force: bool = False, comma: bool = False) -> str | None:
@@ -166,24 +171,29 @@ class OnnxAsrStream:
         self.offset += at - self.ctx
         self.pcm, self.ctx = self.pcm[at - ctx:], ctx
         self._last, self._since = None, self.asr.partial_every  # the next feed() makes a partial of the rest
-        text = self._dedup(_text(toks[:k]))
+        text = self._dedup(_text(toks[:k]), self._last_heard)
         self._tail = tuple(_key(w) for w in text.split()[-REPEAT_WORDS:])
         return text
 
-    def _dedup(self, text: str) -> str:  # the longest run of the cut's last words this text starts with goes
+    def _dedup(self, text: str, heard: tuple) -> str:
+        """Without the longest run of the cut's last words this text starts with, unless this window heard that run
+        in its context too (then it is said again, not the same audio)."""
         words, tail, self._tail = text.split(), self._tail, ()
         head = tuple(_key(w) for w in words[:len(tail)])
-        k = next((k for k in range(len(tail), 0, -1) if head[:k] == tail[-k:]), 0)
+        k = next((k for k in range(len(tail), 0, -1) if head[:k] == tail[-k:] and heard[-k:] != tail[-k:]), 0)
         return ' '.join(words[k:]) if k else text
 
     def finish(self, settled_s: float = 0.0) -> str:
         """Final text of the segment. `settled_s`: the segment ends in that much known silence (the VAD
         pause), so a partial made within it already saw all the speech and is reused as final."""
         fresh = self._last is not None and len(self.pcm) - self._last_at <= settled_s * SAMPLE_RATE
-        toks = self._last[0] if fresh else (self._run()[0] if len(self.pcm) > self.ctx else [])
-        text = _text(toks) or (_text(self._last[0]) if self._last else '')
+        toks, heard = (self._last[0], self._last_heard) if fresh else \
+            (self._run()[0], self._heard) if len(self.pcm) > self.ctx else ([], ())
+        text = _text(toks)
+        if not text and self._last:
+            text, heard = _text(self._last[0]), self._last_heard
         if not text and self.duration > 0.3:  # still nothing: the clause alone, with the other lead-in
             text = self.asr.recognize(self.pcm[self.ctx:], self.offset != 0).text.strip()
         self.offset += len(self.pcm) - self.ctx
         self.pcm, self.ctx, self._last, self._since = np.zeros(0, np.float32), 0, None, 0
-        return self._dedup(text)
+        return self._dedup(text, heard)

@@ -276,11 +276,22 @@ def test_dedup_across_cut_and_empty_final_retry():
     assert s.finish() == 'four'
     s = stream_of(asr, 1.0)
     assert s.finish() == 'five' and asr.calls[-2:] == [(1.0, True), (1.0, False)]
+    # the window's timestamps ran ahead: the next window hears 'cope with' after the cut, not in its context
     asr = ScriptedAsr(Result([' to', ' cope', ' with', ' the'], [0.2, 0.8, 1.2, 2.0]),
-                      Result([' cope', ' with', ' the', ' impacts.'], [1.0, 1.3, 1.6, 1.9]))  # repeats two words
+                      Result([' warming', ' cope', ' with', ' the', ' impacts.'], [0.5, 1.0, 1.3, 1.6, 1.9]))
     s = stream_of(asr, 3.0)
     assert s.cut(force=True) == 'to cope with'
     assert s.finish() == 'the impacts.'
+
+
+def test_a_phrase_said_twice_across_a_cut_stays():
+    """'Thank you. Thank you very much.' without a pause: the next window hears the first 'Thank you.' in its
+    context before the cut, so the second one is said again, not a repeat of the cut's audio."""
+    asr = ScriptedAsr(Result([' Thank', ' you.', ' Thank', ' you', ' very', ' much.'], [0.2, 0.5, 1.0, 1.3, 2.5, 2.8]),
+                      Result([' Thank', ' you.', ' Thank', ' you', ' very', ' much.'], [0.2, 0.5, 1.0, 1.3, 1.6, 1.9]))
+    s = stream_of(asr, 3.0)
+    assert s.cut() == 'Thank you.'
+    assert s.finish() == 'Thank you very much.'
 
 
 # queue policy and barge-in: real-time feeds (a few seconds each), so the lags are real

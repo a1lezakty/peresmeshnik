@@ -40,6 +40,9 @@ ALLOW = ('allow Peresmeshnik in System Settings > Privacy & Security > Screen & 
 EXIT = {3: 'the call app is not running', 4: f'no permission to record the call app\'s sound: {ALLOW}',
         5: f'macOS {platform.mac_ver()[0]} has no process taps (14.4+): set the call app\'s speaker to {CALL_DEVICE}',
         6: 'Core Audio could not tap the call app', 7: 'the tap\'s sample rate changed'}
+# a helper killed (Force Quit, a crash) cannot remove its tap; Core Audio is meant to, but may keep the app muted (CI:
+# 9 of 10 late in the test set). A new tap of it does not lift that; the app restarted or coreaudiod restarted does.
+KILLED = 'if the call is silent now, restart the call app or run `sudo killall coreaudiod` in the Terminal'
 RESTART = 7  # the helper's "start me again": the tap's own rate changed
 RESTART_S, RESTARTS = 1.0, 5  # at most one restart a second; asked again after 5 within a minute: given up, said why
 
@@ -175,6 +178,8 @@ class ProcessTap:
         why = EXIT.get(proc.returncode) or f'the tap helper ended ({proc.returncode}): {self.status}'
         if proc.returncode == 3:
             why = f'{self.app or self.pid} is not running'
+        elif proc.returncode < 0:
+            why += f'; {KILLED}'
         again = proc.returncode == RESTART
         if again:
             now = time.monotonic()

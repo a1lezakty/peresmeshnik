@@ -6,3 +6,7 @@ each scaled to −26 dBFS RMS (a usual call level; some FLEURS takes are at −5
 followed by 0.8 s of silence. Reference texts in `call-*.txt`, one sentence per line.
 
 FLEURS: Conneau et al., 2022, https://huggingface.co/datasets/google/fleurs, licensed CC-BY-4.0.
+
+`ours-en.ogg`: 22 s, made the same way from FLEURS dev ids 1511, 1513, 1521 (other people than in
+`call-en.ogg`): "our" speech in the call scenarios (tests/test_echo.py, tests/test_call.py), texts in
+`ours-en.txt`.

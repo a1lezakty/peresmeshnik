@@ -112,13 +112,25 @@ jobs:
         run: |
           call native\windows\loopback\build.cmd "%RUNNER_TEMP%\bin\peresmeshnik-loopback.exe" || exit /b 1
           echo PERESMESHNIK_LOOPBACK=%RUNNER_TEMP%\bin\peresmeshnik-loopback.exe>> %GITHUB_ENV%
+      # its own process, first, on a fresh coreaudiod: after a SIGKILLed tap coreaudiod can loop a buffer (device tests
+      # after it failed), and late in a run the killed tap's mute was not lifted; coreaudiod restarted after it (runner only)
+      - name: macOS call sound, the tap helper killed (then coreaudiod restarted)
+        if: runner.os == 'macOS'
+        env:
+          PERESMESHNIK_REQUIRE_MACOS: '1'
+        run: |
+          uv run pytest -q -s -rs tests/test_macos_audio.py -k killed_helper
+          sudo launchctl kickstart -kp system/com.apple.audio.coreaudiod
+          for i in $(seq 30); do system_profiler SPAudioDataType | grep -q 'BlackHole 16ch' && break; sleep 2; done
+          system_profiler SPAudioDataType | grep -E '^ +BlackHole'
       # includes the idle-CPU watchdogs: the app (tray, overlay, first-run wizard) 60 s idle, and again with
       # the overlay on screen; each fails above 0.13 s of CPU. Linux: Xvfb; macOS, Windows: the runner's desktop
-      - run: uv run pytest -q -s -rs  # -rs: what was skipped and why
+      - run: uv run pytest -q -s -rs --deselect tests/test_macos_audio.py::test_a_killed_helper_lets_the_original_through  # -rs: what was skipped and why
         env:  # macOS, Windows: a synthetic key press or click that does not arrive fails the test instead of skipping it
           PERESMESHNIK_REQUIRE_SYNTHETIC: ${{ runner.os != 'Linux' && '1' || '' }}
           PERESMESHNIK_REQUIRE_MACOS: ${{ runner.os == 'macOS' && '1' || '' }}  # the call-sound tests run, not skip
           PERESMESHNIK_REQUIRE_WINDOWS: ${{ runner.os == 'Windows' && '1' || '' }}  # the Windows call-sound tests run, not skip
+          PERESMESHNIK_REQUIRE_PIPEWIRE: ${{ runner.os == 'Linux' && '1' || '' }}  # the echo gate on the real Linux path runs, not skip
 
   # working-mode CPU gate: the local pipeline on a 30 s recording (RTF, CPU s per audio s)
   work-gate:
@@ -127,7 +139,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-15, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -153,6 +165,11 @@ jobs:
           PERESMESHNIK_WORK_GATE: '1'  # the models are there: the test fails instead of skipping
           PERESMESHNIK_MODELS: ${{ runner.temp }}/models
         run: uv run pytest -q -s -rs tests/test_crash.py -k killed
+      - name: Call scenarios (echo, long phrases, two people, latency per link)
+        env:
+          PERESMESHNIK_WORK_GATE: '1'
+          PERESMESHNIK_MODELS: ${{ runner.temp }}/models
+        run: uv run pytest -q -s tests/test_call.py
       - name: macOS call sound with the models (file -> BlackHole 16ch / a tapped afplay -> subtitles and voice)
         if: runner.os == 'macOS'
         env:

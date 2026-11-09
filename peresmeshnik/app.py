@@ -34,6 +34,7 @@ import numpy as np
 
 from peresmeshnik import __version__, config, crash
 from peresmeshnik.audio import c_locale
+from peresmeshnik.audio.echo import EchoGate, Reference, Referenced, Threaded
 from peresmeshnik.audio.resample import Resampler
 from peresmeshnik.engines import SAMPLE_RATE, Caption, Latency, Speech
 
@@ -440,8 +441,10 @@ class Side:
     on_failure = None  # (why, exception): the controller restarts the side; None: the tray hears it
     _stopping = False
 
-    def __init__(self, name: str, s: config.Settings, inp, out, overlay, on_error=lambda text: None):
+    def __init__(self, name: str, s: config.Settings, inp, out, overlay, on_error=lambda text: None, echo=None):
+        """`echo`: an audio.echo.EchoGate on the input (our own speech coming back from the other side is not translated)."""
         self.name, self.inp, self.out, self.overlay, self.on_error = name, inp, out, overlay, on_error
+        self.echo, self._gate = echo, None
         self.src, self.tgt = (s.their_lang, s.my_lang) if name == 'them' else (s.my_lang, s.their_lang)
         self.engine = s.them_to_me if name == 'them' else s.me_to_them
         self.live = False
@@ -502,7 +505,9 @@ class Side:
             t = threading.Thread(target=target, args=args, name=f'{self.name}-{target.__name__[1:]}', daemon=True)
             t.start()
             self._threads.append(t)
-        self.inp.start(self._on_frames)
+        if self.echo is not None:  # on its own thread: _on_frames runs in the capture's callback
+            self._gate = Threaded(self.echo, self._on_frames)
+        self.inp.start(self._gate or self._on_frames)
 
     def _on_frames(self, pcm: np.ndarray) -> None:  # capture thread or PortAudio callback: only hand on
         if self.live and not self._supports_live:
@@ -575,6 +580,8 @@ class Side:
     def stop(self) -> None:
         self._stopping = True
         self.inp.stop()
+        if self._gate:
+            self._gate.close()
         self._live_q.put(None)
         for d, _, _ in self.directions:
             d.close()
@@ -602,6 +609,8 @@ class Controller:
         self._through = self._through_arrival = None  # macOS < 14.4, translation off: the call app's speaker on to the headphones
         self._mic = ''  # the default input as it was before our devices existed
         self._restarts: dict[str, list[float]] = {}  # side -> times of its restarts in the last minute
+        self.call_echo = Reference()  # what we said into the call: its echo from a far end on a loudspeaker is not ours to translate
+        self.mic_echo = Reference()  # what the headphones (or speakers) played: for the microphone's echo gate
 
     def submit(self, fn, *args):
         """None once quit() shut the control thread down (a Core Audio notification can still come then)."""
@@ -793,7 +802,11 @@ class Controller:
 
     def _side(self, name: str, s: config.Settings) -> Side:
         inp = FileIn(f) if (f := {'them': self.them_file, 'me': self.me_file}[name]) else self._input(name, s)
-        side = Side(name, s, inp, self._output(name, s), self.overlay.side(name), self.on_state)
+        # our speech coming back: 'them' hears what we said into the call, 'me' what the headphones played (no echo
+        # path from a file, nor in the wizard's test, where both sides speak into the headphones)
+        gate = None if f or self.test else EchoGate(self.call_echo if name == 'them' else self.mic_echo,
+                                                    max_delay_s=s.local.echo_max_delay_s)
+        side = Side(name, s, inp, self._output(name, s), self.overlay.side(name), self.on_state, echo=gate)
         side.on_failure = lambda why, e: self.submit(self._restart, side, why, e)
         if name == 'me':  # I talk over their voice: barge-in on the them -> me side of now
             side.on_talk = lambda: [x.interrupt() for x in self.sides if x.name == 'them']
@@ -962,8 +975,8 @@ class Controller:
             back = (lambda: self.submit(self._refresh_devices)) if self.devices and sys.platform in ('darwin', 'win32') else None
             out = Headphones(s.ui.headphones, self.on_state, on_back=back)
             out.resolve()  # a missing device or our own as the default: say so now, not at the first word
-            return out
-        return self.virtual_mic()
+            return Referenced(out, self.mic_echo)
+        return Referenced(self.virtual_mic(), self.call_echo)
 
     def _off(self) -> None:
         self._unroute()  # first: the user hears the call as is again at once

@@ -245,7 +245,8 @@ def test_tap_hears_the_process_and_mutes_it_for_the_speakers(afplay):
 @pytest.mark.usefixtures('granted')
 def test_a_killed_helper_lets_the_original_through(afplay):
     """Core Audio removes a private tap and its aggregate device with the process that made them: the call is heard
-    again even when the helper could not clean up (SIGKILL), and the app is told."""
+    again even when the helper could not clean up (SIGKILL), and the app is told how to get it back if not. CI runs it
+    first, on a fresh coreaudiod: late in the set the app stayed muted in 9 of 10 tries (stage 5, BENCH)."""
     import signal
 
     from peresmeshnik.audio import capture_macos as cm
@@ -263,7 +264,7 @@ def test_a_killed_helper_lets_the_original_through(afplay):
     print(f'killed helper: speakers rms during {rms(during[SR // 2:]):.4f}, after {rms(after[SR // 2:]):.3f}; {ended}')
     assert rms(during[SR // 2:]) < 0.01
     assert rms(after[SR // 2:]) > 0.1, 'the original stayed muted after the helper was killed'
-    assert '-9' in ended[0], ended
+    assert '-9' in ended[0] and 'killall coreaudiod' in ended[0], ended
 
 
 @needs_helper

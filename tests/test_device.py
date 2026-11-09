@@ -54,3 +54,38 @@ def test_on_cuda_reflects_the_sessions_real_providers():
     assert _on_cuda(Holder(['CPUExecutionProvider'])) is False
     assert _on_cuda(Holder(['CUDAExecutionProvider', 'CPUExecutionProvider'])) is True
     assert _on_cuda(object()) is False
+
+
+def test_mt_falls_back_when_cuda_fails_at_the_first_translation(monkeypatch, tmp_path):
+    """A driver without the CUDA libraries: CTranslate2 sees the GPU and loads the model, but cuBLAS fails at the
+    first translation (libcublas.so.12 not found). The engine finds that while it is built and goes to the CPU,
+    instead of the pipeline's MT worker dying at the first clause."""
+    ctranslate2 = pytest.importorskip('ctranslate2')
+    spm = pytest.importorskip('sentencepiece')
+    from peresmeshnik import models
+    from peresmeshnik.local import mt
+
+    class Translator:
+        def __init__(self, path, device, **kw):
+            self.device = device
+
+        def translate_batch(self, batch, **kw):
+            if self.device == 'cuda':
+                raise RuntimeError('Library libcublas.so.12 is not found or cannot be loaded')
+            return [type('R', (), {'hypotheses': [['▁ok']]})()]
+
+    class Sp:
+        def __init__(self, path):
+            pass
+
+        def encode(self, text, out_type=str):
+            return ['▁hi']
+
+        def decode(self, toks):
+            return 'ok'
+    monkeypatch.setattr(device, 'ct2_cuda', lambda: True)
+    monkeypatch.setattr(ctranslate2, 'Translator', Translator)
+    monkeypatch.setattr(spm, 'SentencePieceProcessor', Sp)
+    monkeypatch.setattr(models, 'path', lambda model_id: tmp_path)
+    e = mt.OpusMt('en', 'ru')
+    assert e.device == 'cpu' and e.translate('Hello.', 'en', 'ru') == 'ok'

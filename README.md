@@ -46,6 +46,9 @@ The call hears a hum or an old tone while nothing plays: a program that played i
 (Force Quit, a crash), and the BlackHole driver may keep repeating its last sound buffer. That is the driver's known
 behaviour; restarting the sound system clears it: `sudo killall coreaudiod` in the Terminal (or restart the Mac).
 Peresmeshnik's own audio helpers close their streams themselves when the app goes, even after a Force Quit.
+The call app stays silent after its sound helper `peresmeshnik-tap` was killed (Force Quit, a crash): macOS may keep
+the app muted as it was while translated, and Peresmeshnik says so. Restart the call app, or run
+`sudo killall coreaudiod` (then the call app's sound comes back without restarting it).
 
 The hotkey ⇧⌘Space switches between translation and your live voice (Settings to change it; a combo
 that is a macOS shortcut or another app's global hotkey is refused with the reason; a shortcut inside

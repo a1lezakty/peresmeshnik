@@ -61,8 +61,11 @@ def test_the_call_device_and_virtual_inputs_are_no_microphone(monkeypatch):
     devs = [{**dev, 'uid': 'BuiltInMicrophoneDevice', 'name': 'MacBook Pro Microphone', 'transport': 'bltn'},
             {**dev, 'uid': 'ZoomAudioDevice', 'name': 'ZoomAudioDevice', 'transport': 'virt'},
             {**dev, 'uid': 'BlackHole16ch_UID', 'name': 'BlackHole 16ch', 'transport': 'virt', 'outputs': 16},
-            {**dev, 'uid': 'peresmeshnik-test-mic', 'name': 'Test Mic', 'transport': 'grup'}]
-    monkeypatch.setattr(selftest, 'MACOS', True)
+            {**dev, 'uid': 'peresmeshnik-test-mic', 'name': 'Test Mic', 'transport': 'grup'},
+            {**dev, 'uid': 'KrispMicrophone', 'name': 'krisp microphone', 'transport': 'virt'}]  # the real one, processed
+    monkeypatch.setattr(selftest, 'HELPER', True)
+    monkeypatch.setattr(selftest, 'WINDOWS', False)
+    monkeypatch.setattr(sys, 'platform', 'darwin')  # mic.native() picks audio/macos.py (on the Windows runner too)
     monkeypatch.setattr(macos, 'devices', lambda: devs)
     # saved earlier (or by hand) as the microphone: refused when it opens, with the reason
     with pytest.raises(ValueError, match='ZoomAudioDevice is a virtual device, not your microphone'):
@@ -70,8 +73,10 @@ def test_the_call_device_and_virtual_inputs_are_no_microphone(monkeypatch):
     with pytest.raises(ValueError, match='Test Mic is an aggregate device, not your microphone'):
         macos.not_blackhole('Test Mic')
     assert macos.not_blackhole('BuiltInMicrophoneDevice') == 'BuiltInMicrophoneDevice'
+    assert macos.not_blackhole('KrispMicrophone') == 'KrispMicrophone'
     assert macos.not_blackhole('') == ''  # the default input: the helper never takes a virtual one by itself
-    assert selftest.devices('sources') == [('BuiltInMicrophoneDevice', 'MacBook Pro Microphone')]
+    assert selftest.devices('sources') == [('BuiltInMicrophoneDevice', 'MacBook Pro Microphone'),
+                                           ('KrispMicrophone', 'krisp microphone')]
     assert ('BlackHole16ch_UID', 'BlackHole 16ch') in selftest.devices('sinks')  # an output: S1's (the call app's)
     monkeypatch.setenv('PERESMESHNIK_TEST_MIC', 'BlackHole16ch_UID')
     assert ('BlackHole16ch_UID', 'BlackHole 16ch') in selftest.devices('sources')
@@ -227,25 +232,32 @@ class Timed:
         return np.concatenate(self.chunks)
 
 
+def onsets(y: np.ndarray) -> list[int]:
+    on = np.nonzero(np.abs(y) > 0.25)[0]
+    return [i for k, i in enumerate(on) if k == 0 or i - on[k - 1] > SR_OUT // 10]
+
+
 @mac
 def test_latency():
     """play() -> the sound at BlackHole 2ch's input as a call app reads it, 5 clicks from silence (the first one opens
-    the playback process). Upper bound: includes the reader's own 10 ms chunks."""
+    the playback process), each once the one before has played out. Not at a fixed pace: a click is 0.52 s of sound,
+    so with a click every 0.6 s a slow start of the process stayed queued ahead of the next ones (a runner: 545, 377,
+    260, 160, 31 ms). Upper bound: includes the reader's own 10 ms chunks."""
     from peresmeshnik.audio.virtual_mic_macos import VirtualMic
     vm = VirtualMic()
     rec = Timed(macos.BLACKHOLE_UID)
     sent = []
     try:
         time.sleep(0.5)
-        for _ in range(5):
+        for k in range(5):
             sent.append(time.monotonic())
             vm.play(np.concatenate([np.full(SR_IN // 50, 0.5, np.float32), np.zeros(SR_IN // 2, np.float32)]), SR_IN)
-            time.sleep(0.6)
+            wait_for(lambda k=k: len(onsets(np.concatenate([np.zeros(0, np.float32), *rec.chunks[:]]))) > k)
+            time.sleep(0.6)  # its 0.5 s of silence plays out: the next click finds the player idle
         y = rec.stop()
     finally:
         vm.remove()
-    on = np.nonzero(np.abs(y) > 0.25)[0]
-    starts = [i for k, i in enumerate(on) if k == 0 or i - on[k - 1] > SR_OUT // 10]
+    starts = onsets(y)
     lags = [rec.at(i) - t for i, t in zip(starts, sent)]
     print('\nplay -> BlackHole 2ch input, ms:', [round(x * 1000) for x in lags])
     assert len(starts) == 5
@@ -438,6 +450,63 @@ def test_live_voice_with_a_dead_output_says_so(monkeypatch):
     side.stop()
     assert errors == ['error: them: BlackHole 2ch: the playback stopped (peresmeshnik-audio: BlackHole 2ch went away)']
     assert plays == [320]
+
+
+def test_live_voice_plays_again_when_the_output_is_back(monkeypatch):
+    """The output fails (BlackHole 2ch gone), then is back: the tray heard it once; the live voice plays again by
+    itself (a new stream every RETRY_S on the frames that come), without a second message for a stream that fails
+    right after it opened."""
+    from peresmeshnik import app, config
+    s = config.Settings()
+    s.them_to_me = 'local'
+    errors, plays, fails = [], [], [3]  # the output fails its first three tries
+
+    class Direction:  # its events last until it is closed, as a real one's (ended by themselves: it died)
+        def __init__(self):
+            self.closed = threading.Event()
+
+        def feed(self, pcm):
+            pass
+
+        def events(self):
+            self.closed.wait()
+            yield from ()
+
+        def close(self):
+            self.closed.set()
+
+    class FlakyOut:
+        def play(self, pcm, sr):
+            if fails[0]:
+                fails[0] -= 1
+                raise RuntimeError('BlackHole 2ch: the playback stopped (exit 4)')
+            plays.append(len(pcm))
+
+        def flush(self):
+            pass
+
+        def stop(self):
+            pass
+
+    class In:
+        def start(self, cb):
+            self.cb = cb
+
+        def stop(self):
+            pass
+    inp = In()
+    monkeypatch.setattr(app.Side, 'RETRY_S', 0.05)
+    monkeypatch.setattr(app.Side, '_local', lambda self, s: Direction())
+    side = app.Side('them', s, inp, FlakyOut(), type('O', (), {'show': lambda self, c: None})(), errors.append)
+    side.start()
+    side.set_live(True)
+    for _ in range(40):  # 0.4 s of 10 ms frames
+        inp.cb(np.zeros(160, np.float32))
+        time.sleep(0.01)
+    assert wait_for(lambda: side._live_q.empty())
+    side.stop()
+    assert errors == ['error: them: BlackHole 2ch: the playback stopped (exit 4)']  # once for the whole outage
+    assert fails == [0] and len(plays) > 10  # it plays again
 
 
 def test_followed_says_which_microphone_plays_meanwhile():

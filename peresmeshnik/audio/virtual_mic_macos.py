@@ -21,7 +21,7 @@ class VirtualMic(_VirtualMic):
     reopen = (7,)  # the helper ends with 7 when BlackHole 2ch changes its rate: the next one plays at the new rate
 
     def _make(self) -> list[str]:
-        self.device = macos.blackhole()
+        self.device = self.call_mic = macos.blackhole()  # one device: played into, recorded by the call app
         return []  # nothing of ours to remove at exit
 
     @staticmethod

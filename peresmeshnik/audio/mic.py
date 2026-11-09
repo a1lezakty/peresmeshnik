@@ -1,12 +1,14 @@
 """Microphone capture, and "translation <-> live voice" for the me -> them direction.
 
 `Mic`: on Linux a PipeWire / PulseAudio source by name (the names of `pactl list sources`, as in the
-wizard and the settings) through `parec`; on macOS a Core Audio device by UID or name through the helper
-(`audio/macos.py`), which can also follow the device itself (`follow`: the saved one while it is there,
-else the default input, back to the saved one when it returns); both read on a thread blocked on the pipe.
-Elsewhere PortAudio (sounddevice). The reader / device callback only hands frames on (engines.py rules):
-`on_frames` must just enqueue. The stream exists only between start() and stop(), so when translation is
-off no device is open. Our own devices (`peresmeshnik_*`, BlackHole 2ch) are refused: the app would hear itself.
+wizard and the settings) through `parec`; on macOS a Core Audio device by UID or name, on Windows a WASAPI endpoint
+by id or name, through the helper (`audio/macos.py`, `audio/windows.py`), which can also follow the device itself
+(`follow`: the saved one while it is there, else the default input, back to the saved one when it returns); both read
+on a thread blocked on the pipe. Elsewhere PortAudio (sounddevice). The helper, not PortAudio, on Windows too: it
+sees endpoints come and go by itself (PortAudio only after a refresh that reopens every stream of the process).
+The reader / device callback only hands frames on (engines.py rules): `on_frames` must just enqueue. The stream
+exists only between start() and stop(), so when translation is off no device is open. Our own devices
+(`peresmeshnik_*`, BlackHole 2ch, CABLE Output) are refused: the app would hear itself.
 
 `LiveSwitch`: the me -> them `Direction` with `set_live` (see its docstring).
 """
@@ -29,6 +31,7 @@ from peresmeshnik.engines import SAMPLE_RATE, Speech
 OURS = 'peresmeshnik_'  # every PipeWire device the app makes starts with this
 FADE_MS = 30  # crossfade of the live switch: >= 2 periods of a low voice (85 Hz), well under a syllable (BENCH)
 LEAD_MS = 60  # output kept ahead of the input clock: room for scheduling jitter on top of the device's 40 ms
+START_S = 5.0  # record(): how much longer than asked it waits for the microphone's sound
 
 
 def _pactl(*args: str) -> str:
@@ -38,6 +41,15 @@ def _pactl(*args: str) -> str:
 def sources() -> list[str]:
     """Names of the PipeWire / PulseAudio sources (monitors of sinks included)."""
     return [line.split('\t')[1] for line in _pactl('list', 'short', 'sources').splitlines() if '\t' in line]
+
+
+def native():
+    """The helper's platform module: audio/macos.py or audio/windows.py."""
+    if sys.platform == 'win32':
+        from peresmeshnik.audio import windows
+        return windows
+    from peresmeshnik.audio import macos
+    return macos
 
 
 def not_ours(name: str) -> str:
@@ -61,10 +73,10 @@ class Mic:
         self.follow, self.on_device = follow, on_device
         self.blocksize = sample_rate * frame_ms // 1000
         self.pipewire = sys.platform.startswith('linux') and bool(shutil.which('parec'))
-        self.macos = sys.platform == 'darwin'
+        self.helper = sys.platform in ('darwin', 'win32')
         self.source = ''  # the device being recorded (Linux, macOS)
-        self.uid = ''  # macOS: its Core Audio UID
-        self._stream = self._proc = self._thread = self._on_frames = None
+        self.uid = ''  # macOS: its Core Audio UID; Windows: its endpoint id
+        self._stream = self._proc = self._thread = None
         self._stopping = False
 
     def start(self, on_frames: Callable[[np.ndarray], None]) -> None:
@@ -72,19 +84,9 @@ class Mic:
         if self.pipewire:
             self._start_parec(on_frames)
             return
-        if self.macos:
+        if self.helper:
             self._start_helper(on_frames)
             return
-        self._on_frames = on_frames
-        if sys.platform == 'win32':  # register in the shared PortAudio holder registry: a device refresh suspends/
-            from peresmeshnik.audio import coreaudio  # resumes it (else refresh_portaudio frees this live stream)
-            with coreaudio.portaudio_lock:
-                self._open(on_frames)
-                coreaudio.hold(self)
-        else:
-            self._open(on_frames)
-
-    def _open(self, on_frames) -> None:
         import sounddevice as sd  # PortAudio is loaded only when a stream opens
 
         def callback(indata, frames, time_info, status):
@@ -96,24 +98,7 @@ class Mic:
 
         self._stream = sd.InputStream(device=self.device, channels=1, samplerate=self.sample_rate, blocksize=self.blocksize,
                                       dtype='float32', callback=callback, finished_callback=finished)
-        self._stopping = False
         self._stream.start()
-
-    def suspend(self) -> None:  # coreaudio.refresh_portaudio: the stream is freed, resume() opens it again (Windows)
-        self._stopping = True
-        stream, self._stream = self._stream, None
-        if stream is not None:
-            stream.abort()
-            stream.close()
-
-    def resume(self) -> None:  # under coreaudio.portaudio_lock (the refresh)
-        if self._on_frames is None:  # stopped meanwhile
-            return
-        try:
-            self._open(self._on_frames)
-        except Exception as e:
-            if self.on_end:  # its own thread: the owner may wait for a thread that waits for this refresh
-                threading.Thread(target=self.on_end, args=(f'the microphone after the device refresh: {e}',), daemon=True).start()
 
     def _start_parec(self, on_frames) -> None:
         name = not_ours(self.device or _pactl('get-default-source').strip())
@@ -143,9 +128,9 @@ class Mic:
         self._thread.start()
 
     def _start_helper(self, on_frames) -> None:
-        from peresmeshnik.audio import macos
-        self.source = macos.not_blackhole(self.device or '')
-        self._proc = proc = macos.spawn('record', '--from', self.source, '--rate', str(self.sample_rate), *(['--follow'] * self.follow))
+        helper = native()
+        self.source = helper.not_virtual(self.device or '')
+        self._proc = proc = helper.spawn('record', '--from', self.source, '--rate', str(self.sample_rate), *(['--follow'] * self.follow))
         errors: list[str] = []
         done = threading.Event()
 
@@ -166,19 +151,12 @@ class Mic:
 
         def why():
             done.wait(5)
-            return [macos.NO_PERMISSION] if proc.returncode == 6 else errors
+            return [helper.NO_PERMISSION] if proc.returncode == 6 else errors
         threading.Thread(target=events, name='mic-events', daemon=True).start()
         self._read(on_frames, why)
 
     def stop(self) -> None:
         self._stopping = True
-        if self._on_frames is not None and sys.platform == 'win32':  # unregister before closing the PortAudio stream
-            from peresmeshnik.audio import coreaudio
-            self._on_frames = None  # a refresh going on does not open it again
-            with coreaudio.portaudio_lock:
-                coreaudio.release(self)
-                self.suspend()
-        self._on_frames = None
         if self._stream is not None:
             self._stream.stop()
             self._stream.close()
@@ -195,8 +173,8 @@ class Mic:
 
 
 def followed(saved: str, on_state: Callable[[str], None] = lambda text: None) -> Mic:
-    """macOS: the microphone of me -> them, kept by the helper on the saved device, else the default input (never
-    BlackHole), back on the saved one when it returns. The helper takes another one at once: the tray says which one
+    """macOS, Windows: the microphone of me -> them, kept by the helper on the saved device, else the default input
+    (never a virtual one), back on the saved one when it returns. The helper takes another one at once: the tray says which one
     plays meanwhile, and again when the saved one is back."""
     away = {'name': '', 'none': False}  # the saved microphone while it is away; no microphone at all
 
@@ -224,18 +202,40 @@ def followed(saved: str, on_state: Callable[[str], None] = lambda text: None) ->
 
 def record(seconds: float, device: int | str | None = None, sample_rate: int = SAMPLE_RATE,
            on_progress: Callable[[float], None] | None = None) -> np.ndarray:
-    """Blocking recording of `seconds` from the microphone (enrollment); `on_progress(seconds so far)` once a second."""
+    """Blocking recording of `seconds` of sound from the microphone (enrollment); `on_progress(seconds so far)` once a
+    second of it. Counted in sound, not wall time: the helper takes ~0.5 s to start (macOS runner: 2.5 s of 3 came by
+    wall time). A microphone that gives less within `START_S` extra (it went away) returns what came; one that ends
+    before any sound came raises with why (no permission: the helper says so at once, not after the wait)."""
     frames: list[np.ndarray] = []
-    mic = Mic(device, sample_rate)
-    mic.start(frames.append)
+    got = threading.Condition()
+    n, ended = [0], []
+
+    def take(pcm: np.ndarray) -> None:
+        with got:
+            frames.append(pcm)
+            n[0] += len(pcm)
+            got.notify()
+
+    def end(why: str) -> None:
+        with got:
+            ended.append(why)
+            got.notify()
+    mic = Mic(device, sample_rate, on_end=end)
+    mic.start(take)
     try:
-        t0 = time.monotonic()
+        end_at = time.monotonic() + seconds + START_S
         for i in range(1, math.ceil(seconds) + 1):
-            time.sleep(max(0.0, t0 + min(i, seconds) - time.monotonic()))
+            want = min(i, seconds)
+            with got:
+                if not got.wait_for(lambda: n[0] >= want * sample_rate or ended, max(0.0, end_at - time.monotonic())) \
+                        or n[0] < want * sample_rate:  # noqa: B023
+                    break
             if on_progress:
-                on_progress(min(i, seconds))
+                on_progress(want)
     finally:
         mic.stop()
+    if not frames and ended:
+        raise RuntimeError(ended[0])
     return np.concatenate(frames)[:int(seconds * sample_rate)] if frames else np.zeros(0, np.float32)
 
 

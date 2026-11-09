@@ -7,11 +7,16 @@ Qt signals; nothing is polled. Settings are written when the wizard finishes.
 """
 from __future__ import annotations
 
+import json
+import logging
+import os
 import shutil
+import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 import psutil
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -33,11 +38,14 @@ from PySide6.QtWidgets import (
 )
 
 from peresmeshnik import config, models
+from peresmeshnik.local import voicepack
 from peresmeshnik.ui.tray import LANGS, MIC_LABEL, SIDES, device_combo, save_key
 
 LINUX = sys.platform.startswith('linux')
+log = logging.getLogger('peresmeshnik.ui')
 MACOS = sys.platform == 'darwin'
-VMIC = 'BlackHole 2ch' if MACOS else 'Peresmeshnik Mic'  # what the call app takes as its microphone
+WINDOWS = sys.platform == 'win32'
+VMIC = 'BlackHole 2ch' if MACOS else 'CABLE Output' if WINDOWS else 'Peresmeshnik Mic'  # the call app's microphone
 SAMPLES = Path(__file__).parent / 'samples'
 
 
@@ -58,16 +66,106 @@ def needed_models(s: config.Settings) -> list[str]:
             ids += [s.local.asr[src], s.local.mt[f'{src}-{tgt}']]
         if local:
             stock = side == 'them_to_me' or s.local.clone == 'piper'  # voice.STOCK: me -> them in a stock voice
-            ids.append(s.local.tts[tgt] if stock else s.local.clone)
+            ids += [s.local.tts[tgt]] if stock else [s.local.clone, s.local.tts[tgt]]  # the clone's fallback (~60 MB)
     return list(dict.fromkeys(ids))
+
+
+MIN_VRAM_GB = 5.5  # the clone (XTTS-v2 ~2 GB) next to them -> me on CUDA (~0.6 GB): a 6 GB card (6144 MiB, some report less)
+
+
+PACK_CONSENT = ('I accept the licenses of the voice pack: PyTorch (BSD-3-Clause), coqui-tts (MPL-2.0), and of the XTTS-v2 '
+                'voice model it runs, the Coqui Public Model License (huggingface.co/coqui/XTTS-v2): noncommercial use '
+                'only, it binds me as the user')
+
+
+MIN_DRIVER = (570, 65)  # Windows: CUDA 12.8 GA's driver (the pack's torch 2.8.0+cu128; NVIDIA's CUDA 12.8.0 notes)
+MIN_DRIVER_COMPAT = (528, 33)  # CUDA 12.x minor version compatibility on Windows: below 570.65 not checked, may work
+MIN_CC = 6.1  # the pack's Windows torch is built for sm_61 .. sm_120 (its _cuda_getArchFlags, the voice-pack job)
+
+
+class Gpu(NamedTuple):
+    vram: float = 0.0  # GB
+    driver: tuple[int, ...] = ()
+    cc: float = 0.0  # compute capability; 0: not known (a driver too old to say)
+    why: str = ''  # nvidia-smi is there but fails: the driver's own words
+
+    @property
+    def driver_text(self) -> str:
+        return _version(self.driver)
+
+
+def _smi(exe: str, fields: str) -> list[list[str]] | str:
+    try:
+        r = subprocess.run([exe, f'--query-gpu={fields}', '--format=csv,noheader,nounits'], capture_output=True, text=True,
+                           timeout=10, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    except (OSError, subprocess.SubprocessError) as e:
+        return str(e)
+    rows = [[x.strip() for x in ln.split(',')] for ln in (r.stdout or '').splitlines() if ln.strip()]
+    if rows and all(len(row) == fields.count(',') + 1 and row[0].replace('.', '', 1).isdigit() for row in rows):
+        return rows
+    return ' '.join((r.stdout or '').split())[:200] or f'nvidia-smi exited with {getattr(r, "returncode", "?")}'
+
+
+def gpu() -> Gpu:
+    """The biggest NVIDIA GPU by nvidia-smi (no torch, ~0.1 s): memory, driver, compute capability; Gpu() without one.
+    A driver that does not answer is not "no GPU": `why` says what nvidia-smi said."""
+    exe = shutil.which('nvidia-smi')
+    if not exe:
+        return Gpu()
+    rows = _smi(exe, 'memory.total,driver_version,compute_cap')
+    if isinstance(rows, str):  # a driver before compute_cap (R510) does not know the field
+        rows = old if not isinstance(old := _smi(exe, 'memory.total,driver_version'), str) else rows
+    if isinstance(rows, str):
+        return Gpu(why=rows)
+    best = max(rows, key=lambda row: float(row[0]))
+
+    def num(x: str, kind=float):
+        try:
+            return kind(x)
+        except ValueError:
+            return kind()
+    return Gpu(float(best[0]) / 1024, tuple(num(x, int) for x in best[1].split('.')), num(best[2]) if len(best) > 2 else 0.0)
+
+
+def gpu_text(vram: float) -> str:
+    return f'an NVIDIA GPU with {vram:.0f} GB' if vram else 'no NVIDIA GPU'
+
+
+def _version(v: tuple[int, ...]) -> str:
+    return '.'.join(f'{x:02d}' if i else str(x) for i, x in enumerate(v))
+
+
+def gpu_note(g: Gpu) -> str:
+    """A driver between CUDA 12.x's compatibility floor and CUDA 12.8's own: not refused, not checked either."""
+    if not g.why and MIN_DRIVER_COMPAT <= g.driver < MIN_DRIVER:
+        return (f'Your NVIDIA driver {g.driver_text} is older than {_version(MIN_DRIVER)} (CUDA 12.8\'s): not checked, it '
+                'may work; if the clone does not start, update it from nvidia.com/drivers.')
+    return ''
+
+
+def gpu_refusal(g: Gpu) -> str:
+    """Why the voice pack (Windows) would not run the clone on this GPU, said before its 3.7 GB download; '' if it would."""
+    if g.why:
+        return (f'The NVIDIA driver does not answer ({g.why}): reinstall or update it from nvidia.com/drivers, then open '
+                'this page again.')
+    if g.vram < MIN_VRAM_GB:
+        return (f'The clone of your voice needs an NVIDIA GPU with at least 6 GB of memory; this computer has '
+                f'{gpu_text(g.vram)}.')
+    if g.driver < MIN_DRIVER_COMPAT:
+        return (f'The clone of your voice needs NVIDIA driver {_version(MIN_DRIVER)} or newer; this computer has '
+                f'{g.driver_text or "an older one"}: update it from nvidia.com/drivers (or the NVIDIA app), then open this '
+                'page again.')
+    if g.cc and g.cc < MIN_CC:
+        return (f'This NVIDIA GPU is too old for the voice pack (compute capability {g.cc:g}; it needs {MIN_CC:g} or newer: '
+                'GeForce GTX 10xx and later).')
+    return ''
 
 
 def tier() -> tuple[str, str]:
     """(what this machine is, the recommended me -> them engine)."""
-    gb = psutil.virtual_memory().total / 2 ** 30
-    gpu = bool(shutil.which('nvidia-smi'))
-    rec = 'local' if gpu else 'cloud'  # no local clone is live without an NVIDIA GPU (BENCH)
-    return f'{gb:.0f} GB RAM, {"an NVIDIA GPU" if gpu else "no NVIDIA GPU"}: recommended them → me local, me → them {rec}', rec
+    gb, vram = psutil.virtual_memory().total / 2 ** 30, gpu().vram
+    rec = 'local' if vram >= MIN_VRAM_GB else 'cloud'  # the clone keeps up only on an NVIDIA GPU with room for it (BENCH)
+    return f'{gb:.0f} GB RAM, {gpu_text(vram)}: recommended them → me local, me → them {rec}', rec
 
 
 class LanguagesPage(QWizardPage):
@@ -125,6 +223,8 @@ class LanguagesPage(QWizardPage):
 
 
 class DevicesPage(QWizardPage):
+    mic_checked = Signal(bool)  # Windows: the microphone is denied (the worker's probe)
+
     def __init__(self, w: SetupWizard):
         super().__init__()
         self.w = w
@@ -134,6 +234,8 @@ class DevicesPage(QWizardPage):
         self.f = QFormLayout(self)
         self.warn = QLabel()
         self.warn.setWordWrap(True)
+        self.mic_checked.connect(self._mic_checked)
+        self._vmic_text, self._denied, self._probed = '', False, False
 
     def initializePage(self) -> None:  # noqa: N802
         while self.f.rowCount():
@@ -147,16 +249,65 @@ class DevicesPage(QWizardPage):
         self.warn.setWordWrap(True)
         self.f.addRow(self.warn)
         self._echo()
-        if MACOS:
-            self.blackhole = QLabel()
-            self.blackhole.setWordWrap(True)
-            self.blackhole.setOpenExternalLinks(True)
-            self.blackhole.setTextInteractionFlags(Qt.TextBrowserInteraction)  # the brew command can be copied
+        if MACOS or WINDOWS:
+            self.vmic = QLabel()
+            self.vmic.setWordWrap(True)
+            self.vmic.setOpenExternalLinks(True)
+            self.vmic.setTextInteractionFlags(Qt.TextBrowserInteraction)  # the brew command can be copied
             self.recheck = QPushButton('Check again')
-            self.recheck.clicked.connect(self.check_blackhole)
-            self.f.addRow('Virtual microphone', self.blackhole)
+            self.recheck.clicked.connect(lambda: self.check_vmic(probe=True))
+            self.f.addRow('Virtual microphone', self.vmic)
             self.f.addRow('', self.recheck)
-            self.check_blackhole()
+            self.check_vmic(probe=not self._probed)  # the microphone tried once, not on every visit to the page
+
+    def check_vmic(self, probe: bool = False) -> bool:
+        return self.check_cable(probe) if WINDOWS else self.check_blackhole()
+
+    def check_cable(self, probe: bool = False) -> bool:
+        """Windows: VB-Cable is the user's to install (the driver needs an administrator and a restart); missing -> how
+        to, and "Check again". `probe`: also try the microphone (Windows' permission), in a worker: up to seconds."""
+        from peresmeshnik.audio import windows
+        try:
+            devs = windows.devices()
+            play, rec = windows.cable(devs)
+            text, ok = ('✔ VB-Audio Virtual Cable is installed: in the call app choose the microphone '
+                        f'<b>{windows.CABLE_OUT}</b>.'), True
+            if any(d['default_output'] for d in devs if d['outputs'] and windows.is_ours(d)):
+                text += (f'<br>⚠ <b>{play["name"]}</b> is Windows\' default output: what Windows plays, the translation of '
+                         'the other side too, goes into the call instead of your headphones. Choose your headphones or '
+                         'speakers in Settings → System → Sound → Output.')
+            if rec['default_input']:
+                text += (f'<br>⚠ <b>{rec["name"]}</b> is Windows\' default microphone: the call app may take it, but every '
+                         'other app hears the translation instead of you. Choose your real microphone in Settings → System '
+                         '→ Sound → Input, and CABLE Output in the call app.')
+            if probe:
+                self._probed = True
+
+                def ask():
+                    try:
+                        self.mic_checked.emit(windows.permission() == 'denied')
+                    except Exception as e:  # the helper is missing: said above already
+                        log.warning('microphone permission: %s', e)
+                threading.Thread(target=ask, name='mic-permission', daemon=True).start()
+        except windows.CableMissing:
+            text, ok = ('<b>✘ VB-Audio Virtual Cable is not installed.</b> It is the virtual microphone that carries your '
+                        'translated voice to the call app (them → me works without it).<br>Install it: download the '
+                        f'<b>VB-CABLE Driver Pack</b> from <a href="{windows.URL}">vb-audio.com/Cable</a>, unpack the zip, '
+                        'right-click <b>VBCABLE_Setup_x64.exe</b> → <b>Run as administrator</b> → <b>Install Driver</b>, '
+                        'restart Windows. Then press <b>Check again</b>.'), False
+        except Exception as e:  # the helper is missing (a broken install)
+            text, ok = f'✘ Cannot list the sound devices: {e}', False
+        self._vmic_text = text if ok else ''
+        self.vmic.setText(text + (f'<br>✘ {windows.NO_PERMISSION}.' if ok and self._denied else ''))
+        self.recheck.setVisible(not ok or self._denied)
+        return ok
+
+    def _mic_checked(self, denied: bool) -> None:
+        from peresmeshnik.audio import windows
+        self._denied = denied
+        if self._vmic_text:
+            self.vmic.setText(self._vmic_text + (f'<br>✘ {windows.NO_PERMISSION}.' if denied else ''))
+            self.recheck.setVisible(denied)
 
     def check_blackhole(self) -> bool:
         """macOS: BlackHole 2ch is the user's to install; missing -> how to, and "Check again". The microphone permission
@@ -175,7 +326,7 @@ class DevicesPage(QWizardPage):
             text, ok = f'✘ Cannot list the sound devices: {e}', False
         if ok and macos.permission() in ('denied', 'restricted'):
             text += f'<br>✘ {macos.NO_PERMISSION}.'
-        self.blackhole.setText(text)
+        self.vmic.setText(text)
         self.recheck.setVisible(not ok)
         return ok
 
@@ -193,7 +344,9 @@ class DevicesPage(QWizardPage):
 class CallSoundPage(QWizardPage):
     """macOS: how the app hears the call (audio/capture_macos): a process tap of the call app (14.4+; macOS asks for
     "System Audio Recording" once, `request()` waits for that answer, so not on the GUI thread), or before 14.4 the call
-    app's speaker set to BlackHole 16ch. Either way the page can be left: them -> me says why when it cannot start."""
+    app's speaker set to BlackHole 16ch. Windows (audio/capture_windows, S1): a process loopback of the call app
+    (Windows 10 2004+, no permission to ask), checked here. Either way the page can be left: them -> me says why when
+    it cannot start."""
     answered = Signal(int, str)
 
     def __init__(self, w: SetupWizard):
@@ -214,6 +367,13 @@ class CallSoundPage(QWizardPage):
         self.running, self.path = False, ''
 
     def initializePage(self) -> None:  # noqa: N802
+        if WINDOWS:
+            self.path = 'loopback'
+            self.text.setText("While translating, Peresmeshnik hears your call app through Windows (only that app's sound) "
+                              'and turns its volume down on your speakers; translation off gives the volume back.')
+            self.button.setText('Check again')
+            self.check_loopback()
+            return
         from peresmeshnik.audio import capture_macos as cm
         self.path = cm.path()
         if self.path == 'tap':
@@ -235,6 +395,9 @@ class CallSoundPage(QWizardPage):
             return -1, str(e)
 
     def act(self) -> None:
+        if WINDOWS:
+            self.check_loopback()
+            return
         if self.path != 'tap':
             self.check_blackhole()
             return
@@ -254,6 +417,23 @@ class CallSoundPage(QWizardPage):
     def _show(self, code: int, why: str) -> None:
         self.state.setText('✔ Allowed: while translating, the call app is heard through macOS.' if code == 0 else f'✘ {why}')
         self.button.setVisible(code != 0)
+
+    def check_loopback(self) -> bool:
+        """Windows: the loopback helper and Windows itself can take the call app's sound; which app plays now, if any."""
+        from peresmeshnik.audio import capture_windows as cw
+        code, why = self._safe(cw.check)
+        if code:
+            self.state.setText(f'✘ {why}')
+        else:
+            try:
+                app = cw.guess_call_app()
+            except Exception:  # the session list failed: the check passed, the app is found at the call
+                app = ''
+            self.state.setText('✔ Windows gives Peresmeshnik the call app\'s sound. ' + (
+                f'Playing now: <b>{app}</b>.' if app else 'Telegram, Zoom, Discord and the like are found by themselves '
+                'once the call plays; else choose the app in the tray menu <b>Call app</b>.'))
+        self.button.setVisible(code != 0)
+        return code == 0
 
     def check_blackhole(self) -> bool:
         from peresmeshnik.audio import capture_macos as cm
@@ -393,13 +573,13 @@ class SelfTestPage(QWizardPage):
                 from peresmeshnik.ui import selftest
                 ctl.set_translation(False).result()  # the call sink must carry only the chirp
                 vmic = ctl.submit(ctl.virtual_mic).result()  # the app's own: a second one would replace it
-                if MACOS:  # the test records BlackHole 2ch like a call app: the loop would open the microphone into it
+                if MACOS or WINDOWS:  # the test records the virtual mic like a call app: the loop would join the chirp
                     ctl.submit(ctl._loopback, False).result()
                 try:
                     rs = selftest.run_all(s.ui.headphones or None, s.ui.mic or None, vmic,
                                           report=lambda r: self.result.emit(r.ok, f'{r.name}: {r.detail}'))
                 finally:
-                    if MACOS and not ctl.on:
+                    if (MACOS or WINDOWS) and not ctl.on:
                         ctl.submit(ctl._loopback, True).result()
                 self.ok = all(r.ok for r in rs)
             except Exception as e:  # no pactl, no sound server: say so instead of waiting forever
@@ -425,6 +605,9 @@ class VoicePage(QWizardPage):
     progress = Signal(float)
     result = Signal(object)  # (Report, Voice | None), or an error text
     checked = Signal(str)
+    pack_progress = Signal(object)  # voicepack.install's (stage, done, total[, text]): bytes overflow a Qt int
+    pack_done = Signal(str)  # '' or why it stopped
+    gpu_found = Signal(object)  # Gpu: nvidia-smi runs in a worker (up to its 10 s), not in the GUI thread
     seconds = 45.0
     name = 'me'
 
@@ -448,10 +631,26 @@ class VoicePage(QWizardPage):
             row.addWidget(b)
         self.bar = QProgressBar()
         self.bar.setVisible(False)
-        self.out, self.clone_out = QLabel(), QLabel()
-        for x in (self.out, self.clone_out):
+        self.out, self.clone_out, self.pack_out = QLabel(), QLabel(), QLabel()
+        for x in (self.out, self.clone_out, self.pack_out):
             x.setWordWrap(True)
+        self.pack_button, self.pack_cancel = QPushButton('Install the voice pack'), QPushButton('Cancel')
+        self.pack_button.clicked.connect(self.install_pack)
+        self.pack_consent = QCheckBox(PACK_CONSENT)  # before anything is downloaded
+        self.pack_consent.toggled.connect(self._buttons)
+        self.pack_cancel.clicked.connect(lambda: self._cancel_pack.set())
+        self.pack_bar = QProgressBar()
+        for x in (self.pack_out, self.pack_consent, self.pack_button, self.pack_cancel, self.pack_bar):
+            x.setVisible(False)  # _show_pack: only on Windows with the clone
+        prow = QHBoxLayout()
+        prow.addWidget(self.pack_button)
+        prow.addWidget(self.pack_cancel)
+        prow.addStretch()
         lay.addWidget(self.stock)
+        lay.addWidget(self.pack_out)
+        lay.addWidget(self.pack_consent)
+        lay.addLayout(prow)
+        lay.addWidget(self.pack_bar)
         lay.addWidget(self.prompt)
         lay.addLayout(row)
         for x in (self.bar, self.out, self.clone_out):
@@ -459,8 +658,13 @@ class VoicePage(QWizardPage):
         self.progress.connect(lambda t: self.bar.setValue(int(t)))
         self.result.connect(self._result)
         self.checked.connect(self._checked)
+        self.pack_progress.connect(self._pack_progress)
+        self.pack_done.connect(self._pack_done)
         self.voice = None
         self.running = False
+        self.packing, self.pack_note, self.gpu = False, '', None  # None: not known yet (the worker asks)
+        self.gpu_found.connect(self._gpu_found)
+        self._cancel_pack = threading.Event()
         self.draft = f'{self.name}.new'
 
     def local(self) -> bool:
@@ -481,15 +685,108 @@ class VoicePage(QWizardPage):
         self.stock.setVisible(self.local())
         self.stock.setChecked(s.local.clone == voice.STOCK)
         self.check_button.setVisible(self.local() and not self.stock.isChecked())
+        if not WINDOWS:
+            self.gpu = Gpu()
+        elif self.gpu is None and not getattr(self, '_asking', False):  # once: the GPU does not change meanwhile
+            self._asking = True
+            threading.Thread(target=lambda: self.gpu_found.emit(gpu()), name='gpu', daemon=True).start()
         if self.voice is None and s.local.voice and (voice.voices_dir() / s.local.voice / 'voice.json').exists():
             self.voice = voice.load(s.local.voice)
             q = self.voice.meta.get('quality', {})
             self.out.setText(f'Saved voice "{self.voice.name}": {q.get("seconds", 0):.0f} s, '
                              f'recorded {self.voice.meta.get("created", "")}.')
+        self._show_pack()
         self._buttons()
 
     def isComplete(self) -> bool:  # noqa: N802
-        return not self.running and (not self.local() or self.stock.isChecked() or self.voice is not None)
+        return not self.running and not self.packing and (not self.local() or self.stock.isChecked() or self.voice is not None)
+
+    def pack(self) -> str:
+        """The clone's voice pack here: '' where it is not this page's business (not Windows, cloud, the stock voice, a
+        runner of one's own in $PERESMESHNIK_VOICE_CMD, a build without the pack's files), 'installing', 'gpu' (gpu_refusal:
+        too little memory, an old driver or GPU, a driver that does not answer), else voicepack.state()."""
+        if not (WINDOWS and self.local() and not self.stock.isChecked()) or os.environ.get('PERESMESHNIK_VOICE_CMD') \
+                or not voicepack.lock_file().is_file():
+            return ''
+        if self.packing:
+            return 'installing'
+        if self.gpu is None:
+            return 'checking'
+        return 'gpu' if gpu_refusal(self.gpu) else voicepack.state()
+
+    def _gpu_found(self, g) -> None:
+        self.gpu = g
+        self._show_pack()
+        self._buttons()
+
+    def _show_pack(self) -> None:
+        st = self.pack()
+        for x in (self.pack_out, self.pack_consent, self.pack_button, self.pack_cancel, self.pack_bar):
+            x.setVisible(False)
+        if not st:
+            return
+        self.pack_out.setVisible(True)
+        self.pack_cancel.setVisible(st == 'installing')
+        self.pack_bar.setVisible(st == 'installing')
+        if st == 'installing':
+            return
+        if st == 'checking':
+            self.pack_out.setText('Checking the NVIDIA GPU…')
+            return
+        if st == 'gpu':
+            text = gpu_refusal(self.gpu) + ' Choose a stock voice above, or cloud for "me → them" on the first page.'
+        elif st == 'ready':
+            text = 'The voice pack is installed.'
+        else:
+            spec = json.loads(voicepack.lock_file().read_text())
+            dl = sum(f['size'] for f in [spec['python'], spec['pip'], *spec['wheels']])
+            text = {'none': 'The clone runs in the voice pack: its own Python with torch for NVIDIA GPUs.',
+                    'partial': 'The voice pack install did not finish: it goes on from where it stopped.',
+                    'outdated': 'The voice pack was installed for another version of Peresmeshnik: install it again.'}[st]
+            text += (f' {dl / 1e9:.1f} GB to download, {spec["installed_bytes"] / 1e9:.0f} GB on disk '
+                     f'({voicepack.need_bytes() / 1e9:.0f} GB free space needed while installing).')
+            self.pack_button.setText({'partial': 'Resume the install'}.get(st, 'Install the voice pack'))
+            self.pack_button.setVisible(True)
+            self.pack_consent.setVisible(True)
+        if st != 'gpu' and (note := gpu_note(self.gpu)):
+            text = f'{note} {text}'
+        self.pack_out.setText(f'{self.pack_note} {text}'.strip())
+
+    def install_pack(self) -> None:
+        if not self.pack_consent.isChecked():  # the button is off until then
+            return
+        self.packing, self.pack_note = True, ''
+        self._cancel_pack.clear()
+        self.pack_bar.setRange(0, 0)  # busy until bytes come
+        self.pack_out.setText('Starting the voice pack install…')
+        self._show_pack()
+        self._buttons()
+
+        def work():
+            try:
+                voicepack.install(lambda *a: self.pack_progress.emit(a), self._cancel_pack)
+                self.pack_done.emit('')
+            except voicepack.Cancelled:
+                self.pack_done.emit('Cancelled: what is downloaded stays for the next try.')
+            except Exception as e:  # no space, the network, pip
+                self.pack_done.emit(f'error: {e}.')
+        threading.Thread(target=work, name='voice-pack', daemon=True).start()
+
+    def _pack_progress(self, a: tuple) -> None:
+        stage, done, total, text = (*a, '')[:4]
+        if stage == 'downloading' and total:
+            self.pack_bar.setRange(0, 1000)
+            self.pack_bar.setValue(int(1000 * done / total))
+            self.pack_out.setText(f'Downloading the voice pack: {done / 1e9:.2f} of {total / 1e9:.2f} GB ({text})')
+        else:
+            self.pack_bar.setRange(0, 0)
+            self.pack_out.setText({'cleaning': 'Removing the old voice pack…', 'unpacking': 'Unpacking its Python…',
+                                   'installing': f'Installing, a few minutes: {text}'}.get(stage, stage))
+
+    def _pack_done(self, note: str) -> None:
+        self.packing, self.pack_note = False, note
+        self._show_pack()
+        self._buttons()
 
     def _stock(self, on: bool) -> None:
         """The stock voice instead of the clone; its model (~60 MB) is fetched here when the models page took the clone."""
@@ -497,6 +794,7 @@ class VoicePage(QWizardPage):
         s = self.w.s
         s.local.clone = voice.STOCK if on else config.Local().clone
         self.check_button.setVisible(self.local() and not on)
+        self._show_pack()
         vid = s.local.tts[s.their_lang]
         if on and not models.is_fetched(models.get(vid), models.root()):
             self.out.setText(f'Downloading the stock voice {vid}…')
@@ -510,7 +808,10 @@ class VoicePage(QWizardPage):
     def _buttons(self) -> None:
         for b in (self.record_button, self.import_button):
             b.setEnabled(not self.running)
-        self.check_button.setEnabled(not self.running and self.voice is not None and not self.translating())
+        self.check_button.setEnabled(not self.running and self.voice is not None and not self.translating()
+                                     and self.pack() in ('', 'ready'))
+        self.pack_button.setEnabled(not self.running and self.pack_consent.isChecked())
+        self.stock.setEnabled(not self.packing)
         self.check_button.setToolTip('Turn translation off first: the check loads a second clone (~3 GB)'
                                      if self.translating() else '')
         self.completeChanged.emit()
@@ -570,18 +871,17 @@ class VoicePage(QWizardPage):
         self.clone_out.setText('Checking the clone: it says two test phrases… (first time: loading the voice pack)')
 
         def work():
-            try:
-                from peresmeshnik.local.clone import XttsClone
-            except ImportError as e:
-                self.checked.emit(f'The clone check needs the voice pack (torch, coqui-tts): {e}')
-                return
             from peresmeshnik.local.asr import OnnxAsr
+            from peresmeshnik.local.clone import make_clone
+            tts = None
             try:
-                tts = XttsClone(models.path(s.local.clone), threads=s.local.threads)
+                tts = make_clone(models.path(s.local.clone), threads=s.local.threads)
                 asr = OnnxAsr(s.local.asr[s.their_lang], s.local.threads)
                 self.checked.emit(voice.clone_verdict(voice.check_clone(tts, v, s.their_lang, asr)))
-            except Exception as e:  # a model not downloaded yet, out of memory
+            except Exception as e:  # no voice pack or GPU, a model not downloaded yet, out of memory
                 self.checked.emit(f'error: {e}')
+            finally:
+                getattr(tts, 'close', lambda: None)()  # the voice pack's process and its VRAM
         self.running = True
         self._buttons()
         threading.Thread(target=work, name='clone-check', daemon=True).start()
@@ -599,8 +899,9 @@ class VoicePage(QWizardPage):
             self.w.s.local.voice = self.name
 
     def rollback(self) -> None:
-        """The wizard was cancelled: the saved profile stays as it was."""
+        """The wizard was cancelled: the saved profile stays as it was; a voice pack install stops (it resumes later)."""
         from peresmeshnik import voice
+        self._cancel_pack.set()
         voice.discard(self.draft)
 
 
@@ -726,8 +1027,8 @@ class SetupWizard(QWizard):
         super().__init__()
         self.tray, self.s, self.key = tray, config.load(), ''
         self.setWindowTitle('Peresmeshnik setup')
-        routed = LINUX or MACOS
-        self.pages = [LanguagesPage(self)] + ([DevicesPage(self)] if routed else []) + ([CallSoundPage(self)] if MACOS else []) \
+        routed = LINUX or MACOS or WINDOWS
+        self.pages = [LanguagesPage(self)] + ([DevicesPage(self)] if routed else []) + ([CallSoundPage(self)] if MACOS or WINDOWS else []) \
             + [ModelsPage(self)] \
             + ([SelfTestPage(self)] if routed else []) + [VoicePage(self), HotkeyPage(self), DonePage()]
         self.voice_page = next(p for p in self.pages if isinstance(p, VoicePage))

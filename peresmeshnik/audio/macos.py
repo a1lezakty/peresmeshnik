@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from peresmeshnik.audio import processed
+
 HELPER = 'peresmeshnik-audio'
 BLACKHOLE = 'BlackHole 2ch'
 BLACKHOLE_UID = 'BlackHole2ch_UID'
@@ -52,6 +54,10 @@ def is_blackhole(key: str) -> bool:
     return key in (BLACKHOLE, BLACKHOLE_UID)
 
 
+def is_ours(d: dict) -> bool:
+    return is_blackhole(d['uid']) or is_blackhole(d['name'])
+
+
 def blackhole(devs: list[dict] | None = None) -> dict:
     """The BlackHole 2ch device, else BlackHoleMissing with how to install it."""
     for d in devices() if devs is None else devs:
@@ -69,7 +75,8 @@ def stand_in_mic() -> str:
 def not_blackhole(key: str, what: str = 'microphone') -> str:
     """BlackHole 2ch carries our own output: as the microphone (or the headphones) the app would hear itself. BlackHole
     16ch carries the call (below macOS 14.4): as the microphone, me -> them would translate the other side back. Any
-    other virtual input (Zoom's, Teams') or aggregate saved as the microphone is not the user's voice either."""
+    other virtual input (Zoom's, Teams') or aggregate saved as the microphone is not the user's voice either; Krisp's
+    is (audio.processed)."""
     if key and is_blackhole(key):
         raise ValueError(f'{BLACKHOLE} is the virtual microphone for the call app, not your {what}: choose your real '
                          f'{what} in the settings')
@@ -78,10 +85,13 @@ def not_blackhole(key: str, what: str = 'microphone') -> str:
     if key in CALL:
         raise ValueError(f'{CALL[0]} carries the call\'s sound, not your microphone: choose your real microphone in the settings')
     d = next((d for d in devices() if d['inputs'] and key in (d['uid'], d['name'])), None)
-    if d and d['transport'] in ('virt', 'grup'):
+    if d and d['transport'] in ('virt', 'grup') and not (d['transport'] == 'virt' and processed(d['name'])):
         kind = 'an aggregate device' if d['transport'] == 'grup' else 'a virtual device'
         raise ValueError(f'{d["name"]} is {kind}, not your microphone: choose your real microphone in the settings')
     return key
+
+
+not_virtual = not_blackhole  # the name shared with audio/windows.py
 
 
 def spawn(*args: str, stdout=subprocess.PIPE, stdin=subprocess.PIPE) -> subprocess.Popen:

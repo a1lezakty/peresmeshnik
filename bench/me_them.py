@@ -1,5 +1,6 @@
 """End to end "me -> them": my recording -> LocalDirection (VAD, ASR, MT, clone TTS) -> the virtual mic
-("Peresmeshnik Mic" on Linux, BlackHole 2ch on macOS) -> recorded back the way a call app records it -> ASR check.
+("Peresmeshnik Mic" on Linux, BlackHole 2ch on macOS, CABLE Input -> CABLE Output on Windows) -> recorded back the way
+a call app records it -> ASR check.
 
     python bench/me_them.py input                       # 30 s of the enrolled reader, other lines than the reference
     python bench/me_them.py run --voice DIR --model-dir DIR    # clone in this process (GPU box; on CPU it falls behind)
@@ -122,18 +123,26 @@ class Marked:
 # --- the call app's side
 
 class Recorder:
-    """Records a PulseAudio/PipeWire source (macOS: a Core Audio device); remembers when each piece arrived."""
+    """Records a PulseAudio/PipeWire source (macOS: a Core Audio device, Windows: an endpoint); remembers when each
+    piece arrived."""
 
     def __init__(self, source: str):
-        if sys.platform == 'darwin':
-            from peresmeshnik.audio import macos
-            self.p = macos.spawn('record', '--from', source, '--rate', str(SR_REC))
+        if sys.platform in ('darwin', 'win32'):
+            from peresmeshnik.audio.mic import native
+            self.p = native().spawn('record', '--from', source, '--rate', str(SR_REC))
         else:
             self.p = subprocess.Popen(['parec', f'--device={source}', '--format=float32le', f'--rate={SR_REC}', '--channels=1',
                                        '--raw', '--latency-msec=20', '--property=node.dont-reconnect=true'], stdout=subprocess.PIPE)
         self.chunks, self.marks, self.n = [], [(0, time.perf_counter())], 0
         self.t = threading.Thread(target=self._run, daemon=True)
         self.t.start()
+        t = time.perf_counter() + 10
+        while not self.chunks and self.p.poll() is None and time.perf_counter() < t:  # the helper takes a while to start
+            time.sleep(0.05)
+        if not self.chunks:
+            self.p.kill()
+            err = self.p.stderr.read().decode(errors='replace') if self.p.stderr else ''
+            raise RuntimeError(f'nothing recorded from {source} (exit {self.p.wait()}): {err.strip()}')
 
     def _run(self):
         rest = b''
@@ -159,6 +168,46 @@ class Recorder:
         self.p.terminate()
         self.t.join()
         return np.concatenate(self.chunks) if self.chunks else np.zeros(0, np.float32)
+
+
+class NullMic:
+    """No sound server here (a GPU box without PipeWire): a device that plays in real time into memory, back to back
+    like a real one, and its own Recorder (chunks, marks, wall, index, stop). The device link is then 0 ms; the path
+    through real devices is measured on the CI runners."""
+
+    def __init__(self):
+        self.t0, self.end, self.x = time.perf_counter(), 0.0, np.zeros(SR_REC * 600, np.float32)
+        self.call_mic, self.marks = {'uid': ''}, [(0, self.t0)]
+
+    @property
+    def n(self) -> int:
+        return int((time.perf_counter() - self.t0) * SR_REC)
+
+    @property
+    def chunks(self) -> list:
+        return [self.x[:self.n]]
+
+    def play(self, pcm, sr):
+        y = np.interp(np.arange(int(len(pcm) * SR_REC / sr)) * sr / SR_REC, np.arange(len(pcm)), pcm).astype(np.float32)
+        start = max(time.perf_counter(), self.end)
+        i = int((start - self.t0) * SR_REC)
+        self.x[i:i + len(y)] = y[:max(0, len(self.x) - i)]
+        self.end = start + len(y) / SR_REC
+
+    def drain(self):
+        time.sleep(max(0.0, self.end - time.perf_counter()))
+
+    def wall(self, i):
+        return self.t0 + i / SR_REC
+
+    def index(self, wall):
+        return int((wall - self.t0) * SR_REC)
+
+    def stop(self) -> np.ndarray:
+        return self.x[:self.n].copy()
+
+    def remove(self):
+        pass
 
 
 class Memory:
@@ -246,7 +295,8 @@ def make_input(a):
 
     import pyarrow.parquet as pq
     import soundfile as sf
-    t = pq.read_table(ROOT / 'refs' / 'ru.parquet')
+    from data import REFS, fetch
+    t = pq.read_table(fetch(REFS['ru'], ROOT / 'refs' / 'ru.parquet'))  # downloaded here on a fresh runner
     audio, text = t.column('audio').to_pylist(), t.column('transcription').to_pylist()
     keep = [i for i, x in enumerate(audio) if re.match(r'poemi_01_', x['path'])][a.skip:]
     parts, said, total = [np.zeros(SR_REC // 2, np.float32)], [], 0.0
@@ -272,9 +322,12 @@ def run(a):
     from peresmeshnik import pipeline, voice
     from peresmeshnik.engines import Speech
     mac = sys.platform == 'darwin'
+    SOURCE = None
     if mac:
         from peresmeshnik.audio.macos import BLACKHOLE_UID as SOURCE
         from peresmeshnik.audio.virtual_mic_macos import VirtualMic
+    elif sys.platform == 'win32':  # CABLE Output, what the call app records (VirtualMic.call_mic)
+        from peresmeshnik.audio.virtual_mic_windows import VirtualMic
     else:
         from peresmeshnik.audio.virtual_mic_linux import SOURCE, VirtualMic
     out = Path(a.out_dir)
@@ -294,8 +347,9 @@ def run(a):
     elif a.remote:
         tts, v = RemoteTts(os.environ['CLONE_SERVER']), None
     else:
-        from peresmeshnik.local.clone import XttsClone
-        tts, v = XttsClone(a.model_dir, a.device, a.threads), voice.load(a.voice.name, a.voice.parent)
+        from peresmeshnik.local.clone import XttsClone, make_clone  # make_clone: the voice pack's runner if set up
+        tts = XttsClone(a.model_dir, a.device, a.threads) if a.device else make_clone(a.model_dir, a.threads)
+        v = voice.load(a.voice.name, a.voice.parent)
     marked = Marked(tts)
     d = pipeline.make_local('ru', 'en', threads=a.threads, tts=marked, voice=v)
     d.realtime = True
@@ -320,8 +374,11 @@ def run(a):
                pactl('load-module', 'module-remap-source', f'master={a.mic}_feed.monitor', f'source_name={a.mic}', 'channels=1').strip()]
         sw = LiveSwitch(d, tts.sample_rate)
         events, inp = sw.events, Microphone(a.mic)
-    mic = VirtualMic()
-    rec = Recorder(SOURCE)
+    if a.null_mic:
+        mic = rec = NullMic()
+    else:
+        mic = VirtualMic()
+        rec = Recorder(SOURCE or mic.call_mic['uid'])
     time.sleep(0.5)
     link = probe(mic, rec)
     print(f'engines {load_s:.1f} s; virtual mic link {[round(x * 1000) for x in link]} ms', flush=True)
@@ -384,6 +441,9 @@ def run(a):
     for m in reversed(src):
         subprocess.run(['pactl', 'unload-module', m], capture_output=True)
 
+    if them:  # both directions log their clauses: keep mine (they have my language's text),
+        # before k below is matched with my utterances
+        clauses[:] = [c for c in clauses if re.search('[а-яё]', c.get('text', ''), re.I)]
     for k, c in enumerate(clauses):  # clause end -> its translated audio at the call app's mic
         s, cap = starts.get(k), captions.get(c['clause'])
         j = onset_after(x, rec.index(s) - i0 - SR_REC // 50) if s is not None else None
@@ -399,8 +459,6 @@ def run(a):
         if j is not None:
             heard = rec.wall(j + i0)
             c['call_lag_s'], c['after_caption_s'] = round(heard - (cap - c['caption_lag_s']), 3), round(heard - cap, 3)
-    if them:  # both directions log their clauses: keep mine (they have my language's text)
-        clauses[:] = [c for c in clauses if re.search('[а-яё]', c.get('text', ''), re.I)]
     for c in clauses:
         print(json.dumps(c, ensure_ascii=False))
     sr = tts.sample_rate
@@ -411,10 +469,10 @@ def run(a):
     hyp_rec = transcribe(x, SR_REC)
     hyp_dir = transcribe(np.concatenate(direct), sr) if direct else ''
     lags = [c['call_lag_s'] for c in clauses if c.get('call_lag_s') is not None]
-    remote = getattr(tts, 'stats', [])
+    remote = tts.stats if a.remote else []  # RemoteTts: per-request rows (VoicePackClone.stats is a method)
     row = record('e2e_me_them_mic' if a.mic else 'e2e_me_them', 'piper' if a.stock else 'xtts-remote' if a.remote else 'xtts',
                  device=f'remote-{tts.device}' if a.remote else (a.device or 'auto'),
-                 threads=a.threads, audio_s=round(len(pcm) / pipeline.SAMPLE_RATE, 2), clauses=len(clauses),
+                 threads=a.threads, null_mic=a.null_mic, audio_s=round(len(pcm) / pipeline.SAMPLE_RATE, 2), clauses=len(clauses),
                  load_s=round(load_s, 1), wall_s=round(wall, 1), tail_after_input_s=round(done - feed_end, 1),
                  cpu_s_per_audio_s=round(cpu / (len(pcm) / pipeline.SAMPLE_RATE), 3),
                  mic_link_ms=[round(v * 1000) for v in link],
@@ -448,6 +506,7 @@ def main():
     r = sub.choices['run']
     r.add_argument('--in', dest='inp', type=Path, default=ROOT / 'me_them' / 'ru_30s.wav')
     r.add_argument('--remote', action='store_true', help='clone through $CLONE_SERVER')
+    r.add_argument('--null-mic', action='store_true', help='no sound server: play into memory in real time (a GPU box)')
     r.add_argument('--stock', action='store_true', help='the stock Piper voice instead of the clone (no --voice needed)')
     r.add_argument('--with-them', type=Path, help='also translate this English file them -> me in this process (memory of both)')
     r.add_argument('--mic', help='play the recording into a test microphone of this PipeWire name and take it from there '

@@ -490,12 +490,18 @@ RTF; the user can override it in settings.
 | Linux (x64) | PyInstaller one-folder on the oldest supported Ubuntu runner (older glibc) | — | `.tar.gz`, AppImage later |
 
 - The base app is **torch-free**: onnxruntime, CTranslate2, llama.cpp and sounddevice keep it
-  ~150–250 MB. Engines that need torch (voice cloning) ship as an optional "voice pack" that the
-  app downloads into its cache with its own runtime, so users who only need subtitles never get
-  a 1–3 GB bundle.
-- GPU: macOS uses CoreML/Metal where it pays (llama.cpp Metal, onnxruntime CoreML EP);
-  NVIDIA builds use the CUDA variants of onnxruntime/CTranslate2/llama.cpp from the same voice-
-  pack mechanism.
+  ~150–250 MB. The voice clone (XTTS-v2, torch) is the optional **voice pack** (Windows, NVIDIA;
+  decision 09.11 03:14/03:18): an embeddable CPython 3.12 with pinned, hash-checked wheels (torch
+  2.8.0+cu128, coqui-tts; `voice-runner/pack-windows.json`, ~3.7 GB download, ~8 GB installed)
+  that the setup wizard installs into `<data dir>/voice-pack` after the user accepts its licenses
+  (CPML for the model). The clone runs in a process of its own on that Python
+  (`voice-runner/voice_runner.py`, shipped with the app so it always matches it; `local/clone.py`
+  `VoicePackClone` over a pipe, the Piper runner's protocol): the app's process never loads torch
+  (no second OpenMP or CUDA runtime in it), and a runner that dies or hangs ends the direction,
+  which falls back to the local stock voice. The wizard checks the GPU first (≥ 6 GB, compute
+  capability ≥ 6.1, driver ≥ 570.65; 528.33–570.64 not checked, allowed with a note; the clone's real-time factor measured at warm-up, above 1 the stock voice). Them → me stays on the CPU (onnxruntime, CTranslate2).
+- GPU: macOS uses CoreML/Metal where it pays (llama.cpp Metal, onnxruntime CoreML EP). On Linux a
+  source install with torch and coqui-tts runs the clone in-process (`XttsClone`).
 - Piper (GPL, with espeak-ng) is never imported: it runs as its own process. Its upstream CLI has
   no thread option and onnxruntime pins its default pool to every physical core (`taskset` does
   not bound it — found in the bench), so the app ships a tiny Piper runner as a separate GPL-3.0

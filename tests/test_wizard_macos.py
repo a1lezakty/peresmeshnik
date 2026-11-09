@@ -37,22 +37,25 @@ def test_devices_page_without_blackhole_says_how_to_install(monkeypatch):
     from peresmeshnik.ui import selftest, wizard
     devs = [MIC, SPEAKERS]
     monkeypatch.setattr(wizard, 'MACOS', True)
-    monkeypatch.setattr(selftest, 'MACOS', True)
+    monkeypatch.setattr(wizard, 'WINDOWS', False)
+    monkeypatch.setattr(selftest, 'HELPER', True)
+    monkeypatch.setattr(selftest, 'WINDOWS', False)
+    monkeypatch.setattr(sys, 'platform', 'darwin')  # mic.native() picks audio/macos.py (on the Windows runner too)
     monkeypatch.setattr(macos, 'devices', lambda: list(devs))
     monkeypatch.setattr(macos, 'permission', lambda: 'authorized')
     page = wizard.DevicesPage(type('W', (), {'s': config.Settings()})())
     page.initializePage()
-    text = page.blackhole.text()
+    text = page.vmic.text()
     assert 'not installed' in text and 'brew install blackhole-2ch' in text and 'existential.audio/blackhole' in text
     assert not page.recheck.isHidden()
     assert [page.mic.itemData(i) for i in range(page.mic.count())] == ['', 'BuiltInMicrophoneDevice']
     devs.append(BLACKHOLE)  # installed meanwhile
     page.recheck.click()
-    assert page.blackhole.text().startswith('✔ BlackHole 2ch is installed') and page.recheck.isHidden()
+    assert page.vmic.text().startswith('✔ BlackHole 2ch is installed') and page.recheck.isHidden()
     assert 'BlackHole2ch_UID' not in [page.mic.itemData(i) for i in range(page.mic.count())]  # never the microphone
     monkeypatch.setattr(macos, 'permission', lambda: 'denied')
     page.check_blackhole()
-    assert 'Privacy & Security → Microphone' in page.blackhole.text()
+    assert 'Privacy & Security → Microphone' in page.vmic.text()
 
 
 @pytest.mark.parametrize('granted', [True, False])
@@ -72,6 +75,7 @@ def test_call_sound_page_tap(monkeypatch, granted):
     monkeypatch.setitem(sys.modules, 'peresmeshnik.audio.capture_macos', cm)
     import peresmeshnik.audio
     monkeypatch.setattr(peresmeshnik.audio, 'capture_macos', cm, raising=False)
+    monkeypatch.setattr(wizard, 'WINDOWS', False)  # the macOS page on the Windows runner too
     page = wizard.CallSoundPage(type('W', (), {'s': config.Settings()})())
     page.initializePage()
     assert 'System Audio Recording' in page.text.text() and page.state.text() == f'✘ {why}'
@@ -95,6 +99,7 @@ def test_call_sound_page_blackhole(monkeypatch):
     monkeypatch.setattr(peresmeshnik.audio, 'capture_macos', cm, raising=False)
     devs = [MIC, SPEAKERS, BLACKHOLE]
     monkeypatch.setattr(macos, 'devices', lambda: list(devs))
+    monkeypatch.setattr(wizard, 'WINDOWS', False)  # the macOS page on the Windows runner too
     page = wizard.CallSoundPage(type('W', (), {'s': config.Settings()})())
     page.initializePage()
     assert 'choose the speaker <b>BlackHole 16ch</b>' in page.text.text()

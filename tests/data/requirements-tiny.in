@@ -1,0 +1,3 @@
+# A real but tiny voice pack for the Windows CI test (tests/test_voice_pack_windows.py): what the stub runner needs.
+numpy==2.5.4
+soundfile==0.14.0

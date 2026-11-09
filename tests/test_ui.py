@@ -204,7 +204,8 @@ def test_wizard_asks_for_the_right_models():
     s.cloud.subtitles, s.them_to_me = True, 'cloud'
     assert needed_models(s) == ['silero-vad']
     s.me_to_them = 'local'
-    assert needed_models(s) == ['silero-vad', 'gigaam-v3-e2e-ctc', 'opus-mt-ru-en', 'xtts-v2']
+    assert needed_models(s) == ['silero-vad', 'gigaam-v3-e2e-ctc', 'opus-mt-ru-en', 'xtts-v2',
+                                s.local.tts[s.their_lang]]  # the stock voice: the clone's fallback
 
 
 def test_hotkey_combos():
@@ -529,8 +530,8 @@ def test_default_devices_that_are_ours_are_refused(monkeypatch):
     from peresmeshnik import app as app_mod
     with pytest.raises(RuntimeError, match='our own device'):
         app_mod.not_ours('peresmeshnik_mic_sink.monitor', 'default input')
-    if sys.platform == 'darwin':
-        pytest.skip('the rest is PipeWire: on macOS BlackHole 2ch is refused in tests/test_virtual_mic_macos.py')
+    if sys.platform in ('darwin', 'win32'):
+        pytest.skip('the rest is PipeWire: BlackHole 2ch / CABLE Output are refused in tests/test_virtual_mic_{macos,windows}.py')
     monkeypatch.setattr(app_mod, 'pactl', lambda *a: 'peresmeshnik_mic_sink.monitor\n' if a == ('get-default-source',) else '')
     ctl = app_mod.Controller(None, lambda st: None)
     with pytest.raises(RuntimeError, match='our own device'):

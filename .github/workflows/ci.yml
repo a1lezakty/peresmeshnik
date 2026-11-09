@@ -123,6 +123,25 @@ jobs:
           sudo launchctl kickstart -kp system/com.apple.audio.coreaudiod
           for i in $(seq 30); do system_profiler SPAudioDataType | grep -q 'BlackHole 16ch' && break; sleep 2; done
           system_profiler SPAudioDataType | grep -E '^ +BlackHole'
+      # the runner denies desktop apps the microphone (E_ACCESSDENIED, the audio helper's exit 6): allowed on this VM
+      # only, as the TCC.db row on macOS; a user allows it in Windows Settings -> Privacy & security -> Microphone
+      - name: Microphone access for desktop apps (this VM only)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $k = 'SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone'
+          foreach ($root in 'HKLM:', 'HKCU:') {
+            New-Item -Path "$root\$k\NonPackaged" -Force | Out-Null
+            Set-ItemProperty -Path "$root\$k" -Name Value -Value Allow
+            Set-ItemProperty -Path "$root\$k\NonPackaged" -Name Value -Value Allow
+          }
+      - name: WASAPI helper (native/windows/audio), me -> them on Windows, as the .exe gets it
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          call native\windows\audio\build.cmd "%RUNNER_TEMP%\bin\peresmeshnik-audio.exe" || exit /b 1
+          echo PERESMESHNIK_AUDIO=%RUNNER_TEMP%\bin\peresmeshnik-audio.exe>> %GITHUB_ENV%
+          "%RUNNER_TEMP%\bin\peresmeshnik-audio.exe" list
       # includes the idle-CPU watchdogs: the app (tray, overlay, first-run wizard) 60 s idle, and again with
       # the overlay on screen; each fails above 0.13 s of CPU. Linux: Xvfb; macOS, Windows: the runner's desktop
       - run: uv run pytest -q -s -rs --deselect tests/test_macos_audio.py::test_a_killed_helper_lets_the_original_through  # -rs: what was skipped and why

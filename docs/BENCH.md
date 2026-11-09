@@ -1369,6 +1369,80 @@ Tests: `tests/test_windows_audio.py`.
 - The runner has no GPU, so **Windows + CUDA** (the voice pack's onnxruntime-gpu / CTranslate2) is a USER-CHECKS line;
   the CUDA numbers above are on Linux (an RTX A4000).
 
+## Stage 4: me → them on Windows and the voice pack on CUDA (S2)
+
+### me → them through VB-Cable on the runner
+
+`windows-latest` (Windows Server 2025, x64, 4 cores, no GPU, no real audio device); VB-Audio Virtual Cable installed
+silently in CI (S1's step), the microphone opened for desktop apps on that VM only. The WASAPI helper
+`native/windows/audio` (MSVC, `build.cmd`) plays the translation into "CABLE Input" and records "CABLE Output" as a
+call app does. `bench/me_them.py run --stock` (the CI job `bench` of the temporary workflow): 33 s of Russian, 9
+clauses → VAD, GigaAM, OPUS-MT, the stock voice (Piper `en_US-john-medium`; no GPU for the clone) → CABLE Input →
+recorded from CABLE Output → Whisper small.
+
+| | value |
+|---|---|
+| link CABLE Input → CABLE Output (5 beeps) | 83–87 ms (the first 138 ms, the player starting) |
+| WER of what the call app records (of the TTS output itself) | **5.95 %** (7.1 %) |
+| TTS: first audio of a clause / per second of speech | 0.09–0.31 s / 0.06 s |
+| subtitles, after the clause | 0.33–2.6 s |
+| the call hears each clause, after its end (median) | 1.1–7.2 s (5.2 s) |
+| engines loaded / process RSS peak / CPU s per second of input | 7.1 s / 0.47 GB / 0.89 |
+
+The cable loses nothing (the recording transcribes as well as the TTS output: the judge's noise is ±1 %). What the
+call waits for is the queue — the English is as long as the Russian (34 s for 33 s), as with the stock voice on
+macOS (stage 3).
+
+### The clone in the voice pack's runner (CUDA)
+
+The voice pack (ARCHITECTURE §10) runs the clone in a process of its own: `voice-runner/voice_runner.py` with
+XTTS-v2 (`peresmeshnik/local/xtts.py`), torch 2.8.0+cu128, coqui-tts 0.28.0; the app talks to it over a pipe
+(`local/clone.py` `VoicePackClone`, the piper-runner protocol). Measured on an RTX 3060 12 GB (Linux, a box shared
+with another service: ≤ 4 cores, 2 threads for the engines), the "me" voice of the earlier stages.
+`bench/voice_pack.py`, 3 sentences × 3 runs per language; "cap 5.4" is a 6 GB card with them → me next to the clone
+(`--vram-gb 5.4`: `torch.cuda.set_per_process_memory_fraction`).
+
+| | en | ru |
+|---|---|---|
+| runner up (CUDA, the model loaded, warm) | 28.8–32.5 s | |
+| first audio (median / max) | 0.41 / 0.48 s | 0.44 / 0.44 s |
+| RTF (median / max) | 0.43 / 0.51 | 0.49 / 0.51 |
+| stop (barge-in: `stop` → the runner's last chunk) | 345–433 ms | 428–449 ms |
+| VRAM peak (allocated / reserved) | 1.89 / 1.98 GB | 1.92 / 2.10 GB |
+| the same with cap 5.4 | 0.42 s, RTF 0.49, 1.89 GB | 0.38 s, RTF 0.42, 1.92 GB |
+
+- **The pipe costs nothing measurable**: XTTS in the bench process (`bench/tts_clone.py synth --device cuda`, same
+  box) has first audio 0.42–0.43 s and RTF ~0.49, the runner the same. The app's process stays torch-free: its RSS
+  with the clone in the runner was 0.86 GB at the peak (me → them alone), against 4.7 GB with XTTS in the process.
+- **The Windows pack's pins** (`voice-runner/requirements-windows.txt`: numpy 2.5.4, librosa 1.0.0, transformers
+  5.22.2, …) installed by version on Linux (`vast-a-rtx3060-pins`): first audio 0.43–0.45 s, RTF 0.50–0.53, stop
+  410–442 ms, VRAM 1.89–1.90 GB — the same as the bench venv: the pinned set runs XTTS-v2 on CUDA.
+
+### me → them end to end with the clone on CUDA, and both directions (the 6 GB question)
+
+`bench/me_them.py run --null-mic` (no sound server on that box: a device that plays in real time into memory; the
+link through real devices is measured on the runners), 33 s of Russian, 9 clauses; `--with-them
+tests/data/call-en.ogg` adds them → me (CUDA) in the same process, as in the app.
+
+| | me → them alone | both at once (cap 5.4) |
+|---|---|---|
+| engines loaded | 36 s | 43 s |
+| clone: first audio of a clause | 0.43–0.53 s (the first 1.1 s) | 0.43–0.62 s (the first 1.2 s) |
+| clone RTF in the pipeline | 0.54 | 0.60 |
+| the call hears each clause, after its end (median) | 1.4–5.4 s (2.54 s) | 1.9–5.4 s (3.55 s) |
+| subtitles, after the clause | 0.38–3.0 s | 0.89–3.7 s |
+| WER of what the call app records (Whisper small, against the MT text) | 5.1 % | 5.0 % |
+| GPU memory, the whole card at the peak (the other service ~0.44 GB of it) | — | 3.0 GB |
+| app process RSS, peak | 0.86 GB | 1.96 GB |
+
+- **6 GB VRAM: both directions fit** — ~2.6 GB of the card for the clone and them → me together, with the clone
+  capped at 5.4 GB. The wizard recommends the local clone from 5.5 GB (`ui/wizard.py` `MIN_VRAM_GB`: a 6 GB card
+  reports 6144 MiB, some a little less); below that, or without an NVIDIA GPU, it says why and offers the stock voice
+  or the cloud. On the Windows `.exe` them → me runs on the CPU (BENCH stage 4, S1), so there the card holds only
+  the clone (~2 GB).
+- Live: synthesis takes half the speech; what the call waits for is the queue, as with the stock voice (stage 3).
+- **Windows + an NVIDIA GPU** (the pack installed by the wizard, CUDA under Windows) is not on any runner: USER-CHECKS.
+
 ## Stage 5: cloud fallback, crash reports, latency on screen (S3)
 
 Measured 2026-11-09. The fallback against a fake Gemini Live server (`tests/fake_gemini.py`: a real WebSocket over TLS

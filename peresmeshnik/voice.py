@@ -353,8 +353,8 @@ def main(argv=None) -> int:
         return 1
     print(f'saved voice profile {v.name!r}: {v.path}')
     if a.engine == 'xtts':
-        from peresmeshnik.local.clone import XttsClone
-        XttsClone(a.model_dir).latents(v)
+        from peresmeshnik.local.clone import make_clone
+        make_clone(a.model_dir).latents(v)
         print('XTTS-v2 conditioning ready')
     return 0
 

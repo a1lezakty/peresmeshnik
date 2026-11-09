@@ -742,20 +742,58 @@ def test_pass_through_plays_on_the_default_while_portaudio_does_not_see_the_save
 def test_pass_through_that_cannot_open_says_so():
     """N3: opening on Core Audio's event thread fails (no headphones): on_end says why, not lost in that thread."""
     from peresmeshnik.audio import capture_macos as cm
+    from peresmeshnik.audio import coreaudio as ca
 
     def pick(exclude=''):
         raise RuntimeError('no output device')
-    ended = []
+    busy = ca.Running(cm.CALL_DEVICE, lambda running: None)
+    try:  # the last test's call app may still run IO on BlackHole 16ch: start() would open (and fail) at once
+        assert until(lambda: not busy.running(), 10), f'{cm.CALL_DEVICE} stays busy'
+    finally:
+        busy.close()
+    ended, call = [], None
     through = cm.PassThrough(pick, on_end=ended.append)
-    through.start()
-    call = player(cm.CALL_DEVICE, 4.0)
     try:
+        through.start()
+        call = player(cm.CALL_DEVICE, 4.0)
         assert until(lambda: ended), 'the failure was lost'
     finally:
         through.stop()
-        call.kill()
+        if call:
+            call.kill()
     print(f'pass-through cannot open: {ended}')
     assert 'no output device' in ended[0]
+
+
+def test_a_listener_lives_while_core_audio_holds_it(monkeypatch):
+    """A listener nobody closed is not freed under Core Audio (that was a SIGSEGV on its listener queue): it stays
+    registered by its key, with the one C callback that is never freed; after close() a late call does nothing."""
+    import gc
+    import types
+
+    from peresmeshnik.audio import coreaudio as ca
+    added, removed, fired = [], [], []
+    monkeypatch.setattr(ca, '_lib', lambda: types.SimpleNamespace(
+        AudioObjectAddPropertyListener=lambda obj, a, cb, key: added.append((cb, key)) or 0,
+        AudioObjectRemovePropertyListener=lambda obj, a, cb, key: removed.append((cb, key)) or 0))
+
+    class Changed(ca._Listener):
+        once = False
+
+        def _check(self, obj):
+            return obj
+
+        def _fire(self, why):
+            fired.append(why)
+    Changed([(ca.SYSTEM, ca.DEVICES, ca.GLOBAL)], 'the devices')  # dropped at once, never closed
+    gc.collect()
+    (cb, key), = added
+    assert cb is ca._dispatch and key in ca._listeners
+    ca._dispatch(7, 1, None, key)
+    assert until(lambda: fired == [7])
+    ca._listeners[key].close()
+    assert removed == [(ca._dispatch, key)] and key not in ca._listeners
+    assert ca._dispatch(7, 1, None, key) == 0
 
 
 @needs_blackhole

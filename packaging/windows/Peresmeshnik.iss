@@ -78,19 +78,26 @@ begin
   Result := '';
 end;
 
-{ The voice pack (the CUDA clone, ~8 GB, in the app's data folder: config.data_dir) goes only when the user says so;
-  a silent uninstall (/SILENT, /VERYSILENT: an update, a script) leaves it, as it leaves the settings, models and voices. }
+{ The voice pack (the CUDA clone, ~8 GB, in the app's data folder: config.data_dir) goes only when the user says so,
+  and with it what an install leaves beside it (local/voicepack.py): voice-pack.download (up to 3.7 GB), voice-pack.tmp,
+  voice-pack.pip-tmp, voice-pack.old-*; asked about also when only those are there. A silent uninstall (/SILENT,
+  /VERYSILENT: an update, a script) leaves it all, as it leaves the settings, models and voices. }
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   Pack: String;
+  F: TFindRec;
 begin
   if CurUninstallStep = usUninstall then  { after the user confirmed the removal }
     CloseApp();
-  if CurUninstallStep = usPostUninstall then begin
+  if (CurUninstallStep = usPostUninstall) and not UninstallSilent() then begin
     Pack := ExpandConstant('{localappdata}\Peresmeshnik\voice-pack');
-    if DirExists(Pack) and not UninstallSilent() then
-      if MsgBox('Remove the voice pack too (about 8 GB, ' + Pack + ')? Your voice, settings and models stay either way.',
-                mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+    if FindFirst(Pack + '*', F) then begin  { voice-pack itself or voice-pack.<leftover> }
+      FindClose(F);
+      if MsgBox('Remove the voice pack and its downloads too (up to 12 GB, ' + Pack + ')? Your voice, settings and '
+                + 'models stay either way.', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then begin
         DelTree(Pack, True, True, True);
+        DelTree(Pack + '.*', False, True, True);  { the leftovers above: a wildcard, files and folders }
+      end;
+    end;
   end;
 end;

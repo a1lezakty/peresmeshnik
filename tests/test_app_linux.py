@@ -351,8 +351,9 @@ def pair_models(monkeypatch, s, my: str, their: str) -> str:
     from peresmeshnik import languages, models
     if all(languages.direction(s, k).local for k in languages.SIDES):
         return 'real models'
-    asr, voices = 'parakeet-tdt-0.6b-v3', {my: 'piper-ru_RU-dmitri-medium', their: 'piper-en_US-john-medium'}
-    mts = {f'{their}-{my}': 'opus-mt-en-ru', f'{my}-{their}': 'opus-mt-ru-en'}
+    # only the work-gate's models (its CI cache): nothing to download for the stand-ins
+    asr, voices = 'parakeet-tdt-0.6b-v3', {my: 'piper-ru_RU-dmitri-medium', their: 'piper-ru_RU-dmitri-medium'}
+    mts = {f'{their}-{my}': 'opus-mt-en-ru', f'{my}-{their}': 'opus-mt-en-ru'}
     reg = dict(models.registry())
     for mid, langs in [(asr, (my, their)), *((v, (k,)) for k, v in voices.items()), *((v, (k,)) for k, v in mts.items())]:
         reg[mid] = replace(reg[mid], langs=reg[mid].langs + langs)  # the same files: the downloaded folders stay valid

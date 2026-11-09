@@ -144,7 +144,7 @@ jobs:
           "%RUNNER_TEMP%\bin\peresmeshnik-audio.exe" list
       - uses: actions/cache@v4
         if: runner.os == 'Linux'
-        with:  # the work-gate's models of main as a start (the same path): only the pair's others are downloaded
+        with:  # the work-gate's models of main as a start (the same path): the stand-ins need nothing more
           path: ${{ runner.temp }}/models
           key: pair-models-${{ runner.os }}-${{ hashFiles('peresmeshnik/models.toml', 'peresmeshnik/config.py') }}
           restore-keys: models-${{ runner.os }}-${{ hashFiles('peresmeshnik/models.toml') }}
@@ -153,7 +153,7 @@ jobs:
         env:
           PERESMESHNIK_MODELS: ${{ runner.temp }}/models
         run: |
-          ids=$(uv run python -c "from peresmeshnik import config, languages as l; s = config.Settings(my_lang='de', their_lang='ja', them_to_me='local', me_to_them='local'); s.local.clone = 'piper'; print(*(l.needed_models(s) if all(l.direction(s, k).local for k in l.SIDES) else ['silero-vad', 'parakeet-tdt-0.6b-v3', 'opus-mt-en-ru', 'opus-mt-ru-en', 'piper-ru_RU-dmitri-medium', 'piper-en_US-john-medium']))")
+          ids=$(uv run python -c "from peresmeshnik import config, languages as l; s = config.Settings(my_lang='de', their_lang='ja', them_to_me='local', me_to_them='local'); s.local.clone = 'piper'; print(*(l.needed_models(s) if all(l.direction(s, k).local for k in l.SIDES) else ['silero-vad', 'parakeet-tdt-0.6b-v3', 'opus-mt-en-ru', 'piper-ru_RU-dmitri-medium']))")
           echo "$ids"
           for i in 1 2 3; do  # GitHub / Hugging Face answer 504 at times: fetch resumes where it stopped
             uv run peresmeshnik models fetch $ids --accept-licenses && break

@@ -802,7 +802,10 @@ class Controller:
 
     def _side(self, name: str, s: config.Settings) -> Side:
         inp = FileIn(f) if (f := {'them': self.them_file, 'me': self.me_file}[name]) else self._input(name, s)
-        gate = EchoGate(self.call_echo if name == 'them' else self.mic_echo)  # our speech coming back
+        # our speech coming back: 'them' hears what we said into the call, 'me' what the headphones played (no echo
+        # path from a file, nor in the wizard's test, where both sides speak into the headphones)
+        gate = None if f or self.test else EchoGate(self.call_echo if name == 'them' else self.mic_echo,
+                                                    max_delay_s=s.local.echo_max_delay_s)
         side = Side(name, s, inp, self._output(name, s), self.overlay.side(name), self.on_state, echo=gate)
         side.on_failure = lambda why, e: self.submit(self._restart, side, why, e)
         if name == 'me':  # I talk over their voice: barge-in on the them -> me side of now

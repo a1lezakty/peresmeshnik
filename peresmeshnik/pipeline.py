@@ -307,7 +307,8 @@ def make_local(src: str, tgt: str, asr: str | None = None, threads: int | None =
     threads = threads or loc.threads
     return LocalDirection(SileroVad(), OnnxAsr(asr or loc.asr[src], threads=threads),
                           OpusMt(src, tgt, loc.mt[f'{src}-{tgt}'], threads=threads),
-                          tts or PiperTts(loc.tts[tgt], threads=threads), src, tgt, voice, max_lag_s=max_lag_s)
+                          tts or PiperTts(loc.tts[tgt], threads=threads), src, tgt, voice, max_lag_s=max_lag_s,
+                          partial_mt=loc.partial_mt)
 
 
 def cpu_s(direction: LocalDirection | None = None) -> float:

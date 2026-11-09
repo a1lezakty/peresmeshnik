@@ -262,45 +262,26 @@ def test_headphones_play_without_error():
         out.stop()
 
 
-def _pwsh(cmd: str) -> subprocess.CompletedProcess:
-    return subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', cmd], capture_output=True, text=True)
-
-
-def cable_input_instance() -> str:
-    r = _pwsh("(Get-PnpDevice -Class AudioEndpoint | Where-Object FriendlyName -like '*CABLE Input*' "
-              "| Select-Object -First 1).InstanceId")
-    return r.stdout.strip()
-
-
 @pytest.mark.usefixtures('cable')
-def test_headphones_reopen_when_the_device_goes(monkeypatch):
+def test_headphones_reopen_when_the_device_goes():
     """A device change refreshes PortAudio (its list is cached at init) before deciding; a device gone from the
-    refreshed list cannot be reopened, so the output reports it and the owner reopens. Real path: disable the CABLE
-    Input endpoint (Disable-PnpDevice), re-enabled after. If the runner has no admin PnP control, the gone device is
-    simulated by hiding CABLE Input from PortAudio's query instead."""
-    import sounddevice as sd
+    refreshed list cannot be reopened, so the output reports it and the owner reopens. Real path: the CABLE Input
+    endpoint disabled as the Sound control panel does (WASAPI sees DEVICE_STATE_DISABLED), re-enabled after.
+    Disable-PnpDevice on the endpoint's node is no stand-in: WASAPI keeps it active (test_virtual_mic_windows)."""
+    from test_virtual_mic_windows import endpoint_enabled
 
+    from peresmeshnik.audio import windows
     from peresmeshnik.audio.out import WasapiOut
+    uid = next(d['uid'] for d in windows.devices() if d['name'] == CABLE_IN)
     ended = []
     out = WasapiOut(SR, CABLE_IN, on_end=ended.append)
-    inst = cable_input_instance()
-    disabled = bool(inst) and _pwsh(f"Disable-PnpDevice -InstanceId '{inst}' -Confirm:$false").returncode == 0
+    endpoint_enabled(uid, False)
     try:
-        if disabled:  # real unplug: the helper's watch fires on the state change, the output reopens
-            assert until(lambda: bool(ended), 25), 'the output did not report the disabled endpoint'
-        else:  # no PnP control on this runner: simulate the gone device at PortAudio's query
-            real_query = sd.query_devices
-            monkeypatch.setattr(sd, 'query_devices',
-                                lambda device=None, **k: ([d for d in real_query() if not d['name'].startswith('CABLE Input')]
-                                                          if device is None else real_query(device, **k)))
-            out._on_device_event()
-            assert until(lambda: bool(ended), 5), 'the output did not report the device going away'
+        assert until(lambda: bool(ended), 25), 'the output did not report the disabled endpoint'
         assert not out.alive
     finally:
-        monkeypatch.undo()
-        if disabled:
-            _pwsh(f"Enable-PnpDevice -InstanceId '{inst}' -Confirm:$false")
-            until(lambda: has_cable(), 25)  # back for any later test
+        endpoint_enabled(uid, True)
+        until(lambda: has_cable(), 25)  # back for any later test
         out.stop()
 
 
@@ -394,15 +375,22 @@ def test_every_helper_spawn_suppresses_the_console_window(monkeypatch):
     assert all(f & subprocess.CREATE_NO_WINDOW for f in seen), seen
 
 
-def test_microphone_is_held_in_the_portaudio_registry_on_windows(monkeypatch):
-    """N1: the me -> them microphone stream is registered in the shared PortAudio holder registry on Windows (as on
-    macOS), so a device refresh suspends/resumes it instead of freeing a live, unmanaged stream."""
-    from peresmeshnik.audio import coreaudio
+def test_microphone_is_no_portaudio_stream_on_windows(monkeypatch):
+    """The me -> them microphone goes through the WASAPI helper (S2, audio/windows.py), not PortAudio: a device refresh
+    (refresh_portaudio) has nothing of it to free, so it is not in the holder registry."""
+    import types
+
+    from peresmeshnik.audio import coreaudio, windows
     from peresmeshnik.audio.mic import Mic
+    spawned = []
+    proc = types.SimpleNamespace(stdout=types.SimpleNamespace(read=lambda n: b''), stderr=iter(()), wait=lambda *a: 0,
+                                 returncode=0, terminate=lambda: None)
+    monkeypatch.setattr(windows, 'devices', lambda: [])
+    monkeypatch.setattr(windows, 'spawn', lambda *a, **k: spawned.append(a) or proc)
     m = Mic(device='whatever', sample_rate=SR)
-    monkeypatch.setattr(Mic, '_open', lambda self, on_frames: setattr(self, '_stream', object()))  # no real device
     m.start(lambda pcm: None)
     try:
-        assert m in coreaudio._holders, 'the microphone is not in the PortAudio registry (a refresh would free it)'
+        assert spawned and spawned[0][:3] == ('record', '--from', 'whatever'), spawned
+        assert m not in coreaudio._holders
     finally:
-        coreaudio.release(m)
+        m.stop()

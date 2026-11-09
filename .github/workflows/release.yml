@@ -38,6 +38,8 @@ jobs:
         env:
           REQUIRE_TAP: ${{ startsWith(github.ref, 'refs/tags/v') && '1' || '' }}  # a release needs the call's sound
         run: packaging/macos/build.sh
+      - name: The built runner speaks Japanese (pyopenjtalk and its dictionary in the build)
+        run: dist/Peresmeshnik.app/Contents/MacOS/piper-runner --self-check
       - uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/models
@@ -45,7 +47,7 @@ jobs:
       - name: Models for the frozen CLI check (the same as the work gate)
         env:
           PERESMESHNIK_MODELS: ${{ runner.temp }}/models
-        run: uv run --no-sync peresmeshnik models fetch silero-vad parakeet-tdt-0.6b-v3 opus-mt-en-ru piper-ru_RU-dmitri-medium
+        run: uv run --no-sync peresmeshnik models fetch silero-vad parakeet-tdt-0.6b-v3 quickmt-en-ru piper-ru_RU-dmitri-medium
       - name: Check the .dmg (mount, start, menu-bar item, idle CPU, SIGTERM, frozen CLI)
         shell: bash  # -eo pipefail
         env:
@@ -97,6 +99,8 @@ jobs:
         run: test -x "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" || choco install innosetup --version=6.7.1 -y --no-progress
       - name: Build the folder, the .zip and the installer (PyInstaller, the loopback helper, Inno Setup)
         run: packaging/windows/build.sh
+      - name: The built runner speaks Japanese (pyopenjtalk and its dictionary in the build)
+        run: dist/Peresmeshnik/piper-runner.exe --self-check
       - uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/models
@@ -104,7 +108,7 @@ jobs:
       - name: Models for the frozen CLI check (the same as the work gate)
         env:
           PERESMESHNIK_MODELS: ${{ runner.temp }}/models
-        run: uv run --no-sync peresmeshnik models fetch silero-vad parakeet-tdt-0.6b-v3 opus-mt-en-ru piper-ru_RU-dmitri-medium
+        run: uv run --no-sync peresmeshnik models fetch silero-vad parakeet-tdt-0.6b-v3 quickmt-en-ru piper-ru_RU-dmitri-medium
       - name: Check the installer and the .zip (silent install, start, tray, idle CPU, WM_CLOSE, update, uninstall, frozen CLI)
         env:
           PERESMESHNIK_MODELS: ${{ runner.temp }}/models

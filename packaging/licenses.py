@@ -26,6 +26,8 @@ BUNDLED = {  # file name start -> its texts: libraries inside a wheel that its o
     'libiomp5md': ['libiomp5md-LICENSE.txt', 'libiomp5md-third-party-programs.txt'],  # Intel OpenMP in ctranslate2 (Windows;
     # from the intel-openmp 2025.3.0 wheel, the DLL's build of 2025-09-10)
     'libportaudio': ['PortAudio-LICENSE.txt'],  # in sounddevice (PortAudio v19.7.0 LICENSE.txt)
+    'sys.dic': ['OpenJTalk-dictionary-COPYING.txt'],  # pyopenjtalk-plus's dictionary: mecab-naist-jdic and UniDic words
+    # (BSD-3-Clause; pyopenjtalk/dictionary/COPYING of the 0.4.1.post10 wheel)
 }
 
 out, warn, runner = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
@@ -85,6 +87,7 @@ shutil.copyfile(ROOT / 'piper-runner' / 'LICENSE', out / 'piper-runner-LICENSE.t
 - piper-tts 1.8.0: https://github.com/OHF-Voice/piper1-gpl, tag v1.8.0 (its PyPI sdist has no C sources);
 - espeak-ng, built statically into piper's espeakbridge module: https://github.com/espeak-ng/espeak-ng, commit 724808c
   (the GIT_TAG in piper1-gpl v1.8.0's CMakeLists.txt);
-- onnxruntime and numpy, whose licenses are in this folder.
+- for the Japanese voice, pyopenjtalk-plus 0.4.1.post10 (MIT, with OpenJTalk and its dictionary) and sudachipy 0.7.0;
+- onnxruntime and numpy, whose licenses are in this folder (and those of the packages above).
 Peresmeshnik itself never imports it; it talks to it over stdin/stdout.
 ''')

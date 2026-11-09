@@ -33,13 +33,46 @@ def data_dir() -> Path:  # voice profiles live here and are never uploaded
     return platformdirs.user_data_path(APP, appauthor=False)
 
 
+LANGS = ('en', 'ru', 'uk', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'tr', 'zh', 'ja', 'ko', 'ar')  # = languages.LANGS (a test)
+
+
+DIRECT_RU = ('uk', 'de', 'fr', 'es', 'it', 'pt', 'pl')  # X<->ru by OPUS-MT of their own: through English the speaker's
+# gender and ты / вы get lost, and they win on short everyday sentences (BENCH stage 6, MT)
+OPUS_TO_EN = ('ru', 'uk', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'tr')  # X->en by OPUS-MT: quickmt makes up a continuation of a
+# one- or two-word reply ("Да." -> "Yes, I am very"); = the `pivot` rows of models.toml (a test)
+
+
+def _mt() -> dict[str, str]:
+    """Every direction of the 14 (BENCH stage 6): X<->ru direct for DIRECT_RU; X->en OPUS-MT for OPUS_TO_EN, else quickmt;
+    en->X quickmt; the rest through English (models.registry: mt-X-Y-via-en)."""
+    def one(a, b):
+        if 'ru' in (a, b) and {a, b} - {'ru'} <= set(DIRECT_RU):
+            return f'opus-mt-{a}-{b}'
+        if b == 'en':
+            return f'opus-mt-{a}-en' if a in OPUS_TO_EN else f'quickmt-{a}-en'
+        return f'quickmt-en-{b}' if a == 'en' else f'mt-{a}-{b}-via-en'
+    return {f'{a}-{b}': one(a, b) for a in LANGS for b in LANGS if a != b}
+
+
 @dataclass
 class Local:
     threads: int = 2  # per runtime: onnxruntime intra_op, CTranslate2 intra_threads, torch set_num_threads
-    # ru: GigaAM, not Parakeet: Parakeet has no language setting and drifts into Ukrainian on short windows (BENCH stage 1)
-    asr: dict[str, str] = field(default_factory=lambda: {'en': 'parakeet-tdt-0.6b-v3', 'ru': 'gigaam-v3-e2e-ctc'})
-    mt: dict[str, str] = field(default_factory=lambda: {'en-ru': 'opus-mt-en-ru', 'ru-en': 'opus-mt-ru-en'})
-    tts: dict[str, str] = field(default_factory=lambda: {'en': 'piper-en_US-john-medium', 'ru': 'piper-ru_RU-dmitri-medium'})
+    # ru: GigaAM, not Parakeet: Parakeet has no language setting and drifts into Ukrainian on short windows (BENCH stage 1).
+    # tr / zh / ko: Whisper large-v3-turbo, live only on an NVIDIA GPU (its registry row: needs = "gpu"; BENCH stage 6)
+    asr: dict[str, str] = field(default_factory=lambda: {
+        'en': 'parakeet-tdt-0.6b-v3', 'ru': 'gigaam-v3-e2e-ctc',
+        **dict.fromkeys(('uk', 'de', 'es', 'it', 'pt', 'pl'), 'parakeet-tdt-0.6b-v3'),
+        # fr: Parakeet v3 drifts into English mid-monologue (BENCH stage 6: WER 0.31 against 0.17 in a monologue)
+        'fr': 'fastconformer-fr-pc',
+        'ja': 'parakeet-tdt_ctc-0.6b-ja', 'ar': 'fastconformer-ar-pcd',
+        **dict.fromkeys(('tr', 'zh', 'ko'), 'whisper-large-v3-turbo')})
+    mt: dict[str, str] = field(default_factory=lambda: _mt())
+    # stock voices (BENCH stage 6); tr / ko / ja: noncommercial voices (consent); zh / ar: none with a usable license
+    tts: dict[str, str] = field(default_factory=lambda: {
+        'en': 'piper-en_US-john-medium', 'ru': 'piper-ru_RU-dmitri-medium', 'uk': 'piper-uk_UA-ukrainian_tts-medium',
+        'de': 'piper-de_DE-thorsten-medium', 'fr': 'piper-fr_FR-siwis-medium', 'es': 'piper-es_MX-ald-medium',
+        'it': 'piper-it_IT-paola-medium', 'pt': 'piper-pt_BR-faber-medium', 'pl': 'piper-pl_PL-gosia-medium',
+        'tr': 'piper-tr_TR-dfki-medium', 'ko': 'piper-ko_KR-kss-medium', 'ja': 'piper-ja_JP-hi_fi_captain-medium'})
     clone: str = 'xtts-v2'  # clone TTS for me -> them
     voice: str = ''  # enrolled voice name ('' = none yet)
     # them -> me: a long clause's stable words get a translated subtitle while it is still said (BENCH stage 5)

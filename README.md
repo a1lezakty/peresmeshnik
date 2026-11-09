@@ -35,20 +35,20 @@ the language, a stock voice speaks instead, and the wizard says so.
 |---|---|---|---|---|
 | English | parakeet-tdt-0.6b-v3 | piper-en_US-john-medium | xtts-v2 (NVIDIA GPU) | ✔ |
 | Русский (Russian) | gigaam-v3-e2e-ctc | piper-ru_RU-dmitri-medium | xtts-v2 (NVIDIA GPU) | ✔ |
-| Українська (Ukrainian) | — (cloud) | — (cloud) | — (cloud or a stock voice) | ✔ |
-| Deutsch (German) | — (cloud) | — (cloud) | — (cloud or a stock voice) | ✔ |
-| Français (French) | — (cloud) | — (cloud) | — (cloud or a stock voice) | ✔ |
-| Español (Spanish) | — (cloud) | — (cloud) | — (cloud or a stock voice) | ✔ |
-| Italiano (Italian) | — (cloud) | — (cloud) | — (cloud or a stock voice) | ✔ |
-| Português (Portuguese) | — (cloud) | — (cloud) | — (cloud or a stock voice) | ✔ |
-| Polski (Polish) | — (cloud) | — (cloud) | — (cloud or a stock voice) | ✔ |
-| Türkçe (Turkish) | — (cloud) | — (cloud) | — (cloud or a stock voice) | ✔ |
-| 中文 (Chinese) | — (cloud) | — (cloud) | — (cloud or a stock voice) | ✔ |
-| 日本語 (Japanese) | — (cloud) | — (cloud) | — (cloud or a stock voice) | ✔ |
-| 한국어 (Korean) | — (cloud) | — (cloud) | — (cloud or a stock voice) | ✔ |
-| العربية (Arabic) | — (cloud) | — (cloud) | — (cloud or a stock voice) | ✔ |
+| Українська (Ukrainian) | parakeet-tdt-0.6b-v3 | piper-uk_UA-ukrainian_tts-medium | — (cloud or a stock voice) | ✔ |
+| Deutsch (German) | parakeet-tdt-0.6b-v3 | piper-de_DE-thorsten-medium | — (cloud or a stock voice) | ✔ |
+| Français (French) | fastconformer-fr-pc | piper-fr_FR-siwis-medium | — (cloud or a stock voice) | ✔ |
+| Español (Spanish) | parakeet-tdt-0.6b-v3 | piper-es_MX-ald-medium | — (cloud or a stock voice) | ✔ |
+| Italiano (Italian) | parakeet-tdt-0.6b-v3 | piper-it_IT-paola-medium | — (cloud or a stock voice) | ✔ |
+| Português (Portuguese) | parakeet-tdt-0.6b-v3 | piper-pt_BR-faber-medium | — (cloud or a stock voice) | ✔ |
+| Polski (Polish) | parakeet-tdt-0.6b-v3 | piper-pl_PL-gosia-medium | — (cloud or a stock voice) | ✔ |
+| Türkçe (Turkish) | whisper-large-v3-turbo (NVIDIA GPU) | piper-tr_TR-dfki-medium | — (cloud or a stock voice) | ✔ |
+| 中文 (Chinese) | whisper-large-v3-turbo (NVIDIA GPU) | — (cloud) | — (cloud or a stock voice) | ✔ |
+| 日本語 (Japanese) | parakeet-tdt_ctc-0.6b-ja | piper-ja_JP-hi_fi_captain-medium | — (cloud or a stock voice) | ✔ |
+| 한국어 (Korean) | whisper-large-v3-turbo (NVIDIA GPU) | piper-ko_KR-kss-medium | — (cloud or a stock voice) | ✔ |
+| العربية (Arabic) | fastconformer-ar-pcd | — (cloud) | — (cloud or a stock voice) | ✔ |
 
-Translation on this computer: en → ru, ru → en; every other pair of the 14 is translated in the cloud.
+Translation on this computer: ar → de, ar → en, ar → es, ar → fr, ar → it, ar → ja, ar → ko, ar → pl, ar → pt, ar → ru, ar → tr, ar → uk, ar → zh, de → ar, de → en, de → es, de → fr, de → it, de → ja, de → ko, de → pl, de → pt, de → ru, de → tr, de → uk, de → zh, en → ar, en → de, en → es, en → fr, en → it, en → ja, en → ko, en → pl, en → pt, en → ru, en → tr, en → uk, en → zh, es → ar, es → de, es → en, es → fr, es → it, es → ja, es → ko, es → pl, es → pt, es → ru, es → tr, es → uk, es → zh, fr → ar, fr → de, fr → en, fr → es, fr → it, fr → ja, fr → ko, fr → pl, fr → pt, fr → ru, fr → tr, fr → uk, fr → zh, it → ar, it → de, it → en, it → es, it → fr, it → ja, it → ko, it → pl, it → pt, it → ru, it → tr, it → uk, it → zh, ja → ar, ja → de, ja → en, ja → es, ja → fr, ja → it, ja → ko, ja → pl, ja → pt, ja → ru, ja → tr, ja → uk, ja → zh, ko → ar, ko → de, ko → en, ko → es, ko → fr, ko → it, ko → ja, ko → pl, ko → pt, ko → ru, ko → tr, ko → uk, ko → zh, pl → ar, pl → de, pl → en, pl → es, pl → fr, pl → it, pl → ja, pl → ko, pl → pt, pl → ru, pl → tr, pl → uk, pl → zh, pt → ar, pt → de, pt → en, pt → es, pt → fr, pt → it, pt → ja, pt → ko, pt → pl, pt → ru, pt → tr, pt → uk, pt → zh, ru → ar, ru → de, ru → en, ru → es, ru → fr, ru → it, ru → ja, ru → ko, ru → pl, ru → pt, ru → tr, ru → uk, ru → zh, tr → ar, tr → de, tr → en, tr → es, tr → fr, tr → it, tr → ja, tr → ko, tr → pl, tr → pt, tr → ru, tr → uk, tr → zh, uk → ar, uk → de, uk → en, uk → es, uk → fr, uk → it, uk → ja, uk → ko, uk → pl, uk → pt, uk → ru, uk → tr, uk → zh, zh → ar, zh → de, zh → en, zh → es, zh → fr, zh → it, zh → ja, zh → ko, zh → pl, zh → pt, zh → ru, zh → tr, zh → uk; every other pair of the 14 is translated in the cloud.
 <!-- languages:end -->
 
 Subtitles in Chinese, Japanese, Korean and Arabic need a font for that script. macOS and Windows have them; on Linux

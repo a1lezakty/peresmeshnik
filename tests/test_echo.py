@@ -82,6 +82,16 @@ def test_beyond_the_limit_the_echo_passes():
     assert s['their_blocks_zeroed'] == 0, s
 
 
+@pytest.mark.parametrize('setting, top, delay', [(-1.0, 0.0, 0.0), (10.0, 2.8, 2.5)])
+def test_the_delay_limit_is_kept_in_range(setting, top, delay):
+    """A setting below 0 would leave no delay to search (the side without a gate all session), above 2.8 s it would
+    look past the 4 s the reference keeps: both are taken to the nearest edge, and an echo at that edge is zeroed."""
+    g = EchoGate(Reference(), max_delay_s=setting)
+    assert len(g.delays) and g.delays.max() == pytest.approx(top, abs=0.02)
+    _, s = gate(scenario(delay, -12), max_delay_s=setting)
+    assert s['echo_blocks_zeroed'] >= 0.85 and s['their_blocks_zeroed'] <= 0.02, s
+
+
 @pytest.mark.parametrize('gain_db', [-6, -12])
 def test_double_talk_keeps_their_speech(gain_db):
     _, s = gate(scenario(0.15, gain_db, double_talk=True))
@@ -101,11 +111,27 @@ def test_the_clock_resyncs_after_a_gap_in_the_capture():
             g.process(np.zeros(512, np.float32), t + (4 * burst + k + 1) * 512 / SR + (0.1 if k < 3 else 0.0))
     t += 80 * 512 / SR
     assert abs(g._hist[-1][0] - (t - HOP / 2 / SR)) < 0.02
-    t += 1.5  # 1.5 s that never come
-    for _ in range(3):
+    t += 1.5  # 1.5 s that never come; then the audio at its own pace again
+    for _ in range(12):
         t += 512 / SR
         g.process(np.zeros(512, np.float32), t)
     assert abs(g._hist[-1][0] - (t - HOP / 2 / SR)) < 0.02, g._hist[-1][0] - t
+
+
+def test_a_stall_without_a_loss_keeps_the_times():
+    """The capture stops for 0.8 s and then hands on all it held at once: no sample is lost, so every frame of that
+    backlog keeps its own time (it is not taken for a gap)."""
+    ref = Reference()
+    ref.loud_until = np.inf
+    g = EchoGate(ref)
+    t0 = ref.t0 + 1.0
+    fed, worst = 0, 0.0
+    for k in range(80):
+        fed += 512
+        arrive = t0 + fed / SR if not 40 <= k < 65 else t0 + 65 * 512 / SR  # frames 40-64 come together, 0.8 s late
+        g.process(np.zeros(512, np.float32), arrive)
+        worst = max(worst, abs(g._hist[-1][0] - (t0 + fed / SR - HOP / 2 / SR)))
+    assert worst < 0.02, worst
 
 
 def test_no_echo_path_no_suppression():

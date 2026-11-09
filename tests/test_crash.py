@@ -353,7 +353,7 @@ def test_a_call_app_that_is_not_running_is_no_restart_on_windows(app, monkeypatc
         ctl.quit()
 
 
-WORK_MODELS = ('silero-vad', 'parakeet-tdt-0.6b-v3', 'opus-mt-en-ru', 'piper-ru_RU-dmitri-medium')
+WORK_MODELS = ('silero-vad', 'parakeet-tdt-0.6b-v3', 'quickmt-en-ru', 'piper-ru_RU-dmitri-medium')
 
 
 def test_a_killed_piper_runner_restarts_the_side(app, monkeypatch):

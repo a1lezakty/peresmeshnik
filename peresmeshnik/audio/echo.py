@@ -35,7 +35,11 @@ _WIN = np.hanning(HOP).astype(np.float32)
 FLOOR = -9.0  # log10 band power of silence (speech at -26 dBFS is ~ -4 .. -6 per band)
 LOUD = FLOOR + 2.0  # a block of the reference that can make an echo
 SEARCH_EVERY = 4  # blocks between delay searches (64 ms): the echo path changes slower than that
-GAP_S = 0.5  # audio this much later than its samples counted: the capture lost samples (restarted), its clock resyncs
+# audio this much later than its samples counted: either the capture stopped and hands its backlog on at once (the
+# times hold: the backlog drains faster than real time) or it lost samples (restarted: the audio comes at its own pace
+# again, later by the gap): then, once that holds over HOLD_S of audio, the clock resyncs
+GAP_S, HOLD_S = 0.5, 0.25
+MAX_DELAY_S = 2.8  # the reference keeps 4 s back: the delay, the 1 s window and the tail must fit in it
 
 
 def bands(blocks: np.ndarray) -> np.ndarray:
@@ -120,6 +124,10 @@ class EchoGate:
     def __init__(self, ref: Reference, max_delay_s: float = 2.0, min_delay_s: float = -0.1, window_s: float = 1.0,
                  tail_s: float = 0.15, rho_on: float = 0.5, margin_db: float = 6.0, excess: float = 0.25):
         self.ref = ref
+        if not 0.0 <= max_delay_s <= MAX_DELAY_S:  # [local] echo_max_delay_s out of range: else no delays to search
+            logging.getLogger('peresmeshnik').warning('echo_max_delay_s %s: taken as %s', max_delay_s,
+                                                      min(max(max_delay_s, 0.0), MAX_DELAY_S))
+            max_delay_s = min(max(max_delay_s, 0.0), MAX_DELAY_S)
         self.delays = np.arange(round(min_delay_s * SR / HOP), round(max_delay_s * SR / HOP) + 1) * HOP / SR
         self.span = (min_delay_s, max_delay_s + window_s + tail_s)  # reference times that can matter now
         self.tail = np.arange(-1, round(tail_s * SR / HOP) + 1) * HOP / SR  # delay jitter and the far room's reverb
@@ -128,6 +136,7 @@ class EchoGate:
         self._hist: deque[tuple[float, np.ndarray]] = deque(maxlen=max(4, round(window_s * SR / HOP)))
         self._carry = np.zeros(0, np.float32)
         self._fed, self._offsets = 0, deque(maxlen=64)  # samples seen; arrival minus their duration, last frames
+        self._jump: list[tuple[float, int]] = []  # (offset, samples seen) since the offsets jumped by GAP_S
         self.gain: np.ndarray | None = None  # log10 echo / reference per band, learnt where the echo is clear
         self.gated, self.delay, self.rho = False, 0.0, 0.0
         self.stats = {'blocks': 0, 'gated': 0}
@@ -138,9 +147,16 @@ class EchoGate:
         # counted, put where they came with the least delay over the last ~2 s
         self._fed += n
         off = (clock() if t_end is None else t_end) - self._fed / SR
-        if self._offsets and off - min(self._offsets) > GAP_S:  # a gap (a helper restarted): the old times are off
-            self._offsets.clear()
-        self._offsets.append(off)
+        if self._offsets and off - min(self._offsets) > GAP_S:  # late: a stall or a gap, the old times meanwhile
+            self._jump.append((off, self._fed))
+            recent = [o for o, fed in self._jump if fed > self._fed - HOLD_S * SR]
+            if self._fed - self._jump[0][1] >= HOLD_S * SR and max(recent) - min(recent) < HOLD_S / 2:
+                self._offsets = deque((o for o, _ in self._jump), maxlen=64)  # at its own pace again: samples lost
+                self._jump = []
+        else:
+            self._offsets.extend(o for o, _ in self._jump)  # a stall's backlog drained: nothing changes
+            self._jump = []
+            self._offsets.append(off)
         t_end = min(self._offsets) + self._fed / SR
         if t_end - n / SR - self.span[1] > self.ref.loud_until:  # nothing we played can be in this audio
             self._hist.clear()

@@ -28,7 +28,7 @@ behind the speech before it). Per clause one JSON line goes to the
 from the end of the clause's speech to its caption, to its synthesized audio and to the estimated
 start of its playback (the output plays speech back to back, so a clause can wait behind the last).
 
-    peresmeshnik models fetch silero-vad parakeet-tdt-0.6b-v3 opus-mt-en-ru piper-ru_RU-dmitri-medium
+    peresmeshnik models fetch silero-vad parakeet-tdt-0.6b-v3 quickmt-en-ru piper-ru_RU-dmitri-medium
     peresmeshnik run --in call.wav [--from en] [--to ru] [--out speech.wav] [--log latency.jsonl]
     peresmeshnik run --in call.wav --pipewire --play   # Linux: file -> "Peresmeshnik Call" sink -> monitor
     peresmeshnik run --in call.wav --blackhole --play "BlackHole 2ch"   # macOS: file -> BlackHole 16ch -> capture
@@ -49,11 +49,13 @@ from collections import defaultdict
 import numpy as np  # BLAS threads: pinned in peresmeshnik/__init__.py, which runs first
 
 from peresmeshnik.engines import SAMPLE_RATE, Caption, Latency, Speech, Voice
-from peresmeshnik.local.asr import _key
+from peresmeshnik.local.asr import NO_SPACES, _key, join, units
 
 log = logging.getLogger('peresmeshnik.latency')
 OTHER = {'en': 'ru', 'ru': 'en'}
-HELLO = {'en': 'Hello.', 'ru': 'Привет.'}
+# the warm-up phrase of each of the 14 languages (languages.LANGS)
+HELLO = {'en': 'Hello.', 'ru': 'Привет.', 'uk': 'Привіт.', 'de': 'Hallo.', 'fr': 'Bonjour.', 'es': 'Hola.', 'it': 'Ciao.',
+         'pt': 'Olá.', 'pl': 'Cześć.', 'tr': 'Merhaba.', 'zh': '你好。', 'ja': 'こんにちは。', 'ko': '안녕하세요.', 'ar': 'مرحبا.'}
 MAX_BEHIND_S = 0.15
 MAX_LAG_S = 4.0  # them -> me: voice starting later than this after its clause ended is dropped (BENCH stage 2: queue policy)
 FAST_AFTER_S = 0.5  # voice this far behind its clause end is sped up ...
@@ -173,11 +175,11 @@ side has no subtitles of what was dropped; them -> me takes MAX_LAG_S."""
                 if partial:
                     self._events.put(Caption(partial, clause=n))
                     if self.partial_mt:  # the words two partials agree on (the stable prefix): translated for the subtitle
-                        words = partial.split()
+                        words = units(partial, self.src)  # zh / ja: characters
                         k = next((i for i, (a, b) in enumerate(zip(words, prev)) if _key(a) != _key(b)), min(len(words), len(prev)))
                         prev = words
-                        if k >= sent + 2:
-                            self._clauses.put({'partial': True, 'clause': n, 'text': ' '.join(words[:k]),
+                        if k >= sent + (4 if self.src in NO_SPACES else 2):
+                            self._clauses.put({'partial': True, 'clause': n, 'text': join(words[:k], self.src),
                                                'end_s': round(pos / SAMPLE_RATE, 2), 'end_wall': self._wall(pos)})
                             sent = k
                 if kind == 'end':

@@ -10,12 +10,31 @@ def test_registry_pins():
     reg = models.registry()
     assert {'silero-vad', 'parakeet-tdt-0.6b-v3', 'opus-mt-en-ru', 'opus-mt-ru-en'} <= set(reg)
     for m in reg.values():
+        if m.via:  # a pair through another language: its models exist, chain up and carry its license
+            parts = [reg[i] for i in m.via]
+            assert m.role == 'mt' and not m.files and all(p.role == 'mt' and not p.via for p in parts), m.id
+            (pair,) = m.langs
+            hops = [p.langs[0].split('-') for p in parts]
+            assert pair == f'{hops[0][0]}-{hops[-1][1]}' and all(a[1] == b[0] for a, b in zip(hops, hops[1:])), m.id
+            assert m.consent == any(p.consent for p in parts) and m.size == sum(p.size for p in parts), m.id
+            continue
         assert m.role in ('vad', 'asr', 'mt', 'tts', 'clone') and m.files and m.license and m.license_url
         assert m.url.startswith('https://') and ('/resolve/' in m.url and len(m.url.split('/resolve/')[1].split('/')[0]) == 40
                                                  or '/releases/download/' in m.url), m.id  # revision pinned
         for f in m.files.values():
             assert len(f['sha256']) == 64 and f['size'] > 0
     assert reg['xtts-v2'].consent and not reg['opus-mt-en-ru'].consent
+    # every direction of the 14 languages has an MT row: its own, or through English by the `pivot` rows (registry())
+    from peresmeshnik.languages import LANGS
+    pairs = {p for m in reg.values() if m.role == 'mt' for p in m.langs}
+    assert {f'{a}-{b}' for a in LANGS for b in LANGS if a != b} <= pairs
+    assert reg['mt-tr-ja-via-en'].via == ('opus-mt-tr-en', 'quickmt-en-ja') and 'mt-de-ru-via-en' not in reg  # de-ru: direct
+    # one pivot per language and way; X->en: OPUS-MT where quickmt makes up a continuation of a one-word reply (config)
+    to_en = sorted(m.langs[0][:2] for m in reg.values() if m.pivot and m.langs[0].endswith('-en'))
+    from_en = sorted(m.langs[0][3:] for m in reg.values() if m.pivot and m.langs[0].startswith('en-'))
+    assert to_en == from_en == sorted(set(LANGS) - {'en'})
+    assert {m.langs[0][:2] for m in reg.values() if m.pivot and m.id.startswith('opus-mt-') and m.langs[0].endswith('-en')} \
+        == set(config.OPUS_TO_EN)
 
 
 def fake(monkeypatch, url, files):
@@ -42,6 +61,27 @@ def test_fetch_resume_and_verify(server, tmp_path, monkeypatch):
     assert sum(got) == len(blob) + 2  # resumed part counted once, the rest downloaded
     assert ('/m-model.bin', 'bytes=1000-') in srv.ranges and ('/m-model.bin', None) not in srv.ranges
     assert models.path('fake', cache) == folder
+
+
+def test_a_pair_through_english_is_its_two_models(server, tmp_path, monkeypatch):
+    srv, url = server
+    pins = {}
+    for name in ('de-en', 'en-ru'):
+        (srv.root / f'{name}-model.bin').write_bytes(name.encode() * 100)
+        pins[name] = {'model.bin': {'sha256': hashlib.sha256(name.encode() * 100).hexdigest(), 'size': 500}}
+    reg = {f'opus-mt-{n}': models.Model(f'opus-mt-{n}', 'mt', (n,), 'CC-BY-4.0', 'https://x', f'{url}{n}-', pins[n])
+           for n in pins}
+    reg['via'] = models.Model('via', 'mt', ('de-ru',), 'CC-BY-4.0', 'https://x', '', {}, via=('opus-mt-de-en', 'opus-mt-en-ru'))
+    monkeypatch.setattr(models, 'registry', lambda: reg)
+    assert reg['via'].size == 1000 and not models.is_fetched(reg['via'], tmp_path)
+    with pytest.raises(models.ModelMissing):
+        models.path('via', tmp_path)
+    models.fetch('opus-mt-de-en', tmp_path)
+    assert not models.is_fetched(reg['via'], tmp_path)  # one of the two is not a pair
+    got = []
+    assert models.fetch('via', tmp_path, got.append) == tmp_path / 'opus-mt-de-en'
+    assert models.is_fetched(reg['via'], tmp_path) and sum(got) == 1000  # the one already there counted, not fetched
+    assert [r[0] for r in srv.ranges] == ['/de-en-model.bin', '/en-ru-model.bin']
 
 
 def test_fetch_resumes_after_cut(server, tmp_path, monkeypatch):
@@ -84,3 +124,17 @@ def test_settings_round_trip(tmp_path):
     p.write_text('[local]\nthreads = "two"\nfuture_key = 1\n')
     with pytest.raises(ValueError, match='local.threads'):
         config.load(p)
+
+
+def test_the_default_engines_cover_the_14_languages():
+    """Settings' defaults: MT for every direction, ASR and a stock voice where the registry has one (BENCH stage 6)."""
+    from peresmeshnik.languages import LANGS
+    loc, reg = config.Local(), models.registry()
+    assert config.LANGS == LANGS
+    assert set(loc.mt) == {f'{a}-{b}' for a in LANGS for b in LANGS if a != b}
+    assert all(k in reg[i].langs for k, i in loc.mt.items()) and set(loc.asr) == set(LANGS)
+    assert all(k in reg[i].langs for d in (loc.asr, loc.tts) for k, i in d.items())
+    assert set(LANGS) - set(loc.tts) == {'zh', 'ar'}  # no stock voice with a usable license (BENCH stage 6)
+    # X<->ru direct where through English loses the speaker's gender and ты / вы; X->en, en->X: the pivots
+    assert [loc.mt[f'{x}-ru'] for x in ('de', 'tr')] == ['opus-mt-de-ru', 'mt-tr-ru-via-en'] and loc.mt['ru-uk'] == 'opus-mt-ru-uk'
+    assert all(reg[loc.mt[f'{x}-en']].pivot and reg[loc.mt[f'en-{x}']].pivot for x in set(LANGS) - {'en'})

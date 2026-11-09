@@ -25,8 +25,10 @@ app = Analysis(
 shutil.copyfile(CONF['warnfile'], Path(CONF['warnfile']).with_name('warn-app.txt'))  # the next Analysis overwrites it
 piper = Analysis(
     [str(ROOT / 'piper-runner' / 'piper_runner.py')],
-    hiddenimports=collect_submodules('piper', filter=lambda n: '.train' not in n),
-    datas=collect_data_files('piper', excludes=['train/**', 'img/**', 'templates/**']),
+    # pyopenjtalk: its compiled OpenJTalk module imports pure-Python ones the analysis cannot see
+    hiddenimports=collect_submodules('piper', filter=lambda n: '.train' not in n) + collect_submodules('pyopenjtalk'),
+    datas=[*collect_data_files('piper', excludes=['train/**', 'img/**', 'templates/**']),
+           *collect_data_files('pyopenjtalk', excludes=['htsvoice/**'])],  # the Japanese voice: OpenJTalk's dictionary
     excludes=EXCLUDES + ['PySide6', 'peresmeshnik'],
 )
 app_exe = EXE(PYZ(app.pure), app.scripts, [], exclude_binaries=True, name='Peresmeshnik', console=False,

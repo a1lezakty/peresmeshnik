@@ -2,6 +2,7 @@
 the reason it died comes back in the error; the runner itself survives a stderr that is a pipe nobody reads."""
 import importlib.util
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -60,3 +61,13 @@ def test_its_stderr_goes_to_the_log_and_the_reason_comes_back(tmp_path, monkeypa
         t.close()
     log = (tmp_path / 'data' / 'logs' / 'piper-runner.log').read_text(encoding='utf-8')
     assert 'a warning from the runner' in log and 'ValueError: the voice broke' in log
+
+
+def test_an_error_says_its_type_not_its_message(tmp_path):
+    """An error's message can quote what was said: the runner's log keeps its type and place only (exit code 1, as the
+    frozen Windows entry needs: no dialog)."""
+    r = subprocess.run([sys.executable, str(ROOT / 'piper-runner' / 'piper_runner.py'), str(tmp_path / 'missing.onnx')],
+                       capture_output=True, text=True, timeout=120)
+    last = r.stderr.strip().splitlines()[-1]
+    assert r.returncode == 1 and last.startswith('piper-runner: ') and 'Error at ' in last, r.stderr
+    assert 'missing.onnx' not in r.stderr and 'No module named' not in r.stderr and 'Traceback' not in r.stderr, r.stderr

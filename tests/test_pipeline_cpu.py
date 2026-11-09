@@ -1,9 +1,9 @@
 """Working-mode CPU gate, next to the idle gate: `peresmeshnik run` (Silero VAD, Parakeet int8 with
-partials, OPUS-MT, Piper) on a 30 s English recording, fed as fast as it goes, in its own process
+partials, quickmt, Piper) on a 30 s English recording, fed as fast as it goes, in its own process
 like the app. Fails when the pipeline is slower than real time or burns more CPU per second of
 audio than the limit, or when the captions are wrong.
 
-Needs the models (`peresmeshnik models fetch silero-vad parakeet-tdt-0.6b-v3 opus-mt-en-ru
+Needs the models (`peresmeshnik models fetch silero-vad parakeet-tdt-0.6b-v3 quickmt-en-ru
 piper-ru_RU-dmitri-medium`, ~0.8 GB), so it runs only with PERESMESHNIK_WORK_GATE=1 (CI job
 `work-gate`). Limits can be overridden: WORK_RTF_LIMIT, WORK_CPU_LIMIT.
 """

@@ -295,20 +295,24 @@ side has no subtitles of what was dropped; them -> me takes MAX_LAG_S."""
 
 
 def make_local(src: str, tgt: str, asr: str | None = None, threads: int | None = None, tts=None, voice: Voice | None = None,
-               settings=None, max_lag_s: float | None = None) -> LocalDirection:
+               settings=None, max_lag_s: float | None = None, mt: str | None = None) -> LocalDirection:
     """Engines and threads from the settings (`[local]`, ARCHITECTURE §6), models from the registry
-    (raises models.ModelMissing until fetched); S2 passes its clone `tts` and `voice`."""
+    (raises models.ModelMissing until fetched); S2 passes its clone `tts` and `voice`. `asr`, `mt` and a `tts` string are
+    registry ids (the app passes `languages.direction`'s), by default the `[local]` tables' (`languages.pick`: the
+    language's or the pair's own, else '*')."""
     from peresmeshnik import config
+    from peresmeshnik.languages import pick
     from peresmeshnik.local.asr import OnnxAsr
     from peresmeshnik.local.mt import OpusMt
     from peresmeshnik.local.tts import PiperTts
     from peresmeshnik.local.vad import SileroVad
     loc = (settings or config.load()).local
     threads = threads or loc.threads
-    return LocalDirection(SileroVad(), OnnxAsr(asr or loc.asr[src], threads=threads),
-                          OpusMt(src, tgt, loc.mt[f'{src}-{tgt}'], threads=threads),
-                          tts or PiperTts(loc.tts[tgt], threads=threads), src, tgt, voice, max_lag_s=max_lag_s,
-                          partial_mt=loc.partial_mt)
+    if tts is None or isinstance(tts, str):
+        tts = PiperTts(tts or pick(loc.tts, tgt), threads=threads)
+    return LocalDirection(SileroVad(), OnnxAsr(asr or pick(loc.asr, src), threads=threads),
+                          OpusMt(src, tgt, mt or pick(loc.mt, f'{src}-{tgt}'), threads=threads),
+                          tts, src, tgt, voice, max_lag_s=max_lag_s, partial_mt=loc.partial_mt)
 
 
 def cpu_s(direction: LocalDirection | None = None) -> float:

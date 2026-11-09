@@ -7,6 +7,7 @@ Qt signals; nothing is polled. Settings are written when the wizard finishes.
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -37,8 +38,10 @@ from PySide6.QtWidgets import (
     QWizardPage,
 )
 
-from peresmeshnik import config, models
+from peresmeshnik import config, languages, models
+from peresmeshnik.languages import needed_models  # noqa: F401 (the models page asks it; tests patch it here)
 from peresmeshnik.local import voicepack
+from peresmeshnik.ui.overlay import font_note
 from peresmeshnik.ui.tray import LANGS, MIC_LABEL, SIDES, device_combo, save_key
 
 LINUX = sys.platform.startswith('linux')
@@ -55,19 +58,6 @@ def has_key(s: config.Settings) -> bool:
         return bool(api_key(s.cloud))
     except SystemExit:
         return False
-
-
-def needed_models(s: config.Settings) -> list[str]:
-    """Registry ids the chosen setup runs on (ARCHITECTURE §6). Silero VAD is always there: it gates the cloud too."""
-    ids = ['silero-vad']
-    for side, (src, tgt) in (('them_to_me', (s.their_lang, s.my_lang)), ('me_to_them', (s.my_lang, s.their_lang))):
-        local = getattr(s, side) == 'local'
-        if local or not s.cloud.subtitles:  # local voice, or local subtitles next to the cloud voice
-            ids += [s.local.asr[src], s.local.mt[f'{src}-{tgt}']]
-        if local:
-            stock = side == 'them_to_me' or s.local.clone == 'piper'  # voice.STOCK: me -> them in a stock voice
-            ids += [s.local.tts[tgt]] if stock else [s.local.clone, s.local.tts[tgt]]  # the clone's fallback (~60 MB)
-    return list(dict.fromkeys(ids))
 
 
 MIN_VRAM_GB = 5.5  # the clone (XTTS-v2 ~2 GB) next to them -> me on CUDA (~0.6 GB): a 6 GB card (6144 MiB, some report less)
@@ -169,30 +159,43 @@ def tier() -> tuple[str, str]:
 
 
 class LanguagesPage(QWizardPage):
+    """The pair, and per side local or cloud: before anything is downloaded, what each side runs on, why local cannot be
+    (languages.direction), what is downloaded for it, under which licenses, and whether the subtitles' fonts are here."""
+
     def __init__(self, w: SetupWizard):
         super().__init__()
         self.w = w
         s = w.s
         self.setTitle('Languages and engines')
-        what, rec = tier()
+        what, self.rec = tier()
         self.setSubTitle(f'This computer: {what}.')
         f = QFormLayout(self)
         self.my_lang, self.their_lang = QComboBox(), QComboBox()
         for c, v in ((self.my_lang, s.my_lang), (self.their_lang, s.their_lang)):
             for code, name in LANGS.items():
                 c.addItem(name, code)
-            c.setCurrentIndex(c.findData(v))
+            c.setCurrentIndex(max(0, c.findData(v)))
         f.addRow('I speak', self.my_lang)
         f.addRow('They speak', self.their_lang)
-        self.engine = {}
+        self.engine, self.why = {}, {}
         for key, title in SIDES.items():
             c = self.engine[key] = QComboBox()
             c.addItems(config.ENGINES)
-            c.setCurrentText(getattr(s, key) if config.settings_path().exists() else ('local' if key == 'them_to_me' else rec))
+            c.setCurrentText(getattr(s, key) if config.settings_path().exists() else ('local' if key == 'them_to_me' else self.rec))
+            self.why[key] = QLabel()
+            self.why[key].setWordWrap(True)
             f.addRow(title, c)
+            f.addRow('', self.why[key])
         self.subtitles = QCheckBox('Subtitles from the cloud (else from the local ASR: faster, needs ~1 GB of models)')
         self.subtitles.setChecked(s.cloud.subtitles)
         f.addRow('Cloud', self.subtitles)
+        self.download = QLabel()
+        self.download.setWordWrap(True)
+        self.download.setOpenExternalLinks(True)
+        f.addRow('Download', self.download)
+        self.fonts = QLabel()
+        self.fonts.setWordWrap(True)
+        f.addRow(self.fonts)
         self.key = QLineEdit()
         self.key.setEchoMode(QLineEdit.Password)
         self.key.setPlaceholderText('already set' if has_key(s) else 'Gemini API key: aistudio.google.com → Get API key')
@@ -203,13 +206,60 @@ class LanguagesPage(QWizardPage):
         f.addRow(note)
         self.err = QLabel()
         f.addRow(self.err)
+        for c in (self.my_lang, self.their_lang, *self.engine.values()):
+            c.currentIndexChanged.connect(self.refresh)
+        self.subtitles.toggled.connect(self.refresh)
+        self.refresh()
 
-    def validatePage(self) -> bool:  # noqa: N802 (Qt name)
-        s = self.w.s
+    def chosen(self) -> config.Settings:
+        """The settings as this page has them now (the wizard's own are written in validatePage)."""
+        s = copy.deepcopy(self.w.s)
         s.my_lang, s.their_lang = self.my_lang.currentData(), self.their_lang.currentData()
         for key, c in self.engine.items():
             setattr(s, key, c.currentText())
         s.cloud.subtitles = self.subtitles.isChecked()
+        return s
+
+    def refresh(self) -> None:
+        """Per side: local is offered only where it can run (else it says why and the side goes to the cloud), with what
+        runs differently; then the download for this pair with its licenses, and the fonts."""
+        s = self.chosen()
+        for key, c in self.engine.items():
+            d = languages.direction(s, key)
+            item = c.model().item(config.ENGINES.index('local'))
+            item.setEnabled(d.local)
+            if not d.local and c.currentText() == 'local':
+                c.blockSignals(True)
+                c.setCurrentText('cloud')
+                c.blockSignals(False)
+                setattr(s, key, 'cloud')
+            if not d.local:
+                text = f'✘ Not on this computer: {"; ".join(d.why)}. The cloud translates {languages.name(d.src)} → ' \
+                       f'{languages.name(d.tgt)}.'
+            else:
+                text = '✔ Both on this computer and in the cloud.' + ''.join(f' ⚠ {n}.' for n in d.notes if c.currentText() == 'local')
+            if c.currentText() == 'cloud' and languages.cloud_subtitles(s, key) and not s.cloud.subtitles:
+                text += ' Its subtitles come from the cloud too.'
+            if d.src == 'ar' and c.currentText() == 'cloud' and languages.cloud_subtitles(s, key):
+                text += ' Arabic subtitles from the cloud are Egyptian Arabic (Gemini has no other): other dialects come out ' \
+                        'worse.'
+            if MACOS and key == 'me_to_them':  # BENCH stage 6: no clone keeps up on an M1's CPU (XTTS, LuxTTS measured)
+                text += ' On a Mac your voice goes to the call through the cloud (or a stock voice): no local clone of it ' \
+                        'keeps up here.'
+            self.why[key].setText(text)
+        ms, base = [models.get(i) for i in needed_models(s)], models.root()
+        todo = [m for m in ms if not models.is_fetched(m, base)]
+        lic = {}  # one link per license
+        for m in ms:
+            lic.setdefault(m.license, f'<a href="{m.license_url}">{m.license}</a>'
+                           + (' (noncommercial: you accept it on the models page)' if m.consent else ''))
+        self.download.setText((f'{sum(map(models.size, todo)) / 1e6:,.0f} MB for this pair ({len(todo)} of {len(ms)} models '
+                               'not here yet)' if todo else 'Nothing: every model of this pair is here') +
+                              '. Licenses: ' + ', '.join(lic.values()) + '.')
+        self.fonts.setText(f'⚠ Subtitles: {note}' if (note := font_note([s.my_lang, s.their_lang])) else '')
+
+    def validatePage(self) -> bool:  # noqa: N802 (Qt name)
+        s = self.chosen()
         self.w.key = self.key.text().strip()
         if s.my_lang == s.their_lang:
             self.err.setText('Choose two different languages.')
@@ -217,6 +267,12 @@ class LanguagesPage(QWizardPage):
         if 'cloud' in (s.them_to_me, s.me_to_them) and not (self.w.key or has_key(s)):
             self.err.setText('The cloud needs a Gemini API key.')
             return False
+        if bad := [SIDES[k] for k in languages.SIDES if getattr(s, k) == 'local' and not languages.direction(s, k).local]:
+            self.err.setText(f'{", ".join(bad)}: not on this computer for this pair; choose cloud.')
+            return False
+        self.w.s.my_lang, self.w.s.their_lang, self.w.s.cloud.subtitles = s.my_lang, s.their_lang, s.cloud.subtitles
+        for k in languages.SIDES:
+            setattr(self.w.s, k, getattr(s, k))
         if self.w.key:
             save_key(self.w.key, s.cloud)  # the test phrase on a later page already needs it
         return True
@@ -483,7 +539,8 @@ class ModelsPage(QWizardPage):
     def initializePage(self) -> None:  # noqa: N802
         self.ms = [models.get(i) for i in needed_models(self.w.s)]
         base = models.root()
-        rows = [f'<tr><td>{"✔" if models.is_fetched(m, base) else "·"}</td><td>{m.id}</td><td align=right>{m.size / 1e6:.0f} MB</td>'
+        rows = [f'<tr><td>{"✔" if models.is_fetched(m, base) else "·"}</td><td>{m.id}</td>'
+                f'<td align=right>{models.size(m) / 1e6:.0f} MB</td>'
                 f'<td><a href="{m.license_url}">{m.license}</a></td></tr>' for m in self.ms]
         self.list.setText(f'<table cellspacing=6>{"".join(rows)}</table><p>Folder: {base}</p>')
         restricted = [m for m in self.ms if m.consent and not models.is_fetched(m, base)]
@@ -507,7 +564,7 @@ class ModelsPage(QWizardPage):
         self.busy = True
         self.button.setEnabled(False)
         self.completeChanged.emit()
-        total = sum(m.size for m in todo)
+        total = sum(map(models.size, todo))
 
         def run():
             done = [0]
@@ -533,7 +590,7 @@ class ModelsPage(QWizardPage):
         self.button.setEnabled(bool(todo))
         self.bar.setVisible(bool(todo) or bool(err))
         self.state.setText(f'Download failed: {err}. Press Download again to resume.' if err else
-                           f'{len(todo)} to download, {sum(m.size for m in todo) / 1e6:.0f} MB.' if todo else 'All models are here.')
+                           f'{len(todo)} to download, {sum(map(models.size, todo)) / 1e6:.0f} MB.' if todo else 'All models are here.')
         self.completeChanged.emit()
 
 
@@ -670,6 +727,14 @@ class VoicePage(QWizardPage):
     def local(self) -> bool:
         return self.w.s.me_to_them == 'local'
 
+    def clone_off(self) -> str:
+        """Why me -> them local speaks in a stock voice though the clone is chosen ('' = the clone speaks): it cannot
+        speak their language, or needs an NVIDIA GPU here (languages.direction)."""
+        from peresmeshnik.voice import STOCK
+        s = self.w.s
+        d = languages.direction(s, 'me_to_them')
+        return '; '.join(d.notes) if self.local() and s.local.clone != STOCK and d.voice == 'stock' else ''
+
     def initializePage(self) -> None:  # noqa: N802
         from peresmeshnik import voice
         s = self.w.s
@@ -690,6 +755,10 @@ class VoicePage(QWizardPage):
         elif self.gpu is None and not getattr(self, '_asking', False):  # once: the GPU does not change meanwhile
             self._asking = True
             threading.Thread(target=lambda: self.gpu_found.emit(gpu()), name='gpu', daemon=True).start()
+        if why := self.clone_off():  # nothing to record for it: said, and the page can be left
+            self.setSubTitle(f'"Me → them" speaks in a stock voice for this pair: {why}. No recording is needed.')
+            for x in (self.stock, self.prompt, self.record_button, self.import_button, self.check_button):
+                x.setVisible(False)
         if self.voice is None and s.local.voice and (voice.voices_dir() / s.local.voice / 'voice.json').exists():
             self.voice = voice.load(s.local.voice)
             q = self.voice.meta.get('quality', {})
@@ -699,13 +768,14 @@ class VoicePage(QWizardPage):
         self._buttons()
 
     def isComplete(self) -> bool:  # noqa: N802
-        return not self.running and not self.packing and (not self.local() or self.stock.isChecked() or self.voice is not None)
+        return not self.running and not self.packing and (not self.local() or self.stock.isChecked() or self.voice is not None
+                                                          or bool(self.clone_off()))
 
     def pack(self) -> str:
         """The clone's voice pack here: '' where it is not this page's business (not Windows, cloud, the stock voice, a
         runner of one's own in $PERESMESHNIK_VOICE_CMD, a build without the pack's files), 'installing', 'gpu' (gpu_refusal:
         too little memory, an old driver or GPU, a driver that does not answer), else voicepack.state()."""
-        if not (WINDOWS and self.local() and not self.stock.isChecked()) or os.environ.get('PERESMESHNIK_VOICE_CMD') \
+        if not (WINDOWS and self.local() and not self.stock.isChecked()) or self.clone_off() or os.environ.get('PERESMESHNIK_VOICE_CMD') \
                 or not voicepack.lock_file().is_file():
             return ''
         if self.packing:
@@ -795,8 +865,8 @@ class VoicePage(QWizardPage):
         s.local.clone = voice.STOCK if on else config.Local().clone
         self.check_button.setVisible(self.local() and not on)
         self._show_pack()
-        vid = s.local.tts[s.their_lang]
-        if on and not models.is_fetched(models.get(vid), models.root()):
+        vid = languages.direction(s, 'me_to_them').tts  # the stock voice now ('' = none for the language)
+        if on and vid and not models.is_fetched(models.get(vid), models.root()):
             self.out.setText(f'Downloading the stock voice {vid}…')
             self._run(lambda: (models.fetch(vid), self.result.emit(f'The stock voice {vid} is here.')))
         self.completeChanged.emit()
@@ -876,7 +946,7 @@ class VoicePage(QWizardPage):
             tts = None
             try:
                 tts = make_clone(models.path(s.local.clone), threads=s.local.threads)
-                asr = OnnxAsr(s.local.asr[s.their_lang], s.local.threads)
+                asr = OnnxAsr(languages.direction(s, 'them_to_me').asr, s.local.threads)  # their language's ASR
                 self.checked.emit(voice.clone_verdict(voice.check_clone(tts, v, s.their_lang, asr)))
             except Exception as e:  # no voice pack or GPU, a model not downloaded yet, out of memory
                 self.checked.emit(f'error: {e}')

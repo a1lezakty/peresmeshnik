@@ -1,0 +1,576 @@
+"""Languages in the shell: the wizard's languages page says what each side of a pair runs on before any download, the tray
+switches the pair without restarting the app (its models fetched first, then the sides made again), the overlay draws
+Chinese, Japanese, Korean and Arabic (right to left) — a snapshot per OS for CI. Pairs whose real models are not in the
+registry yet run on stand-ins (`test_languages.stub`)."""
+import hashlib
+import os
+import sys
+import threading
+import time
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+if sys.platform.startswith('linux') and not os.environ.get('DISPLAY'):
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+pytest.importorskip('PySide6')
+from PySide6.QtCore import QCoreApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
+
+from peresmeshnik import config, languages, models  # noqa: E402
+from peresmeshnik.engines import Caption, Speech  # noqa: E402
+
+app = QApplication.instance() or QApplication([])
+STAND_INS = {'asr': ('asr-de', 'asr-ja'), 'mt': ('mt-de-ja', 'mt-ja-de'), 'tts': ('tts-de', 'tts-ja')}
+
+
+def settle(seconds=0.05):
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        QCoreApplication.processEvents()
+        time.sleep(0.005)
+
+
+def stand_ins(monkeypatch, url='https://example.invalid/', files=None, consent=()):
+    """German and Japanese on stand-in models (served by `url`); `wire(s)` puts them into settings. Silero VAD counts as
+    downloaded: a test never fetches a real model."""
+    reg = dict(models.registry())
+    for role, ids in STAND_INS.items():
+        for mid in ids:
+            reg[mid] = models.Model(mid, role, (mid.split('-', 1)[1],), 'CPML' if mid in consent else 'MIT',
+                                    'https://example.invalid/lic', url, dict(files or {}), consent=mid in consent)
+    monkeypatch.setattr(models, 'registry', lambda: reg)
+    vad = models.root() / 'silero-vad'
+    vad.mkdir(parents=True, exist_ok=True)
+    (vad / models.MARKER).write_text(reg['silero-vad'].fingerprint + '\n')
+
+
+def wire(s: config.Settings) -> config.Settings:
+    s.local.asr.update(de='asr-de', ja='asr-ja')
+    s.local.mt.update({'de-ja': 'mt-de-ja', 'ja-de': 'mt-ja-de'})
+    s.local.tts.update(de='tts-de', ja='tts-ja')
+    return s
+
+
+def test_languages_page_says_before_the_download_what_runs_where(tmp_path, monkeypatch):
+    from peresmeshnik.ui import wizard
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    monkeypatch.setenv('PERESMESHNIK_MODELS', str(tmp_path / 'models'))
+    monkeypatch.setenv('GEMINI_API_KEY', 'a-key')
+    page = wizard.LanguagesPage(type('W', (), {'s': config.Settings(them_to_me='local', me_to_them='local')})())
+    assert page.my_lang.count() == 14 and page.my_lang.itemText(page.my_lang.findData('ja')) == '日本語 (Japanese)'
+    page.my_lang.setCurrentIndex(page.my_lang.findData('de'))
+    page.their_lang.setCurrentIndex(page.their_lang.findData('ja'))
+    local = config.ENGINES.index('local')
+    for key in languages.SIDES:  # no German / Japanese models in the registry: local is not offered, and it says why
+        assert not page.engine[key].model().item(local).isEnabled() and page.engine[key].currentText() == 'cloud'
+        assert 'Not on this computer: no local speech recognition for' in page.why[key].text()
+        assert 'subtitles come from the cloud too' in page.why[key].text()
+    assert page.download.text().startswith('1 MB for this pair') or page.download.text().startswith('2 MB')  # Silero VAD
+    assert page.validatePage() and (page.w.s.my_lang, page.w.s.their_lang, page.w.s.them_to_me) == ('de', 'ja', 'cloud')
+    assert ('On a Mac your voice goes to the call through the cloud' in page.why['me_to_them'].text()) == (sys.platform == 'darwin')
+
+    stand_ins(monkeypatch, files={'w.bin': {'sha256': '0' * 64, 'size': 50_000_000}}, consent=('tts-ja',))
+    s = wire(config.Settings(my_lang='de', their_lang='ja', them_to_me='local', me_to_them='local'))
+    config.save(s)  # saved settings: the page starts from their engines
+    page = wizard.LanguagesPage(type('W', (), {'s': s})())
+    for key in languages.SIDES:
+        assert page.engine[key].model().item(local).isEnabled() and page.engine[key].currentText() == 'local'
+    assert 'cannot speak Japanese: a stock voice speaks instead' in page.why['me_to_them'].text()  # XTTS has no ja here
+    text = page.download.text()
+    assert text.startswith('300 MB for this pair (6 of 7 models')  # only the pair's: 6 stand-ins + Silero VAD
+    assert 'CPML</a> (noncommercial' in text and 'MIT' in text
+
+
+def test_tray_switches_the_pair_fetching_only_its_models(tmp_path, monkeypatch, server):
+    """Another pair from the tray: only its missing models are downloaded (restricted licenses asked first), then it is
+    saved and the running controller makes its sides again — the app is not restarted."""
+    from peresmeshnik.ui import tray as tray_mod
+    httpd, url = server
+    blob = b'w' * 70_000
+    (httpd.root / 'w.bin').write_bytes(blob)
+    files = {'w.bin': {'sha256': hashlib.sha256(blob).hexdigest(), 'size': len(blob)}}
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    monkeypatch.setattr(config, 'config_dir', lambda: tmp_path)
+    monkeypatch.setenv('PERESMESHNIK_MODELS', str(tmp_path / 'models'))
+    stand_ins(monkeypatch, url, files, consent=('mt-de-ja',))
+    monkeypatch.setenv('GEMINI_API_KEY', 'a-key')
+    s = wire(config.Settings(them_to_me='local', me_to_them='local'))
+    s.local.clone = 'piper'  # the stock voice: no clone for these stand-ins
+    config.save(s)
+    calls = []
+
+    class Ctl:
+        live, on = False, True
+
+        def set_languages(self):
+            calls.append(config.load())
+    t = tray_mod.Tray(Ctl())
+    asked = []
+    t.confirm = lambda text: asked.append(text) or False
+    pick = {k: {a.data()[1]: a for a in g.actions()} for k, g in t.langs.items()}
+    assert len(pick['my_lang']) == 14 and pick['my_lang']['ru'].isChecked() and pick['their_lang']['en'].isChecked()
+    pick['my_lang']['de'].trigger()  # de <-> en: no German models -> both sides to the cloud, nothing to download
+    settle(0.1)
+    assert (config.load().my_lang, config.load().them_to_me, config.load().me_to_them) == ('de', 'cloud', 'cloud')
+    assert len(calls) == 1 and pick['my_lang']['de'].isChecked()
+    config.save(s)  # back to ru <-> en, both local
+    t.sync()
+    pick['my_lang']['de'].setChecked(True)
+    t.switch_pair('de', 'ja')
+    assert 'mt-de-ja (CPML' in asked[0] and config.load().my_lang == 'ru' and len(calls) == 1  # declined: nothing changes
+    t.confirm = lambda text: True
+    t.switch_pair('de', 'ja')
+    end = time.monotonic() + 30
+    while len(calls) < 2 and time.monotonic() < end:
+        settle(0.05)
+    got = config.load()
+    assert len(calls) == 2 and (got.my_lang, got.their_lang, got.them_to_me, got.me_to_them) == ('de', 'ja', 'local', 'local')
+    fetched = sorted(p.name for p in (tmp_path / 'models').iterdir() if (p / models.MARKER).exists())
+    assert fetched == ['asr-de', 'asr-ja', 'mt-de-ja', 'mt-ja-de', 'silero-vad', 'tts-de', 'tts-ja']  # nothing else
+    assert pick['their_lang']['ja'].isChecked()
+    pick['their_lang']['de'].trigger()  # my language as theirs: the pair turns round
+    settle(0.1)
+    assert (config.load().my_lang, config.load().their_lang) == ('ja', 'de')
+
+
+def tray_with(monkeypatch, tmp_path, s, on=True):
+    from peresmeshnik.ui import tray as tray_mod
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    monkeypatch.setattr(config, 'config_dir', lambda: tmp_path)
+    monkeypatch.setenv('PERESMESHNIK_MODELS', str(tmp_path / 'models'))
+    monkeypatch.setenv('GEMINI_API_KEY', 'a-key')
+    stand_ins(monkeypatch)  # stand-ins without files: "downloaded" at once
+    config.save(s)
+    calls = []
+
+    class Ctl:
+        live = False
+
+        def set_languages(self):
+            calls.append(config.load())
+    Ctl.on = on
+    t = tray_mod.Tray(Ctl())
+    t.said = []
+    t.message = t.said.append
+    return t, calls
+
+
+def wait_for(cond, s=10.0):
+    end = time.monotonic() + s
+    while not cond() and time.monotonic() < end:
+        settle(0.02)
+    return cond()
+
+
+def test_tray_pair_switch_details(tmp_path, monkeypatch):
+    """The language it has: nothing; a choice while a pair downloads builds on that pair; when it lands only the sides it
+    moved to the cloud are written (a change of the other meanwhile stays); the controller is told even while a start is
+    under way (off: its control thread says idle); a clone that cannot speak the language is said."""
+    import threading as th
+
+    from peresmeshnik import models as models_mod
+    s = wire(config.Settings(them_to_me='local', me_to_them='local'))
+    t, calls = tray_with(monkeypatch, tmp_path, s, on=False)
+    switched = []
+    real_switch, t.switch_pair = t.switch_pair, lambda my, their: switched.append((my, their))
+    pick = {k: {a.data()[1]: a for a in g.actions()} for k, g in t.langs.items()}
+    pick['my_lang']['ru'].trigger()  # already mine
+    assert switched == []
+    t._pair = (config.Settings(my_lang='de', their_lang='ja'), [])  # de -> ja downloading
+    pick['their_lang']['ko'].trigger()
+    assert switched == [('de', 'ko')]  # from the pair on its way, not from the saved ru / en
+    t._pair, t.switch_pair = None, real_switch
+
+    gate = th.Event()
+    real_fetch = models_mod.fetch
+    monkeypatch.setattr(models_mod, 'fetch', lambda mid, *a, **k: gate.wait(10))  # lands nothing: the next part fetches
+    t.set_state('translating (them: local, me: local; languages ru ⇄ en)')
+    t.switch_pair('de', 'ja')
+    settle(0.3)
+    assert t._pair is not None and t.status.text().startswith('downloading')
+    t.switch_pair('ru', 'en')  # back to the saved pair while de -> ja is on its way
+    assert t._pair is None and t.status.text().startswith('translating') and calls == []  # nothing made again
+    gate.set()
+    settle(0.5)
+    assert calls == [] and config.load().my_lang == 'ru'  # the download let go: it ends unused
+
+    gate = th.Event()
+    monkeypatch.setattr(models_mod, 'fetch', lambda mid, *a, **k: gate.wait(10) and real_fetch(mid, *a, **k))
+    t.switch_pair('ja', 'de')  # both sides local in ja <-> de: its stand-ins are fetched (the gate holds them)
+    settle(0.3)
+    assert t._pair is not None and calls == [] and any('downloading' in m for m in t.said)
+    saved = config.load()
+    saved.cloud.subtitles, saved.me_to_them = True, 'cloud'  # changes elsewhere while it downloads (a side it left alone)
+    config.save(saved)
+    gate.set()
+    assert wait_for(lambda: calls)
+    got = config.load()
+    assert (got.my_lang, got.their_lang, got.cloud.subtitles, got.me_to_them) == ('ja', 'de', True, 'cloud')  # all kept
+    assert len(calls) == 1  # translation off: the controller still hears of it (its thread knows when it is on)
+
+    s = wire(config.Settings(my_lang='de', their_lang='en', them_to_me='local', me_to_them='cloud'))
+    config.save(s)
+    t.switch_pair('de', 'fr')  # them -> me: no French models -> to the cloud; me -> them was cloud
+    assert wait_for(lambda: len(calls) == 2)
+    saved = config.load()
+    assert (saved.them_to_me, saved.me_to_them) == ('cloud', 'cloud')
+    s = wire(config.Settings(my_lang='ru', their_lang='en', them_to_me='cloud', me_to_them='local'))
+    s.local.clone = 'xtts-v2'  # the clone, which has no Japanese
+    config.save(s)
+    t.switch_pair('de', 'ja')
+    assert wait_for(lambda: len(calls) == 3)
+    assert any('Me → them: your cloned voice cannot speak Japanese: a stock voice speaks instead' in m for m in t.said), t.said
+
+
+def test_two_pair_switches_download_each_model_once(tmp_path, monkeypatch, server):
+    """The pair chosen again while it downloads (the tray, then the settings window; the server is slow): every model
+    is downloaded once, the pair made once."""
+    httpd, url = server
+    httpd.slow = 0.2
+    blob = b'x' * 10_000
+    (httpd.root / 'w.bin').write_bytes(blob)
+    t, calls = tray_with(monkeypatch, tmp_path, wire(config.Settings(them_to_me='local', me_to_them='local')))
+    stand_ins(monkeypatch, url, files={'w.bin': {'sha256': hashlib.sha256(blob).hexdigest(), 'size': len(blob)}})
+    t.switch_pair('de', 'ja')
+    t.switch_pair('de', 'ja')
+    assert wait_for(lambda: calls, 30)
+    settle(0.5)
+    assert len(httpd.ranges) == 6, httpd.ranges  # 2 ASR + 2 MT + 2 voices, each once
+    assert len(calls) == 1 and (config.load().my_lang, config.load().their_lang) == ('de', 'ja')
+
+
+def test_settings_window_changes_only_the_pair_without_a_restart(tmp_path, monkeypatch):
+    from peresmeshnik.ui import tray as tray_mod
+    t, calls = tray_with(monkeypatch, tmp_path, wire(config.Settings()))
+    restarts, switched = [], []
+    t.restart = lambda: restarts.append(1)
+    t.switch_pair = lambda my, their: switched.append((my, their))
+    d = tray_mod.SettingsDialog(t)
+    d.their_lang.setCurrentIndex(d.their_lang.findData('ja'))
+    d.save()
+    assert switched == [('ru', 'ja')] and restarts == [] and config.load().their_lang == 'en'  # saved once its models are here
+    d = tray_mod.SettingsDialog(t)
+    d.threads.setValue(3)
+    d.save()
+    assert restarts == [1] and config.load().local.threads == 3
+
+
+class Direction:
+    """A local direction: says one clause in its pair, lives until closed."""
+    made: list = []
+
+    def __init__(self, src, tgt):
+        self.src, self.tgt, self.closed = src, tgt, threading.Event()
+        self.tts = self.mt = None
+        Direction.made.append(self)
+
+    def warm_up(self):
+        pass
+
+    def feed(self, pcm):
+        pass
+
+    def events(self):
+        yield Caption(f'{self.src} text', f'{self.tgt} text', final=True, clause=0)
+        yield Speech(np.zeros(240, np.float32), 24000)
+        self.closed.wait()
+
+    def close(self):
+        self.closed.set()
+
+
+def test_controller_makes_its_sides_again_for_a_new_pair(tmp_path, monkeypatch):
+    """Controller.set_languages while translating: both sides stop and start again in the new pair, as after an error;
+    translation stays on; off, it waits for the next start."""
+    from peresmeshnik import app, pipeline
+    monkeypatch.setenv('PERESMESHNIK_MODELS', str(tmp_path / 'models'))
+    stand_ins(monkeypatch)
+    monkeypatch.setattr(pipeline, 'make_local', lambda src, tgt, **k: Direction(src, tgt))
+    monkeypatch.setattr(app.Controller, '_output', lambda self, name, s: type('Out', (), {
+        'play': lambda *a: None, 'flush': lambda *a: None, 'stop': lambda *a: None})())
+    Direction.made = []
+    sample = str(Path(__file__).parents[1] / 'peresmeshnik' / 'ui' / 'samples' / 'en.ogg')
+    s = wire(config.Settings(them_to_me='local', me_to_them='local'))
+    s.local.clone = 'piper'
+    shown, states = [], []
+    overlay = type('O', (), {'side': lambda self, name: type('S', (), {'show': lambda _, c: shown.append((name, c)),
+                                                                        'hide': lambda _: None})()})()
+    ctl = app.Controller(overlay, states.append, sample, sample, settings=s, test=True)
+    ctl.set_translation(True).result(30)
+    assert sorted((d.src, d.tgt) for d in Direction.made) == [('en', 'ru'), ('ru', 'en')] and ctl.on
+    first = list(Direction.made)
+    s.my_lang, s.their_lang = 'de', 'ja'
+    ctl.set_languages().result(30)
+    assert all(d.closed.is_set() for d in first) and ctl.on and len(ctl.sides) == 2
+    assert sorted((d.src, d.tgt) for d in Direction.made[2:]) == [('de', 'ja'), ('ja', 'de')]
+    assert states[-1].startswith('translating (') and states[-1].endswith('languages de ⇄ ja)'), states
+    ctl.set_translation(False).result(30)
+    s.my_lang = 'fr'
+    ctl.set_languages().result(30)
+    assert len(Direction.made) == 4 and not ctl.on  # off: nothing made now
+    assert states[-1] == 'idle, translation off (languages fr ⇄ ja)'
+    ctl.quit()
+
+
+def test_while_a_side_is_made_again_the_call_and_i_hear_each_other(tmp_path, monkeypatch):
+    """_drop / _make (a new pair, a restart after an error): me -> them — the microphone loop on before the old side
+    stops, off once the new one is made, before it starts (the call hears me meanwhile, as in _on); them -> me — the
+    route undone first, the pass-through (macOS < 14.4) on once the old input let go, off before the new one starts. A
+    side that cannot be made or started leaves its stand-in on, the other side runs; none: translation off. Each side's
+    rows take the new languages once it is made again. A clone that cannot speak the language: said at the start (a new
+    pair: by the tray), once."""
+    from peresmeshnik import app, pipeline
+    monkeypatch.setenv('PERESMESHNIK_MODELS', str(tmp_path / 'models'))
+    stand_ins(monkeypatch)
+    log, fail = [], set()
+
+    class D(Direction):
+        def __init__(self, src, tgt):
+            if (src, tgt) in fail:
+                raise RuntimeError(f'no {src}-{tgt} today')
+            super().__init__(src, tgt)
+            log.append(('made', src))
+
+        def close(self):
+            log.append(('closed', self.src))
+            super().close()
+    monkeypatch.setattr(pipeline, 'make_local', lambda src, tgt, **k: D(src, tgt))
+    monkeypatch.setattr(app.Controller, '_output', lambda self, name, s: type('Out', (), {
+        'play': lambda *a: None, 'flush': lambda *a: None, 'stop': lambda *a: None})())
+    for name in ('_loopback', '_through_start', '_through_stop', '_unroute'):
+        monkeypatch.setattr(app.Controller, name, lambda self, *a, name=name: log.append((name, *a)))
+    sample = str(Path(__file__).parents[1] / 'peresmeshnik' / 'ui' / 'samples' / 'en.ogg')
+    s = wire(config.Settings(them_to_me='local', me_to_them='local'))
+    s.local.clone = 'piper'
+    states = []
+    overlay = type('O', (), {'side': lambda self, name: type('S', (), {'show': lambda *a: None, 'hide': lambda *a: None})(),
+                             'set_pair': lambda self, my, their, side=None: log.append(('pair', side, my, their))})()
+    ctl = app.Controller(overlay, states.append, sample, sample, settings=s, test=True)
+    ctl.set_translation(True).result(30)
+    log.clear()
+    s.my_lang, s.their_lang = 'de', 'ja'
+    ctl.set_languages().result(30)
+    assert log == [('_unroute',), ('closed', 'en'), ('_through_start',), ('made', 'ja'), ('_through_stop',),
+                   ('pair', 'them', 'de', 'ja'), ('_loopback', True), ('closed', 'ru'), ('made', 'de'), ('_loopback', False),
+                   ('pair', 'me', 'de', 'ja')], log
+
+    real_start = app.Side.start
+    monkeypatch.setattr(app.Side, 'start', lambda self: (_ for _ in ()).throw(RuntimeError('the microphone is gone'))
+                        if self.name == 'me' else real_start(self))
+    log.clear()
+    ctl.set_languages().result(30)  # me -> them made, but its start fails: closed, the loop stays on
+    assert [x.name for x in ctl.sides] == ['them'] and ctl.on
+    assert log[-5:] == [('_loopback', True), ('closed', 'de'), ('made', 'de'), ('closed', 'de'), ('pair', 'me', 'de', 'ja')], log
+    assert ('_loopback', False) not in log and any('me → them cannot start for de ⇄ ja: the microphone is gone' in x for x in states)
+    monkeypatch.setattr(app.Side, 'start', real_start)
+
+    log.clear()
+    fail.add(('ja', 'de'))  # them -> me cannot be made in ja <-> de any more; me -> them can
+    s.local.clone = 'xtts-v2'  # chosen, but it has no Japanese: the stock voice
+    n = len(states)
+    ctl.set_languages().result(30)
+    assert [x.name for x in ctl.sides] == ['me'] and ctl.on
+    assert ('_through_stop',) not in log and any(st.startswith('error: them → me cannot start for de ⇄ ja: no ja-de') for st in states)
+    note = 'note: me → them: your cloned voice cannot speak Japanese: a stock voice speaks instead'
+    assert note not in states[n:]  # the tray said it with the pair
+    ctl.set_translation(False).result(30)
+    n = len(states)
+    ctl.set_translation(True).result(30)
+    assert states[n:].count(note) == 1, states[n:]
+    fail.add(('de', 'ja'))  # and neither side now: translation off
+    log.clear()
+    ctl.set_languages().result(30)
+    assert not ctl.on and not ctl.sides and [x for x in log if x[0] != 'pair'][:2] == [('_loopback', True), ('closed', 'de')], log
+    ctl.quit()
+
+
+def test_a_row_keeps_its_languages_fonts(tmp_path):
+    from peresmeshnik.ui.overlay import SubtitleOverlay
+    o = SubtitleOverlay(rows=2)
+    o.set_pair('zh', 'ja')
+    o.caption.emit('me', Caption('这是', 'これ', final=True, clause=0))
+    o.set_pair('ko', 'ar')  # a new pair: its rows in its fonts, the old row in its own
+    o.caption.emit('them', Caption('إنه', '마텔리', final=True, clause=0))
+    settle()
+    assert o._langs == (('zh', 'ja'), ('ar', 'ko'))
+    o.clear.emit()
+    settle()
+
+
+def test_fallback_of_a_cloud_side_says_what_is_missing(tmp_path, monkeypatch):
+    """A cloud side of a new pair: no local ASR + MT — its subtitles from the cloud, and going local says why (no
+    KeyError); ASR + MT but no voice for the language — local subtitles, the fallback voice says why."""
+    from peresmeshnik import pipeline
+    from peresmeshnik.cloud import fallback, gemini
+    monkeypatch.setenv('PERESMESHNIK_MODELS', str(tmp_path / 'models'))
+    stand_ins(monkeypatch)
+    monkeypatch.setattr(gemini, 'GeminiDirection', lambda src, tgt, *a, **k: Direction(src, tgt))
+    monkeypatch.setattr(pipeline, 'make_local', lambda src, tgt, **k: Direction(src, tgt))
+    s = config.Settings(my_lang='de', their_lang='ja', them_to_me='cloud', me_to_them='cloud')
+    s.local.asr, s.local.mt, s.local.tts = {}, {}, {}
+    why = fallback.voice_why('them', s)
+    assert why.startswith('no local speech recognition for Japanese; no local translation from Japanese to German')
+    fb = fallback.make('them', s, 'a-key')
+    try:
+        assert fb.cloud_subtitles and fb.local is None
+        with pytest.raises(RuntimeError, match='no local speech recognition for Japanese'):
+            fb.make_local(None)
+    finally:
+        fb.close()
+    wire(s)
+    s.local.tts = {'ja': 'tts-ja'}  # German has no stock voice: them -> me has subtitles but nothing to speak with
+    assert fallback.voice_why('them', s) == 'no local voice for German'
+    fb = fallback.make('them', s, 'a-key')
+    try:
+        assert not fb.cloud_subtitles and fb.local is not None  # local subtitles beside the cloud voice
+        fb.muted.load()
+        assert 'no local voice for German' in str(fb.muted.error)
+    finally:
+        fb.close()
+
+
+def test_voice_page_needs_no_recording_where_the_clone_cannot_speak(tmp_path, monkeypatch):
+    from peresmeshnik.ui import wizard
+    monkeypatch.setenv('PERESMESHNIK_MODELS', str(tmp_path / 'models'))
+    stand_ins(monkeypatch)
+    s = wire(config.Settings(my_lang='de', their_lang='ja', me_to_them='local'))  # the clone (XTTS) has no Japanese
+    page = wizard.VoicePage(type('W', (), {'s': s})())
+    page.initializePage()
+    assert page.isComplete() and page.record_button.isHidden() and page.check_button.isHidden()
+    assert 'cannot speak Japanese' in page.subTitle() and 'No recording is needed' in page.subTitle()
+    s.their_lang = 'en'
+    page = wizard.VoicePage(type('W', (), {'s': s})())
+    page.initializePage()
+    assert not page.isComplete() and not page.record_button.isHidden()  # the clone speaks English: record
+
+
+def test_pair_size_and_download_go_through_the_registry_functions(tmp_path, monkeypatch, server):
+    """A registry row without files of its own (S1's `via`: a pivot through English): the wizard and the tray take its
+    size from models.size and download it with models.fetch, which unfold it."""
+    from peresmeshnik import models as models_mod
+    from peresmeshnik.ui import wizard
+    t, calls = tray_with(monkeypatch, tmp_path, wire(config.Settings(them_to_me='local', me_to_them='cloud')))  # ru / en
+    s = wire(config.Settings(my_lang='de', their_lang='ja', them_to_me='local', me_to_them='cloud'))
+    reg = models_mod.registry()
+    reg['mt-ja-de'] = models.Model('mt-ja-de', 'mt', ('ja-de',), 'MIT', 'u', 'u', {})  # no files: it is two others
+    monkeypatch.setattr(models_mod, 'size', lambda m: 123_000_000 if m.id == 'mt-ja-de' else m.size)
+    fetched = []
+    monkeypatch.setattr(models_mod, 'fetch', lambda mid, *a, **k: fetched.append(mid))
+    monkeypatch.setattr(models_mod, 'is_fetched', lambda m, base=None: m.id not in ('mt-ja-de',) and m.id in fetched + ['silero-vad'])
+    page = wizard.LanguagesPage(type('W', (), {'s': s})())
+    assert page.download.text().startswith('123 MB for this pair'), page.download.text()
+    t.switch_pair('de', 'ja')
+    assert wait_for(lambda: calls) and 'mt-ja-de' in fetched
+    assert any('downloading 123 MB' in m for m in t.said), t.said
+
+
+# FLEURS sentence 1515 (peresmeshnik/ui/samples): two pairs, each side's original and translation
+S1515 = {'zh': '这是马特利四年来第五次入选海地临时选举委员会。', 'ja': 'マルテリーにとっては4年間で5度目のCEPです。',
+         'ko': '마텔리가 4년 만에 다섯 번째 하는 CEP다.', 'ar': 'إنه المجلس الانتخابي المؤقت الخامس لمارتيلي خلال أربع سنوات.'}
+DISTINCT = {'zh': ('你好吗', '我们他'), 'ja': ('あいう', 'かきく'), 'ko': ('가나다', '라마바'), 'ar': ('ابت', 'جحخ')}
+
+
+def drawn(text: str, font):
+    from PySide6.QtGui import QImage, QPainter
+    img = QImage(240, 60, QImage.Format_ARGB32)
+    img.fill(0)
+    p = QPainter(img)
+    p.setFont(font)
+    p.setPen(0xffffffff)
+    p.drawText(10, 40, text)
+    p.end()
+    return img
+
+
+def test_overlay_draws_chinese_japanese_korean_and_arabic(tmp_path):
+    """Each script draws real glyphs where the font database has a font for it (two different words look different;
+    empty boxes would look the same), and the app says what to install where it has none; macOS and Windows ship them.
+    Chinese, Japanese and Korean rows are drawn in a font of their own language (Han forms differ). Arabic: the painter
+    lays it out right to left by itself, and a long line keeps its end (the latest words). The overlay with zh ⇄ ja and
+    ko ⇄ ar goes to $PERESMESHNIK_SHOTS (a CI artifact per OS)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QFontDatabase, QFontMetrics
+
+    from peresmeshnik.ui.overlay import OWN_FONTS, SubtitleOverlay, font_note, missing_fonts
+    o = SubtitleOverlay(rows=4)
+    shots = Path(os.environ.get('PERESMESHNIK_SHOTS') or tmp_path)
+    shots.mkdir(parents=True, exist_ok=True)
+    for my, their in (('zh', 'ja'), ('ko', 'ar')):
+        o.set_pair(my, their)
+        for i in range(4):
+            mine = i % 2 == 0
+            o.caption.emit('me' if mine else 'them', Caption(S1515[my if mine else their], S1515[their if mine else my],
+                                                            final=True, clause=i))
+            settle(0.1)
+        assert len(o._shown) == 4
+        assert o.grab().save(str(shots / f'overlay-{sys.platform}-{my}-{their}.png'))
+        o.clear.emit()
+        settle()
+    print('paint ms, zh ja then ko ar rows (the pair warmed by set_pair):', [round(x, 1) for x in o.paint_ms])
+    own = {lang: o.own_fonts(lang)[1].family() for lang in ('zh', 'ja', 'ko')}
+    print('own fonts:', own)
+    if sys.platform in ('darwin', 'win32'):  # Han in its language's own forms, not a fallback of the system's choosing
+        assert all(own[x] in OWN_FONTS[x] for x in own), own
+    for lang in DISTINCT:
+        fams = QFontDatabase.families(getattr(QFontDatabase.WritingSystem, languages.WRITING[lang]))
+        print(lang, len(fams), 'fonts:', ', '.join(fams[:4]))
+    miss = missing_fonts(list(DISTINCT))
+    for lang, (a, b) in DISTINCT.items():
+        assert (drawn(a, o.f_tr) != drawn(b, o.f_tr)) == (lang not in miss), f'{lang}: font database and glyphs disagree'
+    if sys.platform in ('darwin', 'win32'):
+        assert not miss, f'no font for {miss} on this OS'
+    assert bool(font_note(list(DISTINCT))) == bool(miss) and (not miss or 'Install one' in font_note(miss))
+    ar = S1515['ar'] * 3
+    cut = QFontMetrics(o.f_tr).elidedText(ar, Qt.ElideLeft, 300)
+    assert cut.startswith('…') and cut.endswith('أربع سنوات.')  # the logical end: the newest words stay
+
+
+def test_arabic_from_the_cloud_is_said_to_be_egyptian(tmp_path, monkeypatch):
+    from peresmeshnik.ui import wizard
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    monkeypatch.setenv('PERESMESHNIK_MODELS', str(tmp_path / 'models'))
+    page = wizard.LanguagesPage(type('W', (), {'s': config.Settings()})())
+    page.their_lang.setCurrentIndex(page.their_lang.findData('ar'))
+    assert 'Egyptian Arabic' in page.why['them_to_me'].text() and 'Egyptian' not in page.why['me_to_them'].text()
+
+
+def test_a_star_model_reaches_the_side(tmp_path, monkeypatch):
+    """'*' in `[local]` asr and mt (one model for every language or pair): the app's local side, the cloud's local
+    fallback and make_local's own defaults are built on it (languages.direction's ids), no KeyError."""
+    from types import SimpleNamespace
+
+    from peresmeshnik import app, pipeline
+    from peresmeshnik.cloud import fallback, gemini
+    from peresmeshnik.local import asr, mt, tts, vad
+    reg = dict(models.registry())
+    for mid, role, langs in (('asr-many', 'asr', ('de', 'ja')), ('mt-many', 'mt', ('de', 'ja')), ('tts-de', 'tts', ('de',)),
+                             ('tts-ja', 'tts', ('ja',))):
+        reg[mid] = models.Model(mid, role, langs, 'MIT', 'u', 'u', {})
+    monkeypatch.setattr(models, 'registry', lambda: reg)
+    made = []
+    monkeypatch.setattr(asr, 'OnnxAsr', lambda mid, threads=None: made.append(mid))
+    monkeypatch.setattr(mt, 'OpusMt', lambda src, tgt, mid, threads=None: made.append(mid))
+    monkeypatch.setattr(tts, 'PiperTts', lambda mid, threads=None: made.append(mid))
+    monkeypatch.setattr(vad, 'SileroVad', lambda: None)
+    monkeypatch.setattr(pipeline, 'LocalDirection', lambda *a, **k: SimpleNamespace(
+        tts=None, mt=None, warm_up=lambda: None, close=lambda: None))
+    monkeypatch.setattr(gemini, 'GeminiDirection', lambda src, tgt, *a, **k: Direction(src, tgt))
+    s = config.Settings(my_lang='de', their_lang='ja', them_to_me='local', me_to_them='local')
+    s.local.asr, s.local.mt, s.local.tts, s.local.clone = {'*': 'asr-many'}, {'*': 'mt-many'}, {'de': 'tts-de', 'ja': 'tts-ja'}, 'piper'
+    pipeline.make_local('ja', 'de', settings=s)
+    assert sorted(made) == ['asr-many', 'mt-many', 'tts-de']
+    for name, src, tgt, voice in (('them', 'ja', 'de', 'tts-de'), ('me', 'de', 'ja', 'tts-ja')):
+        made.clear()
+        side = app.Side.__new__(app.Side)
+        side.name, side.src, side.tgt = name, src, tgt
+        side._local(s)
+        assert sorted(made) == ['asr-many', 'mt-many', voice]
+    s.them_to_me = 'cloud'
+    made.clear()
+    fb = fallback.make('them', s, 'a-key')  # local subtitles beside the cloud voice: the '*' models
+    try:
+        assert sorted(made) == ['asr-many', 'mt-many']
+    finally:
+        fb.close()

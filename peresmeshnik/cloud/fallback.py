@@ -395,18 +395,26 @@ class Fallback:
         self.on_state(f'note: {ARROW[self.name]}: back in the cloud')
 
 
+def _direction(name: str, s):
+    from peresmeshnik import languages
+    return languages.direction(s, 'them_to_me' if name == 'them' else 'me_to_them')
+
+
 def stock(name: str, s) -> bool:
-    """A Piper voice: them -> me always, me -> them when the settings say so (voice.STOCK: an 8 GB Mac)."""
-    from peresmeshnik.voice import STOCK
-    return name == 'them' or s.local.clone == STOCK
+    """A Piper voice: them -> me always, me -> them when the settings say so (voice.STOCK: an 8 GB Mac) or the clone
+    cannot speak the language (languages.direction)."""
+    return _direction(name, s).voice != 'clone'
 
 
 def voice_why(name: str, s) -> str:
     """Why this side has no local voice to fall back to ('' = it has one), without loading anything."""
     from peresmeshnik import models
+    d = _direction(name, s)
     try:
-        if stock(name, s):
-            models.path(s.local.tts[s.my_lang if name == 'them' else s.their_lang])
+        if not d.local:
+            return '; '.join(d.why)
+        if d.voice == 'stock':
+            models.path(d.tts)
             return ''
         if not s.local.voice:
             return 'no voice enrolled (setup wizard, "Your voice")'
@@ -423,11 +431,13 @@ def voice_why(name: str, s) -> str:
 
 def make(name: str, s, key: str, on_state=lambda text: None, on_respawn=lambda e: None) -> Fallback:
     """The side's cloud direction with its local fallback, from the settings."""
+    from peresmeshnik import languages
     from peresmeshnik.cloud.gemini import GeminiDirection
     from peresmeshnik.pipeline import MAX_LAG_S, make_local
-    src, tgt = (s.their_lang, s.my_lang) if name == 'them' else (s.my_lang, s.their_lang)
-    voice, piper = None, stock(name, s)
-    if not piper and s.local.voice:
+    d = _direction(name, s)
+    src, tgt = d.src, d.tgt
+    voice, piper = None, d.voice == 'stock'
+    if d.voice == 'clone' and s.local.voice:
         from peresmeshnik import voice as profiles
         try:
             voice = profiles.load(s.local.voice)
@@ -435,16 +445,23 @@ def make(name: str, s, key: str, on_state=lambda text: None, on_respawn=lambda e
             log.warning('me: voice %s: %s', s.local.voice, e)
 
     def tts():
+        if not d.tts:
+            raise RuntimeError('; '.join(d.why))
         if piper:  # crash.Respawn: the runner dies, only it starts again
             from peresmeshnik import crash
             from peresmeshnik.local.tts import PiperTts
-            return crash.Respawn(lambda: PiperTts(s.local.tts[tgt], threads=s.local.threads), on_respawn)
+            return crash.Respawn(lambda: PiperTts(d.tts, threads=s.local.threads), on_respawn)
         from peresmeshnik import models
         from peresmeshnik.local.clone import make_clone  # the voice pack's runner, or XTTS in this process
         return make_clone(models.path(s.local.clone), threads=s.local.threads)
+
+    def local(t):  # no local path for this pair (models.toml langs): the reason, not a KeyError
+        if not d.subtitles:
+            raise RuntimeError('; '.join(d.why))
+        return make_local(src, tgt, asr=d.asr, mt=d.mt, tts=t, settings=s, voice=voice,  # languages.direction's ids
+                          max_lag_s=MAX_LAG_S if name == 'them' else None)
     return Fallback(
-        name, tgt, s.cloud.subtitles,
+        name, tgt, languages.cloud_subtitles(s, d.side),
         make_cloud=lambda: GeminiDirection(src, tgt, key, s.cloud, fail_fast=True),
-        make_local=lambda t: make_local(src, tgt, tts=t, settings=s, voice=voice,
-                                        max_lag_s=MAX_LAG_S if name == 'them' else None),
+        make_local=local,
         make_tts=tts, voice=voice, voice_why=voice_why(name, s), preload=piper, on_state=on_state)

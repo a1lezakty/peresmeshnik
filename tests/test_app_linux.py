@@ -20,9 +20,12 @@ import pytest
 
 LINUX = sys.platform.startswith('linux')
 SOUND = LINUX and shutil.which('pactl') and subprocess.run(['pactl', 'info'], capture_output=True).returncode == 0
-pytestmark = pytest.mark.skipif(not SOUND, reason='needs PipeWire / PulseAudio')
 DISPLAY = bool(os.environ.get('DISPLAY'))
 E2E = os.environ.get('PERESMESHNIK_E2E') == '1'
+PAIR_MODELS = os.environ.get('PERESMESHNIK_PAIR_MODELS', '')  # CI: the models folder (cached) of the pair test, which must run
+if (PAIR_MODELS or os.environ.get('PERESMESHNIK_REQUIRE_PIPEWIRE') == '1') and not (SOUND and DISPLAY):
+    pytest.fail(f'these tests must run here: PipeWire {bool(SOUND)}, display {DISPLAY}', pytrace=False)  # not a skip
+pytestmark = pytest.mark.skipif(not SOUND, reason='needs PipeWire / PulseAudio')
 DATA = Path(__file__).parent / 'data'
 
 
@@ -336,6 +339,104 @@ def test_wizard_linux_pages(tmp_path, devices, monkeypatch):
         w.accept()
         s = config.load()
         assert (s.ui.headphones, s.ui.mic, s.them_to_me, s.me_to_them) == ('test_headphones', 'test_mic', 'local', 'cloud')
+    finally:
+        w.close()
+        ctl.quit()
+
+
+def pair_models(monkeypatch, s, my: str, their: str) -> str:
+    """The pair's own models when the registry has them (stage 6, S1/S2); until then stand-ins: the en/ru models' files
+    under the pair's languages, so the whole real path runs (its words are wrong: this checks the path, not the
+    translation). Returns which."""
+    from dataclasses import replace
+
+    from peresmeshnik import languages, models
+    if all(languages.direction(s, k).local for k in languages.SIDES):
+        return 'real models'
+    # only the work-gate's models (its CI cache): nothing to download for the stand-ins
+    asr, voices = 'parakeet-tdt-0.6b-v3', {my: 'piper-ru_RU-dmitri-medium', their: 'piper-ru_RU-dmitri-medium'}
+    mts = {f'{their}-{my}': 'opus-mt-en-ru', f'{my}-{their}': 'opus-mt-en-ru'}
+    reg = dict(models.registry())
+    for mid, langs in [(asr, (my, their)), *((v, (k,)) for k, v in voices.items()), *((v, (k,)) for k, v in mts.items())]:
+        reg[mid] = replace(reg[mid], langs=reg[mid].langs + langs)  # the same files: the downloaded folders stay valid
+    monkeypatch.setattr(models, 'registry', lambda: reg)
+    s.local.asr.update({my: asr, their: asr})
+    s.local.mt.update(mts)
+    s.local.tts.update(voices)
+    from peresmeshnik import pipeline  # its warm-up phrase is en/ru until S1's stage 6 (a KeyError for other sources)
+    monkeypatch.setattr(pipeline, 'HELLO', {my: 'Hallo.', their: 'こんにちは。', **pipeline.HELLO})
+    return 'stand-ins'
+
+
+@pytest.mark.skipif(not (PAIR_MODELS or E2E), reason='PERESMESHNIK_PAIR_MODELS (CI) or PERESMESHNIK_E2E=1: runs the models')
+def test_a_new_pair_through_the_wizard_and_the_app(tmp_path, devices, monkeypatch):
+    """de -> ja, both sides local: the languages page offers local for both, the models page lists only the pair's
+    models (no GigaAM, no clone: the stock voice), the test phrase in each language goes through the app's real path
+    (Silero VAD, ASR, MT, Piper, the headphones) and shows translated subtitles; the pair is saved at the end."""
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from peresmeshnik import config, languages
+    from peresmeshnik.app import Controller
+    from peresmeshnik.ui.overlay import SubtitleOverlay
+    from peresmeshnik.ui.tray import Tray
+    from peresmeshnik.ui.wizard import DevicesPage, HotkeyPage, LanguagesPage, ModelsPage, SelfTestPage, SetupWizard, VoicePage
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    if PAIR_MODELS:
+        monkeypatch.setenv('PERESMESHNIK_MODELS', PAIR_MODELS)
+    s = config.Settings(my_lang='de', their_lang='ja', them_to_me='local', me_to_them='local')
+    s.local.clone = 'piper'  # the stock voice: no recording, no voice pack
+    print('de -> ja on', pair_models(monkeypatch, s, 'de', 'ja'))
+    config.save(s)
+    overlay, states = SubtitleOverlay(), []
+    ctl = Controller(overlay, states.append)
+    w = SetupWizard(Tray(ctl))
+    w.show()
+    try:
+        page = w.currentPage()
+        assert isinstance(page, LanguagesPage) and (page.my_lang.currentData(), page.their_lang.currentData()) == ('de', 'ja')
+        for key in languages.SIDES:
+            assert page.engine[key].currentText() == 'local' and page.why[key].text().startswith('✔'), page.why[key].text()
+        print(page.download.text())
+        w.next()
+        page = w.currentPage()
+        assert isinstance(page, DevicesPage)
+        page.headphones.setCurrentIndex(page.headphones.findData(devices['headphones']))
+        page.mic.setCurrentIndex(page.mic.findData(devices['mic']))
+        w.next()
+        page = w.currentPage()
+        assert isinstance(page, ModelsPage)
+        ids = [m.id for m in page.ms]
+        print('models:', ids, 'to download:', [m.id for m in page.missing()])
+        assert ids == languages.needed_models(w.s) and not {'gigaam-v3-e2e-ctc', 'xtts-v2', 't-one'} & set(ids)
+        for _ in range(3):  # a cut download resumes on the next click, as a user would
+            if page.isComplete():
+                break
+            page.button.click()
+            pump(lambda: not page.busy, 900, 'the downloads')
+        assert page.isComplete(), page.state.text()
+        w.next()
+        page = w.currentPage()
+        assert isinstance(page, SelfTestPage)
+        page.button.click()
+        pump(lambda: page.ran, 60, 'the self-test')
+        w.next()
+        page = w.currentPage()
+        assert isinstance(page, VoicePage) and page.isComplete()  # the stock voice: nothing to record
+        w.next()
+        page = w.currentPage()
+        assert isinstance(page, HotkeyPage)
+        for side in ('them', 'me'):  # them: ja.ogg -> German; me: de.ogg -> Japanese
+            n = overlay.updates
+            page.tests[side].click()
+            pump(lambda: page.out.text() == 'test done' or page.out.text().startswith('test done with'), 180,
+                 f'the {side} test phrase')
+            print(side, overlay._shown)
+            assert page.out.text() == 'test done', page.out.text()
+            assert overlay.updates > n and any(r[2] for r in overlay._shown), f'no translated subtitle from {side}'
+        w.next()
+        w.accept()
+        got = config.load()
+        assert (got.my_lang, got.their_lang, got.them_to_me, got.me_to_them) == ('de', 'ja', 'local', 'local')
     finally:
         w.close()
         ctl.quit()

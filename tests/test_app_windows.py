@@ -277,7 +277,13 @@ def test_frozen_cli_fetches_and_translates(tmp_path):
 
 
 def test_uninstaller_closes_the_app_and_removes_it_all(installed, tmp_path):
-    """Last in this file: the app is gone after it."""
+    """Last in this file: the app is gone after it. A silent uninstall leaves the voice pack (~8 GB; asked about only
+    when the user uninstalls by hand, "no" by default: USER-CHECKS)."""
+    from peresmeshnik import config
+    pack = config.data_dir() / 'voice-pack'  # the uninstaller's {localappdata}\Peresmeshnik\voice-pack
+    assert not pack.exists(), f'{pack} is there already'
+    (pack / 'runtime').mkdir(parents=True)
+    (pack / '.complete').write_text('')
     p = subprocess.Popen([str(installed / 'Peresmeshnik.exe'), 'app', '--no-wizard'], stdout=subprocess.PIPE, text=True,
                          env=env(tmp_path))
     try:
@@ -291,6 +297,9 @@ def test_uninstaller_closes_the_app_and_removes_it_all(installed, tmp_path):
         left = [str(f) for f in installed.rglob('*')] if installed.exists() else []
         assert not installed.exists(), f'left behind: {left[:20]}'
         assert not SHORTCUT.exists() and uninstall_key() is None
+        assert (pack / '.complete').exists(), 'a silent uninstall removed the voice pack'
     finally:
         if p.poll() is None:
             p.kill()
+        if pack.exists():  # moved away, not removed
+            pack.rename(tmp_path / 'voice-pack')

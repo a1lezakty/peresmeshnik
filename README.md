@@ -83,7 +83,8 @@ Windows 10 version 2004 or later, or Windows 11 (x64).
 The hotkey Ctrl+Alt+Space switches between translation and your live voice (Settings to change it; a combo that
 Windows keeps for itself, such as Alt+Tab or Win+Space, or that another app has taken is refused with the reason).
 The uninstaller (Settings → Apps → Peresmeshnik, or `unins000.exe` in its folder) closes the app and removes its files;
-your settings, voice and models stay in `%LOCALAPPDATA%\Peresmeshnik` until you delete that folder.
+your settings, voice and models stay in `%LOCALAPPDATA%\Peresmeshnik` until you delete that folder. If the voice pack
+is there (about 8 GB), it asks whether to remove it too ("No" by default); a silent uninstall (`/VERYSILENT`) keeps it.
 
 Checked so far only on GitHub's `windows-latest` runners (Windows Server 2025 in a VM, without a GPU, real sound
 devices or a real call): the installer runs silently, the installed app starts, its tray icon, overlay and hotkey

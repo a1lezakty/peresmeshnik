@@ -78,8 +78,19 @@ begin
   Result := '';
 end;
 
+{ The voice pack (the CUDA clone, ~8 GB, in the app's data folder: config.data_dir) goes only when the user says so;
+  a silent uninstall (/SILENT, /VERYSILENT: an update, a script) leaves it, as it leaves the settings, models and voices. }
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Pack: String;
 begin
   if CurUninstallStep = usUninstall then  { after the user confirmed the removal }
     CloseApp();
+  if CurUninstallStep = usPostUninstall then begin
+    Pack := ExpandConstant('{localappdata}\Peresmeshnik\voice-pack');
+    if DirExists(Pack) and not UninstallSilent() then
+      if MsgBox('Remove the voice pack too (about 8 GB, ' + Pack + ')? Your voice, settings and models stay either way.',
+                mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+        DelTree(Pack, True, True, True);
+  end;
 end;

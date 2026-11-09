@@ -42,6 +42,11 @@ class Local:
     tts: dict[str, str] = field(default_factory=lambda: {'en': 'piper-en_US-john-medium', 'ru': 'piper-ru_RU-dmitri-medium'})
     clone: str = 'xtts-v2'  # clone TTS for me -> them
     voice: str = ''  # enrolled voice name ('' = none yet)
+    # them -> me: a long clause's stable words get a translated subtitle while it is still said (BENCH stage 5)
+    partial_mt: bool = True
+    # the echo gates look for our own speech coming back this late, s (a call's round trip; up to 2.8: the reference
+    # keeps 4 s). 1.0 / 1.5 / 2.0 cost 0.21 / 0.28 / 0.34 ms of CPU per 16 ms block while we speak (BENCH stage 5)
+    echo_max_delay_s: float = 2.0
 
 
 @dataclass

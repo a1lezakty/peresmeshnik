@@ -460,10 +460,11 @@ class Side:
 
     def _local(self, s: config.Settings):
         from peresmeshnik.pipeline import make_local
+        from peresmeshnik.voice import STOCK
         if self.name == 'them':
             from peresmeshnik.pipeline import MAX_LAG_S
             d = make_local(self.src, self.tgt, settings=s, max_lag_s=MAX_LAG_S)  # the queue policy: subtitles keep the rest
-        elif s.local.clone == 'piper':  # voice.STOCK: a stock voice, live where the clone falls behind (an 8 GB Mac, BENCH)
+        elif s.local.clone == STOCK:  # a stock voice, live where the clone falls behind (an 8 GB Mac, BENCH)
             d = make_local(self.src, self.tgt, settings=s)
         else:
             if not s.local.voice:
@@ -477,7 +478,7 @@ class Side:
                                    'or switch "Me -> them" to cloud') from e
             d = make_local(self.src, self.tgt, settings=s, tts=XttsClone(models.path(s.local.clone), threads=s.local.threads),
                            voice=voice.load(s.local.voice))
-        if (self.name == 'them' or s.local.clone == 'piper') and (tts := getattr(d, 'tts', None)) is not None:
+        if (self.name == 'them' or s.local.clone == STOCK) and (tts := getattr(d, 'tts', None)) is not None:
             from peresmeshnik.local.tts import PiperTts  # the Piper runner dies: only it starts again
             d.tts = crash.Respawn(lambda: PiperTts(s.local.tts[self.tgt], threads=s.local.threads), self._tts_respawned, tts)
         d.warm_up()
@@ -798,9 +799,20 @@ class Controller:
             side.on_talk = lambda: [x.interrupt() for x in self.sides if x.name == 'them']
         return side
 
-    def failed(self, name: str, why: str) -> None:
-        """A side's input ended under it (the call sound helper gone): restart that side (any thread)."""
-        self.submit(lambda: next((self._restart(x, why, None) for x in list(self.sides) if x.name == name), None))
+    def failed(self, inp, why: str, restart: bool = True) -> None:
+        """An input ended under its side (the call sound helper gone; any thread): that side restarts; a late end of an
+        input whose side was restarted since does nothing. `restart` False (no helper died: the call app is not
+        running): the route is undone, so the call is heard as usual, and the tray says why."""
+        def run():
+            side = next((x for x in self.sides if x.inp is inp), None)
+            if side is None:
+                return
+            if restart:
+                self._restart(side, why, None)
+            else:
+                self._unroute()
+                self.on_state(f'error: {why}')
+        self.submit(run)
 
     def _restart(self, side: Side, why: str, e: BaseException | None) -> None:
         """The control thread: a side whose direction died or whose input ended starts again, with one message and a
@@ -913,27 +925,32 @@ class Controller:
         s = s or self.settings or config.load()
         if name == 'them' and sys.platform == 'win32':
             from peresmeshnik.audio import capture_windows
-            # the loopback ended (helper exited, call app restarted): the side restarts, un-muted meanwhile (_restart)
-            on_end = lambda why: self.failed('them', f'the call sound capture stopped: {why}')  # noqa: E731
             code, why = capture_windows.check()
             if code:
                 raise RuntimeError(why)
-            return capture_windows.ProcessLoopback(on_end=on_end)  # the app is chosen in _route, after the start
+            # the loopback ended: its helper died -> the side restarts (un-muted meanwhile, _restart); the call app is
+            # not running (not yet, or closed: "<app> is not running", capture_windows) -> no restart, only un-muted
+            tap = capture_windows.ProcessLoopback(on_end=lambda why: self.failed(
+                tap, f'the call sound capture stopped: {why}', restart=not why.endswith(' is not running')))
+            return tap  # the app is chosen in _route, after the start
         if name == 'them' and sys.platform == 'darwin':
             from peresmeshnik.audio import capture_macos
-            on_end = lambda why: self.failed('them', f'the call sound capture stopped: {why}')  # noqa: E731
+            on_end = lambda why: self.failed(inp, f'the call sound capture stopped: {why}')  # noqa: E731
             if capture_macos.path() == 'blackhole':
-                return capture_macos.BlackHoleIn(on_end=on_end)
+                inp = capture_macos.BlackHoleIn(on_end=on_end)
+                return inp
             code, why = capture_macos.check()
             if code:
                 raise RuntimeError(why)
-            return capture_macos.ProcessTap(on_end=on_end)  # the app is chosen in _route, after the start
+            inp = capture_macos.ProcessTap(on_end=on_end)  # the app is chosen in _route, after the start
+            return inp
         if name == 'them':
             if self._call is None:
                 raise RuntimeError(f'no call sink ({self.startup_error or "no sound server"})')
             from peresmeshnik.audio.capture_pipewire import PipeWireCapture
-            return PipeWireCapture(self._call.name, make_sink=False,  # the app's sink, kept for its whole run
-                                   on_end=lambda why: self.failed('them', f'the call sound capture stopped: {why}'))
+            inp = PipeWireCapture(self._call.name, make_sink=False,  # the app's sink, kept for its whole run
+                                  on_end=lambda why: self.failed(inp, f'the call sound capture stopped: {why}'))
+            return inp
         if sys.platform == 'darwin':  # the helper keeps to the saved microphone or the default one by itself
             from peresmeshnik.audio.mic import followed
             return followed(s.ui.mic, self.on_state)

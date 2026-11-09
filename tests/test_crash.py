@@ -148,9 +148,12 @@ def test_a_dead_voice_helper_is_made_again_and_the_clause_said():
     """crash.Respawn: the TTS's helper process died -> a new TTS says the clause; an error with the helper alive, or a
     4th death within a minute, is the pipeline's (the side restarts)."""
     class Proc:
-        code = None
+        code, exits_in = None, 0.0  # killed: the exit code; exits_in: it is still exiting this long after its pipe closed
 
-        def poll(self):
+        def wait(self, timeout=None):
+            time.sleep(min(self.exits_in, timeout or 0))
+            if self.code is None or self.exits_in > (timeout or 0):
+                raise subprocess.TimeoutExpired('tts', timeout)
             return self.code
 
     made = []
@@ -174,8 +177,8 @@ def test_a_dead_voice_helper_is_made_again_and_the_clause_said():
     seen = []
     r = crash.Respawn(Tts, seen.append)
     assert list(r.synth('a', 'ru')) == ['a'] and r._p is made[0]._p
-    for _ in range(3):
-        made[-1]._p.code = -9  # killed
+    for i in range(3):
+        made[-1]._p.code, made[-1]._p.exits_in = -9, 0.2 * i  # killed; still exiting for a moment after its pipe closed
         assert list(r.synth('b', 'ru')) == ['b']  # by a new one
     assert len(made) == 4 and len(seen) == 3 and all(isinstance(e, BrokenPipeError) for e in seen)
     made[-1]._p.code = -9
@@ -256,68 +259,96 @@ def test_a_dying_direction_restarts_its_side_then_stays_off(app, monkeypatch):
     ctl.quit()
 
 
-def test_a_restarted_call_side_on_windows_hears_the_call_meanwhile_and_is_routed_again(app, monkeypatch):
-    """Windows (its branch of app.py, on any OS): the call sound loopback ends under them -> me. The call app is
-    un-muted before the old loopback stops, the new side's loopback gets the call app and mutes it again; one message."""
+class Loopback:  # capture_windows.ProcessLoopback as Controller._input makes it (windows_side)
+    def __init__(self, on_end):
+        self.on_end, self.n, self.stopped = on_end, len(self.made) + 1, False
+        self.made.append(self)
+
+    def start(self, cb):
+        self.seen.append(('start', self.n))
+
+    def retarget(self, app):
+        assert not self.stopped, f'loopback {self.n} retargeted after its stop'
+        self.seen.append(('retarget', self.n, app))
+
+    def stop(self):
+        self.stopped = True
+        self.seen.append(('stop', self.n))
+
+
+class LastingDirection:  # its events last until it is closed, as a real one's
+    def __init__(self):
+        self.closed = threading.Event()
+
+    def feed(self, pcm):
+        pass
+
+    def events(self):
+        self.closed.wait()
+        yield from ()
+
+    def close(self):
+        self.closed.set()
+
+
+def windows_side(s, monkeypatch):
+    """Windows' branch of app.py on any OS: a controller translating them -> me from a fake loopback of the call app
+    (muted), as _on leaves it. Returns (controller, states, seen: what the loopbacks and the muting did)."""
     import types
 
     from peresmeshnik import app as appmod
     from peresmeshnik.audio import capture_windows
     seen = []
-
-    class Loopback:  # capture_windows.ProcessLoopback as _input makes it
-        made = []
-
-        def __init__(self, on_end):
-            self.on_end, self.n, self.stopped = on_end, len(Loopback.made) + 1, False
-            Loopback.made.append(self)
-
-        def start(self, cb):
-            seen.append(('start', self.n))
-
-        def retarget(self, app):
-            assert not self.stopped, f'loopback {self.n} retargeted after its stop'
-            seen.append(('retarget', self.n, app))
-
-        def stop(self):
-            self.stopped = True
-            seen.append(('stop', self.n))
-
-    class Direction:  # lasts until closed
-        def __init__(self):
-            self.closed = threading.Event()
-
-        def feed(self, pcm):
-            pass
-
-        def events(self):
-            self.closed.wait()
-            yield from ()
-
-        def close(self):
-            self.closed.set()
+    monkeypatch.setattr(Loopback, 'made', [], raising=False)
+    monkeypatch.setattr(Loopback, 'seen', seen, raising=False)
     monkeypatch.setattr(appmod, 'sys', types.SimpleNamespace(**{**vars(sys), 'platform': 'win32'}))
     monkeypatch.setattr(capture_windows, 'check', lambda: (0, ''))
     monkeypatch.setattr(capture_windows, 'ProcessLoopback', Loopback)
     monkeypatch.setattr(capture_windows, 'mute_call', lambda app: seen.append(('mute', app)))
     monkeypatch.setattr(capture_windows, 'restore_call', lambda: seen.append(('restore',)))
-    monkeypatch.setattr(appmod.Side, '_local', lambda self, s: Direction())
+    monkeypatch.setattr(appmod.Side, '_local', lambda self, s: LastingDirection())
     monkeypatch.setattr(appmod.Controller, '_output', lambda self, name, s: FakeOut())
-    s = app
     s.them_to_me, s.ui.call_app = 'local', DEVICES[2]
     states = []
     ctl = appmod.Controller(FakeOverlay(), states.append, settings=s)
+    ctl.on, ctl.sides = True, [ctl._side('them', s)]
+    ctl.sides[0].start()
+    ctl._route(s)
+    assert seen == [('start', 1), ('retarget', 1, DEVICES[2]), ('mute', DEVICES[2])], seen
+    seen.clear()
+    return ctl, states, seen
+
+
+def test_a_restarted_call_side_on_windows_hears_the_call_meanwhile_and_is_routed_again(app, monkeypatch):
+    """The call sound loopback's helper dies under them -> me: the call app is un-muted before the old loopback stops,
+    the new side's loopback gets the call app and mutes it again; one message. A late end of the old loopback does
+    not restart the new side."""
+    ctl, states, seen = windows_side(app, monkeypatch)
     try:
-        ctl.on, ctl.sides = True, [ctl._side('them', s)]  # as _on leaves it
-        ctl.sides[0].start()
-        ctl._route(s)
-        assert seen == [('start', 1), ('retarget', 1, DEVICES[2]), ('mute', DEVICES[2])], seen
-        seen.clear()
-        Loopback.made[0].on_end('the helper exited (1)')
+        Loopback.made[0].on_end('the loopback helper ended (1): a Windows audio error')
         assert wait_for(lambda: any('restarted' in x for x in states), 10), states
         assert seen == [('retarget', 1, ''), ('restore',), ('stop', 1), ('start', 2), ('retarget', 2, DEVICES[2]),
                         ('mute', DEVICES[2])], seen
         assert len(states) == 1 and 'them → me restarted after an error (the call sound capture stopped' in states[0]
+        Loopback.made[0].on_end('the loopback helper ended (1): late')  # the old one's, after the restart
+        ctl.submit(lambda: None).result(5)
+        assert len(Loopback.made) == 2 and len(states) == 1, states
+        assert len(list(crash.reports_dir().glob('crash-*.txt'))) == 1
+    finally:
+        ctl.quit()
+
+
+def test_a_call_app_that_is_not_running_is_no_restart_on_windows(app, monkeypatch):
+    """Translation on before the call app runs (or it closed): the loopback ends with "<app> is not running". No helper
+    died: no restart (no models made again, no crash report), the call app is un-muted and the tray says why."""
+    ctl, states, seen = windows_side(app, monkeypatch)
+    try:
+        Loopback.made[0].on_end(f'{DEVICES[2]} is not running')
+        assert wait_for(lambda: states, 10), states
+        ctl.submit(lambda: None).result(5)
+        assert seen == [('retarget', 1, ''), ('restore',)], seen  # un-muted; the side stays, nothing restarted
+        assert states == [f'error: the call sound capture stopped: {DEVICES[2]} is not running'], states
+        assert len(Loopback.made) == 1 and not list(crash.reports_dir().glob('crash-*.txt'))
     finally:
         ctl.quit()
 

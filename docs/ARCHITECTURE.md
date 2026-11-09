@@ -217,7 +217,8 @@ logs handled SEH codes too). A dead Piper runner is started again alone (`crash.
 one if none of it was; the ASR and MT models stay loaded), at most 3 times a minute. A side whose direction dies
 otherwise (a pipeline worker) or whose input ends under it (the call sound helper; its route is undone first, so the
 call is heard as usual meanwhile, then made for the new input) writes a report and starts again; after 3 restarts
-within a minute it stays off and says why. One tray message each time (the report is named in it). A report: version, OS, CPU, RAM, GPU, the engines and models of the settings
+within a minute it stays off and says why. A call app that is not running (Windows: translation on before it starts,
+or it closed) is no failure: the route is undone, the call is heard as usual and the tray says why; nothing restarts. One tray message each time (the report is named in it). A report: version, OS, CPU, RAM, GPU, the engines and models of the settings
 (downloaded or not), the stack, the last 200 log lines. Never in it: what was said, audio, device and call app names,
 the voice's name, keys, the user's name. A log line keeps its format string and only its numbers (every log call of the
 app passes data as arguments); the latency JSON keeps only numbers; exception texts and the stack lose the private

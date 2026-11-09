@@ -27,6 +27,7 @@ import os
 import platform
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -166,7 +167,6 @@ def _devices_now() -> None:
         if ca := sys.modules.get('peresmeshnik.audio.coreaudio'):
             private(*(d['name'] for d in ca.devices()))
         if sys.platform.startswith('linux') and shutil.which('pactl'):
-            import subprocess
             for kind in ('sinks', 'sources'):
                 out = subprocess.run(['pactl', '-f', 'json', 'list', kind], capture_output=True, text=True, timeout=3).stdout
                 for d in json.loads(out or '[]'):  # names and the user's or host's, not every property: "alsa", "100"
@@ -259,6 +259,15 @@ def report(what: str, e: BaseException | None = None, settings=None, quiet: bool
     return write(what, stack, settings, quiet=quiet)
 
 
+def _exited(p) -> bool:
+    """The helper process is gone: just after its pipe closed a killed one may still be exiting (poll() None)."""
+    try:
+        p.wait(0.5)
+        return True
+    except subprocess.TimeoutExpired:
+        return False
+
+
 class Respawn:
     """A TTS whose helper process may die (the Piper runner): made again, and the clause said again if none of it was,
     instead of the pipeline's speak worker dying with it (the side would make all its engines again, BENCH). An error
@@ -289,7 +298,7 @@ class Respawn:
         except Exception as e:
             p, now = self._p, time.monotonic()
             self._times = [x for x in self._times if now - x < 60]
-            if p is None or p.poll() is None or len(self._times) >= self.RESTARTS:
+            if p is None or not _exited(p) or len(self._times) >= self.RESTARTS:
                 raise
             self._times.append(now)
             try:

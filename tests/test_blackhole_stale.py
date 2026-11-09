@@ -1,7 +1,8 @@
 """A writer into BlackHole 2ch goes while the call app reads it and another writer goes on: nothing of the old sound may
 stay. Found on the runner: a helper killed (SIGKILL) with its IOProc running sometimes left its last 10.7 ms buffer
 in coreaudiod's mix, looping (harmonics of 93.75 Hz) with no process left; the app stops helpers with SIGTERM, and the
-helper stops its IOProcs before it exits. SIGKILL is printed for the record, not asserted: that is coreaudiod's."""
+helper stops its IOProcs before it exits. SIGKILL is not tried here: when that buffer stays, it stays for the rest of
+the machine's session, and every later test on BlackHole 2ch hears it (the runner showed it at 656 Hz = 7 x 93.75)."""
 import subprocess
 import sys
 import threading
@@ -49,16 +50,15 @@ def share(y, f):
     return float(np.mean((np.abs(peaks - f) < 30) & loud)), float(np.mean(loud))
 
 
-@pytest.mark.parametrize('how', ['terminate', 'kill'])
 @pytest.mark.parametrize('loop', [False, True])
-def test_old_tone_after_its_writer_goes(how, loop):
+def test_old_tone_after_its_writer_goes(loop):
     from peresmeshnik.ui.selftest import Recorder
     rec = Recorder(macos.BLACKHOLE_UID, SR)
     a, a_stop = writer(220.0)
     b, b_stop = [], threading.Event()
     try:
         time.sleep(2.0)
-        getattr(a[0], how)()
+        a[0].terminate()
         a[0].wait(5)
         a_stop.set()
         b, b_stop = writer(300.0, cycle_loop=loop)
@@ -80,7 +80,6 @@ def test_old_tone_after_its_writer_goes(how, loop):
     time.sleep(1.0)
     z = r2.stop()[SR // 4:]
     alone = float(np.sqrt(np.mean(z ** 2)))
-    print(f'\n{how}, then {"the loop" if loop else "a player"}: old tone in {old:.0%} of the windows, new {new:.0%}, '
+    print(f'\nterminate, then {"the loop" if loop else "a player"}: old tone in {old:.0%} of the windows, new {new:.0%}, '
           f'loud {loud:.0%}; then a reader alone: rms {alone:.4f}')
-    if how == 'terminate':
-        assert old < 0.05 and new > 0.9 and alone < 0.001
+    assert old < 0.05 and new > 0.9 and alone < 0.001

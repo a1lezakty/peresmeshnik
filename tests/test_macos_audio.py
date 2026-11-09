@@ -840,7 +840,7 @@ def test_the_microphone_is_kept_by_a_refresh(tmp_path):
     from peresmeshnik.audio import coreaudio as ca
     from peresmeshnik.audio.mic import Mic
     from peresmeshnik.engines import SAMPLE_RATE
-    t = tone(60)  # stereo: a mono file lands in the centre channel (3) of BlackHole 16ch, the helper reads the first
+    t = tone(6)  # stereo: a mono file lands in the centre channel (3) of BlackHole 16ch, the helper reads the first
     sf.write(tmp_path / 'tone.wav', np.stack([t, t], axis=1), SR)
     before = set_default_output('BlackHole 16ch')  # BlackHole 2ch is the app's own: the microphone refuses it
     p = subprocess.Popen(['afplay', str(tmp_path / 'tone.wav')])
@@ -857,8 +857,7 @@ def test_the_microphone_is_kept_by_a_refresh(tmp_path):
         got = frames.pcm()[n:]
     finally:
         mic.stop()
-        p.kill()
-        p.wait()
+        p.wait(15)  # to its end: a killed writer may leave its last buffer looping in BlackHole
         if before:
             set_default_output(before)
     print(f'microphone: held {held}, refresh {r}, then {len(got) / SAMPLE_RATE:.2f} s rms {rms(got):.3f}')

@@ -72,8 +72,8 @@ MIN_VRAM_GB = 5.5  # the clone (XTTS-v2 ~2 GB) next to them -> me on CUDA (~0.6 
 
 
 PACK_CONSENT = ('I accept the licenses of the voice pack: PyTorch (BSD-3-Clause), coqui-tts (MPL-2.0), and of the XTTS-v2 '
-                'voice model it runs, the Coqui Public Model License (coqui.ai/cpml): noncommercial use only, it binds me as '
-                'the user')
+                'voice model it runs, the Coqui Public Model License (huggingface.co/coqui/XTTS-v2): noncommercial use '
+                'only, it binds me as the user')
 
 
 MIN_DRIVER = (572, 30)  # Windows: CUDA 12.8's driver (the pack's torch 2.8.0+cu128; NVIDIA's CUDA 12.8 release notes)

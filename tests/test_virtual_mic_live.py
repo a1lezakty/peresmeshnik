@@ -310,11 +310,11 @@ def test_record_counts_sound_not_wall_time(monkeypatch):
             self.stopped.set()
 
     progress = []
-    monkeypatch.setattr(mic_mod, 'Mic', lambda device, sample_rate: LateMic(device, sample_rate))
+    monkeypatch.setattr(mic_mod, 'Mic', lambda device, sample_rate, **k: LateMic(device, sample_rate))
     x = mic_mod.record(1.5, sample_rate=8000, on_progress=progress.append)
     assert len(x) == 12000 and progress == [1, 1.5]
     monkeypatch.setattr(mic_mod, 'START_S', 0.5)
-    monkeypatch.setattr(mic_mod, 'Mic', lambda device, sample_rate: LateMic(device, sample_rate, stop_after=0.4))
+    monkeypatch.setattr(mic_mod, 'Mic', lambda device, sample_rate, **k: LateMic(device, sample_rate, stop_after=0.4))
     t = time.monotonic()
     x = mic_mod.record(1.5, sample_rate=8000)
     assert abs(len(x) - 3200) <= 160 and time.monotonic() - t < 1.5 + 0.5 + 0.5

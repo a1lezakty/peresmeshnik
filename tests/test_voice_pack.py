@@ -255,6 +255,12 @@ def me_side(monkeypatch, tmp_path, clone_error=None, key=True):
     def no_key(s):
         raise RuntimeError('no Gemini API key')
     side._cloud = (lambda s: cloud) if key else no_key
+
+    def api_key(c):
+        if not key:
+            raise SystemExit('no Gemini API key')  # as cloud.api_key says it
+        return 'key'
+    monkeypatch.setattr('peresmeshnik.cloud.api_key', api_key)
     return side, s, made, cloud
 
 
@@ -269,13 +275,21 @@ def test_clone_out_of_vram_at_warm_up_falls_back_to_the_stock_voice_not_the_clou
     side, s, made, cloud = me_side(monkeypatch, tmp_path, 'oom')  # a cloud key is there: still not the cloud
     d = side._local(s)
     assert d is not cloud and side.engine == 'local' and made == ['oom', None]
-    assert side.errors == ['error: me: the voice clone is off (CUDA out of memory); a stock voice speaks instead']
+    assert side.errors == ['error: me: the voice clone is off (CUDA out of memory); a stock voice speaks instead. With '
+                           'your Gemini key you can switch "Me → them" to cloud in the settings']  # said, not done
 
 
 def test_clone_that_dies_mid_call_is_replaced(monkeypatch, tmp_path):
     from peresmeshnik.audio.mic import LiveSwitch
     side, s, made, cloud = me_side(monkeypatch, tmp_path, key=False)
-    dead = FakeDirection('clone', voice=Voice('me', 'xtts', tmp_path), error=RuntimeError('the voice pack exited (-11)'))
+
+    def _speak():  # the error as the pipeline's speak worker records it (app.spoke: the TTS, not ASR or MT)
+        raise RuntimeError('the voice pack exited (-11)')
+    try:
+        _speak()
+    except RuntimeError as e:
+        error = e
+    dead = FakeDirection('clone', voice=Voice('me', 'xtts', tmp_path), error=error)
     side.directions = [(LiveSwitch(dead), True, True)]
     side._consume(side.directions[0][0], True, True)  # its events end at once: the worker died
     assert dead.closed and side.errors == ['error: me: the voice clone is off (the voice pack exited (-11)); '
@@ -284,3 +298,23 @@ def test_clone_that_dies_mid_call_is_replaced(monkeypatch, tmp_path):
     new = side.directions[0][0]
     assert isinstance(new, LiveSwitch) and new.inner.tts is None and new.inner.voice is None  # no second fallback
     new.close()
+
+
+def test_an_asr_error_mid_call_is_no_clone_death(monkeypatch, tmp_path):
+    """The worker that died is ASR's (or MT's): not the clone, so no stock voice; the side fails and restarts (S3)."""
+    from peresmeshnik.audio.mic import LiveSwitch
+    side, s, made, cloud = me_side(monkeypatch, tmp_path, key=False)
+    failures = []
+    side.on_failure = lambda why, e: failures.append(why)
+
+    def _listen():
+        raise RuntimeError('onnxruntime: bad allocation')
+    try:
+        _listen()
+    except RuntimeError as e:
+        error = e
+    dead = FakeDirection('clone', voice=Voice('me', 'xtts', tmp_path), error=error)
+    side.directions = [(LiveSwitch(dead), True, True)]
+    side._consume(side.directions[0][0], True, True)
+    assert not dead.closed and side.errors == [] and made == []
+    assert failures == ['the translation failed (RuntimeError: its events ended by themselves)']

@@ -7,7 +7,11 @@ clause is spoken while the next one is recognised. Generic over `Tts` and `Voice
 voice (them -> me) and the clone (me -> them) plug in the same way. On silence only the VAD runs.
 
 A clause ends at a VAD pause (>= 300 ms), at sentence punctuation from the ASR with a word after
-it, or at `max_clause_s` (then at a comma or between words).
+it, or at `max_clause_s` (then at a comma or between words); `early_s` would cut it at a comma from that
+length on too, off: on a monologue the voice gained 0.2 s and the translation lost 5 chrF (BENCH stage 5).
+Before it ends, the words of the clause two ASR partials agree on are translated for the subtitle
+(`partial_mt`; a caption with only the translation, not final; skipped when the translator is behind):
+a long clause is readable while it is said. The voice says only whole clauses, so it never takes a word back.
 
 The voice must not fall ever further behind on continuous speech (a translation is often longer than
 its clause, and the speech plays back to back). When audio arrives in real time, the speak worker
@@ -16,7 +20,10 @@ knows when the clause's voice would start: from `FAST_AFTER_S` behind its clause
 would start more than `max_lag_s` after its end is not said at all (its caption stays). `interrupt()`
 is barge-in: the user talks over the voice, so what is not heard yet is dropped.
 
-Per clause one JSON line goes to the
+When audio arrives in real time each clause also puts out `Latency` events, seconds from the end of its
+speech: 'vad' (the clause's end is known: VAD pause or cut), 'asr' (its final text), 'caption' (its
+translated subtitle), 'tts_first' (its first synthesized audio), 'voice' (its voice starts playing,
+behind the speech before it). Per clause one JSON line goes to the
 `peresmeshnik.latency` logger: time of each link and, when audio arrives in real time, the lag
 from the end of the clause's speech to its caption, to its synthesized audio and to the estimated
 start of its playback (the output plays speech back to back, so a clause can wait behind the last).
@@ -41,7 +48,8 @@ from collections import defaultdict
 
 import numpy as np  # BLAS threads: pinned in peresmeshnik/__init__.py, which runs first
 
-from peresmeshnik.engines import SAMPLE_RATE, Caption, Speech, Voice
+from peresmeshnik.engines import SAMPLE_RATE, Caption, Latency, Speech, Voice
+from peresmeshnik.local.asr import _key
 
 log = logging.getLogger('peresmeshnik.latency')
 OTHER = {'en': 'ru', 'ru': 'en'}
@@ -53,15 +61,17 @@ MAX_SPEED = 1.4  # ... linearly up to this at MAX_LAG_S (4 s, 0.5 s, 1.4x: 1-3 %
 
 
 class LocalDirection:
-    """`asr.stream()` objects also take `feed(pcm, partial=False)` and expose `duration` (s) and
-    `cut(force) -> str | None` (local/asr.py). A `tts.synth` with a `speed` keyword is sped up when
+    """`asr.stream()` objects also take `feed(pcm, partial=False)` and expose `duration` (s),
+    `cut(force, comma) -> str | None` and `cut_at` (local/asr.py). A `tts.synth` with a `speed` keyword is sped up when
     behind. `max_lag_s` None: no queue policy, every clause is said however late — me -> them, where the other
 side has no subtitles of what was dropped; them -> me takes MAX_LAG_S."""
 
     def __init__(self, vad, asr, mt, tts, src: str, tgt: str, voice: Voice | None = None, max_clause_s: float = 5.0,
-                 max_lag_s: float | None = None):
+                 max_lag_s: float | None = None, early_s: float | None = None, partial_mt: bool = True):
         self.vad, self.asr, self.mt, self.tts, self.voice = vad, asr, mt, tts, voice
         self.src, self.tgt, self.max_clause_s, self.max_lag_s = src, tgt, max_clause_s, max_lag_s
+        self.early_s, self.partial_mt = early_s, partial_mt
+        self._partials: dict[int, list] = {}  # clause -> [words, end_s, caption_lag_s] of its translated partials
         self._speeds = 'speed' in inspect.signature(tts.synth).parameters
         self._ttfa = 0.0  # the last TTS first-chunk time: a clause's voice starts at least that late
         self._cut = 0.0  # interrupt(): speech of clauses that ended before this is not said
@@ -143,6 +153,7 @@ side has no subtitles of what was dropped; them -> me takes MAX_LAG_S."""
 
     def _listen(self):
         stream, n, pos, seg0, partial_s = None, 0, 0, 0, 0.0
+        prev, sent = [], 0  # words of the clause's previous partial; how many of them went to MT
         while (item := self._in.get()) is not None:
             if self._stop.is_set():
                 continue
@@ -155,22 +166,31 @@ side has no subtitles of what was dropped; them -> me takes MAX_LAG_S."""
                 if kind == 'start':
                     stream, seg0, partial_s = self.asr.stream(self.src), pos - len(x), 0.0
                     self._start = seg0
+                    prev, sent = [], 0
                 t = time.perf_counter()
                 partial = stream.feed(x, partial=not catch_up)
                 partial_s += time.perf_counter() - t
                 if partial:
                     self._events.put(Caption(partial, clause=n))
+                    if self.partial_mt:  # the words two partials agree on (the stable prefix): translated for the subtitle
+                        words = partial.split()
+                        k = next((i for i, (a, b) in enumerate(zip(words, prev)) if _key(a) != _key(b)), min(len(words), len(prev)))
+                        prev = words
+                        if k >= sent + 2:
+                            self._clauses.put({'partial': True, 'clause': n, 'text': ' '.join(words[:k]),
+                                               'end_s': round(pos / SAMPLE_RATE, 2), 'end_wall': self._wall(pos)})
+                            sent = k
                 if kind == 'end':
                     silence = self.vad.min_silence_frames * len(x)
                     n = self._clause(n, stream, None, 'pause', pos - silence, partial_s, settled_s=silence / SAMPLE_RATE)
                     stream = None
                 elif (force := stream.duration >= self.max_clause_s) or partial is not None:
                     t = time.perf_counter()
-                    text = stream.cut(force)
+                    text = stream.cut(force, comma=self.early_s is not None and stream.duration >= self.early_s)
                     if text is not None:
-                        n = self._clause(n, stream, text, 'max' if force else 'punct', seg0 + stream.offset, partial_s,
-                                         time.perf_counter() - t)
-                        partial_s = 0.0
+                        reason = 'punct' if stream.cut_at == 'sentence' else 'max' if force else 'early'
+                        n = self._clause(n, stream, text, reason, seg0 + stream.offset, partial_s, time.perf_counter() - t)
+                        partial_s, prev, sent = 0.0, [], 0
         if stream is not None and not self._stop.is_set():
             self._clause(n, stream, None, 'eof', pos, partial_s)
         self.stats['audio_s'] = self._fed / SAMPLE_RATE
@@ -178,30 +198,48 @@ side has no subtitles of what was dropped; them -> me takes MAX_LAG_S."""
 
     def _clause(self, n, stream, text, reason, end, partial_s, final_s=0.0, settled_s=0.0):
         start, self._start = self._start, end  # a cut's audio after `end` starts the next clause
+        decided = time.perf_counter() - final_s  # a cut's final text came with the cut
         if text is None:
-            t = time.perf_counter()
             text = stream.finish(settled_s)
-            final_s = time.perf_counter() - t
+            final_s = time.perf_counter() - decided
         self.stats['asr_partial_s'] += partial_s
         self.stats['asr_final_s'] += final_s
-        if not text:
+        if not text:  # the ASR heard nothing in it (noise), or lost the words: counted, the speech is not said
+            self.stats['empty'] += 1
             return n
-        self._clauses.put({'clause': n, 'reason': reason, 'start_s': round(start / SAMPLE_RATE, 2), 'end_s': round(end / SAMPLE_RATE, 2),
-                           'end_wall': self._wall(end),
-                           'asr_partial_ms': round(1000 * partial_s), 'asr_final_ms': round(1000 * final_s), 'text': text})
+        c = {'clause': n, 'reason': reason, 'start_s': round(start / SAMPLE_RATE, 2), 'end_s': round(end / SAMPLE_RATE, 2),
+             'end_wall': self._wall(end), 'asr_partial_ms': round(1000 * partial_s), 'asr_final_ms': round(1000 * final_s), 'text': text}
+        if self.realtime:  # the clause's end known (VAD pause or cut), its final text
+            c |= {'vad_lag_s': round(decided - c['end_wall'], 3), 'asr_lag_s': round(decided + final_s - c['end_wall'], 3)}
+            self._events.put(Latency(n, 'vad', c['vad_lag_s']))
+            self._events.put(Latency(n, 'asr', c['asr_lag_s']))
+        self._clauses.put(c)
         return n + 1
 
     def _translate(self):
         while (c := self._clauses.get()) is not None:
             if self._stop.is_set():
                 continue
+            if c.get('partial'):  # a subtitle that may still change; skipped when anything newer waits
+                if self._clauses.empty():
+                    t = time.perf_counter()
+                    tr = self.mt.translate(c['text'], self.src, self.tgt)
+                    self.stats['mt_partial_s'] += time.perf_counter() - t
+                    self._events.put(Caption('', tr, clause=c['clause']))
+                    if self.realtime:
+                        self._partials.setdefault(c['clause'], []).append(
+                            [len(c['text'].split()), c['end_s'], round(time.perf_counter() - c['end_wall'], 3)])
+                continue
             t = time.perf_counter()
             c['translation'] = self.mt.translate(c['text'], self.src, self.tgt)
             self.stats['mt_s'] += (dt := time.perf_counter() - t)
             self._events.put(Caption(c['text'], c['translation'], final=True, clause=c['clause']))
             c['mt_ms'] = round(1000 * dt)
+            if p := self._partials.pop(c['clause'], None):
+                c['partials'] = p
             if self.realtime:
                 c['caption_lag_s'] = round(time.perf_counter() - c['end_wall'], 3)
+                self._events.put(Latency(c['clause'], 'caption', c['caption_lag_s']))
             self._spoken.put(c)
 
     def _speak(self):
@@ -234,6 +272,8 @@ side has no subtitles of what was dropped; them -> me takes MAX_LAG_S."""
                     if self.realtime:
                         c |= {'synth_lag_s': round(now - end_wall, 3), 'voice_lag_s': round(start - end_wall, 3),
                               'play_queue_s': round(start - now, 3)}
+                        self._events.put(Latency(c['clause'], 'tts_first', c['synth_lag_s']))
+                        self._events.put(Latency(c['clause'], 'voice', c['voice_lag_s']))
                 with self._play_lock:
                     if self._cut != cut:  # interrupted since this chunk came: it is not played
                         break
@@ -249,8 +289,9 @@ side has no subtitles of what was dropped; them -> me takes MAX_LAG_S."""
     def summary(self) -> dict:
         """Busy time of each link per second of input audio (link RTF)."""
         s, a = self.stats, max(self.stats['audio_s'], 1e-9)
-        return {'audio_s': round(a, 2), 'clauses': int(s['clauses']), 'dropped': int(s['dropped']), 'speech_s': round(s['tts_audio_s'], 2),
-                **{f'{k[:-2]}_rtf': round(s[k] / a, 4) for k in ('vad_s', 'asr_partial_s', 'asr_final_s', 'mt_s', 'tts_s')}}
+        return {'audio_s': round(a, 2), 'clauses': int(s['clauses']), 'dropped': int(s['dropped']), 'empty': int(s['empty']),
+                'speech_s': round(s['tts_audio_s'], 2),
+                **{f'{k[:-2]}_rtf': round(s[k] / a, 4) for k in ('vad_s', 'asr_partial_s', 'asr_final_s', 'mt_s', 'mt_partial_s', 'tts_s')}}
 
 
 def make_local(src: str, tgt: str, asr: str | None = None, threads: int | None = None, tts=None, voice: Voice | None = None,
@@ -378,6 +419,8 @@ def cli(argv=None) -> int:
     def consume():
         at = 0  # write cursor of --out, samples
         for e in d.events():
+            if isinstance(e, Latency):
+                continue
             if isinstance(e, Speech):
                 if player:
                     player.play(e.pcm, e.sample_rate)
@@ -390,7 +433,7 @@ def cli(argv=None) -> int:
             elif e.final:
                 print(f'{a.src}: {e.original}\n{tgt}: {e.translation}', flush=True)
             elif a.partials:
-                print(f'  … {e.original}', flush=True)
+                print(f'  … {e.original or e.translation}', flush=True)
     consumer = threading.Thread(target=consume, name='consumer')
     consumer.start()
 

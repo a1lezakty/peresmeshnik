@@ -1430,3 +1430,183 @@ dispatcher only), took it for a window's own close, the helper window was destro
 A WM_CLOSE to a window without Qt's window procedure now quits (none of them has an X);
 `test_wm_close_to_a_hidden_helper_of_qt_quits` posts one to `_q_titlebar`. With a look every 0.05 s taskkill comes
 before the wizard is even built and goes to the tray's window, which quit on both builds (40 of 40 each).
+
+## Stage 5: latency per link, long phrases, two people, echo (S1)
+
+Measured 2026-11-09. Nobody uses the app live yet, so a call is rebuilt from recordings (`bench/call.py`): FLEURS dev
+(CC-BY-4.0) takes of different people at −26 dBFS glued into the sound of a call: **echo** (we speak into the call,
+the far end is on a loudspeaker: our speech comes back through a small speaker's band, a room of ~0.2 s and the
+given delay and level; they answer, a third of the time over us), **overlap** (two people at the far end: turns that
+overlap 0.3–1.5 s, and some that start together), **long** (one person, sentences back to back with every silence
+cut to 0.15 s: no pause the VAD takes). A scenario is a seed; only numbers come here. Engines as in the app: Silero
+VAD, Parakeet v3 int8, OPUS-MT en-ru, Piper `dmitri`, 2 threads, the app's queue policy (cap 4 s) where the voice is
+measured. **C** = the dev server C (16 cores, runs with 2 threads each, at most 8 threads at once; CPU unless said);
+**runners** = the CI job work-gate (`tests/test_call.py` on the recordings of `tests/data`: 3 of our sentences, 3 of
+theirs). Real calls, a real loudspeaker at the far end, real people over each other: USER-CHECKS «Этап 5 / S1».
+
+### Latency per link (them → me)
+
+**links** on C: the echo scenario (n = 4: 24 of our utterances, 24 of theirs) through the gate, in real time with
+Piper and the queue policy; *runners*: `test_latency_per_link` (3 + 3 sentences, one scenario). Seconds from the end
+of a clause's speech (where the clause ends in the audio) to: *VAD* — the end is known (a pause of 0.3 s, or the ASR
+cuts the clause); *ASR* — its final text; *caption* — its translated subtitle; *TTS* — the first synthesized audio;
+*voice* — its voice starts playing (after the voice of the clauses before it). The budget is ARCHITECTURE §4 (a short
+clause, nothing queued); the stage's target: subtitle ≤ 0.5 s, voice ≤ 1.5 s from the clause end.
+
+| where | clauses (dropped) | VAD p50 / p90 | ASR | caption | TTS first | voice |
+|---|---|---|---|---|---|---|
+| budget (§4, x86 / M1) | | 0.30 | ≈ 0.43 | ≈ 0.5 / 0.55–0.65 | ≈ 0.65 / 0.8–0.9 | target ≤ 1.5 |
+| C, CPU, 2 threads | 80 (3) | 0.36 / 1.42 | 0.40 / 1.42 | **0.43** / 1.47 | 0.50 / 1.59 | **1.18** / 2.54 |
+| C, A4000 (ASR and MT on CUDA, Piper on the CPU) | 82 (5) | 0.37 / 1.47 | 0.43 / 1.47 | **0.43** / 1.48 | 0.50 / 1.53 | **1.13** / 2.47 |
+| runner Linux (4 vCPU) | 12 (2) | 0.41 / 1.34 | 0.48 / 1.34 | 0.55 / 1.55 | 0.53 / 2.04 | 0.53 / 2.04 |
+| runner macOS (M1, 3 cores) | 12 (2) | 0.32 / 0.99 | 0.38 / 0.99 | 0.40 / 1.28 | 0.49 / 1.69 | 0.49 / 1.69 |
+| runner Windows (4 vCPU) | 12 (2) | 0.44 / 1.40 | 0.56 / 1.40 | 0.63 / 1.70 | 0.66 / 2.27 | 0.66 / 2.40 |
+
+- Medians: the subtitle is within the target on C and the M1 runner (0.40–0.43 s), 0.55–0.63 s on the shared 4 vCPU
+  Linux and Windows runners; once the end is known, the final ASR and MT add 0.07–0.19 s to it. *Dropped* = the
+  queue policy skipped the voice (its subtitle shown); a dropped clause has no TTS or voice number.
+- **The worst link is the end of a clause without a pause.** By how the clause ended (C, CPU): a pause (58 of
+  80) VAD 0.29 / 0.48 s; the 5 s limit (19) 1.27 / 1.87 s; a sentence end the ASR punctuates (3) 1.20 / 1.45 s. A
+  cut takes only words that start ≥ `TAIL_S` before the window end (there the model squeezes the last words
+  together; 0.8 s since stage 1), so such a clause is known ≥ `TAIL_S` after its last word.
+- **The A4000 changes nothing here** (within 0.07 s of the CPU): the links are bound by when the clause end is
+  known and by the voice queue, not by compute. MT RTF 0.0068 → 0.0019 on CUDA; the partial ASR (int8 graph, host ↔
+  device copies, see "them → me on CUDA vs CPU") 0.20 on 2 CPU threads, 0.22 on CUDA.
+- The voice p50 (1.18 s on C) is the queue: their sentences are 5–12 s (p10–p90, median 8 s), cut into
+  clauses back to back, and a clause's voice waits for the one before it (its TTS first audio is there at 0.5 s).
+  The p90 above the target (2.5 s on C) is that wait plus the clauses known late (above). On the runners (one
+  scenario, 12 clauses) the voice p50 is its TTS first audio.
+
+**`TAIL_S` 0.5 measured, not taken.** Both values on C at the same time (2 threads each), English (Parakeet) and
+Russian (GigaAM → English, Piper `john`): **links** n = 4 as above, in real time; **long** n = 6 (the monologue of
+"Long phrases", 30 sentences, 27–37 clauses cut at the 5 s limit) in real time and, for the words alone, fed as fast
+as it goes (`--asap`: the same on any load). *Repeated* = words a clause repeats from the end of the one before it
+(a cut whose window timestamps ran ahead); `REPEAT_WORDS` = how many such words the next clause may drop (1 before
+stage 5).
+
+| | real time (links): VAD p90 / caption p90 / 5 s limit VAD p50 | real time (long): WER / chrF, run 1; run 2 | as fast as it goes (long): WER / chrF / repeated |
+|---|---|---|---|
+| en, `TAIL_S` 0.8, `REPEAT_WORDS` 1 | 1.53 / 1.57 / 1.38 | 0.1285 / 70.0; 0.1268 / 70.1 | 0.1447 / 70.1 / 5 |
+| **en, 0.8, 3 (now)** | — | — | **0.1366** / 70.1 / **0** |
+| en, 0.5, 1 | 1.13 / 1.25 / 0.99 | 0.1252 / 70.2; — | 0.1447 / 68.6 / 0 |
+| en, 0.5, 3 | — | —; 0.1528 / 68.0 | 0.1447 / 68.6 / 0 |
+| ru, 0.8, 1 | 1.28 / 1.36 / 1.21 | 0.0893 / 72.8; 0.0821 / 72.7 | 0.0839 / 73.0 / 0 |
+| **ru, 0.8, 3 (now)** | — | — | 0.0839 / 73.0 / 0 |
+| ru, 0.5, 1 | 0.86 / 0.95 / 0.85 | 0.0839 / 73.5; — | 0.0857 / 74.2 / 0 |
+| ru, 0.5, 3 | — | —; 0.0875 / 72.5 | 0.0857 / 74.2 / 0 |
+
+- `TAIL_S` 0.5 knows a cut clause 0.35–0.4 s earlier (the subtitle p90 −0.3–0.4 s, the median as before). The
+  words: in real time the English WER with 0.5 moved by 0.028 between two runs (0.1252, 0.1528; `REPEAT_WORDS` makes
+  no difference there when fed fast), with 0.8 by 0.002–0.007: the cuts move with the load. Fed as fast as it goes,
+  0.5 is no better in English (chrF −1.5) and mixed in Russian (WER +0.002, chrF +1.2). Not taken: the gain is only
+  in the p90, and the quality is not shown to hold.
+- **Taken: `REPEAT_WORDS` 3** (`local/asr.py`): a clause that repeats up to 3 words of the cut before it ("…to cope
+  with" | "cope with the impacts": `test_two_people_overlapping_ends` with 0.5 on the dev box) drops them; with 0.8 the English WER
+  0.1447 → 0.1366 (5 repeated words → 0), Russian the same.
+
+### Echo of our speech from the far end
+
+**echo** on C, n = 6 (36 of our utterances and 36 of theirs per row, a third of their turns over our echo), fed as
+fast as it goes; the gate runs in the scenario's own time with the reference pushed as it is sent. *echo translated*
+= our utterances that come out as a clause (≥ 2 and ≥ 25 % of their content words); *their recall* = their content
+words out; *zeroed* = 16 ms blocks the gate zeroed, of their speech (false suppression) and of our echo alone.
+
+| far end: delay, level | echo translated: no gate → gate | their recall: no gate → gate | their blocks zeroed | echo blocks zeroed |
+|---|---|---|---|---|
+| 50 ms, −12 dB | 32 of 36 (89 %) → 1 (2.8 %) | 0.880 → 0.892 | 0.12 % | 88.5 % |
+| 150 ms, −6 dB | 34 (94 %) → 1 (2.8 %) | 0.899 → 0.899 | 0.15 % | 87.3 % |
+| 150 ms, −12 dB | 32 (89 %) → 0 | 0.892 → 0.899 | 0.11 % | 88.3 % |
+| 150 ms, −20 dB | 24 (67 %) → 0 | 0.879 → 0.901 | 0.09 % | 90.0 % |
+| 300 ms, −12 dB | 32 (89 %) → 0 | 0.882 → 0.911 | 0.13 % | 94.0 % |
+| no echo path (a headset), we talk, they talk over us | — | 0.913 → 0.913 | 0 | — |
+
+- Their words are not lost to the gate (0.1 % of their blocks, recall the same or higher: the echo no longer mixes
+  into their clauses). The 10–13 % of the echo blocks it leaves include the echo under their speech (double talk
+  passes by design); in 34–36 of 36 utterances that is too little for a clause.
+- **Through the devices** (`tests/test_echo_pipewire.py`, Linux: `VirtualMic` through `Referenced` → a far end that
+  records "Peresmeshnik Mic", plays it back 150 ms later 12 dB quieter between its own sentences into "Peresmeshnik
+  Call" → the capture → `Threaded` gate): echo zeroed 90–100 % per phrase, their speech 0 %, on the dev server and
+  the ubuntu runner. Before the reference kept speech queued ahead (a TTS hands out seconds at once) it was 46 %.
+- Runners (`test_echo_is_not_translated`, 3 + 3 sentences, one over our echo): echo translated 2 of 3 → 0, their
+  recall 0.871 → 0.871 (Linux, macOS, Windows). Without models (`tests/test_echo.py`, every OS): echo blocks zeroed
+  94–100 % at 50/150/300 ms and −6/−20 dB, their blocks 0 %, double talk 0.2 %, no echo path 0.
+- CPU: 0.25 ms per 16 ms block while the reference sounds (1.6 % of a core; was 1.35 ms before the delay search went
+  to every 4th block), nothing while it is silent.
+
+### Long phrases: translated partials
+
+**long** on C, n = 6 (30 sentences, 6 monologues of ~45 s), real time. *subtitle* = a word → its translation on
+screen (the first translated partial that has it, or its clause's final caption); *caption* = a word → its clause's
+final caption (before stage 5 the only translation on screen); *first word* = a clause's first word → its first
+translated subtitle; *voice* = a word → its clause's voice starts; words spread evenly over their clause. WER of the
+clauses against the sentences, chrF of the clauses' translations against the MT of whole sentences
+(pseudo-reference). `early` = a clause is also cut at a comma from that length (≥ 1 s before the comma). `TAIL_S`
+0.8 here (0.5 now: "Latency per link").
+
+| variant | clauses | subtitle p50 / p90, s | caption p50 / p90, s | first word, s | voice p50 / p90, s | WER | chrF | dropped | MT RTF (+ partials) |
+|---|---|---|---|---|---|---|---|---|---|
+| before (stage 4) | 78 | 2.54 / 4.59 | 2.54 / 4.59 | 3.61 | 3.24 / 5.06 | 0.127 | 71.4 | 5 | 0.016 |
+| **translated partials (now)** | 78 | **1.42 / 2.92** | 2.56 / 4.64 | **2.02** | 3.19 / 5.08 | 0.127 | 70.0 | 5 | 0.016 + 0.025 |
+| + early 2.0 s | 86 | 1.47 / 3.05 | 2.50 / 4.57 | 2.03 | 3.22 / 4.99 | 0.153 | 68.1 | 7 | 0.017 + 0.024 |
+| + early 2.5 s | 86 | 1.43 / 2.99 | 2.52 / 4.51 | 2.03 | 3.04 / 4.89 | 0.155 | 65.9 | 9 | 0.017 + 0.023 |
+| + early 3.0 s | 84 | 1.48 / 3.10 | 2.57 / 4.64 | 2.04 | 3.16 / 5.11 | 0.143 | 68.3 | 6 | 0.017 + 0.022 |
+| + early 2.5 s, max clause 4 s | 97 | 1.42 / 2.80 | 2.20 / 3.67 | 1.97 | 2.75 / 4.06 | 0.159 | 66.9 | 1 | 0.017 + 0.019 |
+
+- The translated partials take a word's translation on screen from 2.5 to 1.4 s (p90 4.6 → 2.9 s) at the same WER;
+  chrF differs by ~1 between real-time runs of one variant (cuts move with timing). They cost 2–2.5 % of a core.
+- Cutting clauses earlier for the voice gains it 0.05–0.2 s (a comma from 2–3 s) or 0.5 s (a 4 s limit) and costs
+  2–5 chrF and 0.02–0.03 WER (fragments): not taken. The voice of a monologue is bound by its clauses, not by a link.
+- Runners (`test_long_phrases_get_earlier_subtitles`, 4 sentences, real time): subtitle p50 before → after
+  3.16 → 1.41 s (Windows), 2.99 → 1.29 s (macOS M1), 3.00 → 1.37 s (Linux), WER 0.065 = 0.065 (Windows: 0.081 →
+  0.065; the clauses cut differently in real time).
+
+### Two people at once (the far end)
+
+**overlap** on C, n = 6 (48 utterances: per scenario 4 pairs where one starts 0.3–1.5 s before the other ends, 4
+pairs that start within 0.5 s of each other), fed as fast as it goes; *with voice* = n = 4 in real time with Piper
+and the queue policy. *lost* = an utterance with < 50 % of its content words out; *merged* = a clause with ≥ 2
+content words of each of two people; *empty* = clauses the ASR returned nothing for.
+
+| run | utterances | lost | over the other's end: lost / recall | both at once: lost / recall | merged clauses | empty clauses |
+|---|---|---|---|---|---|---|
+| captions | 48 | 23 (48 %) | 1 of 24 / 0.88 | 22 of 24 / 0.24 | 0 of 130 | 34 |
+| with voice | 32 | 14 (44 %); in the voice 14 | 1 of 16 / 0.88 | 13 of 16 / 0.26 | 0 of 65 | 6 |
+
+- Where one only overlaps the other's end, both are out (0.88 of the words; the overlap itself is lost). Where both
+  talk at once the call gives one mixed channel and the ASR returns a mix of both or nothing: lost.
+- The voice queue loses nobody beyond the subtitles (9 of 65 clauses not said, their subtitles shown; no utterance
+  goes silent only in the voice): the stage 2 policy stays.
+- Runners (`test_two_people_overlapping_ends`, 6 turns each 0.5–1 s over the previous one's end): recall of every
+  utterance 0.75 (Linux), 0.6 (macOS, Windows), the others 0.8–1.0.
+
+**Spike: a separation model in front of the pipeline** (`bench/separation.py`). TIGER (Xu, Li et al., ICLR 2025;
+Apache-2.0, `JusperLee/TIGER-speech`, 0.8 M parameters, 16 kHz, trained on EchoSet with reverberation and noise)
+splits the call into two streams (10 s per call of the model, the streams may swap at a seam); each goes through the
+pipeline as its own direction, the clauses of both are scored together. Same 6 scenarios, 1 thread (so the mix row
+differs a little from the table above).
+
+| input | lost | over the other's end: lost / recall | both at once: lost / recall | merged | duplicated words |
+|---|---|---|---|---|---|
+| the mix (now) | 21 of 48 (44 %) | 1 of 24 / 0.89 | 20 of 24 / 0.29 | 0 | — |
+| TIGER, two streams | **8 of 48 (17 %)** | 0 of 24 / 0.91 | **8 of 24 / 0.62** | 0 | 0.7 % |
+
+Cost: RTF 0.06 on the A4000; on the CPU (torch, 2 threads) RTF 2.55 and 2 GB peak RSS: not live without a GPU. Not
+in the app: it would need an ONNX export, the model only on CUDA, a second ASR stream only while the second stream
+carries speech at the same time as the first, and two subtitle rows (backlog "NVIDIA: two people at once").
+
+
+### macOS: the call app after a killed tap helper
+
+GitHub `macos-15`, afplay (a 440 Hz tone) as the call app on BlackHole 2ch, tapped by `peresmeshnik-tap`, the
+helper SIGKILLed (it cannot remove its tap; Core Audio is meant to remove it with the process). *Heard* = the app's
+tone back on its speakers.
+
+| when the helper is killed | heard again within 2 s | then: a new tap of it, removed | the app started again | coreaudiod restarted, the same app |
+|---|---|---|---|---|
+| first in a job (a fresh coreaudiod) | 5 of 5 | — | — | — |
+| after the whole macOS test set | 1 of 10 | 0 of 5 (a sound of rms 0.21, not the tone) | 5 of 5 | 5 of 5 (4 of them muted before) |
+
+A new tap does not lift it and the app has no rights to restart coreaudiod: the reason it shows now says to restart the call
+app or `sudo killall coreaudiod` (README). In CI the SIGKILL test now runs in its own step first and coreaudiod is
+restarted after it: the rest of the macOS set passed in 10 of 10 runs; with the test in its old place 5 of 6 (one
+device test after it failed; a run of S3 had 4 such failures).

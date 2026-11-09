@@ -2,7 +2,6 @@
 import json
 import os
 import platform
-import resource
 import sys
 import time
 from pathlib import Path
@@ -25,6 +24,11 @@ def manifest():
 
 
 def peak_rss_mb():
+    try:
+        import resource  # not on Windows (tests import the bench helpers there too)
+    except ImportError:
+        import psutil
+        return round(psutil.Process().memory_info().peak_wset / 2 ** 20)
     r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return round(r / (1024 * 1024 if sys.platform == 'darwin' else 1024))  # bytes on macOS, KiB on Linux
 

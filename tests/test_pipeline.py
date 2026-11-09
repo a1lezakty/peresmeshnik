@@ -63,7 +63,9 @@ class WordStream:
         self.pcm = np.concatenate([self.pcm, pcm])
         return self.text(int(self.duration * 2)) if len(self.pcm) % (10 * FRAME) == 0 else None
 
-    def cut(self, force=False):
+    cut_at = 'word'
+
+    def cut(self, force=False, comma=False):
         if not force:
             return None
         n = int(self.duration * 2) - 1  # keep the last word
@@ -147,6 +149,29 @@ def test_long_speech_is_cut():
     assert words == [f'w{i}' for i in range(len(words))]  # nothing lost or repeated across cuts
     assert [r['reason'] for r in caplog_rows][:-1] == ['max'] * (len(finals) - 1)
     assert len(finals) >= 3
+
+
+def test_long_speech_gets_translated_partials():
+    """Stage 5: before a long clause ends, the words two partials agree on are translated for the subtitle (a
+    caption without the original, not final); the final caption of the clause comes after them."""
+    _, events, _ = translate(np.concatenate([tone(6.0), silence(0.6)]))
+    caps = [e for e in events if isinstance(e, Caption)]
+    early = [i for i, e in enumerate(caps) if not e.final and e.translation]
+    assert early, caps
+    for i in early:
+        c = caps[i]
+        final = next(j for j, e in enumerate(caps) if e.final and e.clause == c.clause)
+        assert i < final and c.original == '' and caps[final].translation.startswith(c.translation)
+
+
+def test_early_cut_at_a_comma():
+    """With `early_s` a long clause is cut at a comma too, with at least MIN_PART_S of speech before it."""
+    toks, ts = [' a', ' b', ',', ' c', ' d', ' e'], [0.2, 0.5, 0.7, 1.5, 2.0, 2.5]
+    assert stream_of(ScriptedAsr(Result(toks, ts)), 4.0).cut() is None  # no sentence end
+    s = stream_of(ScriptedAsr(Result(toks, ts)), 4.0)
+    assert s.cut(comma=True) == 'a b,' and s.cut_at == 'comma'
+    early = [0.2, 0.4, 0.5, 0.9, 2.0, 2.5]  # the comma 0.9 s in: too short a part
+    assert stream_of(ScriptedAsr(Result(toks, early)), 4.0).cut(comma=True) is None
 
 
 @pytest.mark.filterwarnings('ignore::pytest.PytestUnhandledThreadExceptionWarning')
@@ -251,6 +276,11 @@ def test_dedup_across_cut_and_empty_final_retry():
     assert s.finish() == 'four'
     s = stream_of(asr, 1.0)
     assert s.finish() == 'five' and asr.calls[-2:] == [(1.0, True), (1.0, False)]
+    asr = ScriptedAsr(Result([' to', ' cope', ' with', ' the'], [0.2, 0.8, 1.2, 2.0]),
+                      Result([' cope', ' with', ' the', ' impacts.'], [1.0, 1.3, 1.6, 1.9]))  # repeats two words
+    s = stream_of(asr, 3.0)
+    assert s.cut(force=True) == 'to cope with'
+    assert s.finish() == 'the impacts.'
 
 
 # queue policy and barge-in: real-time feeds (a few seconds each), so the lags are real
@@ -353,3 +383,22 @@ def test_blas_threads_pinned_before_numpy_whatever_imports_first():
     code = 'import peresmeshnik.app, os, sys; print(os.environ["OPENBLAS_NUM_THREADS"], os.environ["OMP_NUM_THREADS"])'
     r = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, env=env, timeout=60)
     assert r.stdout.split() == ['1', '1'], r.stdout + r.stderr
+
+
+def test_latency_events_in_real_time_and_through_the_live_switch():
+    """Stage 5: a real-time direction puts out Latency per clause and link; the me -> them live switch passes
+    them on (it took every event that is not a caption for speech)."""
+    from peresmeshnik.audio.mic import LiveSwitch
+    from peresmeshnik.engines import Latency
+    d = LocalDirection(EnergyVad(), WordAsr(), UpperMt(), ToneTts(), 'en', 'ru')
+    sw = LiveSwitch(d, 8000)
+    got = []
+    t = threading.Thread(target=lambda: got.extend(sw.events()))
+    t.start()
+    run(d, np.concatenate([tone(1.0), silence(0.6)]), realtime=True)
+    d.finish()
+    t.join(5)
+    lat = {e.what: e.s for e in got if isinstance(e, Latency)}
+    assert set(lat) == {'vad', 'asr', 'caption', 'tts_first', 'voice'}, got
+    assert 0.3 <= lat['vad'] <= lat['asr'] <= lat['caption'] <= lat['tts_first'] <= lat['voice'] < 2.0, lat
+    assert any(isinstance(e, Speech) for e in got) and any(isinstance(e, Caption) and e.final for e in got)

@@ -339,7 +339,7 @@ def run(a):
                 due = max(due, now) + len(e.pcm) / e.sample_rate
                 mic.play(e.pcm, e.sample_rate)
                 direct.append(e.pcm)
-            elif e.final:
+            elif getattr(e, 'final', False):  # a final Caption (Latency events pass)
                 captions[e.clause] = time.perf_counter()
                 said.append(e.translation)
                 print(f'ru: {e.original}\nen: {e.translation}', flush=True)

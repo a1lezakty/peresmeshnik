@@ -129,6 +129,24 @@ within 4 s of its clause end; without it the queue alone let the voice fall 20 s
 Russian speaker. An 8 s limit translates 0–2 chrF better and adds 1.2–2.4 s to the p95, so 5 s
 stays.
 
+**Long phrases (stage 5).** A monologue without pauses used to wait for its clause end (a sentence
+end the ASR punctuates, else the 5 s limit) before any translation was on screen. Now (BENCH,
+stage 5 "Long phrases") every ASR partial's *stable prefix* — the words the last two partials agree
+on — is translated for the subtitle (a caption with only the translation, not final; it may still
+change, and is skipped when the translator has something newer waiting). The voice says only whole
+clauses: it never takes a word back. Cutting clauses earlier for the voice (at a comma from 2.5 s,
+or a 4 s limit) gained it 0.2–0.5 s and cost 4–5 chrF, so the clause rules stay as above.
+
+**Latency per link.** In real time the local pipeline puts out `Latency(clause, what, s)` events,
+seconds from the end of the clause's speech: `vad` (the end is known: VAD pause or cut), `asr` (final
+text), `caption` (translated subtitle), `tts_first` (first synthesized audio), `voice` (its voice
+starts playing, behind the speech before it). The overlay shows `caption` and `voice` (S3); the per
+clause JSON log has all of them. Medians and p90 per platform against this budget: BENCH, stage 5. The worst link
+is a clause cut without a pause (the 5 s limit, a punctuated sentence end): the cut takes only words that start
+`TAIL_S` = 0.8 s before the window end, so the clause is known that much after its last word (0.5 s: the subtitle
+p90 −0.3–0.4 s, but the words not shown to hold, so 0.8 stays). The next clause may repeat up to 3 of the cut's last
+words; they are dropped.
+
 **Me → them, local clone** — the same chain with the clone TTS instead of Piper:
 
 | Clone TTS first audio / RTF | M1 | x86 CPU | NVIDIA |
@@ -257,6 +275,18 @@ process taps (macOS) and process loopback (Windows) through small native helpers
 **Echo safety.** Translated speech goes to headphones only; on first run the app asks to use
 headphones and warns when the output device is built-in speakers (the mic would pick up the
 translation and translate it back).
+
+**Echo gates (stage 5, `audio/echo.py`).** Our own speech can come back on both sides: the far end
+on a loudspeaker sends our translation back into the call (50–300 ms later, quieter), and without
+headphones the microphone hears the translation from the speakers. Both outputs write what they play
+into a reference (`Referenced`: the virtual mic → `call_echo`, the headphones → `mic_echo`); each
+side's input passes an `EchoGate` on its own thread before the direction: the band envelopes of the
+capture are correlated with the reference's over −0.1…1 s of delay (spectral shape only, only where
+the reference sounds), and a 16 ms block that is our echo and nothing more is zeroed, so the VAD sees
+silence. Where the other person talks over our echo the block passes. No adaptive filter and no
+dependency: robust to codecs, loudspeakers and a drifting delay; ~1.6 % of a core while the
+reference sounds, nothing while it is silent. The reference keeps 2 s behind and up to 30 s ahead
+(a TTS hands out seconds of speech at once).
 
 **Setup wizard (first run, re-runnable from the tray):**
 1. Language pair and mode (local / cloud), tier detected from the hardware (§9), model download
@@ -497,6 +527,9 @@ RTF; the user can override it in settings.
    (CC-BY-NC-SA) are noncommercial; HY-MT is not licensed in the EU/UK/South Korea. Defaults
    (Parakeet, GigaAM, T-one, OPUS-MT, Piper CC0 voices) are permissive.
 8. **Echo.** With speakers instead of headphones the mic hears the translation → headphone check
-   in the wizard, warning on built-in speakers.
+   in the wizard, warning on built-in speakers; since stage 5 echo gates on both sides (§7). A far
+   end whose own echo cancellation fails is the same case on the call side.
 9. **M1 numbers are a lower bound.** The runner is a 3-core virtual M1 without GPU/ANE; a real M1
    has 4 performance cores and CoreML. Stage 3 re-measures on real hardware.
+10. **Two people at once.** One mixed channel from the call: overlapping speech is recognised as one
+    speaker or a mix; no separation model yet (stage 5 measures what is lost, BENCH).

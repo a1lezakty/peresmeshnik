@@ -95,7 +95,11 @@ class Recorder:
 
     def stop(self) -> np.ndarray:
         self.p.terminate()
-        self.p.wait(5)
+        try:
+            self.p.wait(5)
+        except subprocess.TimeoutExpired:  # the helper once hung stopping (1 in ~400 on the runner): a reader, kill is safe
+            self.p.kill()
+            self.p.wait()
         self.t.join(5)
         return np.concatenate(self.chunks) if self.chunks else np.zeros(0, np.float32)
 

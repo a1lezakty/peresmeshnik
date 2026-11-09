@@ -396,15 +396,19 @@ def test_live_voice_with_a_dead_output_says_so(monkeypatch):
     s.them_to_me = 'local'
     errors, plays = [], []
 
-    class Direction:
+    class Direction:  # its events last until it is closed, as a real one's (ended by themselves: it died)
+        def __init__(self):
+            self.closed = threading.Event()
+
         def feed(self, pcm):
             pass
 
         def events(self):
+            self.closed.wait()
             yield from ()
 
         def close(self):
-            pass
+            self.closed.set()
 
     class DeadOut:
         def play(self, pcm, sr):

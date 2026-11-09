@@ -5,7 +5,9 @@ Windows tells the app things through a hidden top-level window of ours (a QWindo
 of our combos, WM_SETTINGCHANGE "ImmersiveColorSet" (the theme changed). A native event filter reads them in Qt's
 own message loop: nothing polls. It also sees WM_CLOSE to any window of the app. One posted from outside (taskkill,
 an installer) quits the app, whichever window it went to; one a window sends itself (its X button, Alt+F4) closes
-that window only. WM_ENDSESSION (sign-out, shutdown, an installer's Restart Manager) Qt turns into aboutToQuit.
+that window only. With no window on screen (a start, before the wizard shows) taskkill picks a hidden one, maybe one of
+Qt's helpers (the title bar metrics', the tray's): they have no X, so a WM_CLOSE to them is from outside too.
+WM_ENDSESSION (sign-out, shutdown, an installer's Restart Manager) Qt turns into aboutToQuit.
 
 Qt's combo text on Windows: 'Meta' is the Windows key.
 """
@@ -38,6 +40,7 @@ user32.SetWinEventHook.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.HMOD
 user32.UnhookWinEvent.argtypes = [wintypes.HANDLE]
 
 WM_CLOSE, WM_SETTINGCHANGE, WM_HOTKEY = 0x0010, 0x001A, 0x0312
+GWLP_WNDPROC = -4
 MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, MOD_NOREPEAT = 1, 2, 4, 8, 0x4000
 MODS = {'alt': MOD_ALT, 'ctrl': MOD_CONTROL, 'shift': MOD_SHIFT, 'meta': MOD_WIN}
 ERROR_HOTKEY_ALREADY_REGISTERED = 1409
@@ -91,8 +94,10 @@ class _Filter(QAbstractNativeEventFilter):
             # qwindowscontext windowsProc). Any other message in between: a new count.
             twice, self.last_close = msg.message == WM_CLOSE and msg.hWnd == self.last_close, None
             if msg.message == WM_CLOSE:
-                if twice or msg.hWnd == self.host.hwnd:  # the hidden window has no X: any WM_CLOSE to it is from outside
-                    # (once only when it came inside a native modal loop, e.g. the file dialog, or was sent)
+                # the hidden window has no X: any WM_CLOSE to it is from outside (once only when it came inside a native
+                # modal loop, e.g. the file dialog, or was sent); neither has a window without Qt's window procedure, and
+                # the filter sees one posted to it once: from the dispatcher only
+                if twice or msg.hWnd == self.host.hwnd or not self.host.is_qt(msg.hWnd):
                     log.info('WM_CLOSE from outside: quitting')
                     self.host.closing.emit()
                     return True, 0
@@ -115,11 +120,16 @@ class Host(QObject):
         self.window.setTitle(HOST_TITLE)
         self.window.create()  # a native window, never shown
         self.hwnd = int(self.window.winId())
+        self.proc = user32.GetWindowLongPtrW(self.hwnd, GWLP_WNDPROC)  # Qt's window procedure, of every QWindow
         self.hotkeys: dict[int, Callable[[], None]] = {}
         self.last_id = 0  # RegisterHotKey ids: unique per window, so per process (any number of WinHotkey)
         self._filter = _Filter(self)
         QCoreApplication.instance().installNativeEventFilter(self._filter)
         QCoreApplication.instance().aboutToQuit.connect(unhook)  # quitting with subtitles on screen
+
+    def is_qt(self, hwnd: int) -> bool:
+        """A QWindow (the wizard, the overlay): a message posted to it reaches the filter twice."""
+        return user32.GetWindowLongPtrW(hwnd, GWLP_WNDPROC) == self.proc
 
     def handle(self, message: int, wparam: int, lparam: int) -> bool:
         """True: the message is ours, Qt does not see it. WM_HOTKEY comes once per press: posted, it reaches the

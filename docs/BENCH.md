@@ -1367,3 +1367,66 @@ Tests: `tests/test_windows_audio.py`.
   comtypes and no polling on the Python side.
 - The runner has no GPU, so **Windows + CUDA** (the voice pack's onnxruntime-gpu / CTranslate2) is a USER-CHECKS line;
   the CUDA numbers above are on Linux (an RTX A4000).
+
+## Stage 5: cloud fallback, crash reports, latency on screen (S3)
+
+Measured 2026-11-09. The fallback against a fake Gemini Live server (`tests/fake_gemini.py`: a real WebSocket over TLS
+for the real google-genai client; its "translator" answers each block 1 s later, as a tone for speech and zeros for
+silence), with the real local path (Parakeet v3 + OPUS-MT en-ru + Piper `dmitri`) on the dev server (4 cores, CPU),
+the 30 s test call (`tests/data/call-en.ogg`) fed in real time, the fault 8 s in (`bench/fallback.py`, 3 runs each).
+Not measured: a real Gemini outage in a call, a real quota (USER-CHECKS).
+
+### Cloud → local and back
+
+| Fault (what the server does) | the side decides (one tray message), after the fault | first local voice, after the fault | detail |
+|---|---|---|---|
+| connection dropped, the server not reachable (no close frame, then HTTP 503) | 0.19, 0.19, 0.20 s | 2.93, 2.94, 3.09 s | one reconnect try is the decision; the voice waits for the clause in progress to end (VAD pause, MT, Piper) |
+| quota: the connection closes and the next one is refused with 1011 "RESOURCE_EXHAUSTED" | 0.19, 0.20, 0.20 s | 2.91, 3.01, 3.07 s | the reason in the tray: the lost connection, then Google's text ("1011 … quota") |
+| too slow: no translated voice (`cloud.fallback_after_s` = 6 s after a phrase began) | 6.88, 6.89, 6.88 s | 6.98, 7.01, 7.13 s | the first phrase that begins after the fault gets no voice: 6 s after its start (≥ 1 s of its speech heard); its clauses so far, muted, are said at once |
+| back: the server answers again 8 s after the drop | drop as above (0.19, 0.19, 0.20 s; voice 2.94–3.17 s); back in the cloud 6.41, 6.76, 14.98 s after the server answers | — | two phrase starts: at the first one (after the pause: 0 s here, 30 s doubling to 15 min in the app) a session opens with nothing sent, at the next one the phrase goes to the cloud from its start; how long that takes is how the call's phrases fall. Two messages per outage, none at close |
+
+The 6 s limit against the cloud's real first voice after a phrase began (`first_audio_after_start` /
+`audio_from_start`, every measurement kept): stage 0 p90 3.27–3.42 s (n = 30 + 30 sentences, 3 runs) and 3.40–3.41 s
+(`stream_end`, 5 + 5); stage 1 p90 3.88 / 4.61 s (7 + 10); stage 2, Silero and energy gates, 3.13–4.66 s (4); app bench runs of
+2026-11-08 3.69–4.15 s (3). No phrase over 6 s among the values kept one by one (max 4.66 s); the per-sentence values of stages
+0–1 are kept only as median and p90. The margin over the p90 is 1.4–2.7 s, not 2×; a real slow network (USER-CHECKS)
+tells whether 6 s falls back too early.
+
+The same faults with the pipeline's fake engines and a 0.3 s "translator" (`tests/test_fallback.py`, CI on all three
+OSes): drop → decision 0.20 s, quota 0.20 s, too slow 2.08 s with a 2 s limit, back 0.61 s after the phrase's first
+partial subtitle on the dev server. On the CI runners (PR #13):
+
+| runner | drop | quota | too slow (limit 2 s) | back |
+|---|---|---|---|---|
+| ubuntu-latest | 0.19 s | 0.19 s | 2.08 s | 0.61 s |
+| macos-15 | 0.28 s | 0.31 s | 2.19 s | 0.63 s |
+| windows-latest | 0.19 s | 0.19 s | 2.08 s | 0.61 s |
+
+### Crash reports and a helper that dies
+
+| Check | Result |
+|---|---|
+| what was said (whole and in part), its translation, the key, device names (microphone, headphones as PipeWire names), the call app, the voice's name, the home folder: through log arguments, the latency JSON, an exception's text and a thread's unhandled exception (`tests/test_crash.py`) | none in the report or the log file; the report keeps the version, OS, CPU, RAM, GPU, engines and models, the stack (`in worker`), the log's format strings and numbers |
+| a segfault (`ctypes.string_at(0)`) in the app's process | faulthandler's stack in `fault-<pid>.txt`, a report at the next start, the fault file gone |
+| a side whose direction dies 4 times in a row | 3 restarts (one message each, the report named in it), then off with "failed 4 times within a minute"; 4 reports; the app goes on |
+| the Piper runner (a real helper process) killed while them → me translates the 30 s call | only the runner starts again (`crash.Respawn`), one message, one report ("the voice helper died"); the side speaks again 5.6, 5.7, 6.0, 6.2 s after the kill on the dev server (the next clause of the call; most of it is waiting for that clause). Before (the whole side made again: new ASR, MT, runner and warm-up) 15.1–16.3 s there, 13.2–21.3 s on the CI runners |
+| GitHub issue link | under 8000 characters; a long report is cut there and copied whole to the clipboard |
+| idle CPU with the hooks and the log file (`tests/test_idle_cpu.py`, dev server under Xvfb) | 0.010 s in 60 s (limit 0.13 s) |
+
+### taskkill right after the start (Windows)
+
+`tests/test_app_windows.py::test_started_from_the_start_menu_shortcut` failed now and then (once in the stage-4 runs):
+the app did not quit within 20 s of taskkill. Repeated (`bench/windows_close.py`, the installed app started from its
+Start menu shortcut, taskkill as soon as its tray icon is there, the test's look every 0.5 s) on `windows-latest`:
+
+| Build | runs that ended with exit code 0 within 20 s |
+|---|---|
+| main (bac8639) | 20 of 25, 30 of 40, 30 of 40: **80 of 105** |
+| this stage | 40 of 40, 40 of 40, 40 of 40: **120 of 120** (one run hit the case below and quit) |
+
+Every failure: no window was on screen yet (the wizard not shown), and taskkill posted its WM_CLOSE to a hidden window —
+Qt's `_q_titlebar` (the wizard's title bar metrics), which is no QWindow: the filter saw that WM_CLOSE once (from Qt's
+dispatcher only), took it for a window's own close, the helper window was destroyed and the app stayed, with the wizard.
+A WM_CLOSE to a window without Qt's window procedure now quits (none of them has an X);
+`test_wm_close_to_a_hidden_helper_of_qt_quits` posts one to `_q_titlebar`. With a look every 0.05 s taskkill comes
+before the wizard is even built and goes to the tray's window, which quit on both builds (40 of 40 each).

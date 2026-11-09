@@ -148,6 +148,11 @@ jobs:
           PERESMESHNIK_WORK_GATE: '1'
           PERESMESHNIK_MODELS: ${{ runner.temp }}/models
         run: uv run pytest -q -s tests/test_pipeline_cpu.py
+      - name: A helper that dies (the Piper runner killed while translating) restarts its side, with a clean report
+        env:
+          PERESMESHNIK_WORK_GATE: '1'  # the models are there: the test fails instead of skipping
+          PERESMESHNIK_MODELS: ${{ runner.temp }}/models
+        run: uv run pytest -q -s -rs tests/test_crash.py -k killed
       - name: macOS call sound with the models (file -> BlackHole 16ch / a tapped afplay -> subtitles and voice)
         if: runner.os == 'macOS'
         env:

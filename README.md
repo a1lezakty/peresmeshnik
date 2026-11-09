@@ -101,6 +101,26 @@ are found by themselves, otherwise choose the app in the tray menu "Call app" wh
 browser (Meet) moves with all of its sound, other tabs too. One instance runs per user:
 while yours is open, the app instances that the tests start exit with code 3 ("already running").
 
+## When something goes wrong
+
+- **The cloud fails.** A side set to the cloud (Gemini) goes local by itself when the connection drops, Google answers
+  with an error or the quota is used up, or no translated voice comes `cloud.fallback_after_s` (6 s) after a phrase
+  began. What the cloud had not said yet is said by the local voice, what it had said is not repeated; the tray says
+  so once. Later, when someone starts a phrase, the app tries the cloud again (after 30 s, then less and less often, at
+  most every 15 min while it stays down: nothing runs on a timer) and goes back to it at the next phrase. Going local
+  needs the local models (the wizard downloads them) and, for your own voice, the voice pack and an NVIDIA GPU; without
+  them the tray says what is missing, and the hotkey gives the call your own voice meanwhile.
+- **A crash.** A report goes to the `reports` folder in the app's data folder (macOS `~/Library/Application
+  Support/Peresmeshnik`, Windows `%LOCALAPPDATA%\Peresmeshnik`, Linux `~/.local/share/Peresmeshnik`), and the tray menu
+  shows **Crash report…**: read it, copy it, or open a GitHub issue with it and send it yourself — the app sends
+  nothing. A report has the app's version, the OS, CPU, RAM, GPU, the engines and models of the settings, where it
+  failed and the last lines of the log. It has no subtitles or translations, no audio, no names of devices, of the
+  call app or of your voice, no key and not your user name. When the Piper voice helper dies, only it starts again and
+  the voice goes on a few seconds later; a side whose translation dies otherwise starts again by itself (its models
+  load again: up to ~20 s); after 4 failures within a minute it stays off and says why. One tray message each time.
+- **Latency.** Tray → **Show latency**: each subtitle ends with its clause's times from the end of the speech to the
+  subtitle and to the voice (a cloud phrase: to the end of its voice). Off by default.
+
 ## License
 
 [PolyForm Noncommercial 1.0.0](LICENSE): anyone may use, change and share it for any

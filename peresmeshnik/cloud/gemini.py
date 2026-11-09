@@ -10,7 +10,11 @@
   is not capped at 15 min. Input switches between two 100 ms blocks: nothing is lost or sent
   twice. The old connection is drained until its output is quiet and the new one's events are
   held back until then, so the end of a translation is not cut and the order is kept;
-- latency per link goes to the `peresmeshnik.latency` logger and to `self.latency`.
+- latency per link goes to the `peresmeshnik.latency` logger and to `self.latency`; per phrase a `Latency(-1,
+  'voice_end', s)` event: its translated voice ended s after the phrase did;
+- `fail_fast` (a side with a local fallback, cloud/fallback.py): one connect try (5 s at most), and the direction ends
+  with `CloudDown` when the cloud cannot serve now: the connection was lost and one new one failed (network, an API
+  error, the quota), or a phrase with >= 1 s of speech got no translated voice `cloud.fallback_after_s` after it began.
 
 Threads: one asyncio thread per direction; `feed()` only enqueues; `close()` ends the thread.
 """
@@ -26,14 +30,24 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from peresmeshnik.config import Cloud
-from peresmeshnik.engines import SAMPLE_RATE, Caption, Speech
+from peresmeshnik.engines import SAMPLE_RATE, Caption, Latency, Speech
 
 OUT_RATE = 24_000
 BLOCK = SAMPLE_RATE // 10  # 100 ms, as the Live API recommends
 BACKLOG = 300  # blocks (30 s) kept while a dropped connection is replaced
 LANG = {'en': 'en-US', 'ru': 'ru-RU'}
+CONNECT_S = 5.0  # fail_fast: a connect (socket, TLS, setup) that takes longer counts as failed (measured 0.3-1 s, BENCH)
+SLOW_MIN_BLOCKS = 10  # fail_fast: a phrase is judged "too slow" only after 1 s of speech (not a cough)
 log = logging.getLogger('peresmeshnik.latency')
 warn = logging.getLogger(__name__).warning
+
+
+class CloudDown(RuntimeError):
+    """The cloud cannot translate now (fail_fast); the message says why, for the tray."""
+
+
+def _short(e: BaseException) -> str:
+    return (str(e) or type(e).__name__).replace('\n', ' ')[:160]
 
 
 def _rms(a: np.ndarray) -> float:
@@ -112,6 +126,7 @@ class _Utt:
     pause: float | None = None  # last 300 ms pause
     end: float | None = None  # 1 s of silence after it
     marks: set = field(default_factory=set)
+    voiced: int = 0  # 100 ms blocks of speech so far
 
 
 class _Conn:
@@ -146,6 +161,7 @@ class _Link:
         self.stalls = 0  # reconnects for silence in a row; the wait doubles with each
         self.dropped = 0  # blocks dropped from a full backlog since the last connection
         self.src_text = ''  # translate: source transcript since the last translated piece
+        self.retry_at = 0.0  # fail_fast: a planned reconnect failed while the old connection works: try again then
 
     def config(self):
         from google.genai import types
@@ -162,14 +178,17 @@ class _Link:
             context_window_compression=types.ContextWindowCompressionConfig(sliding_window=types.SlidingWindow()))
 
     async def connect(self) -> _Conn:
-        for attempt in range(6):
+        tries = 1 if self.d.fail_fast else 6
+        for attempt in range(tries):
             t0 = time.monotonic()
             try:
                 cm = self.d.client.aio.live.connect(model=self.model, config=self.config())
-                session = await cm.__aenter__()
+                session = await (asyncio.wait_for(cm.__aenter__(), CONNECT_S) if self.d.fail_fast else cm.__aenter__())
                 break
             except Exception as e:  # quota, network, expired handle: retry fresh, then give up loudly
-                if attempt == 5:
+                if attempt == tries - 1:
+                    if self.d.fail_fast:
+                        raise CloudDown(f'cannot connect: {_short(e)}') from e
                     raise
                 warn('%s: connect failed (%s), retry', self.kind, str(e)[:200])
                 self.handle = None if attempt else self.handle
@@ -186,7 +205,7 @@ class _Link:
 
     def due(self, quiet: bool) -> bool:
         c, now = self.conn, time.monotonic()
-        if self.next:
+        if self.next or now < self.retry_at:
             return False
         if c.task.done() or c.failed or self.go_away:
             return True
@@ -208,9 +227,13 @@ class _Link:
             self.go_away = False
             self.next = asyncio.create_task(self.connect())
         if self.next and self.next.done():
-            if self.next.exception() is not None:  # still no connection: the next block tries again
-                warn('%s: reconnect failed (%s)', self.kind, str(self.next.exception())[:200])
+            if (e := self.next.exception()) is not None:  # still no connection: the next block tries again
                 self.next = None
+                if self.d.fail_fast:
+                    if self.conn.task.done() or self.conn.failed:  # lost, and no new one: the side goes local
+                        raise CloudDown(f'{self.kind}: {self.lost(self.conn)}; {_short(e)}') from e
+                    self.retry_at = time.monotonic() + 10  # a planned one: the old connection still works
+                warn('%s: reconnect failed (%s)', self.kind, str(e)[:200])
             else:
                 old, self.conn, self.next = self.conn, self.next.result(), None  # switch between two blocks
                 self.d.mark(f'cloud.{self.kind}.reconnect_after', time.monotonic() - old.started)
@@ -239,6 +262,12 @@ class _Link:
         if voiced:
             c.unanswered += 1
             c.waiting = c.waiting or time.monotonic()
+
+    @staticmethod
+    def lost(c: _Conn) -> str:
+        if c.task.done() and not c.task.cancelled() and (e := c.task.exception()) is not None:
+            return f'the connection closed ({_short(e)})'
+        return 'a send failed' if c.failed else 'the connection closed'
 
     async def stream_end(self):
         if self.kind == 'transcribe' and not (self.conn.task.done() or self.conn.failed):  # never to the translator
@@ -345,7 +374,8 @@ class _Link:
 class GeminiDirection:
     """Direction (engines.py) over Gemini Live: Speech from the translator, Caption from both models."""
 
-    def __init__(self, src: str, tgt: str, key: str | None = None, cfg: Cloud | None = None, client=None, gate=None):
+    def __init__(self, src: str, tgt: str, key: str | None = None, cfg: Cloud | None = None, client=None, gate=None,
+                 fail_fast: bool = False):
         self.src, self.tgt, self.cfg = src, tgt, cfg or Cloud()
         self.gate = gate or make_gate()  # before the thread: a model error comes out here
         if client is None:
@@ -360,6 +390,9 @@ class GeminiDirection:
         self._utts: list[_Utt] = []
         self._voiced_until = 0.0  # end of the last voiced translated chunk
         self._segment = False  # transcribe: a segment is open (partials came, no final yet)
+        self._heard_at = 0.0  # when the last voiced translated chunk came
+        self.fail_fast = fail_fast
+        self.ready = threading.Event()  # every connection is up (a fallback's probe waits for it)
         self._thread = threading.Thread(target=self._run, name=f'gemini-{src}-{tgt}', daemon=True)
         self._thread.start()
 
@@ -407,7 +440,7 @@ class GeminiDirection:
         return None
 
     def on_audio(self, now, until):
-        self._voiced_until = until
+        self._voiced_until, self._heard_at = until, now
         u = self._oldest(now, 'audio')
         if u and u.fresh:
             self.mark('cloud.translate.first_audio_after_start', now - u.start)
@@ -418,6 +451,7 @@ class GeminiDirection:
             u.marks.add('done')
         if done:
             self.mark('cloud.translate.done_after_end', last_voiced - done[-1].end)
+            self.emit(Latency(-1, 'voice_end', round(last_voiced - done[-1].end, 3)))
 
     def on_text(self, now, final):
         if not final and not self._segment and (u := self._oldest(now, 'partial')):
@@ -425,6 +459,11 @@ class GeminiDirection:
         self._segment = not final
         if final and (u := self._oldest(now, 'final', 'pause')):
             self.mark('cloud.transcribe.final_after_pause', now - u.pause)
+
+    def _check_slow(self, t: float) -> None:
+        u = self._utts[-1] if self._utts else None
+        if u and u.voiced >= SLOW_MIN_BLOCKS and self._heard_at < u.start and t - u.start > self.cfg.fallback_after_s:
+            raise CloudDown(f'no translation {t - u.start:.0f} s after the phrase began')
 
     async def _main(self):
         links = [_Link(self, 'translate')] + ([_Link(self, 'transcribe')] if self.cfg.subtitles else [])
@@ -437,6 +476,7 @@ class GeminiDirection:
                     t.cancel()
                 await asyncio.gather(*starts, return_exceptions=True)
                 raise
+            self.ready.set()
             gate, buf = self.gate, np.zeros(0, np.int16)
             while (item := await self._in.get()) is not None:
                 t, pcm = item
@@ -458,6 +498,10 @@ class GeminiDirection:
                             await lk.stream_end()
                     if ev == 'end':
                         self._utts[-1].end = gate.last_voiced
+                    if self._utts and gate.on and gate.quiet == 0:
+                        self._utts[-1].voiced += 1
+                    if self.fail_fast:
+                        self._check_slow(t)
                 buf = buf[n:]
             if links[0].conn:
                 self.on_quiet(links[0].conn.last_voiced)

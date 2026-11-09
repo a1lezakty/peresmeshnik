@@ -451,15 +451,19 @@ def test_live_voice_plays_again_when_the_output_is_back(monkeypatch):
     s.them_to_me = 'local'
     errors, plays, fails = [], [], [3]  # the output fails its first three tries
 
-    class Direction:
+    class Direction:  # its events last until it is closed, as a real one's (ended by themselves: it died)
+        def __init__(self):
+            self.closed = threading.Event()
+
         def feed(self, pcm):
             pass
 
         def events(self):
+            self.closed.wait()
             yield from ()
 
         def close(self):
-            pass
+            self.closed.set()
 
     class FlakyOut:
         def play(self, pcm, sr):

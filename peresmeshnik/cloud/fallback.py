@@ -412,8 +412,9 @@ def voice_why(name: str, s) -> str:
             return 'no voice enrolled (setup wizard, "Your voice")'
         if not shutil.which('nvidia-smi'):
             return 'your cloned voice is not live without an NVIDIA GPU'
-        if importlib.util.find_spec('torch') is None:
-            return 'the voice pack (torch) is not installed'
+        from peresmeshnik.local.clone import voice_cmd
+        if voice_cmd() is None and importlib.util.find_spec('torch') is None:  # the pack's runner, or torch here
+            return 'the voice pack is not installed (setup wizard, "Your voice")'
         models.path(s.local.clone)
     except models.ModelMissing as e:
         return str(e)
@@ -439,8 +440,8 @@ def make(name: str, s, key: str, on_state=lambda text: None, on_respawn=lambda e
             from peresmeshnik.local.tts import PiperTts
             return crash.Respawn(lambda: PiperTts(s.local.tts[tgt], threads=s.local.threads), on_respawn)
         from peresmeshnik import models
-        from peresmeshnik.local.clone import XttsClone
-        return XttsClone(models.path(s.local.clone), threads=s.local.threads)
+        from peresmeshnik.local.clone import make_clone  # the voice pack's runner, or XTTS in this process
+        return make_clone(models.path(s.local.clone), threads=s.local.threads)
     return Fallback(
         name, tgt, s.cloud.subtitles,
         make_cloud=lambda: GeminiDirection(src, tgt, key, s.cloud, fail_fast=True),

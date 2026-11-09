@@ -192,7 +192,7 @@ def me_side(monkeypatch, tmp_path, clone_error=None, key=True):
     monkeypatch.setattr(clone, 'make_clone', make)
     side = app.Side.__new__(app.Side)
     side.name, side.src, side.tgt, side.engine, side.settings, side.live = 'me', s.my_lang, s.their_lang, 'local', s, False
-    side._lock, side._stopped, side.directions, side.errors = threading.Lock(), False, [], []
+    side._lock, side.directions, side.errors = threading.Lock(), [], []
     side.on_error = side.errors.append
     cloud = types.SimpleNamespace(supports_live=True, close=lambda: None, set_live=lambda on: None)
 
@@ -223,7 +223,8 @@ def test_clone_that_dies_mid_call_is_replaced(monkeypatch, tmp_path):
     side.directions = [(LiveSwitch(dead), True, True)]
     side._consume(side.directions[0][0], True, True)  # its events end at once: the worker died
     assert dead.closed and side.errors == ['error: me: the voice clone is off (the voice pack exited (-11)); '
-                                           'a stock voice speaks instead']
+                                           'a stock voice speaks instead',
+                                           'error: me: its events ended by themselves']  # the stock voice's: a failure
     new = side.directions[0][0]
     assert isinstance(new, LiveSwitch) and new.inner.tts is None and new.inner.voice is None  # no second fallback
     new.close()

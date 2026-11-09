@@ -473,18 +473,20 @@ def test_flush_leaves_silence():
         time.sleep(0.4)
         vm.play(tone(3.0, SR_IN), SR_IN)
         time.sleep(1.0)
-        t = time.monotonic()
         vm.flush()
         time.sleep(2.5)
         y = rec.stop()
     finally:
         vm.remove()
-    cut = next(n for at, n in rec.stamps if at >= t + 0.3)  # chunks arrive with jitter: ~1 ms of tone was seen at +0.15 s
-    before, after = y[:cut - SR_OUT // 5], y[cut:]
-    say(f'\nflush: rms before {np.sqrt(np.mean(before[-SR_OUT // 2:] ** 2)):.3f}, after {np.sqrt(np.mean(after ** 2)):.4f} '
-          f'(max {np.abs(after).max():.4f}) over {len(after) / SR_OUT:.1f} s')
-    assert np.sqrt(np.mean(before[-SR_OUT // 2:] ** 2)) > 0.15  # it was playing
-    assert np.abs(after).max() < 0.01
+    # by the recording's own samples, not by when its chunks came (they come with jitter: 0.3 s once on the runner)
+    loud = np.flatnonzero(np.abs(y) > 0.01)
+    s0, s1 = loud[0], loud[-1]
+    said, rest = (s1 - s0) / SR_OUT, y[s1 + 1:]
+    say(f'\nflush: {said:.2f} s of the 3 s tone heard (flushed after 1 s), rms {np.sqrt(np.mean(y[s0:s1] ** 2)):.3f}; '
+        f'then {len(rest) / SR_OUT:.1f} s of silence (max {np.abs(rest).max() if len(rest) else 0:.4f})')
+    assert np.sqrt(np.mean(y[s0:s1] ** 2)) > 0.15  # it was playing
+    assert 0.6 < said < 1.5  # it stopped at the flush (the tone is 3 s)
+    assert len(rest) > 1.2 * SR_OUT  # and nothing after it: no last buffer left looping
 
 
 @win

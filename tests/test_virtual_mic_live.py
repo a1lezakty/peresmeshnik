@@ -338,12 +338,12 @@ def test_record_counts_sound_not_wall_time(monkeypatch):
         def start(self, on_frames):
             def run():
                 time.sleep(0.5)  # the helper starting
-                sent = 0
+                if self.stop_after is not None:  # gives this much at once and goes silent (no runner is too slow for it)
+                    for _ in range(round(self.stop_after * 50)):
+                        on_frames(np.full(self.sr // 50, 0.1, np.float32))
+                    return
                 while not self.stopped.wait(0.02):
-                    if self.stop_after is not None and sent >= self.stop_after * self.sr:
-                        return
                     on_frames(np.full(self.sr // 50, 0.1, np.float32))
-                    sent += self.sr // 50
             threading.Thread(target=run, daemon=True).start()
 
         def stop(self):
@@ -357,4 +357,4 @@ def test_record_counts_sound_not_wall_time(monkeypatch):
     monkeypatch.setattr(mic_mod, 'Mic', lambda device, sample_rate, **k: LateMic(device, sample_rate, stop_after=0.4))
     t = time.monotonic()
     x = mic_mod.record(1.5, sample_rate=8000)
-    assert abs(len(x) - 3200) <= 160 and time.monotonic() - t < 1.5 + 0.5 + 0.5
+    assert len(x) == 3200 and time.monotonic() - t < 1.5 + 0.5 + 0.5

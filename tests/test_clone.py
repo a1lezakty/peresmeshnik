@@ -12,7 +12,7 @@ import pytest
 
 from peresmeshnik import voice
 from peresmeshnik.local.clone import SR, XttsClone, budget_samples, cap_pauses, guard, split_text
-from peresmeshnik.local.xtts import FADE_IN, SENTENCE_PAUSE_S, closed, shape
+from peresmeshnik.local.xtts import FADE_IN, SENTENCE_END, SENTENCE_PAUSE_S, closed, shape
 
 REF_RU = Path(os.environ.get('BENCH_DATA', 'bench-data')) / 'set' / 'ref_ru.wav'  # LibriVox reader (bench/data.py), if present
 
@@ -206,10 +206,16 @@ def test_shape_fades_in_and_pauses_after_a_sentence(sentence_end):
     assert silence == (round(SENTENCE_PAUSE_S * SR) if sentence_end else len(tail))
     long = list(shape(iter([talk, np.zeros(SR, np.float32)]), True))  # a long enough silence already: nothing added
     assert len(long) == 2
+    short = list(shape(iter([talk, talk[:SR // 200]]), True))  # a loud chunk under 10 ms ends it: not silence
+    assert len(short[-1]) == round(SENTENCE_PAUSE_S * SR)
 
 
 def test_a_fragment_ends_with_a_comma():
     assert closed('number of those opposed to the') == 'number of those opposed to the,'
     assert closed('  education   and ') == 'education and,'
-    for done in ('Hello.', 'Really?', 'Wait!', 'and so,', 'as follows:', 'He said "yes."', 'Он сказал «да».', ''):
+    for done in ('Hello.', 'Really?', 'Wait!', 'and so,', 'as follows:', 'He said "yes."', 'Он сказал «да».', '',
+                 '你好。', '真的吗？', '他说「好。」', '然后，', 'هل أنت هنا؟', 'ثم،'):
         assert closed(done) == done
+    assert closed('我们') == '我们,'
+    assert [bool(SENTENCE_END.search(t)) for t in ('Hello.', '你好。', '真的吗？', 'هل أنت هنا؟', '他说「好。」', 'and so,', '然后，')] \
+        == [True] * 5 + [False] * 2

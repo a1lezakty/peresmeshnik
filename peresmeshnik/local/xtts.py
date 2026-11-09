@@ -20,6 +20,7 @@ SLOW_CPS = 8.0  # spoken chars per second; real XTTS speech is 12-20 (BENCH): a 
 FADE = SR // 100
 FADE_IN = SR // 200  # XTTS starts mid-waveform: half of its utterances stepped -33..-10 dB under their peak (a click, BENCH)
 SENTENCE_PAUSE_S = 0.35  # silence after a sentence: queued clauses played back to back had 0.1-0.16 s between sentences
+SENTENCE_END = re.compile(r'[.!?…。！？؟]["»”)」』]*$')  # zh / ja / ar too (stage 6)
 
 
 def split_text(text: str, limit: int) -> list[str]:
@@ -45,7 +46,7 @@ def closed(text: str) -> str:
     """A clause cut mid-sentence ("... opposed to the") ends with a comma for XTTS: without one it went on with a
     word or two of its own in 6 of 102 such clauses, with a comma in none (a period: 6; BENCH stage 5)."""
     text = ' '.join(text.split())
-    return text if not text or re.search(r'[.!?…,;:]["»”)]*$', text) else text + ','
+    return text if not text or re.search(r'[.!?…,;:。！？，；：、؟،]["»”)」』]*$', text) else text + ','
 
 
 def spoken_len(text: str) -> int:
@@ -99,9 +100,10 @@ def shape(chunks: Iterator[np.ndarray], sentence_end: bool, sr: int = SR) -> Ite
             n = min(FADE_IN, len(c))
             c[:n] *= np.linspace(0, 1, n + 1, dtype=np.float32)[1:]
         k = len(c) // frame
-        f = 10 * np.log10(np.mean(c[len(c) - k * frame:].reshape(k, frame) ** 2, axis=1) + 1e-10) if k else np.zeros(0)
+        blocks = c[len(c) - k * frame:].reshape(k, frame) if k else c[None]  # a chunk under 10 ms is one block
+        f = 10 * np.log10(np.mean(blocks ** 2, axis=1) + 1e-10) if len(c) else np.zeros(0)
         loud = np.nonzero(f >= QUIET_DB)[0]
-        quiet = quiet + len(c) if not len(loud) else (k - 1 - loud[-1]) * frame
+        quiet = quiet + len(c) if not len(loud) else (len(f) - 1 - loud[-1]) * frame
         yield c
     if sentence_end and (pad := int(SENTENCE_PAUSE_S * sr) - quiet) > 0:
         yield np.zeros(pad, np.float32)
@@ -186,7 +188,7 @@ class Engine:
                                               enable_text_splitting=False)
             try:
                 yield from shape(guard(cap_pauses(c.float().cpu().numpy() for c in gen), budget_samples(part)),
-                                 bool(re.search(r'[.!?…]["»”)]*$', part)))
+                                 bool(SENTENCE_END.search(part)))
             finally:
                 gen.close()  # stops generation on a cut or when the caller stops listening (barge-in)
 

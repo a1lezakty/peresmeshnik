@@ -217,6 +217,11 @@ def load(path: Path | None = None) -> Settings:
     if wrong := set(s.forced_cloud) - {'them_to_me', 'me_to_them'}:
         bad.append(f'forced_cloud may hold only them_to_me, me_to_them, got {sorted(wrong)}')
         s.forced_cloud = []
+    r = s.remote  # nonsense from a hand edit: the nearest sane value, said on stderr
+    for k, lo, hi in (('jitter_ms', 0, 500), ('retry_s', 1.0, 300.0), ('slow_s', 2.0, 60.0)):
+        if not lo <= (v := getattr(r, k)) <= hi:
+            setattr(r, k, type(v)(min(max(v, lo), hi)))
+            print(f'settings: remote.{k} {v} is outside {lo}..{hi}, {getattr(r, k)} used', file=sys.stderr)
     if not 0.2 <= (r := s.local.mic_echo_rho_on) <= 0.8:  # near 0 it zeroes my speech, near 1 lets every echo through
         s.local.mic_echo_rho_on = min(max(r, 0.2), 0.8)
         print(f'settings: local.mic_echo_rho_on {r} is outside 0.2..0.8, {s.local.mic_echo_rho_on} used', file=sys.stderr)

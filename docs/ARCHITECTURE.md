@@ -506,7 +506,8 @@ runner so far (BENCH "Stage 3: me → them on macOS"); a real Mac, AirPods and a
   torch) are published once as assets of the project's GitHub release
   [`models-1`](https://github.com/a1lezakty/peresmeshnik/releases/tag/models-1) with the original
   license, README and attribution.
-- Voice profiles: `platformdirs.user_data_dir`, never uploaded.
+- Voice profiles: `platformdirs.user_data_dir`, never uploaded, except to your own paired server (engine `remote`) for a
+  session: only your own voice confirmed by a live recording (voice.json v2, `kind` me).
 
 ## 9. Hardware tiers
 

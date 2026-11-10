@@ -14,8 +14,9 @@ from peresmeshnik.remote import pairing
 
 HOW = ('On the stronger computer run <code>peresmeshnik serve</code>. It shows a line like '
        '<code>https://192.168.1.20:47000/#K7QM-2XPA-4DFE</code> (the address and a one-time code, 10 minutes): paste it '
-       'here. Both computers must be on one network (home LAN or Tailscale). With "Me → them" on the server your voice '
-       'profile goes to it for each session and is deleted there when the session ends.')
+       'here. Both computers must be on one network (home LAN or Tailscale). With "Me → them" on the server your own voice '
+       '(confirmed by a live recording) goes to it for each session; it is deleted there when the session ends, or up to '
+       '10 minutes later if the server keeps the session warm for your return.')
 
 
 def described(p: dict | None) -> str:

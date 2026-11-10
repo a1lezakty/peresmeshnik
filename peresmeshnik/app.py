@@ -519,6 +519,8 @@ class Side:
     on_failure = None  # (why, exception): the controller restarts the side; None: the tray hears it
     _stopping = False
     auto = False  # the translation is down (cloud/fallback.py: on_mode): the call's own sound passes meanwhile
+    _live_lock = threading.Lock()  # the hotkey (control thread) against on_mode (the side's events thread); one for all
+    # sides (a switch is rare) and a class default, so a side made without __init__ (tests) has it
 
     def __init__(self, name: str, s: config.Settings, inp, out, overlay, on_error=lambda text: None, echo=None):
         """`echo`: an audio.echo.EchoGate on the input (our own speech coming back from the other side is not translated)."""
@@ -734,17 +736,19 @@ class Side:
         self.out.flush()
 
     def set_live(self, on: bool) -> None:
-        self._live(on, self.auto)
+        with self._live_lock:
+            self._live(on, self.auto)
 
     def _on_mode(self, mode: str) -> None:
-        """The side's Fallback switched (its events thread): while it is 'down' nothing translates, the call app is muted
-        for the translation and the other side would hear nothing, so the call's own sound passes (the user's live voice),
-        until it is back ('cloud') or local."""
-        if (mode == 'down') != self.auto:
-            log.info('%s: %s: the live voice %s', self.name, mode, 'on' if mode == 'down' else 'off')
-            self._live(self.live, mode == 'down')
+        """The side's Fallback switched (its events thread; 'down' also while its server loads the models): while it is
+        'down' nothing translates, the call app is muted for the translation and the other side would hear nothing, so
+        the call's own sound passes (the user's live voice), until it is back ('cloud') or local."""
+        with self._live_lock:
+            if (mode == 'down') != self.auto:
+                log.info('%s: %s: the live voice %s', self.name, mode, 'on' if mode == 'down' else 'off')
+                self._live(self.live, mode == 'down')
 
-    def _live(self, live: bool, auto: bool) -> None:
+    def _live(self, live: bool, auto: bool) -> None:  # under _live_lock
         was, on = self.live or self.auto, live or auto
         if self._supports_live:
             self.directions[0][0].set_live(on)

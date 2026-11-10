@@ -47,8 +47,10 @@ LAG_S = 3.5  # the cloud's voice behind the speech until this session measured i
 KEEP_S = 15.0  # input kept: for a new local path, and for the first syllables of a phrase going back to the cloud
 PRE_S = 1.0  # back to the cloud: the input from this long before the phrase's first partial subtitle
 RETRY_S, RETRY_MAX_S = 30.0, 900.0
+READY_GRACE_S = 1.0  # the primary path not ready this long after the side starts (the server loads its models): 'down'
 ARROW = {'them': 'them → me', 'me': 'me → them'}
 _END, _SAY = object(), object()
+NO_MORE = 'no new try until translation is turned on again'  # a refusal retrying does not cure
 
 
 class Muted:
@@ -184,6 +186,8 @@ class Fallback:
         for d in (self.cloud, self.local):
             if d:
                 self._pump(d)
+        if on_mode and hasattr(self.cloud, 'ready'):
+            threading.Thread(target=self._await_ready, args=(self.cloud,), name=f'{name}-ready', daemon=True).start()
 
     # Direction --------------------------------------------------------------------------------------
     def feed(self, pcm) -> None:
@@ -313,7 +317,7 @@ class Fallback:
         else:  # it spoke since (or this is its first fault): retry_s again
             self.retry_s = self.retry_base
         self.retry_at = time.monotonic() + self.retry_s
-        self._stop_trying(e)  # said below, with why
+        permanent = self._stop_trying(e)  # said below, with why
         self.switched.append(('down', time.monotonic()))
         lags = [s for k, s in getattr(old, 'latency', ()) if k == 'cloud.translate.done_after_end']
         cut = self.heard_at - (statistics.median(lags) if lags else LAG_S) + MARGIN_S  # speech that ended later: unsaid
@@ -326,7 +330,7 @@ class Fallback:
             except Exception as ex:
                 reason = self.local_why = str(ex)
         if reason:
-            self._down(reason, f'{self.label[0]} failed ({why})')
+            self._down(reason, f'{self.label[0]} failed ({why})', permanent)
             return
         self.muted.lock.acquire()  # before a clause is marked to be said: the muted ones the cloud had not said go first
         try:
@@ -355,19 +359,37 @@ class Fallback:
             return
         self._say(again)  # releases the lock
         note, self.voice_note = self.voice_note, ''  # once
-        self.on_state(f'note: {ARROW[self.name]}: {self.label[0]} failed ({why}); translating locally until it answers '
-                      'again' + (f'; {note}' if note else ''))
+        until = f'; {NO_MORE}' if permanent else ' until it answers again'
+        self.on_state(f'note: {ARROW[self.name]}: {self.label[0]} failed ({why}); translating locally{until}'
+                      + (f'; {note}' if note else ''))
         self._mode()
 
-    def _down(self, reason: str, what: str) -> None:
+    def _down(self, reason: str, what: str, permanent: bool = False) -> None:
         self.mode = 'down'
         if self.on_mode:  # the app passes the call's own sound meanwhile
-            live = {'them': '; you hear the call as it is', 'me': '; the call hears your own voice'}[self.name] + \
-                f' until {self.label[0]} answers again'
+            live = f'; {self._live_text()}' + (f'; {NO_MORE}' if permanent else f' until {self.label[0]} answers again')
         else:
             live = '; the hotkey gives the call your own voice' if self.name == 'me' else ''
         self.on_state(f'error: {ARROW[self.name]}: {what} and there is no local path here: {reason}{live}')
         self._mode()
+
+    def _live_text(self) -> str:
+        return {'them': 'you hear the call as it is', 'me': 'the call hears your own voice'}[self.name] + \
+            ' (the hotkey changes nothing)'
+
+    def _await_ready(self, cloud) -> None:
+        """The side starts and its primary path is not ready (the server loads its models: up to ~30 s): nothing would
+        translate meanwhile, with the call app muted - 'down' for the app (the call's own sound) until it is."""
+        if cloud.ready.wait(READY_GRACE_S) or self._closing or self.cloud is not cloud:
+            return
+        self.on_mode('down')
+        self.on_state(f'note: {ARROW[self.name]}: {self.label[0]} is getting ready (it loads its models); '
+                      f'{self._live_text()} meanwhile')
+        while not cloud.ready.wait(1.0):
+            if self._closing or self.cloud is not cloud:  # failed meanwhile: _cloud_failed said where the side went
+                return
+        if self.mode == 'cloud' and self.cloud is cloud and not self._closing:
+            self.on_mode('cloud')
 
     def _mode(self) -> None:
         if self.on_mode:
@@ -421,7 +443,7 @@ class Fallback:
         self.retry_at, self.retry_s = time.monotonic() + self.retry_s, min(self.retry_s * 2, self.retry_max)
         log.info('%s: the cloud is still down (%s); the next try in %.0f s or later', self.name, e, self.retry_s / 2)
         if self._stop_trying(e):
-            self.on_state(f'error: {ARROW[self.name]}: {e}; no more tries until translation is turned on again')
+            self.on_state(f'error: {ARROW[self.name]}: {e}; {NO_MORE}')
 
     def _stop_trying(self, e) -> bool:
         """A refusal that trying again does not cure (the server: an unknown token, another protocol version, a pair
@@ -519,23 +541,34 @@ def voice_why(name: str, s) -> str:
     return local_voice(name, s)[1]
 
 
-def my_voice(s) -> bytes | None:
-    """What me -> them on the user's server speaks with: the enrolled profile, zipped (protocol.pack_voice), only when it
-    is the user's own confirmed voice (M-20: a contact's voice never speaks as me); None: the server's stock voice."""
+MINE = ('mic-live', 'import+mic-match')  # voice.json v2 consent.how of my own voice, confirmed by a live recording (S3)
+
+
+def my_voice(s) -> tuple[bytes | None, str]:
+    """What me -> them on the user's server speaks with: (the enrolled profile zipped (protocol.pack_voice), '') only when
+    it is the user's own voice confirmed by a live recording - voice.json v2 (stream S3) with kind 'me' and consent from
+    the microphone (M-20, the leader's rule for the server: a v1 profile, a file imported without the live check, a
+    contact's voice never go up); else (None, why): the server's stock voice speaks and the side goes on. The stock
+    setting ([local] clone = piper) is this computer's and does not hold the user's voice back from the server.
+    ponytail: S3's voice.mine() is the one check once it is on main."""
     import json
 
     from peresmeshnik import voice as profiles
     from peresmeshnik.remote import protocol
-    if not s.local.voice or s.local.clone == profiles.STOCK:
-        return None
+    if not s.local.voice:
+        return None, ''
     folder = profiles.voices_dir() / s.local.voice
-    meta = json.loads((folder / 'voice.json').read_text('utf-8'))
-    # voice.json v2 (stream S3): kind and consent; a v1 profile was recorded by the user in the wizard
-    # ponytail: S3's one check of "my confirmed voice" replaces this when it lands
-    if meta.get('version', 1) >= 2 and not (meta.get('kind') == 'me' and (meta.get('consent') or {}).get('how') in
-                                            ('mic-live', 'import+mic-match')):
-        raise RuntimeError(f'the voice "{s.local.voice}" is not your own confirmed voice: it cannot speak for you')
-    return protocol.pack_voice(folder)
+    try:
+        meta = json.loads((folder / 'voice.json').read_text('utf-8'))
+    except (OSError, ValueError):
+        return None, 'your voice profile is not there or cannot be read'
+    consent = meta.get('consent') if isinstance(meta, dict) else None
+    if not (meta.get('version') == 2 and meta.get('kind') == 'me' and isinstance(consent, dict) and consent.get('how') in MINE):
+        return None, 'your voice is not confirmed by a live recording'
+    try:
+        return protocol.pack_voice(folder), ''
+    except (OSError, ValueError) as e:
+        return None, f'your voice profile cannot be sent ({e})'
 
 
 def make(name: str, s, key: str, on_state=lambda text: None, on_respawn=lambda e: None, remote: dict | None = None,
@@ -577,7 +610,10 @@ def make(name: str, s, key: str, on_state=lambda text: None, on_respawn=lambda e
     note = f'your voice is not ready ({note}), a stock voice speaks for you' if note else ''
     if remote is not None:
         from peresmeshnik.remote.client import RemoteDirection
-        up = my_voice(s) if name == 'me' else None
+        up, up_why = my_voice(s) if name == 'me' else (None, '')
+        if up_why:
+            on_state(f'note: {ARROW[name]}: {up_why}: record your voice again (Voices…) to hear it on the server; its stock '
+                     'voice speaks meanwhile')
         return Fallback(
             name, tgt, True,
             make_cloud=lambda: RemoteDirection(remote['address'], name, src, tgt, remote['token'], remote['fp'], voice=up,

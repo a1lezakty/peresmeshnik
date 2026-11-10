@@ -208,7 +208,13 @@ downloads them again.
   for a cloud direction too, unless its subtitles come from the cloud ("Subtitles from the cloud") or its languages
   have no local models; a noncommercial stock voice (Turkish, Korean, Japanese) only if you accept its license. Your
   cloned voice takes over where it is ready, else the stock voice. Without a local path the wizard says so beforehand,
-  the tray says what is missing, and the hotkey gives the call your own voice meanwhile.
+  the tray says what is missing, and meanwhile you hear the call as it is and the call hears your own live voice (your
+  choice over silence; the hotkey changes nothing until the translation is back).
+- **Your own server fails** (a direction set to `remote`: tray menu, Server…). The same: this computer translates when
+  it has the models, else the call passes as it is, and the server is tried again (after 5 s, at most every 150 s). A
+  refused device (revoked with `peresmeshnik serve --revoke`, or the server's certificate changed) is not tried again:
+  pair again. The pairing code and the device token protect the server, not the network: a private address (a home LAN,
+  Tailscale, or 100.64/10 that some mobile operators give many customers) is not a trusted network by itself.
 - **A crash.** A report goes to the `reports` folder in the app's data folder (macOS `~/Library/Application
   Support/Peresmeshnik`, Windows `%LOCALAPPDATA%\Peresmeshnik`, Linux `~/.local/share/Peresmeshnik`), and the tray menu
   shows **Crash report…**: read it, copy it, or open a GitHub issue with it and send it yourself — the app sends

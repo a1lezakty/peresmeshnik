@@ -16,6 +16,7 @@ from test_ui import FakeIn, FakeOut
 from peresmeshnik import app, config, languages
 from peresmeshnik.cloud import fallback
 from peresmeshnik.cloud.fallback import Fallback
+from peresmeshnik.cloud.gemini import _Gate
 from peresmeshnik.engines import SAMPLE_RATE, Caption, Latency
 from peresmeshnik.pipeline import LocalDirection
 from peresmeshnik.remote import protocol
@@ -51,7 +52,8 @@ class Run:
                 raise RuntimeError('model asr-en is not downloaded')
             return LocalDirection(EnergyVad(), WordAsr(), UpperMt(), tts, 'en', 'ru')
         self.fb = Fallback('them', 'ru', True,
-                           make_cloud=lambda: RemoteDirection(srv.address, 'them', 'en', 'ru', TOKEN, srv.fp, jitter_ms=0),
+                           make_cloud=lambda: RemoteDirection(srv.address, 'them', 'en', 'ru', TOKEN, srv.fp, jitter_ms=0,
+                                                              gate=_Gate()),
                            make_local=make_local, make_tts=TextTts, on_state=self.states.append,
                            label=('the server', 'on the server'), retry_s=retry_s, on_mode=self.modes.append)
         assert self.fb.cloud.ready.wait(5)
@@ -76,7 +78,8 @@ def test_the_server_fails_and_the_cut_clause_is_said_locally(srv):
     r = Run(srv)
     try:
         r.say(np.concatenate([tone(2.0), silence(0.5)]))  # clause A (4 words): the server voices it
-        srv.send(protocol.event(Caption('a a a a', 'A A A A', True, 0)), protocol.event(Latency(0, 'voice', 0.5)))
+        srv.send(protocol.event(Caption('a a a a', 'A A A A', True, 0)), protocol.event(Latency(0, 'tts_first', 0.5)),
+                 protocol.event(Latency(0, 'voice', 1.5)))  # its voice queued a second on the server: tts_first counts
         until(lambda: r.captions())
         r.say(tone(1.0))  # clause B (2 words) ...
         srv.refuse = ('internal', 'restarting')
@@ -100,7 +103,8 @@ def test_down_then_back_on_the_server(srv):
         srv.drop()
         until(lambda: r.fb.mode == 'down')
         assert r.modes == ['down']
-        assert [s for s in r.states if s.startswith('error') and 'you hear the call as it is until the server answers again'
+        assert [s for s in r.states if s.startswith('error') and
+                'you hear the call as it is (the hotkey changes nothing) until the server answers again'
                 in s], r.states
         srv.refuse = None  # the server is back: tried again retry_s after, on the input that keeps coming
         t = time.monotonic()
@@ -169,7 +173,8 @@ def test_a_revoked_device_is_not_tried_again(srv):
             r.fb.feed(silence(0.032))
             time.sleep(0.03)
         assert len(srv.hellos) == n and r.fb.probe is None
-        assert [x for x in r.states if 'pair again' in x and x.startswith('error')], r.states
+        assert [x for x in r.states if 'pair again' in x and x.startswith('error')
+                and 'no new try until translation is turned on again' in x and 'answers again' not in x], r.states
     finally:
         r.close()
 
@@ -184,21 +189,92 @@ def test_not_paired_says_so(monkeypatch):
 
 
 def test_only_my_confirmed_voice_goes_up(tmp_path, monkeypatch):
+    """M-20, the leader's rule for the server: only voice.json v2 of kind 'me' confirmed by a live recording goes up;
+    anything else -> None and why (the server's stock voice speaks, the side goes on); the stock setting is this
+    computer's."""
     from peresmeshnik import voice
     monkeypatch.setattr(voice, 'voices_dir', lambda: tmp_path)
     s = config.Settings()
+    assert fallback.my_voice(s) == (None, '')  # no voice recorded: nothing to say
     s.local.voice = 'v'
+    assert fallback.my_voice(s)[1] == 'your voice profile is not there or cannot be read'  # no folder
     (tmp_path / 'v').mkdir()
-    for meta, ok in (({'name': 'v'}, True),  # v1: recorded by the user in the wizard
+    (tmp_path / 'v' / 'voice.json').write_text('{broken')
+    assert fallback.my_voice(s)[1] == 'your voice profile is not there or cannot be read'
+    for meta, ok in (({'name': 'v'}, False),  # v1: not checked live (an imported file could be anyone's)
                      ({'version': 2, 'kind': 'me', 'consent': {'how': 'mic-live'}}, True),
                      ({'version': 2, 'kind': 'me', 'consent': {'how': 'import+mic-match'}}, True),
-                     ({'version': 2, 'kind': 'contact', 'consent': {'how': 'call-saved'}}, False),
-                     ({'version': 2, 'kind': 'me'}, False)):
+                     ({'version': 2, 'kind': 'them', 'consent': {'how': 'call-saved'}}, False),
+                     ({'version': 2, 'kind': 'me', 'consent': None}, False),
+                     ({'version': 2, 'kind': 'me', 'consent': {'how': 'call-saved'}}, False)):
         (tmp_path / 'v' / 'voice.json').write_text(json.dumps(meta))
-        if ok:
-            assert fallback.my_voice(s)
-        else:
-            with pytest.raises(RuntimeError, match='not your own confirmed voice'):
-                fallback.my_voice(s)
-    s.local.clone = voice.STOCK
-    assert fallback.my_voice(s) is None
+        up, why = fallback.my_voice(s)
+        assert (up is not None, why) == ((True, '') if ok else (False, 'your voice is not confirmed by a live recording'))
+    s.local.clone = voice.STOCK  # this computer's stock voice does not hold the voice back from the server
+    (tmp_path / 'v' / 'voice.json').write_text(json.dumps({'version': 2, 'kind': 'me', 'consent': {'how': 'mic-live'}}))
+    assert fallback.my_voice(s)[0]
+
+
+def test_an_unconfirmed_voice_does_not_stop_the_side(srv, monkeypatch, tmp_path):
+    from peresmeshnik import voice
+    from peresmeshnik.remote import pairing
+    monkeypatch.setenv('PERESMESHNIK_MODELS', str(tmp_path))
+    monkeypatch.setattr(voice, 'voices_dir', lambda: tmp_path)
+    monkeypatch.setattr(pairing, 'load', lambda path=None: {'address': srv.address, 'fp': srv.fp, 'token': TOKEN})
+    (tmp_path / 'v').mkdir()
+    (tmp_path / 'v' / 'voice.json').write_text(json.dumps({'name': 'v'}))  # v1
+    s = config.Settings()
+    s.me_to_them, s.local.voice = 'remote', 'v'
+    states = []
+    side = app.Side('me', s, FakeIn(), FakeOut(), type('O', (), {'show': lambda self, c: None})(), on_error=states.append)
+    try:
+        assert side.directions[0][0].inner.cloud.ready.wait(5)
+        assert srv.hellos[-1]['voice'] is None  # the server's stock voice
+        assert [x for x in states if x.startswith('note') and 'record your voice again (Voices…) to hear it on the server'
+                in x], states
+    finally:
+        side.stop()
+
+
+def test_the_server_loading_its_models_is_down_for_the_app(srv, monkeypatch, tmp_path):
+    """The first ready takes a while (the server loads its models): the call's own sound meanwhile, not silence."""
+    from peresmeshnik.remote import pairing
+    monkeypatch.setenv('PERESMESHNIK_MODELS', str(tmp_path))
+    monkeypatch.setattr(pairing, 'load', lambda path=None: {'address': srv.address, 'fp': srv.fp, 'token': TOKEN})
+    srv.ready_delay = 2.5
+    s = config.Settings()
+    s.them_to_me = 'remote'
+    states, out = [], FakeOut()
+    side = app.Side('them', s, FakeIn(), out, type('O', (), {'show': lambda self, c: None})(), on_error=states.append)
+    try:
+        until(lambda: side.auto, 2.0)  # READY_GRACE_S
+        assert [x for x in states if 'the server is getting ready (it loads its models); you hear the call as it is' in x]
+        until(lambda: not side.auto, 5)
+        assert side.directions[0][0].mode == 'cloud' and not side.live
+    finally:
+        side.stop()
+
+
+def test_the_hotkey_and_on_mode_in_any_order():
+    """Both switch the live voice, from two threads: the end state is always live or auto, never a lost one."""
+    class Switch:
+        supports_live, live = True, False
+
+        def set_live(self, on):
+            self.live = on
+    for _ in range(50):
+        side = app.Side.__new__(app.Side)
+        sw = Switch()
+        side.name, side.live, side.directions, side.out = 'me', False, [(sw, True, True)], FakeOut()
+        a = threading.Thread(target=lambda side=side: [side.set_live(i % 2 == 0) for i in range(51)])  # ends on True
+        b = threading.Thread(target=lambda side=side: [side._on_mode('down' if i % 2 else 'cloud') for i in range(51)])
+        a.start(), b.start()
+        a.join(), b.join()
+        assert (side.live, side.auto) == (True, False) and sw.live == (side.live or side.auto)
+
+
+def test_remote_settings_out_of_range(tmp_path):
+    p = tmp_path / 'settings.toml'
+    p.write_text('[remote]\njitter_ms = -5\nretry_s = 0.0\nslow_s = 0.1\n')
+    r = config.load(p).remote
+    assert (r.jitter_ms, r.retry_s, r.slow_s) == (0, 1.0, 2.0)

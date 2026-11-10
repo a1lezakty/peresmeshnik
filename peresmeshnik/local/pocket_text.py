@@ -1,5 +1,6 @@
 """Text as the Pocket TTS models read it (local/pocket.py). The Russian model (Shtorm-PocketTTS-RU) knows no digits and
-no Latin letters (its SentencePiece vocabulary): numbers become words, Latin words Cyrillic. Other languages: as is."""
+no Latin letters (its SentencePiece vocabulary): numbers become words, Latin words Cyrillic; and it was trained on stress
+marks: local/stress_ru.py puts them. Other languages: as is."""
 from __future__ import annotations
 
 import re
@@ -112,4 +113,7 @@ def russian(text: str) -> str:
 
 
 def prepare(text: str, lang: str) -> str:
-    return russian(text) if lang == 'ru' else text
+    if lang != 'ru':
+        return text
+    from peresmeshnik.local.stress_ru import stress
+    return stress(russian(text))

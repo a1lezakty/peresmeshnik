@@ -221,9 +221,12 @@ leaves (`[server] warm_s`), so a reconnect does not load the models again.
   (`ssh -N` delays small messages; the network adds one round trip to the voice either way, BENCH "Remote").
 - **A rented NVIDIA server:** `packaging/server/Dockerfile` (build it yourself: no image is published, it would ship
   the models' and Piper's licenses with it). Your cloned voice runs on its GPU.
-- **What goes there:** the call's sound and your microphone while a side is on the server, and your own confirmed
-  voice profile for the session (in a folder only the server's user can read, deleted when the session ends). The
-  server's log keeps times only, no words (`--log` for debugging). Your Gemini key never goes there. The provider of a
+- **What goes there:** the call's sound and your microphone while a side is on the server, and your own voice
+  profile for the session, only once it is confirmed as yours at the microphone (any other voice sent for *Me → them*:
+  the server speaks with a stock voice). It is kept in a folder only the server's user can read while the laptop's
+  session is warm, up to 10 minutes after it leaves (`[server] warm_s`, 0: at once), and deleted then, when the server
+  stops, or at its next start after a crash. The server's log keeps times only, no words (`--log` for debugging). Your
+  Gemini key never goes there. The provider of a
   rented server can technically see its memory and disk.
 - **For yourself only:** a server for your own laptops is fine; running it as a service for others is not (the voice
   models' licenses are non-commercial).

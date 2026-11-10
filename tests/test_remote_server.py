@@ -109,14 +109,15 @@ class Events:
         return self.q.get(timeout=timeout)
 
 
-def raw(srv, side='them'):
+def raw(srv, side='them', path='', **kw):
     """A bare client for what the app's never sends."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE
     # ponytail: TLS 1.2 here: this sync client over TLS 1.3 got no handshake answer in ~1 of 5 runs of this file (never
     # alone, never the app's asyncio client in hundreds of connections); look into it if a real client ever hangs so
     ctx.maximum_version = ssl.TLSVersion.TLSv1_2
-    return connect(f'wss://{srv.address}{protocol.side_path(side)}', ssl=ctx, max_size=protocol.CHUNK, open_timeout=5)
+    return connect(f'wss://{srv.address}{path or protocol.side_path(side)}', ssl=ctx, max_size=protocol.CHUNK,
+                   open_timeout=5, **kw)
 
 
 def answer(ws) -> dict:
@@ -131,10 +132,15 @@ def frame(v):
     return np.full(FRAME, v, np.float32)
 
 
-def profile(folder, size=int(2.5 * protocol.CHUNK)):
+CONFIRMED = {'version': 2, 'kind': 'me', 'name': 'me', 'consent': {'how': 'mic-live'}}  # voice.json v2 (S3)
+
+
+def profile(folder, size=int(2.5 * protocol.CHUNK), meta=CONFIRMED):
+    """My confirmed voice (an engine's cache as big as `size`), and an xtts.pt the server must not keep (a pickle)."""
     folder.mkdir()
-    (folder / 'voice.json').write_text('{"kind": "me", "name": "me"}')
-    (folder / 'state.bin').write_bytes(os.urandom(size))
+    (folder / 'voice.json').write_text(json.dumps(meta))
+    (folder / 'state.npy').write_bytes(os.urandom(size))
+    (folder / 'xtts.pt').write_bytes(b'a pickle')
     return protocol.pack_voice(folder)
 
 
@@ -142,7 +148,7 @@ def test_pair_then_a_side_end_to_end(srv, made, tmp_path):
     """The main path: pairing with the line `serve` shows, then them -> me through the app's client and Side."""
     code = srv.pairing.new_code()
     paired = pairing.pair(server.url('127.0.0.1', srv.ports[0], code), 'laptop', tmp_path / 'remote')
-    assert paired['fp'] == srv.fp and [d['name'] for d in srv.pairing.devices()] == ['laptop']
+    assert paired['fp'] == srv.fp == srv.pairing.fp != '' and [d['name'] for d in srv.pairing.devices()] == ['laptop']
     d = RemoteDirection(paired['address'], 'them', 'en', 'ru', paired['token'], paired['fp'])
     ev = Events(d)
     assert d.ready.wait(10), ev.error
@@ -234,7 +240,8 @@ def test_the_voice_its_folder_and_its_side(srv, made, tmp_path):
     f = {x.side: x for x in made}
     folder = srv.slots['me'].folder
     assert f['me'].voice_dir == str(folder) and folder.parent == srv.voices  # me -> them: only the voice of its own hello
-    assert (folder / 'state.bin').read_bytes() == (tmp_path / 'mine' / 'state.bin').read_bytes()
+    assert (folder / 'state.npy').read_bytes() == (tmp_path / 'mine' / 'state.npy').read_bytes()
+    assert not (folder / 'xtts.pt').exists()  # a pickle from the laptop is never loaded here: computed again
     assert voice.load(f['me'].voice_dir).meta['kind'] == 'me'  # the app's loader takes the folder as it is
     assert f['them'].voice_dir == '' and srv.slots['them'].folder != folder  # the contact's voice stays on 'them'
     assert isinstance(srv.slots['me'].engines.directions[0][0], server._Unswitched)  # no LiveSwitch here: the client's
@@ -260,7 +267,8 @@ def test_a_damaged_voice_and_leftovers(tmp_path, made):
         token = srv.pairing.add('laptop')
         data = profile(tmp_path / 'v', 1000)
         for sent, ref in [(data[:-1], protocol.voice_ref(data)), (b'x' * len(data), protocol.voice_ref(data)),
-                          (data, {'sha256': 'ab' * 32, 'bytes': len(data)})]:
+                          (data, {'sha256': 'ab' * 32, 'bytes': len(data)}),
+                          (data + b'\0', protocol.voice_ref(data))]:  # never more than hello said
             with raw(srv, 'me') as ws:
                 ws.send(hello(token, 'me', 'ru', 'en', voice=ref))
                 assert answer(ws)['type'] == 'send_voice'
@@ -269,6 +277,7 @@ def test_a_damaged_voice_and_leftovers(tmp_path, made):
                     ws.send(b'\1')  # its last byte is 0
                 a = answer(ws)
                 assert (a['type'], a['code']) == ('error', 'voice'), a
+                assert ('more' in a['text']) is (len(sent) > ref['bytes'])  # refused before the extra is kept
         bad = tmp_path / 'bad'  # a zip, but its voice.json does not read: refused once (not 'internal', retried forever)
         bad.mkdir()
         (bad / 'voice.json').write_text('{not json')
@@ -495,3 +504,158 @@ def test_headless():
             'print(sorted(m for m in ("PySide6", "sounddevice") if m in sys.modules))')
     out = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, timeout=60, check=True)
     assert out.stdout.strip() == '[]'
+
+
+# --- RS-MUST: what the server must do (the security review of the client, PR #24) ---------------------------------
+
+def test_must_auth_first_and_limits(srv, made, monkeypatch):
+    """1, 2: the token right after hello (before the voice, before busy); the first message within HELLO_S; a message
+    at most CHUNK; at most MAX_UNAUTH connections without a checked token."""
+    token = srv.pairing.add('laptop')
+    with raw(srv, 'me') as ws:  # an unpaired client with a voice: 'auth', never 'send_voice'
+        ws.send(hello('cd' * 32, 'me', 'ru', 'en', voice={'sha256': 'ab' * 32, 'bytes': protocol.VOICE_MAX}))
+        assert answer(ws)['code'] == 'auth'
+    with raw(srv) as ws:
+        ws.send(hello(token))
+        assert answer(ws)['type'] == 'ready'
+        with raw(srv, 'me') as other:  # the server is busy, but an unpaired one hears 'auth', not 'busy'
+            other.send(hello('cd' * 32, 'me', 'ru', 'en'))
+            assert answer(other)['code'] == 'auth'
+    from websockets.exceptions import ConnectionClosed
+    monkeypatch.setattr(server, 'HELLO_S', 0.3)
+    with raw(srv) as ws:  # silent: closed
+        t = time.monotonic()
+        with pytest.raises(ConnectionClosed):
+            ws.recv(timeout=5)
+        assert time.monotonic() - t < 3
+    with raw(srv) as ws, pytest.raises(ConnectionClosed) as e:  # a message over CHUNK: closed by the WebSocket (1009),
+        ws.send(b'x' * (protocol.CHUNK + 1))  # sometimes while it is still being sent
+        ws.recv(timeout=5)
+    assert e.value.rcvd.code == 1009
+    monkeypatch.setattr(server, 'HELLO_S', 10.0)
+    monkeypatch.setattr(server, 'MAX_UNAUTH', 2)
+    until(lambda: srv.unauth == 0)
+    with raw(srv) as a, raw(srv, 'me') as b:
+        until(lambda: srv.unauth == 2)
+        with raw(srv) as c, pytest.raises(ConnectionClosed) as e:
+            c.recv(timeout=5)
+        assert e.value.rcvd.code == 1013
+        a.send(hello(token))  # a token shown: no longer counted
+        assert answer(a)['type'] == 'ready' and srv.unauth == 1
+        b.close()
+    until(lambda: srv.unauth == 0)
+
+
+def test_must_a_voice_is_per_device(tmp_path, made):
+    """3: the warm session and the voice it keeps are the device's: another paired computer that knows the sha256 sends
+    the voice itself and gets new engines, never the first one's."""
+    srv = start(tmp_path / 'server', warm_s=30)
+    try:
+        a, b = srv.pairing.add('laptop'), srv.pairing.add('other')
+        v = profile(tmp_path / 'v', 1000)
+        d = RemoteDirection(srv.address, 'me', 'ru', 'en', a, srv.fp, voice=v)
+        assert d.ready.wait(10)
+        d.close()
+        until(lambda: srv.slots['me'].conn is None)
+        with raw(srv, 'me') as ws:
+            ws.send(hello(b, 'me', 'ru', 'en', voice=protocol.voice_ref(v)))
+            assert answer(ws)['type'] == 'send_voice'
+            ws.send(v)
+            assert answer(ws)['warm'] is False and len(made) == 2 and made[0].closed
+    finally:
+        srv.stop()
+        srv.thread.join(10)
+
+
+def test_must_bind_private_only(tmp_path):
+    """6: never every address or a public one unless --public (the command checks each of `hosts('')` too)."""
+    for host in ('', '0.0.0.0', '::', '8.8.8.8', ['127.0.0.1', '0.0.0.0']):
+        with pytest.raises(ValueError):
+            server.Server(tmp_path / 'server', config.Settings(), host)
+    assert server.Server(tmp_path / 'server', config.Settings(), '0.0.0.0', public=True).host == '0.0.0.0'
+    assert all(pairing.private(h) for h in server.hosts(''))
+
+
+def test_must_pairing(srv, made, tmp_path, capsys):
+    """7: /v1/pair only while a code is open; one use; at most 10 minutes; the device paired said on the terminal."""
+    assert pairing.CODE_S <= 600
+    with raw(srv, path=protocol.PAIR_PATH) as ws:  # no code open: refused before anything is read
+        assert answer(ws)['code'] == 'code'
+    code = srv.pairing.new_code()
+    pairing.pair(server.url('127.0.0.1', srv.ports[0], code), 'laptop\x1b[2J', tmp_path / 'remote')
+    assert capsys.readouterr().out == 'paired: laptop[2J from 127.0.0.1\n'  # no terminal control from a name
+    with raw(srv, path=protocol.PAIR_PATH) as ws:  # used: closed again
+        assert answer(ws)['code'] == 'code'
+
+
+def test_must_a_revoked_device_is_cut_off(tmp_path, made, monkeypatch):
+    """8: `serve --revoke` from another process: the device's live session gets 'auth' (it stops trying) and its warm
+    side goes too, within REVOKE_S."""
+    monkeypatch.setattr(server, 'REVOKE_S', 0.1)
+    srv = start(tmp_path / 'server', warm_s=30)
+    try:
+        token = srv.pairing.add('laptop')
+        with raw(srv, 'me') as ws:
+            ws.send(hello(token, 'me', 'ru', 'en'))
+            assert answer(ws)['type'] == 'ready'
+        until(lambda: srv.slots['me'].conn is None)  # warm
+        with raw(srv) as ws:
+            ws.send(hello(token))
+            assert answer(ws)['type'] == 'ready'
+            assert pairing.Pairing(tmp_path / 'server').revoke('laptop')  # another process: its own Pairing
+            a = answer(ws)
+            assert (a['type'], a['code']) == ('error', 'auth')
+        until(lambda: not srv.slots and all(f.closed for f in made))
+    finally:
+        srv.stop()
+        srv.thread.join(10)
+
+
+def test_must_no_token_in_the_log(tmp_path, made, caplog, capsys):
+    """9: neither hello nor pair is logged (token, nonce, mac), whatever the log level; websockets never below INFO."""
+    caplog.set_level(logging.DEBUG)
+    srv = start(tmp_path / 'server')
+    try:
+        assert logging.getLogger('websockets').getEffectiveLevel() >= logging.INFO
+        code, nonce = srv.pairing.new_code(), 'ab' * 32
+        with raw(srv, path=protocol.PAIR_PATH) as ws:
+            ws.send(protocol.pair(code, srv.fp, nonce, 'laptop'))
+            token = answer(ws)['token']
+        with raw(srv) as ws:
+            ws.send(hello(token))
+            assert answer(ws)['type'] == 'ready'
+    finally:
+        srv.stop()
+        srv.thread.join(10)
+    for secret in (token, nonce, protocol.pair_mac(code, srv.fp, nonce), protocol.norm_code(code)):
+        assert secret not in caplog.text
+    assert 'ready' in caplog.text or 'loading' in caplog.text  # it did log the session
+
+
+def test_must_not_a_browser(srv, made):
+    """10: a request with an Origin header (a web page) is refused before any message, on every path."""
+    from websockets.exceptions import InvalidStatus
+    srv.pairing.new_code()
+    for path in (protocol.PAIR_PATH, protocol.side_path('them')):
+        with pytest.raises(InvalidStatus) as e:
+            raw(srv, path=path, origin='https://example.org')
+        assert e.value.response.status_code == 403
+
+
+@pytest.mark.parametrize('meta', [{'kind': 'me', 'name': 'me'},  # v1: from an older app
+                                  {**CONFIRMED, 'kind': 'them', 'consent': {'how': 'call-saved'}},  # a contact's
+                                  {**CONFIRMED, 'consent': None}])  # mine, not confirmed
+def test_must_only_my_confirmed_voice_speaks_as_me(srv, made, tmp_path, meta):
+    """12: me -> them speaks only with my own voice confirmed live (voice.json v2); anything else sent on 'me': a stock
+    voice and why, and that voice is gone at once."""
+    token = srv.pairing.add('laptop')
+    v = profile(tmp_path / 'v', 1000, meta)
+    with raw(srv, 'me') as ws:
+        ws.send(hello(token, 'me', 'ru', 'en', voice=protocol.voice_ref(v)))
+        assert answer(ws)['type'] == 'send_voice'
+        ws.send(v)
+        a = answer(ws)
+        assert (a['type'], a['voice']) == ('ready', 'stock')
+        states = [answer(ws)['text'] for _ in srv.slots['me'].notes]
+        assert any('cannot speak for you' in s for s in states), states
+        assert (made[0].voice_dir, made[0].clone) == ('', 'piper') and not any(srv.voices.iterdir())

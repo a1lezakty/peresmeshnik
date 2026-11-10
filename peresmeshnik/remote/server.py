@@ -24,7 +24,11 @@ the client has them (its LiveSwitch wraps the stream; none here, `_Unswitched`).
   ends, and every folder left behind (a crash) when the server starts;
 - the log keeps numbers: the clause text and translation that pipeline.py logs are taken out (`NoText`), with --log
   (`[server] log_text`) they stay. Neither sound nor text is written to disk;
-- headless: neither Qt nor a sound device is touched (no PySide6, no sounddevice).
+- headless: neither Qt nor a sound device is touched (no PySide6, no sounddevice);
+- guarded: only private addresses without --public, no browser (an Origin header is refused), the token checked right
+  after hello and before anything else, at most MAX_UNAUTH connections without one, /v1/pair only while a code is open,
+  a device unpaired by another process (`--revoke`) cut off within REVOKE_S, "me -> them" only with my own voice
+  confirmed live (`not_mine`), nothing but SAFE files kept of an uploaded profile (no pickle is ever loaded from it).
 """
 from __future__ import annotations
 
@@ -36,6 +40,7 @@ import hashlib
 import json
 import logging
 import shutil
+import socket
 import sys
 import tempfile
 import threading
@@ -54,7 +59,24 @@ HELLO_S = 10.0  # the first message comes this soon after the connection, else i
 VOICE_S = 120.0  # a voice upload (at most protocol.VOICE_MAX) takes at most this long
 PING_S = 5.0  # a client gone without a reset (Wi-Fi) is noticed in twice this: its side goes warm, another computer may come
 KEY = {'them': 'them_to_me', 'me': 'me_to_them'}
+MAX_UNAUTH = 8  # connections at once that have not shown a device token yet (each may hold a message of protocol.CHUNK)
+REVOKE_S = 5.0  # a device unpaired from another process (`serve --revoke`) loses its session within this
+SAFE = {'.json', '.wav', '.flac', '.ogg', '.npy', '.npz'}  # what is kept of an uploaded profile: no pickle (xtts.pt,
+# qwen3.pt are torch.load'ed: the engines compute them here again)
 TEXT = ('text', 'translation')  # what pipeline.py logs that was said
+
+
+def not_mine(meta: dict) -> str:
+    """'' for my own voice confirmed at the microphone (voice.json v2: kind 'me', consent by a live reading), else why
+    not: only that may speak as me (M-20), whatever the client says."""
+    # ponytail: S3's voice.why_not_mine is the same rule; this goes when stream S3 lands in main
+    if meta.get('version', 1) < 2:
+        return 'a profile of an older app: update the app on the laptop'
+    if meta.get('kind') != 'me':
+        return 'it is not your own voice'
+    if (meta.get('consent') or {}).get('how') not in ('mic-live', 'import+mic-match'):
+        return 'it is not confirmed as your own voice yet'
+    return ''
 
 
 class NoText(logging.Filter):
@@ -76,6 +98,7 @@ class Conn:
 
     def __init__(self, ws, loop: asyncio.AbstractEventLoop):
         self.ws, self.loop, self.epoch = ws, loop, 0
+        self.authed = False  # its hello's token was checked (Server.unauth)
         self.q: asyncio.Queue = asyncio.Queue()
 
     def put(self, data, speech: bool = False) -> None:
@@ -182,6 +205,8 @@ class Slot:
 
     def __init__(self, side: str, device: str, key: tuple):
         self.side, self.device, self.key = side, device, key
+        self.sha = ''  # sha256 of the device token it came with: unpaired meanwhile -> the session goes
+        self.refused = ''  # the voice sent is not mine to speak with: a stock voice, and why
         self.net = Net()
         self.conn: Conn | None = None
         self.task: asyncio.Future | None = None  # -> the ServerSide, built on a thread
@@ -201,8 +226,10 @@ class Server:
     """`folder`: the certificate, paired.json and the voices' folders (<data dir>/server); `settings`: the server's own
     (its [local] models and threads, [server])."""
 
-    def __init__(self, folder: Path, settings, host: str = '127.0.0.1', port: int = protocol.PORT, log_text: bool = False,
-                 warm_s: float | None = None):
+    def __init__(self, folder: Path, settings, host: str | list[str] = '127.0.0.1', port: int = protocol.PORT,
+                 log_text: bool = False, warm_s: float | None = None, public: bool = False):
+        for h in host if isinstance(host, list) else [host]:  # never '' / 0.0.0.0 / a public one unless --public
+            pairing.check_bind(h, public)  # ValueError
         self.folder, self.settings, self.host, self.port = folder, settings, host, port
         self.log_text = log_text
         self.warm_s = settings.server.warm_s if warm_s is None else warm_s
@@ -215,6 +242,7 @@ class Server:
         self.ports: list[int] = []
         self.device = ''
         self._stops: list[threading.Thread] = []
+        self.unauth = 0  # connections without a checked token now (MAX_UNAUTH)
         self._filter = NoText()
         self._stop: asyncio.Event | None = None
         self.lock: asyncio.Lock | None = None
@@ -235,6 +263,8 @@ class Server:
         self._loop, self._stop, self.lock = asyncio.get_running_loop(), asyncio.Event(), asyncio.Lock()
         if not self.log_text:
             logging.getLogger('peresmeshnik.latency').addFilter(self._filter)
+        if (wl := logging.getLogger('websockets')).getEffectiveLevel() < logging.INFO:
+            wl.setLevel(logging.INFO)  # its DEBUG logs every frame: hello's token, pair's nonce and mac
         try:
             import signal
             self._loop.add_signal_handler(signal.SIGTERM, self._stop.set)  # docker stop: the voices go too
@@ -247,13 +277,16 @@ class Server:
             from peresmeshnik.languages import gpu
             self.device = 'cuda' if await asyncio.to_thread(gpu) else 'cpu'
             async with serve(self._handler, self.host, self.port, ssl=ctx, compression=None, max_size=protocol.CHUNK,
-                             ping_interval=PING_S, ping_timeout=PING_S, close_timeout=1, server_header=None) as srv:
+                             ping_interval=PING_S, ping_timeout=PING_S, close_timeout=1, server_header=None,
+                             origins=[None]) as srv:  # no Origin: not a browser (a web page could burn the code)
                 self.ports = sorted({s.getsockname()[1] for s in srv.sockets})
                 self.clean()  # once the port is ours (not another server's voices), before any session (on the loop)
                 self.started.set()
                 if self.on_start:
                     self.on_start()
+                watch = asyncio.create_task(self._revoked())
                 await self._stop.wait()
+                watch.cancel()
         finally:
             for slot in list(self.slots.values()):
                 self._drop(slot)
@@ -269,18 +302,27 @@ class Server:
     # connections ----------------------------------------------------------------------------------
     async def _handler(self, ws) -> None:
         from websockets.exceptions import ConnectionClosed
+        # small messages (pong, captions, the voice's pieces) not held back: asyncio sets it on Linux only (CI: not on
+        # Windows or macOS), BENCH remote-0
+        ws.transport.get_extra_info('socket').setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         path = ws.request.path
-        if path == protocol.PAIR_PATH:
-            try:
-                m = await asyncio.wait_for(ws.recv(), HELLO_S)
-                await ws.send(await asyncio.to_thread(self.pairing.handle, m))  # its file is written with an fsync
-            except (TimeoutError, ConnectionClosed):
-                pass
-            return
         side = next((x for x in protocol.SIDES if path == protocol.side_path(x)), None)
-        if side is None:
+        if side is None and path != protocol.PAIR_PATH:
             await ws.close(1008, 'not found')
             return
+        if self.unauth >= MAX_UNAUTH:  # many connections that showed no token yet: not one more
+            await ws.close(1013, 'too many connections')
+            return
+        if side is None:
+            self.unauth += 1
+            try:
+                await self._pair(ws)
+            except (TimeoutError, ConnectionClosed):
+                pass
+            finally:
+                self.unauth -= 1
+            return
+        self.unauth += 1
         conn = Conn(ws, self._loop)
         sender = asyncio.create_task(conn.run())
         try:
@@ -295,12 +337,44 @@ class Server:
             log.exception('%s: the session failed', side)
             conn.put(protocol.error('internal', f'{type(e).__name__}: {e}'))
         finally:
+            if not conn.authed:
+                self.unauth -= 1
             self._left(conn)
             conn.end()
             try:
                 await asyncio.wait_for(sender, 5)
             except (TimeoutError, ConnectionClosed):
                 ws.transport.abort()
+
+    async def _pair(self, ws) -> None:
+        """/v1/pair: only while a code is open (one use, pairing.CODE_S); the device paired is said on the terminal."""
+        p = self.pairing
+        if not p.code or p.used or p.clock() > p.until or p.tries >= pairing.CODE_TRIES:
+            await ws.send(protocol.error('code', 'no pairing code is open on the server: start it with --code for one'))
+            return
+        m = await asyncio.wait_for(ws.recv(), HELLO_S)
+        a = await asyncio.to_thread(p.handle, m)  # paired.json is written with an fsync
+        await ws.send(a)
+        if json.loads(a)['type'] == 'paired':
+            name = ''.join(c for c in json.loads(m)['name'].strip()[:pairing.NAME_MAX] if c.isprintable())
+            print(f'paired: {name} from {ws.remote_address[0]}', flush=True)  # the terminal, not the log
+
+    async def _revoked(self) -> None:
+        """Every REVOKE_S: a device unpaired meanwhile (`serve --revoke`, another process) loses its sessions, warm too."""
+        while True:
+            await asyncio.sleep(REVOKE_S)
+            if not self.slots:
+                continue
+            try:
+                known = {d['sha256'] for d in await asyncio.to_thread(self.pairing.devices)}
+            except (OSError, ValueError, KeyError, TypeError):  # being rewritten, or broken: the next round
+                continue
+            for slot in [s for s in self.slots.values() if s.sha not in known]:
+                log.info('%s: its computer was unpaired: the session ends', slot.side)
+                if slot.conn is not None:
+                    slot.conn.put(protocol.error('auth', 'this computer was removed from the server: pair it again '
+                                                         '(tray menu, Server…)'))
+                self._drop(slot)
 
     async def _open(self, conn: Conn, side: str) -> Slot | None:
         """hello, auth, one session, the voice, the engines -> the slot after `ready`; None: another connection of the
@@ -310,6 +384,9 @@ class Server:
         if device is None:
             raise ProtocolError('auth', 'this computer is not paired with the server, or it was removed from it: pair it '
                                         'again (tray menu, Server…)')
+        conn.authed = True
+        self.unauth -= 1
+        sha = hashlib.sha256(h['token'].encode()).hexdigest()
         v = h['voice']
         key = (h['src'], h['tgt'], v and v['sha256'])
         async with self.lock:  # who has the server, and this side's slot: one hello at a time
@@ -330,17 +407,21 @@ class Server:
                     self._cut(slot)
             else:
                 slot = self.slots[side] = Slot(side, device, key)
-            slot.conn = conn
+            slot.conn, slot.sha = conn, sha
         log.info('%s: %s -> %s for %s, %s, %s', side, h['src'], h['tgt'], device, 'its voice' if v else 'a stock voice',
                  'warm' if warm else 'loading')
         try:
             if not warm:
                 if v:
                     try:
-                        await self._voice(conn, slot, v)
+                        why = await self._voice(conn, slot, v)
                     finally:  # dropped meanwhile (another hello of this side): its _drop ran before this folder was
                         if slot.dead and slot.folder is not None:  # made or while it was unpacked: it goes here
                             await asyncio.to_thread(shutil.rmtree, slot.folder, True)
+                    if why:  # not my confirmed voice: it goes, and a stock voice speaks (as in the app: M-20)
+                        await asyncio.to_thread(shutil.rmtree, slot.folder, True)
+                        slot.folder = None
+                        slot.refused = f'note: me → them: a stock voice speaks: the voice sent cannot speak for you ({why})'
                 if slot.conn is not conn:
                     return None
                 slot.task = asyncio.ensure_future(asyncio.to_thread(self._build, slot, h))
@@ -361,7 +442,8 @@ class Server:
         slot.net.conn = conn
         return slot
 
-    async def _voice(self, conn: Conn, slot: Slot, v: dict) -> None:
+    async def _voice(self, conn: Conn, slot: Slot, v: dict) -> str:
+        """The voice of this hello, unpacked into the slot's own folder; '' or why it may not speak as me (side 'me')."""
         conn.put(protocol.message('send_voice'))
         data = bytearray()
         try:
@@ -370,21 +452,27 @@ class Server:
                     m = await conn.ws.recv()
                     if not isinstance(m, bytes):
                         raise ProtocolError('voice', 'a text message in the middle of the voice profile')
+                    if len(data) + len(m) > v['bytes']:  # never more than hello said
+                        raise ProtocolError('voice', 'more of the voice profile than hello said')
                     data += m
         except TimeoutError:
             raise ProtocolError('internal', f'the voice profile did not come in {VOICE_S:g} s') from None
         if len(data) != v['bytes'] or (await asyncio.to_thread(hashlib.sha256, data)).hexdigest() != v['sha256']:
             raise ProtocolError('voice', 'the voice profile arrived damaged (its size or sha256 is not the one in hello)')
         slot.folder = Path(tempfile.mkdtemp(prefix=f'{slot.side}-', dir=self.voices))  # 0700
-        await asyncio.to_thread(self._unpack, data, slot.folder)
+        meta = await asyncio.to_thread(self._unpack, data, slot.folder)
+        return not_mine(meta) if slot.side == 'me' else ''
 
     @staticmethod
-    def _unpack(data: bytearray, folder: Path) -> None:
-        """protocol.unpack_voice, and a voice.json the app can read: a broken one is refused once, not retried forever."""
+    def _unpack(data: bytearray, folder: Path) -> dict:
+        """protocol.unpack_voice, only the SAFE files kept, and a voice.json the app can read (a broken one is refused
+        once, not retried forever) -> its meta."""
         from peresmeshnik import voice
         protocol.unpack_voice(bytes(data), folder)
+        for f in [f for f in folder.rglob('*') if f.is_file() and f.suffix.lower() not in SAFE]:
+            f.unlink()
         try:
-            voice.load(folder.name, folder.parent)
+            return voice.load(folder.name, folder.parent).meta
         except (OSError, ValueError) as e:
             raise ProtocolError('voice', f'the voice profile does not read: {e}') from None
 
@@ -414,7 +502,7 @@ class Server:
         except ModelMissing as e:
             raise ProtocolError('lang', f'the server is missing a model for {h["src"]} -> {h["tgt"]}: {e}') from None
         side.on_error = slot.net.state
-        slot.notes = (*(f'note: {n}' for n in pair.notes), *said)
+        slot.notes = (*(f'note: {n}' for n in pair.notes), *filter(None, [slot.refused]), *said)
         slot.voice = 'stock' if side.stock else pair.voice
         side.on_failure = lambda why, e: self._loop.call_soon_threadsafe(self._failed, slot, why)
         side.start()
@@ -567,7 +655,7 @@ def cli(argv=None) -> int:
         return rc
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s: %(message)s')
     logging.getLogger('websockets').setLevel(logging.WARNING)
-    srv = Server(folder, s, hosts(a.host), a.port, a.log)
+    srv = Server(folder, s, hosts(a.host), a.port, a.log, public=a.public)
     print(f'Peresmeshnik server {__version__}, certificate SHA-256 {srv.fp}', flush=True)
 
     def pair_line():  # once it listens: a server already on the port keeps its own code

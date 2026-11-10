@@ -889,7 +889,8 @@ def test_voice_page_offers_no_recording_where_the_clone_never_speaks(tmp_path, m
     page = wizard.VoicePage(type('W', (), {'s': s})())
     page.initializePage()
     assert page.isComplete() and page.record_button.isHidden() and page.import_button.isHidden()
-    assert languages.clone_why(s.local.clone, 'en') in page.subTitle() and 'Optional' not in page.subTitle()
+    # the engine choice's reason (stage 8: English is Pocket TTS on a CPU, behind Kyutai's token)
+    assert languages.clone_engine('en')[1] in page.subTitle() and 'Optional' not in page.subTitle()
     monkeypatch.setattr(languages, 'gpu', lambda engine='': True)  # nvidia-smi says nothing here: taken as able
     page.initializePage()  # the same page again (Back, then Next): the recording is offered anew
     assert not page.record_button.isHidden() and not page.prompt.isHidden() and page.subTitle().startswith('Optional')

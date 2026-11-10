@@ -800,8 +800,7 @@ class VoicePage(QWizardPage):
             threading.Thread(target=lambda: self.gpu_found.emit(gpu()), name='gpu', daemon=True).start()
         if why := self.clone_off():  # nothing to record for it: said, and the page can be left
             self.setSubTitle(f'"Me → them" speaks in a stock voice for this pair: {why}. No recording is needed.')
-        elif not self.local() and not remote and s.local.clone != voice.STOCK and (why := languages.clone_why(s.local.clone,
-                                                                                                           s.their_lang)):
+        elif not self.local() and not remote and s.local.clone != voice.STOCK and (why := languages.clone_engine(s.their_lang)[1]):
             self.setSubTitle(f'"Me → them" runs in the cloud, in Gemini\'s voice, and {why}: no recording is needed.')
         if why:
             for x in (self.stock, self.prompt, self.own, self.record_button, self.import_button, self.check_button):

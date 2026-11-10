@@ -270,6 +270,73 @@ def test_a_killed_helper_lets_the_original_through(afplay):
 @needs_helper
 @needs_blackhole
 @pytest.mark.usefixtures('granted')
+@pytest.mark.parametrize('sig', ['SIGTERM', 'SIGINT', 'SIGHUP'])
+def test_a_signalled_tap_removes_its_tap_first(afplay, sig):
+    """F1-06: Ctrl+C in the Terminal the app was started from (SIGINT to the whole group), its window closed (SIGHUP)
+    or a plain SIGTERM: the helper removes the tap and exits 0, so the call app is not left muted."""
+    import signal
+
+    from peresmeshnik.audio import capture_macos as cm
+    frames, ended = Frames(), []
+    tap = cm.ProcessTap(pid=afplay.pid, on_end=ended.append)
+    tap.start(frames)
+    try:
+        assert until(lambda: len(frames.pcm()) > 8000), tap.status
+        proc = tap._proc
+        os.kill(proc.pid, getattr(signal, sig))
+        assert until(lambda: ended), 'no on_end'
+        after = record(SPEAKERS, 1.5)
+    finally:
+        tap.stop()
+    print(f'{sig}: exit {proc.returncode}, {tap.status!r}; speakers after rms {rms(after[SR // 2:]):.3f}')
+    assert proc.returncode == 0, (proc.returncode, ended)
+    assert 'signal' in tap.status, tap.status
+    assert rms(after[SR // 2:]) > 0.1, 'the original stayed muted after the signal'
+
+
+def restart_coreaudiod() -> None:
+    subprocess.run(['sudo', 'launchctl', 'kickstart', '-kp', 'system/com.apple.audio.coreaudiod'], check=True, timeout=60)
+
+
+def blackhole_back() -> None:
+    for _ in range(30):
+        if subprocess.run(['system_profiler', 'SPAudioDataType'], capture_output=True, text=True).stdout.count('BlackHole') >= 2:
+            return
+        time.sleep(2)
+
+
+@pytest.mark.skipif(os.environ.get('PERESMESHNIK_COREAUDIOD_RESTART') != '1',
+                    reason='restarts coreaudiod: its own CI step (PERESMESHNIK_COREAUDIOD_RESTART=1)')
+@needs_helper
+@needs_blackhole
+@pytest.mark.usefixtures('granted')
+def test_a_coreaudiod_restart_ends_the_tap_to_be_started_again(afplay):
+    """S2-04: `sudo killall coreaudiod` (README's advice for a muted call app) under a running tap: the tap went with
+    coreaudiod and no IO comes again. The helper exits 7 ("start me again") instead of a silent wait."""
+    from peresmeshnik.audio.capture_macos import helper
+    tap = subprocess.Popen([helper(), 'tap', '--pid', str(afplay.pid)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE)
+    try:
+        assert tap.stdout.readline().startswith(b'peresmeshnik-tap 1')
+        threading.Thread(target=lambda: [None for _ in iter(lambda: tap.stdout.read(65536), b'')], daemon=True).start()
+        time.sleep(1.0)
+        restart_coreaudiod()
+        try:
+            code = tap.wait(15)
+        except subprocess.TimeoutExpired:
+            pytest.fail('the tap helper still runs 15 s after coreaudiod restarted')
+        err = tap.stderr.read().decode(errors='replace')
+        print(f'tap after a coreaudiod restart: exit {code}; afplay alive {afplay.poll() is None}; {err[-300:]!r}')
+        assert code == 7 or (code == 3 and afplay.poll() is not None), (code, err)
+    finally:
+        if tap.poll() is None:
+            tap.kill()
+        blackhole_back()
+
+
+@needs_helper
+@needs_blackhole
+@pytest.mark.usefixtures('granted')
 def test_tap_keeps_the_pitch_when_the_device_changes_its_rate(afplay):
     """m5: the call app's device changes its rate (speakers at 48 kHz -> AirPods in a call, 16/24 kHz; here BlackHole
     2ch 48 -> 44.1 kHz): the voice keeps its pitch. On the runner the tap keeps its own format (Core Audio converts);

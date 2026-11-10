@@ -14,8 +14,10 @@
 // (--no-ask: start anyway, the system asks by itself when the tap starts).
 // Exit: 0 stdin or stdout closed, 2 usage, 3 no such process (--pid: not running, or it ended), 4 no permission,
 // 5 macOS older than 14.4, 6 a Core Audio error, 7 the tap's own rate or format changed: start it again, the new header
-// has the new rate (the tapped app's device changing its rate does not do it: Core Audio converts, CI). Messages go
-// to stderr.
+// has the new rate (the tapped app's device changing its rate does not do it: Core Audio converts, CI; nor does a
+// coreaudiod restart, which ends the tap: start it again). SIGTERM / SIGINT / SIGHUP (Ctrl+C or a closed Terminal
+// window when the app was started from one) remove the tap before the exit (0): killed, a tap can leave the call app
+// muted. Messages go to stderr.
 //
 // Build (no Xcode project): swiftc -O -target arm64-apple-macos12 native/macos/tap/*.swift -o <dir>/peresmeshnik-tap
 
@@ -43,6 +45,7 @@ func address(_ selector: AudioObjectPropertySelector) -> AudioObjectPropertyAddr
 }
 
 let system = AudioObjectID(kAudioObjectSystemObject)
+var signalSources: [DispatchSourceSignal] = []  // tap: kept, a released source no longer delivers
 
 func read<T>(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector, _ initial: T) -> T? {
     var a = address(selector)
@@ -296,6 +299,17 @@ func tapCommand(_ args: [String]) -> Never {
     if bundle.isEmpty == (pid == nil) { quit(.usage, "tap: give --bundle ID or --pid N") }
     if let pid, kill(pid, 0) != 0 && errno == ESRCH { quit(.noProcess, "no process \(pid)") }
     let tapper = Tapper(bundle: bundle, pid: pid)
+    signalSources = [SIGTERM, SIGINT, SIGHUP].map { sig in  // the tap goes first: the app is heard as usual again
+        signal(sig, SIG_IGN)
+        let src = DispatchSource.makeSignalSource(signal: sig, queue: tapper.queue)
+        src.setEventHandler { tapper.stop(.ok, "signal \(sig)") }
+        src.resume()
+        return src
+    }
+    var restarted = address(kAudioHardwarePropertyServiceRestarted)
+    AudioObjectAddPropertyListenerBlock(system, &restarted, tapper.queue) { _, _ in
+        tapper.stop(.restart, "Core Audio restarted")  // the tap went with coreaudiod: a new one, in a new helper
+    }
     Thread {  // the parent closes stdin (or dies): the tap goes, the app is heard as usual again
         var b = [UInt8](repeating: 0, count: 256)
         while Darwin.read(0, &b, b.count) > 0 {}

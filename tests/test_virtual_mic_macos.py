@@ -593,6 +593,77 @@ def test_loop_only_while_a_call_records():
 
 
 @mac
+def test_loop_memory_stays_flat_over_calls():
+    """S2-09: the loop lives for days with translation off and opens the microphone and BlackHole 2ch on every call;
+    what a call allocates (rings, mono buffers, the pump's 1 MiB) goes with it. 30 calls (another process records
+    BlackHole 2ch, then stops): the helper's memory grows by less than 3 MiB from the 5th call on."""
+    loop = macos.spawn('loop', '--from', MIC16, '--to', macos.BLACKHOLE_UID, stdout=subprocess.DEVNULL)
+    ev = lines(loop, [])
+    rss = []
+    try:
+        assert wait_for(lambda: 'idle' in ev), ev
+        for i in range(30):
+            n = ev.count('call')
+            call = macos.spawn('record', '--from', macos.BLACKHOLE_UID, '--rate', str(SR_OUT), stdout=subprocess.DEVNULL)
+            assert wait_for(lambda n=n: ev.count('call') > n, 10), ev[-5:]
+            time.sleep(0.3)
+            n = ev.count('idle')
+            call.stdin.close()
+            call.wait(5)
+            assert wait_for(lambda n=n: ev.count('idle') > n, 10), ev[-5:]
+            rss.append(psutil.Process(loop.pid).memory_info().rss)
+    finally:
+        loop.stdin.close()
+        loop.wait(5)
+    grown = (rss[-1] - rss[4]) / 2 ** 20
+    print(f'\nloop RSS over 30 calls (MiB): {[round(r / 2 ** 20, 1) for r in rss[::5]]}; from the 5th call {grown:+.2f}')
+    assert grown < 3, f'the loop grew {grown:.1f} MiB over 25 calls'
+
+
+def restart_coreaudiod() -> None:
+    subprocess.run(['sudo', 'launchctl', 'kickstart', '-kp', 'system/com.apple.audio.coreaudiod'], check=True, timeout=60)
+    for _ in range(30):  # BlackHole back for the next test
+        if subprocess.run(['system_profiler', 'SPAudioDataType'], capture_output=True, text=True).stdout.count('BlackHole') >= 2:
+            break
+        time.sleep(2)
+
+
+@mac
+@pytest.mark.skipif(os.environ.get('PERESMESHNIK_COREAUDIOD_RESTART') != '1',
+                    reason='restarts coreaudiod: its own CI step (PERESMESHNIK_COREAUDIOD_RESTART=1)')
+@pytest.mark.parametrize('what', ['play', 'loop', 'record'])
+def test_a_coreaudiod_restart_ends_the_helper(what):
+    """S2-04: after `sudo killall coreaudiod` our IOProcs never run again: play would wait for an IO cycle forever
+    (the translation silent, its queue growing), the loop would stay silent. play and loop exit 4 and the app starts
+    them again; record (the microphone, --follow as the app runs it) opens its microphone anew and goes on."""
+    args = {'play': ['play', '--to', macos.BLACKHOLE_UID, '--rate', str(SR_IN)],
+            'loop': ['loop', '--from', MIC16, '--to', macos.BLACKHOLE_UID, '--always'],
+            'record': ['record', '--from', MIC16, '--rate', str(SR_OUT), '--follow']}[what]
+    p = macos.spawn(*args, stdout=subprocess.DEVNULL)
+    ev = lines(p, [])
+    try:
+        time.sleep(2.0)
+        assert p.poll() is None, ev
+        n = sum(e.startswith('using ') for e in ev)
+        restart_coreaudiod()
+        if what == 'record':
+            assert wait_for(lambda: sum(e.startswith('using ') for e in ev) > n, 20), f'the microphone was not opened again: {ev}'
+            time.sleep(2.0)
+            print(f'\nrecord after a coreaudiod restart: alive {p.poll() is None}; {ev[-3:]}')
+            assert p.poll() is None, ev
+            return
+        try:
+            code = p.wait(15)
+        except subprocess.TimeoutExpired:
+            pytest.fail(f'{what} still runs 15 s after coreaudiod restarted: {ev[-3:]}')
+        print(f'\n{what} after a coreaudiod restart: exit {code}; {ev[-2:]}')
+        assert code == 4, (code, ev)
+    finally:
+        if p.poll() is None:
+            p.kill()
+
+
+@mac
 def test_self_test():
     from peresmeshnik.ui import selftest
     rs = selftest.run_all(mic=MIC16)

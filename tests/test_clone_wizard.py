@@ -303,6 +303,7 @@ def test_tier_by_vram(tmp_path, monkeypatch, smi, vram, rec):
 def fake_smi(monkeypatch, out, old=None):
     """nvidia-smi answering `out` to the full query, `old` to the one without compute_cap (a driver before R510)."""
     from peresmeshnik import languages
+    monkeypatch.setattr(languages, '_PROBED', {})  # nvidia_once: this nvidia-smi is asked anew
     monkeypatch.setattr(languages.shutil, 'which', lambda name: 'nvidia-smi' if out is not None and name == 'nvidia-smi' else None)
     answers = {'--query-gpu=memory.total,driver_version,compute_cap': out, '--query-gpu=memory.total,driver_version': old}
     monkeypatch.setattr(languages.subprocess, 'run', lambda cmd, **k: types.SimpleNamespace(  # a script would not run on Windows

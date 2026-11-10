@@ -653,6 +653,21 @@ def test_settings_forget_the_key(tmp_path, monkeypatch):
     assert 'Gemini API key' in tray_mod.SettingsDialog(t).key.placeholderText()
 
 
+@pytest.mark.skipif(sys.platform != 'linux', reason='the lowercase folder is another one only where names are case-sensitive')
+def test_settings_says_a_key_in_the_old_folder(tmp_path, monkeypatch):
+    """FIXES-b r2 5: a key in the lowercase ~/.config/peresmeshnik (cloud.api_key reads it) is said, as $GEMINI_API_KEY
+    is: the field does not claim there is none, and the button, off, says where to remove it."""
+    from peresmeshnik.ui import tray as tray_mod
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    monkeypatch.delenv('GEMINI_API_KEY', raising=False)
+    monkeypatch.setattr(config, 'config_dir', lambda: tmp_path / 'Peresmeshnik')
+    (tmp_path / 'peresmeshnik').mkdir()
+    (tmp_path / 'peresmeshnik' / 'gemini-key').write_text('old-key\n')
+    d = tray_mod.SettingsDialog(tray_mod.Tray(type('Ctl', (), {'live': False, 'on': False})()))
+    old = str(tmp_path / 'peresmeshnik' / 'gemini-key')
+    assert not d.forget.isEnabled() and old in d.forget.toolTip() and old in d.key.placeholderText()
+
+
 def test_settings_forgets_only_the_apps_own_key(tmp_path, monkeypatch):
     """FIXES-b 6: a key from $GEMINI_API_KEY or from one's own `cloud.key_file` is not the app's to forget: the button
     is off and says where the key comes from; the user's file stays."""

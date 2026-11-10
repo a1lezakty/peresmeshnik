@@ -15,6 +15,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -171,14 +172,18 @@ def version_text(v: tuple[int, ...]) -> str:
     return '.'.join(f'{x:02d}' if i else str(x) for i, x in enumerate(v))
 
 
-_PROBED: dict = {}  # nvidia-smi's path -> its answer: the card does not change while the app runs
+_PROBED: dict = {}  # nvidia-smi's path -> (its answer, when): the card does not change while the app runs
+FAILED_TTL_S = 60.0  # a driver that did not answer is asked again after this long (updated meanwhile), not at every call
 
 
 def nvidia_once() -> Gpu:
+    """nvidia() once per process (up to 2 x 10 s with a driver that hangs: the wizard's tier and every direction() share
+    it); a driver that did not answer (`why`) is asked again after FAILED_TTL_S: "update it, then open this page again"."""
     exe = shutil.which('nvidia-smi')
-    if exe not in _PROBED:
-        _PROBED[exe] = nvidia()
-    return _PROBED[exe]
+    g, at = _PROBED.get(exe, (None, 0.0))
+    if g is None or g.why and time.monotonic() - at > FAILED_TTL_S:
+        g, at = _PROBED[exe] = nvidia(), time.monotonic()
+    return g
 
 
 def gpu_why(g: Gpu, windows: bool = True) -> str:

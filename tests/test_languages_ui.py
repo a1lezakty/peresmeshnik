@@ -770,7 +770,7 @@ def test_settings_local_subtitles_download_their_models_first(tmp_path, monkeypa
     d = tray_mod.SettingsDialog(t)
     d.subtitles.setChecked(False)
     d.save()
-    assert config.load().cloud.subtitles and any('downloading' in m and 'subtitles from the local' in m for m in t.said), t.said
+    assert config.load().cloud.subtitles and any('downloading' in m and 'local subtitles' in m for m in t.said), t.said
     assert wait_for(lambda: calls, 30) and not config.load().cloud.subtitles
     assert {'asr-ja', 'asr-de'} <= {p.name for p in (tmp_path / 'models').iterdir() if (p / models.MARKER).exists()}
 
@@ -811,6 +811,18 @@ def test_settings_window_keeps_the_mark_of_a_side_the_app_moved(tmp_path, monkey
     t.switch_pair('de', 'fr', {'them_to_me': 'cloud'})  # the user's "cloud" for the moved side, and a pair that asks: No
     assert asked and config.load().forced_cloud == ['them_to_me'] and config.load().their_lang == 'ja'
 
+    t.confirm = lambda text: True  # FIXES-b r2 6: the other side's engine changed in Settings… keeps the moved side's mark
+    got = config.load()
+    got.local.asr['ja'] = 'asr-de'  # no Japanese speech recognition here: them -> me stays in the cloud
+    config.save(got)
+    d = tray_mod.SettingsDialog(t)
+    d.engine['me_to_them'].setCurrentText('cloud')
+    n = len(calls)
+    d.save()
+    assert wait_for(lambda: len(calls) > n)
+    got = config.load()
+    assert (got.them_to_me, got.me_to_them, got.forced_cloud) == ('cloud', 'cloud', ['them_to_me'])
+
 
 def test_an_optional_fallback_voice_does_not_hold_the_wizard_or_the_tray(tmp_path, monkeypatch, server):
     """FIXES-b 2: a cloud side's noncommercial fallback voice does not hold anything: the tray asks for it apart and a No
@@ -839,8 +851,33 @@ def test_an_optional_fallback_voice_does_not_hold_the_wizard_or_the_tray(tmp_pat
     assert page.isComplete() and not page.consent.isHidden() and 'tts-ja' in page.consent.text()
     assert 'optional' in page.list.text() and 'stops until the cloud is back' in page.state.text()
     page.consent.setChecked(True)
+    assert 'Without' not in page.state.text(), page.state.text()  # FIXES-b r2 3: ticked, it is downloaded
     page.download()
     assert wait_for(lambda: not page.busy, 30) and models.is_fetched(models.get('tts-ja')), page.state.text()
+
+
+def test_a_fallback_voice_that_fails_to_download_does_not_hold_the_pair(tmp_path, monkeypatch, server):
+    """FIXES-b r2 2: the optional fallback voice is fetched after the pair's own models; its download failing is said,
+    and the pair changes all the same (not "not changed" with everything it needs here)."""
+    httpd, url = server
+    blob = b'v' * 30_000
+    (httpd.root / 'w.bin').write_bytes(blob)
+    s = wire(config.Settings(my_lang='de', their_lang='ja', them_to_me='cloud', me_to_them='cloud'))  # local subtitles
+    s.local.clone = 'piper'
+    t, calls = tray_with(monkeypatch, tmp_path, s)
+    stand_ins(monkeypatch, url, files={'w.bin': {'sha256': hashlib.sha256(blob).hexdigest(), 'size': len(blob)}},
+              consent=('tts-ja',))
+    fetch = models.fetch
+
+    def no_network_for_tts_ja(mid, *a, **k):
+        if mid == 'tts-ja':
+            raise OSError('network down')
+        return fetch(mid, *a, **k)
+    monkeypatch.setattr(models, 'fetch', no_network_for_tts_ja)
+    t.switch_pair('ja', 'de')  # the fallback voice tts-ja asked apart: Yes
+    assert wait_for(lambda: calls, 30) and config.load().my_lang == 'ja', t.said
+    assert any('tts-ja did not download (network down)' in m for m in t.said), t.said
+    assert models.is_fetched(models.get('tts-de')) and not models.is_fetched(models.get('tts-ja'))
 
 
 def test_voice_page_offers_no_recording_where_the_clone_never_speaks(tmp_path, monkeypatch):

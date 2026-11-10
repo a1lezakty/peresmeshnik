@@ -515,7 +515,7 @@ shown, not used. The user can choose otherwise for each direction.
 
 | Machine | Detected by | Them → me | Me → them, recommended | RAM while working | Expected |
 |---|---|---|---|---|---|
-| **No NVIDIA GPU** (any Mac, most laptops) | no nvidia-smi, or under 5.5 GB of VRAM (Windows also: a driver before 570.65 or compute capability under 6.1) | local: the pair's ASR + MT + Piper | Gemini translate (cloud); locally a stock voice, no clone (`languages.clone_why`) | ~2.6 GB | subtitles 0.2–0.3 s, voice ≈ 2 s; me → them ≈ 3.2 s |
+| **No NVIDIA GPU** (any Mac, most laptops) | no nvidia-smi, or under 5.5 GB of VRAM (Windows also: a driver before 528.33 or compute capability under 6.1) | local: the pair's ASR + MT + Piper | Gemini translate (cloud); locally a stock voice, no clone (`languages.clone_why`) | ~2.6 GB | subtitles 0.2–0.3 s, voice ≈ 2 s; me → them ≈ 3.2 s |
 | **NVIDIA ≥ 6 GB VRAM** | nvidia-smi, 5.5 GB or more (Windows also: driver ≥ 570.65, compute capability ≥ 6.1) | as above (on CUDA only from source with onnxruntime-gpu; the apps' onnxruntime is CPU only) | local XTTS-v2 on the GPU (Windows: the voice pack) | +4.5 GB RAM, 2–4 GB VRAM | voice ≈ 1.6–2.1 s both ways |
 | **Cloud** | user's choice, any machine | Gemini translate + local subtitles | Gemini translate | ~0.5 GB + subtitles ASR | voice ≈ 3.2 s (up to 6 s in long en → ru monologues), ~$2.2/h per direction on the paid tier |
 

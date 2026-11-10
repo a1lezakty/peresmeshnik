@@ -73,6 +73,7 @@ def capture():
 class Tray(QObject):
     call_apps = Signal(object)  # (apps playing, error): listed on a thread of its own
     pair_ready = Signal(object, str)  # (the settings with the new pair, '' or the error): its models, fetched on a thread
+    told = Signal(str)  # a tray message from that thread
 
     def __init__(self, ctl):
         super().__init__()
@@ -114,6 +115,7 @@ class Tray(QObject):
                 group.addAction(a)
             group.triggered.connect(self._lang_chosen)
         self.pair_ready.connect(self._pair_ready)
+        self.told.connect(self._told)
         self._pair = None  # the pair being fetched now: a later choice wins
         self._call_group = None
         self.call_menu = m.addMenu('Call app')
@@ -329,7 +331,7 @@ class Tray(QObject):
             return
         pair = f'{languages.name(my)} ⇄ {languages.name(their)}'
         name = ', '.join(([pair] if (my, their) != (s.my_lang, s.their_lang) else []) + [f'{SIDES[k]}: {v}' for k, v in engines.items()]
-                         + ([f'subtitles from the {subs}'] if subs else []))
+                         + ([f'{subs} subtitles'] if subs else []))
         s.my_lang, s.their_lang = my, their
         if subs:
             s.cloud.subtitles = subs == 'cloud'
@@ -374,21 +376,21 @@ class Tray(QObject):
             self.sync()
             return
         extra = [m for m in map(models.get, languages.optional_models(s)) if not models.is_fetched(m)]
-        if extra and self.confirm(  # a cloud side's fallback voice nobody chose: asked apart, a No changes nothing else
+        if extra and not self.confirm(  # a cloud side's fallback voice nobody chose: asked apart, a No changes nothing else
                 f'{name}: when the cloud fails, a cloud direction goes on with the stock voice '
                 f'{", ".join(f"{m.id} ({m.license}, {m.license_url})" for m in extra)}, under a restricted license '
                 '(noncommercial use only, it binds you as the user). Download and accept it? No: that direction stops '
                 'until the cloud is back.'):
-            todo += extra
-            lic = ', '.join(dict.fromkeys(p.license for m in todo for p in models.parts(m)))
+            extra = []
+        lic = ', '.join(dict.fromkeys(p.license for m in todo + extra for p in models.parts(m)))
         if note := font_note([my, their]):
             notes.append(note)
         self._pair = s, moved, back, {**engines, **{k: getattr(s, k) for k in kept}, **({'subtitles': subs} if subs else {})}
-        if not todo:
+        if not todo and not extra:
             if notes:
                 self.message(f'{name}: ' + '. '.join(notes))
             return self._pair_ready(s, '')
-        self.message(f'{name}: downloading {sum(map(models.size, todo)) / 1e6:,.0f} MB ({lic}); translation goes on as it is '
+        self.message(f'{name}: downloading {sum(map(models.size, todo + extra)) / 1e6:,.0f} MB ({lic}); translation goes on as it is '
                      'meanwhile' + ''.join(f'. {n}' for n in notes))
         self.status.setText(f'downloading the models for {name}')  # the Translation check stays as it is
 
@@ -396,10 +398,19 @@ class Tray(QObject):
             try:
                 for m in todo:
                     models.fetch(m.id)  # one download per model at a time (the wizard may fetch it too)
-                self.pair_ready.emit(s, '')
             except Exception as e:  # the network: the .part files stay, choosing it again resumes them
-                self.pair_ready.emit(s, str(e))
+                return self.pair_ready.emit(s, str(e))
+            for m in extra:  # optional: its failure does not hold the pair back
+                try:
+                    models.fetch(m.id)
+                except Exception as e:
+                    self.told.emit(f'{name}: the fallback voice {m.id} did not download ({e}): when the cloud fails, that '
+                                   'direction stops until it is back; choosing the pair again resumes the download')
+            self.pair_ready.emit(s, '')
         threading.Thread(target=work, name='pair-fetch', daemon=True).start()
+
+    def _told(self, text: str) -> None:
+        self.message(text)
 
     def _pair_ready(self, s: config.Settings, err: str) -> None:
         if not self._pair or s is not self._pair[0]:  # another pair was chosen since
@@ -590,11 +601,15 @@ class SettingsDialog(QDialog):
     def _key_state(self) -> None:
         env, mine = os.environ.get('GEMINI_API_KEY', '').strip(), not self.s.cloud.key_file  # cloud.api_key's order
         saved = key_file(self.s.cloud).exists()
-        self.key.setPlaceholderText('from $GEMINI_API_KEY' if env else 'forgotten on Save' if self.forgotten else
-                                    'saved' if saved else 'Gemini API key (aistudio.google.com)')
+        d = config.config_dir()
+        old = d.with_name(d.name.lower()) / 'gemini-key'  # the lowercase folder api_key reads too (Linux)
+        old = old if mine and not saved and old.is_file() else None
+        self.key.setPlaceholderText('from $GEMINI_API_KEY' if env else f'from {old}' if old else 'forgotten on Save'
+                                    if self.forgotten else 'saved' if saved else 'Gemini API key (aistudio.google.com)')
         self.forget.setEnabled(saved and mine and not env and not self.forgotten)
         self.forget.setToolTip('The key comes from the environment ($GEMINI_API_KEY): unset it there.' if env else
-                               '' if mine else f'The key is read from your own file {self.s.cloud.key_file}: not removed here.')
+                               f'The key is read from the old folder: remove {old} there.' if old else '' if mine else
+                               f'The key is read from your own file {self.s.cloud.key_file}: not removed here.')
 
     def forget_key(self) -> None:
         self.forgotten = True  # Cancel keeps it

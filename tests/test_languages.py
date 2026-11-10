@@ -75,6 +75,28 @@ def test_covers_reads_the_registry_langs(monkeypatch, mid, key, ok):
 
 
 
+def test_the_gpu_is_asked_once_unless_its_driver_did_not_answer(monkeypatch):
+    """FIXES-b r2 1: nvidia-smi once per process, the wizard's tier and direction() alike (a hung driver costs its
+    timeouts once, not per call); a driver that did not answer is asked again later ("update it, then open this page
+    again"), not at once."""
+    from types import SimpleNamespace
+
+    from peresmeshnik.ui import wizard
+    answers, now = [languages.Gpu(why='timed out'), languages.Gpu(8.0, (572, 83), 8.6)], [100.0]
+    calls = []
+    monkeypatch.setattr(languages, '_PROBED', {})
+    monkeypatch.setattr(languages.shutil, 'which', lambda name: '/usr/bin/nvidia-smi')
+    monkeypatch.setattr(languages, 'nvidia', lambda: calls.append(1) or answers[min(len(calls), 2) - 1])
+    monkeypatch.setattr(languages, 'time', SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
+    assert 'NVIDIA driver does not answer' in languages.clone_why('xtts-v2') and wizard.tier()[1] == 'cloud'
+    assert len(calls) == 1
+    now[0] += languages.FAILED_TTL_S + 1
+    assert languages.clone_why('xtts-v2') == '' and wizard.tier()[1] == 'local' and len(calls) == 2
+    now[0] += 3600
+    assert languages.nvidia_once().vram == 8.0 and len(calls) == 2  # a card that answered: asked once
+
+
 def test_readme_pair_sizes_are_the_registrys(monkeypatch):
     """H-08, FIXES-b 8: README's download per pair (no NVIDIA GPU, them -> me local, a side that cannot run here in the
     cloud) is the registry's: the smallest and largest, and the quartiles as "typically"."""

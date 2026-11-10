@@ -100,7 +100,7 @@ def gpu_refusal(g: Gpu) -> str:
 
 def tier() -> tuple[str, str]:
     """(what this machine is, the recommended me -> them engine): local where the clone speaks here (clone_why)."""
-    gb, g = psutil.virtual_memory().total / 2 ** 30, gpu()
+    gb, g = psutil.virtual_memory().total / 2 ** 30, languages.nvidia_once()  # the probe direction() asks too: once
     rec = 'cloud' if languages.clone_why(config.Local().clone, has_gpu=g) else 'local'
     return f'{gb:.0f} GB RAM, {gpu_text(g.vram)}: recommended them → me local, me → them {rec}', rec
 
@@ -552,7 +552,7 @@ class ModelsPage(QWizardPage):
         self.bar.setVisible(bool(todo) or bool(err))
         self.state.setText(f'Download failed: {err}. Press Download again to resume.' if err else
                            f'{len(todo)} to download, {sum(map(models.size, todo)) / 1e6:.0f} MB.' if todo else 'All models are here.')
-        if extra and not err:  # nobody chose it: without it that side has nothing to go local with
+        if extra and not err and not self.consent.isChecked():  # nobody chose it: without it that side has nothing to go local with
             self.state.setText(self.state.text() + f' Without {", ".join(m.id for m in extra)} (its license unticked) '
                                'that cloud direction stops until the cloud is back when the cloud fails.')
         self.completeChanged.emit()

@@ -351,7 +351,8 @@ def run(a):
         tts = XttsClone(a.model_dir, a.device, a.threads) if a.device else make_clone(a.model_dir, a.threads)
         v = voice.load(a.voice.name, a.voice.parent)
     marked = Marked(tts)
-    d = pipeline.make_local('ru', 'en', threads=a.threads, tts=marked, voice=v)
+    src_lang, tgt_lang = a.langs.split(',')
+    d = pipeline.make_local(src_lang, tgt_lang, threads=a.threads, tts=marked, voice=v)
     d.realtime = True
     load_s = time.perf_counter() - t
     events, src = d.events, []
@@ -466,11 +467,11 @@ def run(a):
     sf.write(out / 'direct.wav', np.concatenate(direct) if direct else np.zeros(1, np.float32), sr)
     (out / 'clauses.jsonl').write_text(''.join(json.dumps(c, ensure_ascii=False) + '\n' for c in clauses), encoding='utf-8')
     mt = ' '.join(said)
-    hyp_rec = transcribe(x, SR_REC)
-    hyp_dir = transcribe(np.concatenate(direct), sr) if direct else ''
+    hyp_rec = transcribe(x, SR_REC, tgt_lang)
+    hyp_dir = transcribe(np.concatenate(direct), sr, tgt_lang) if direct else ''
     lags = [c['call_lag_s'] for c in clauses if c.get('call_lag_s') is not None]
     remote = tts.stats if a.remote else []  # RemoteTts: per-request rows (VoicePackClone.stats is a method)
-    row = record('e2e_me_them_mic' if a.mic else 'e2e_me_them', 'piper' if a.stock else 'xtts-remote' if a.remote else 'xtts',
+    row = record('e2e_me_them_mic' if a.mic else 'e2e_me_them', 'piper' if a.stock else os.environ.get('CLONE_NAME', 'xtts-remote') if a.remote else 'xtts',
                  device=f'remote-{tts.device}' if a.remote else (a.device or 'auto'),
                  threads=a.threads, null_mic=a.null_mic, audio_s=round(len(pcm) / pipeline.SAMPLE_RATE, 2), clauses=len(clauses),
                  load_s=round(load_s, 1), wall_s=round(wall, 1), tail_after_input_s=round(done - feed_end, 1),
@@ -505,7 +506,8 @@ def main():
         p.add_argument('--threads', type=int, default=2)
     r = sub.choices['run']
     r.add_argument('--in', dest='inp', type=Path, default=ROOT / 'me_them' / 'ru_30s.wav')
-    r.add_argument('--remote', action='store_true', help='clone through $CLONE_SERVER')
+    r.add_argument('--remote', action='store_true', help='clone through $CLONE_SERVER (the row is named $CLONE_NAME)')
+    r.add_argument('--langs', default='ru,en', help='source,target (the input must be in the source language)')
     r.add_argument('--null-mic', action='store_true', help='no sound server: play into memory in real time (a GPU box)')
     r.add_argument('--stock', action='store_true', help='the stock Piper voice instead of the clone (no --voice needed)')
     r.add_argument('--with-them', type=Path, help='also translate this English file them -> me in this process (memory of both)')

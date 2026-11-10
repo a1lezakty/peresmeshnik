@@ -400,7 +400,8 @@ def _private(*dirs: Path) -> None:
 
 def _write(path: Path, meta: dict) -> None:
     import os
-    tmp = path / 'voice.json.tmp'
+    import threading
+    tmp = path / f'voice.json.{os.getpid()}-{threading.get_ident()}.tmp'  # both sides may upgrade a v1 profile at once
     tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding='utf-8')
     os.replace(tmp, path / 'voice.json')
 

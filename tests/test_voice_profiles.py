@@ -299,3 +299,14 @@ def test_a_refusal_in_noise_asks_for_a_quieter_place(tmp_path):
     said = voice.LIVE_PHRASES['ru'][:2]
     _, text = voice.confirm_live(v, noisy, sr, said, Asr(' '.join(said)), Speaker(0.3))
     assert 'the background is loud' in text and 'somewhere quiet' in text, text
+
+
+def test_the_live_reading_loses_only_the_silence_at_its_edges():
+    """BENCH (FIXES-s3): the live reading keeps its pauses (cutting every quiet frame cut quiet speech in noise);
+    the recording loses every quiet frame."""
+    sr = 16_000
+    tone = 0.2 * np.sin(2 * np.pi * 180 * np.arange(2 * sr) / sr).astype(np.float32)
+    room = np.random.default_rng(0).normal(0, 1e-3, (5, sr // 2)).astype(np.float32)
+    x = np.concatenate([room[0], room[1], room[2], tone, room[3], tone, room[4]])  # 1.5 s, 2 s, 0.5 s, 2 s, 0.5 s
+    assert len(voice._speech(x, sr, edges=True)) / sr == pytest.approx(4.5, abs=0.1)
+    assert len(voice._speech(x, sr)) / sr == pytest.approx(4.0, abs=0.1)

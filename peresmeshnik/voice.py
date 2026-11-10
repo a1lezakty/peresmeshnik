@@ -568,7 +568,10 @@ SPEAKER = 'wespeaker-resnet34'  # registry id: the speaker vector ("the same voi
 # SNR 20 dB, 14-20 % at 10 dB, 21 % against a phone-band file: a refusal asks for a quieter place, a try again helps
 MATCH = 0.45
 # the recording is checked window by window, each against the live reading (min): 30 s of someone else then 30 s of
-# me must not pass as me, and the clone takes the recording's start (XTTS its first 30 s, Pocket its first 10 s)
+# me must not pass as me, and the clone takes the recording's start (XTTS its first 30 s, Pocket its first 10 s).
+# BENCH (FIXES-s3): such splices pass 88-90 % with one vector, 0 % with 8 s windows; the same person is refused 4.1 %
+# clean (3.4 % with one vector), another person passes 0.06 % a try, 0.19 % in 3 tries. 10-12 s: fewer refusals in
+# noise, more of another person in a mixed window
 WIN_S = 8.0
 TRIES, PAUSES_S = 3, (60, 300, 1500, 3600)  # failed checks in a row before a pause; the pauses after them, growing
 
@@ -618,16 +621,20 @@ def _tried(ok: bool, voices: Path) -> None:
     f.write_text(json.dumps({'fails': fails, 'until': time.time() + pause}), encoding='utf-8')
 
 
-def _speech(pcm: np.ndarray, sr: int) -> np.ndarray:
-    """Only the speech of a short recording: its 30 ms frames above the background, as check() counts them (the
-    silence before, between and after the phrases out: other people then match ~0.02 less, the same as much, BENCH)."""
+def _speech(pcm: np.ndarray, sr: int, edges: bool = False) -> np.ndarray:
+    """The speech of a recording: its 30 ms frames above the background, as check() counts them. `edges`: only the
+    silence before the first and after the last such frame goes, the pauses stay (the live reading: in noise, cutting
+    every quiet frame cuts quiet speech too, and the same person was refused 72 % at SNR 10 against 38 %, BENCH)."""
     x = np.asarray(pcm, np.float32)
     x = x.mean(axis=1) if x.ndim > 1 else x
     f = _frames(x - x.mean(), sr)
     db = 10 * np.log10(np.mean(f ** 2, axis=1) + 1e-12)
     live = db[db > -100]
-    keep = f[db > max(float(np.percentile(live, 10)) + 6 if len(live) else -120.0, -60.0)]
-    return keep.reshape(-1).astype(np.float32) if len(keep) else x
+    on = db > max(float(np.percentile(live, 10)) + 6 if len(live) else -120.0, -60.0)
+    if not on.any():
+        return x
+    i, j = np.flatnonzero(on)[[0, -1]]
+    return (f[i:j + 1] if edges else f[on]).reshape(-1).astype(np.float32)
 
 
 class Speaker:
@@ -666,7 +673,7 @@ def confirm_live(ref: Voice, pcm: np.ndarray, sr: int, said: list[str], asr, spe
     x, rsr = sf.read(io.BytesIO(data), dtype='float32', always_2d=True)
     heard = asr.recognize(_to(pcm, sr, SAMPLE_RATE), lang=ref.meta.get('lang')).text
     err = wer(' '.join(said), heard)
-    live = speaker.embed(_speech(pcm, sr), sr)
+    live = speaker.embed(_speech(pcm, sr, edges=True), sr)
     sims = [float(speaker.embed(w, rsr) @ live) for w in _windows(_speech(x.mean(axis=1), rsr), rsr)]
     sim = min(sims)
     why = ([f'the words heard are not the ones on the screen ({err:.0%} differ): read them as written'] if err > LIVE_WER

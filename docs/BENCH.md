@@ -2511,3 +2511,28 @@ front end, torch on the CPU, 4 threads, `VOXTREAM_BEST_OF=1`), on 5 of the 8 voi
 - Chatterbox GGUF ran away once in 48 sentences (a short one with Latin letters: 20 s of repeats instead of 2.5 s; the
   GGUF port has no alignment analyser) — a length check as for XTTS would be needed. The similarity rows were made with
   the two engines sharing the same physical cores (hyper-threads), their own speed fields are slower than the table.
+
+**Chatterbox Multilingual on the GPU, as a fallback to Qwen3** (rows `vNN-chatterbox-gpu`, `vNN-chatterbox-gpu-cfg5`):
+`chatterbox-tts` 0.1.7 (torch 2.6.0, CUDA 12.4), one A4000, 2 CPU threads, the same eight voices → Russian.
+
+| voice → Russian (sim / WER) | Qwen3 (A4000) | Chatterbox torch (A4000), `cfg_weight` 0.5 | Chatterbox GGUF (CPU) |
+|---|---|---|---|
+| English, male | 0.42 / 4 % | 0.51 / 7 % | 0.50 / 14 % |
+| English, female | 0.32 / 74 % | 0.43 / 7 % | 0.39 / 9 % |
+| English, female | 0.29 / 129 % | 0.60 / 19 % | 0.60 / 14 % |
+| Spanish, male | 0.39 / 3 % | 0.60 / 9 % | 0.57 / 10 % |
+| Russian, male | 0.62 / 3 % | 0.71 / 10 % | 0.72 / 9 % |
+| Russian, male | 0.66 / 7 % | 0.72 / 6 % | 0.74 / 13 % |
+| Russian, female | 0.75 / 13 % | 0.75 / 9 % | 0.75 / 4 % |
+| Russian, female | 0.69 / 4 % | 0.75 / 11 % | 0.70 / 7 % |
+
+- Chatterbox on the A4000: the first audio is the whole clause, 2.0–2.7 s (median per voice), up to 3.2 s; RTF
+  0.34–0.40; 3.4 GB of GPU memory at the peak (Qwen3 2.4 GB); 5.0–5.6 GB of process memory; load 6.8 s from a warm
+  cache, preparing a voice 0.03 s. No streaming.
+- A foreign voice in Russian: 0.54 on average against Qwen3's 0.35, and no runaways in 48 sentences, where Qwen3 ran
+  away on 3 of 24 (163 s of repeats instead of 5–6 s: the 74 % and 129 % above). A Russian voice: 0.73 against 0.68.
+- `cfg_weight` 0, the upstream advice for a reference in another language, is worse here: WER 9–27 % (an accent),
+  the same similarity (rows `vNN-chatterbox-gpu` for the foreign voices); the table uses 0.5 everywhere.
+- Code and weights MIT (`ResembleAI/chatterbox` at `5bb1f6ee`, not gated); every output carries an inaudible Perth
+  watermark. It pins transformers 5.2.0, `faster-qwen3-tts` needs 5.16.1: not one environment. The optional
+  `russian_text_stresser` was not installed (no stress marks).

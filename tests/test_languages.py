@@ -74,6 +74,25 @@ def test_covers_reads_the_registry_langs(monkeypatch, mid, key, ok):
     assert languages.covers(mid, key) is ok
 
 
+
+def test_readme_pair_sizes_are_the_registrys(monkeypatch):
+    """H-08, FIXES-b 8: README's download per pair (no NVIDIA GPU, them -> me local, a side that cannot run here in the
+    cloud) is the registry's: the smallest and largest, and the quartiles as "typically"."""
+    from pathlib import Path
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
+    xs = []
+    for a in languages.LANGS:
+        for b in set(languages.LANGS) - {a}:
+            s = config.Settings(my_lang=a, their_lang=b, them_to_me='local', me_to_them='cloud')
+            for k in languages.SIDES:
+                if getattr(s, k) == 'local' and not languages.direction(s, k).local:
+                    setattr(s, k, 'cloud')
+            xs.append(sum(models.size(models.get(i)) for i in languages.needed_models(s)) / 1e9)
+    xs = sorted(x for x in xs if x > 0.01)
+    q = lambda f: xs[int(f * (len(xs) - 1))]  # noqa: E731
+    want = f'{xs[0]:.1f}–{xs[-1]:.1f} GB for a pair, typically {q(.25):.1f}–{q(.75):.1f} GB'
+    assert (Path(__file__).parents[1] / 'README.md').read_text('utf-8').count(want) == 2, want
+
 def test_readme_table_is_the_generated_one():
     """README's "what runs locally, what in the cloud" is languages.table(): a registry change shows up there."""
     from pathlib import Path

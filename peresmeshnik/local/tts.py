@@ -78,6 +78,7 @@ class PiperTts:
         self._p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._log,
                                    creationflags=CREATE_NO_WINDOW, start_new_session=os.name != 'nt')
         self.sample_rate = self._u32(wait_s)
+        self._cold = True  # its first phrase (the warm-up) loads more (dictionaries, a slow CPU): START_S for it
 
     def _uncached(self) -> bool:
         """The offline start failed for want of Piper's packages in uv's cache (its log says so)."""
@@ -122,9 +123,11 @@ class PiperTts:
         """`speed` > 1 speaks faster (Piper's length scale; the pipeline uses it when the voice falls behind)."""
         self._p.stdin.write(json.dumps({'text': text, 'speed': speed}).encode() + b'\n')  # ASCII JSON: no console code page issues
         self._p.stdin.flush()
+        wait_s = START_S if self._cold else None
         try:
-            while n := self._u32():
-                yield np.frombuffer(self._read(n), '<f4')
+            while n := self._u32(wait_s):
+                yield np.frombuffer(self._read(n, wait_s), '<f4')
+            self._cold = False
         except GeneratorExit:  # the caller stopped early: read the rest, or it would be the next request's audio
             while n := self._u32():
                 self._read(n)

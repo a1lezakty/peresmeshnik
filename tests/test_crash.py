@@ -436,3 +436,14 @@ def test_the_apps_own_words_stay_in_what_happened(app):
     p = crash.report(f'them → me: the translation failed (ValueError: {e})', e)
     first = p.read_text('utf-8').splitlines()[0]
     assert first.startswith('What happened: them → me: the translation failed (ValueError: ') and 'Rex' not in first, first
+
+
+def test_a_generic_host_name_is_not_scrubbed(app, monkeypatch):
+    """L-42 (review of PR #22): a host named like the system ("linux", "localhost") is no user's name: the stack keeps
+    "x86_64-linux-gnu"; a host of the user's own is scrubbed."""
+    import platform
+    for host, kept in (('linux', True), ('localhost', True), ('ivans-laptop', False)):
+        monkeypatch.setattr(crash, '_private', set())
+        monkeypatch.setattr(platform, 'node', lambda host=host: host)
+        crash.install(app)
+        assert (crash.scrub(f'lib/x86_64-{host}-gnu/libc.so') == f'lib/x86_64-{host}-gnu/libc.so') is kept, host

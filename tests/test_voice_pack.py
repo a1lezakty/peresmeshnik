@@ -97,6 +97,24 @@ def test_an_error_is_a_reply(pack, me):
         pack._reply()
 
 
+def test_the_clone_in_this_process_leaves_one_clause_out_too(monkeypatch, me):
+    """L-43 (review of PR #22): XTTS in this process (Linux from source) as the voice pack: one clause it cannot say is
+    left out, the clone goes on; MAX_ERRORS in a row end it."""
+    from peresmeshnik.local import xtts
+
+    def synth(self, text, lang, voice=None):
+        if text == 'boom':
+            raise RuntimeError('CUDA out of memory')
+        yield np.full(3, 0.5, np.float32)
+    monkeypatch.setattr(xtts.Engine, 'synth', synth)
+    c = object.__new__(clone.XttsClone)  # no model: its synthesis is the stand-in above
+    assert list(c.synth('boom', 'en', me)) == [] and len(list(c.synth('hi', 'en', me))) == 1
+    for _ in range(VoicePackClone.MAX_ERRORS - 1):
+        assert list(c.synth('boom', 'en', me)) == []
+    with pytest.raises(RuntimeError, match='CUDA out of memory'):
+        list(c.synth('boom', 'en', me))
+
+
 def test_a_runner_dying_after_an_error_is_the_clones_death(pack, me):
     """L-43, the review: the runner died (or was killed by the timeout) right after it said a clause failed: that is the
     clone gone, said now (the side falls back), not one clause lost and the death seen only at the next one."""

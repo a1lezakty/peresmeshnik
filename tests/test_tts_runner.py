@@ -80,8 +80,13 @@ def test_onnxruntime_sends_no_telemetry(monkeypatch):
     code = 'import os, peresmeshnik; print(os.environ.get("ORT_DISABLE_TELEMETRY"))'
     assert subprocess.run([sys.executable, '-c', code], env=env, capture_output=True, text=True, cwd=ROOT,
                           check=True).stdout.strip() == '1'
+    code = ('import importlib.util, os, sys; s = importlib.util.spec_from_file_location("r", sys.argv[1]); '
+            's.loader.exec_module(importlib.util.module_from_spec(s)); '
+            'print(os.environ.get("ORT_DISABLE_TELEMETRY"), "peresmeshnik" in sys.modules)')
+    runner = str(ROOT / 'piper-runner' / 'piper_runner.py')  # its own process, as the app starts it: no peresmeshnik
+    assert subprocess.run([sys.executable, '-I', '-c', code, runner], env=env, capture_output=True, text=True,
+                          check=True).stdout.split() == ['1', 'False']  # set by the runner's own import
     m = runner_module()
-    assert os.environ.get('ORT_DISABLE_TELEMETRY') == '1'  # set by the runner's own import, before onnxruntime's
     import onnxruntime as rt
     calls = []
     monkeypatch.setattr(rt, 'disable_telemetry_events', lambda: calls.append(1))
@@ -126,6 +131,38 @@ def test_a_runner_that_stops_answering_is_killed(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match='did not answer'):
         tts.PiperTts()
     assert time.monotonic() - t0 < 5
+
+
+SLOW_FIRST = '''import struct, sys, time
+sys.stdout.buffer.write(struct.pack("<I", 22050)); sys.stdout.buffer.flush()
+for i, line in enumerate(sys.stdin):
+    time.sleep(1.5 if i == 0 else 30)  # the first phrase loads Piper's dictionaries (a slow CPU, ja); then it hangs
+    sys.stdout.buffer.write(struct.pack("<I", 4) + struct.pack("<f", 0.5) + struct.pack("<I", 0)); sys.stdout.buffer.flush()
+'''
+
+
+def test_the_first_phrase_has_the_start_time(tmp_path, monkeypatch):
+    """M-08 (review of PR #22): the first phrase after the start (the warm-up) may take longer than REPLY_S (a slow
+    CPU, Japanese dictionaries loading): it has START_S; a later phrase that hangs is still killed after REPLY_S."""
+    import time
+
+    from peresmeshnik import config
+    from peresmeshnik.local import tts
+    (tmp_path / 'slow.py').write_text(SLOW_FIRST, encoding='utf-8')
+    monkeypatch.setattr(config, 'data_dir', lambda: tmp_path / 'data')
+    monkeypatch.setattr(tts, 'voice_path', lambda voice_id: tmp_path / 'voice.onnx')
+    monkeypatch.setattr(tts, 'REPLY_S', 1.0)
+    monkeypatch.setattr(tts, 'START_S', 5.0)
+    monkeypatch.setattr(tts, 'runner_cmd', lambda: [sys.executable, str(tmp_path / 'slow.py')])
+    t = tts.PiperTts()
+    try:
+        assert [float(x[0]) for x in t.synth('Привет.', 'ru')] == [0.5]  # 1.5 s: more than REPLY_S, not killed
+        t0 = time.monotonic()
+        with pytest.raises(RuntimeError, match='did not answer in 1 s'):
+            list(t.synth('Ещё.', 'ru'))
+        assert time.monotonic() - t0 < 4
+    finally:
+        t.close()
 
 
 def test_the_runner_starts_offline_and_goes_online_only_the_first_time(tmp_path, monkeypatch):

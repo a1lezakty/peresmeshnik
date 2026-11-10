@@ -67,6 +67,9 @@ def log_file() -> Path:
     return config.data_dir() / 'logs' / 'peresmeshnik.log'
 
 
+GENERIC_HOSTS = {'linux', 'localhost', 'ubuntu', 'debian', 'fedora'}  # no user's name: words of a stack ("x86_64-linux-gnu")
+
+
 def private(*values: str) -> None:
     """Names the app saw that must not reach a report (a device, the call app)."""
     with _lock:
@@ -350,7 +353,8 @@ def install(settings=None, verbose: bool = False) -> list[Path]:
     faulthandler and the exception hooks."""
     global _fault
     _known_private(settings)
-    private(platform.node())  # the host's name (often the user's)
+    if len(host := platform.node()) >= 4 and host.lower() not in GENERIC_HOSTS:  # the host's name (often the user's)
+        private(host)
     found = []
     d = reports_dir()
     for f in sorted(d.glob('fault-*.txt')) if d.is_dir() else ():

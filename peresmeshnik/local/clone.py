@@ -47,6 +47,18 @@ class CloneUnavailable(RuntimeError):
 
 class XttsClone(xtts.Engine):
     """XTTS-v2 in this process: a source install with torch and coqui-tts in its own environment."""
+    _errors = 0  # clauses in a row it could not say: MAX_ERRORS of them end the clone, as VoicePackClone (L-43)
+
+    def synth(self, text: str, lang: str, voice=None):
+        try:
+            yield from super().synth(text, lang, voice)
+        except Exception as e:  # CUDA out of memory on a long clause: this clause is lost, not the clone
+            self._errors += 1
+            if self._errors >= VoicePackClone.MAX_ERRORS:
+                raise
+            log.warning('the clone could not say a clause, it is left out: %s', e)
+            return
+        self._errors = 0
 
     def enroll(self, pcm: np.ndarray, sample_rate: int, transcript: str | None = None, name: str = 'me',
                lang: str = 'ru', root: Path | None = None) -> Voice:

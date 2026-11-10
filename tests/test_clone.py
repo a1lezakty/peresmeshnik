@@ -32,6 +32,30 @@ def test_good_recording_passes():
     assert r.level_db == pytest.approx(-20, abs=1.5) and r.snr_db > 35
 
 
+def test_the_clone_reads_its_checkpoint_with_the_apps_reader(monkeypatch, tmp_path):
+    """M-19 (review of PR #22): xtts.Engine loads the model with `_read_checkpoint` (writes nothing), not coqui-tts's
+    loader (writes model.pth again): checked on stand-ins of torch and coqui-tts, so it runs without them."""
+    from peresmeshnik.local import xtts
+    used = []
+
+    class Model:
+        def load_checkpoint(self, cfg, checkpoint_dir, eval):
+            used.append(self._load_checkpoint)  # what coqui's load_checkpoint calls to read the file
+
+        def to(self, device):
+            pass
+    mods = {'torch': types.SimpleNamespace(set_num_threads=lambda n: None, set_num_interop_threads=lambda n: None,
+                                           cuda=types.SimpleNamespace(is_available=lambda: False)),
+            'TTS.tts.configs.xtts_config': types.SimpleNamespace(XttsConfig=type('C', (), {'load_json': lambda s, p: None})),
+            'TTS.tts.models.xtts': types.SimpleNamespace(Xtts=types.SimpleNamespace(init_from_config=lambda cfg: Model()))}
+    for name in ('TTS', 'TTS.tts', 'TTS.tts.configs', 'TTS.tts.models'):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    for name, m in mods.items():
+        monkeypatch.setitem(sys.modules, name, m)
+    xtts.Engine(tmp_path)
+    assert used == [xtts._read_checkpoint]
+
+
 def test_a_dc_offset_is_not_noise():
     """Stage 7 (C's finding): a microphone with a DC offset (here -40 dBFS) is not "noisy" nor louder: the offset is
     no sound, the check measures without it."""

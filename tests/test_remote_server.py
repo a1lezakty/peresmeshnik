@@ -112,6 +112,9 @@ def raw(srv, side='them'):
     """A bare client for what the app's never sends."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE
+    # ponytail: TLS 1.2 here: this sync client over TLS 1.3 got no handshake answer in ~1 of 5 runs of this file (never
+    # alone, never the app's asyncio client in hundreds of connections); look into it if a real client ever hangs so
+    ctx.maximum_version = ssl.TLSVersion.TLSv1_2
     return connect(f'wss://{srv.address}{protocol.side_path(side)}', ssl=ctx, max_size=protocol.CHUNK, open_timeout=5)
 
 
@@ -310,6 +313,36 @@ def test_warm_session(tmp_path, made):
     assert made[1].closed and not any(srv.voices.iterdir())  # the server stops: the warm ones go too
 
 
+@pytest.mark.parametrize('noticed', [True, False])
+def test_a_drop_reconnects_to_the_warm_side(srv, made, noticed, monkeypatch):
+    """The client's one new connection after a drop gets the same engines; the clause the drop cut is closed by a pause
+    (its voice not said) and comes again from the client. `noticed`: the server saw the old connection go (a reset);
+    else (Wi-Fi gone) the new one takes over before it does."""
+    monkeypatch.setattr(protocol, 'PING_S', 0.1)  # the client's
+    monkeypatch.setattr(protocol, 'PONG_S', 0.3)
+    token = srv.pairing.add('laptop')
+    d = RemoteDirection(srv.address, 'them', 'en', 'ru', token, srv.fp)
+    ev = Events(d)
+    assert d.ready.wait(10)
+    f = made[0]
+    for _ in range(5):
+        d.feed(frame(0.1))
+        time.sleep(0.02)
+    until(lambda: len(f.audio) == 5)
+    old = srv.slots['them'].conn
+    if noticed:
+        srv._loop.call_soon_threadsafe(old.ws.transport.abort)
+    else:
+        srv._loop.call_soon_threadsafe(old.ws.transport.pause_reading)  # no pongs: the client gives it up, not the server
+    until(lambda: srv.slots['them'].conn not in (None, old) and len(f.audio) >= 11, 8)
+    assert not f.audio[5].any() and f.interrupts == 1  # the pause, the cut clause's voice dropped
+    assert [round(float(x[0]), 3) for x in f.audio[6:11]] == [0.1] * 5  # the cut clause again, whole
+    assert len(made) == 1
+    f.say(Caption('one', 'один', True, 0))
+    assert ev.get() == Caption('one', 'один', True, 0) and ev.error is None
+    d.close()
+
+
 def test_engines_that_die(srv, made):
     token = srv.pairing.add('laptop')
     with raw(srv) as ws:
@@ -350,6 +383,36 @@ def test_the_command(tmp_path, monkeypatch, capsys):
     assert main(['serve', '--revoke', 'laptop']) == 0 and main(['serve', '--revoke', 'laptop']) == 1
     assert main(['serve', '--host', '8.8.8.8']) == 2 and 'not a private address' in capsys.readouterr().err
     assert server.url('fd00::5', 47000, 'K7QM') == 'https://[fd00::5]:47000/#K7QM'
+
+
+def test_fetch_a_pair_then_serve(tmp_path, monkeypatch):
+    """`serve --fetch en-ru`: the pair's models both ways round, through `models fetch` (its license screen), then the
+    server starts; a failed download does not start it."""
+    from peresmeshnik import languages, models
+    from peresmeshnik.__main__ import main
+    asked, started = [], []
+    monkeypatch.setattr(config, 'data_dir', lambda: tmp_path)
+    monkeypatch.setattr(config, 'load', lambda: config.Settings())
+    monkeypatch.setattr(models, 'cli', lambda argv: asked.append(argv) or rc)
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
+
+    async def serve(self):
+        started.append(self)
+    monkeypatch.setattr(server.Server, 'serve', serve)
+    rc = 0
+    assert main(['serve', '--host', '127.0.0.1', '--fetch', 'en-ru', '--accept-licenses']) == 0 and len(started) == 1
+    s = config.Settings()
+    want = set()
+    for mine, theirs in (('en', 'ru'), ('ru', 'en')):
+        s.my_lang, s.their_lang, s.them_to_me, s.me_to_them = mine, theirs, 'local', 'local'
+        want |= set(languages.needed_models(s))
+    [argv] = asked
+    assert argv[0] == 'fetch' and argv[-1] == '--accept-licenses' and set(argv[1:-1]) == want and len(argv) == len(want) + 2
+    assert {'gigaam-v3-e2e-ctc', 'parakeet-tdt-0.6b-v3', 'piper-ru_RU-dmitri-medium', 'piper-en_US-john-medium'} <= want
+    rc = 1
+    assert main(['serve', '--host', '127.0.0.1', '--fetch', 'de-fr', '--fetch', 'en-ru']) == 1 and len(started) == 1
+    assert '--accept-licenses' not in asked[-1]  # asked on the terminal, as `models fetch` does
+    assert main(['serve', '--host', '127.0.0.1', '--fetch', 'en-xx']) == 2 and len(asked) == 2
 
 
 def test_headless():

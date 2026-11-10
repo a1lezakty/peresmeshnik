@@ -1,7 +1,7 @@
 """`peresmeshnik serve`: this computer translates the sides of a weak one (the app with a side's engine 'remote', its
 remote/client.RemoteDirection), over the protocol in remote/protocol.py.
 
-    peresmeshnik serve [--host ADDR] [--port 47000] [--public] [--log] [--code]
+    peresmeshnik serve [--host ADDR] [--port 47000] [--public] [--log] [--code] [--fetch en-ru [--accept-licenses]]
     peresmeshnik serve --list | --revoke NAME
 
 One TLS WebSocket per side (its own certificate, pairing.cert, kept in <data dir>/server); /v1/pair hands out device
@@ -239,7 +239,7 @@ class Server:
             from peresmeshnik.languages import gpu
             self.device = 'cuda' if await asyncio.to_thread(gpu) else 'cpu'
             async with serve(self._handler, self.host, self.port, ssl=ctx, compression=None, max_size=protocol.CHUNK,
-                             ping_interval=PING_S, ping_timeout=PING_S, server_header=None) as srv:
+                             ping_interval=PING_S, ping_timeout=PING_S, close_timeout=1, server_header=None) as srv:
                 self.ports = sorted({s.getsockname()[1] for s in srv.sockets})
                 self.started.set()
                 await self._stop.wait()
@@ -261,7 +261,8 @@ class Server:
         path = ws.request.path
         if path == protocol.PAIR_PATH:
             try:
-                await ws.send(self.pairing.handle(await asyncio.wait_for(ws.recv(), HELLO_S)))
+                m = await asyncio.wait_for(ws.recv(), HELLO_S)
+                await ws.send(await asyncio.to_thread(self.pairing.handle, m))  # its file is written with an fsync
             except (TimeoutError, ConnectionClosed):
                 pass
             return
@@ -294,7 +295,7 @@ class Server:
         """hello, auth, one session, the voice, the engines -> the slot after `ready`; None: another connection of the
         same side took it meanwhile."""
         h = protocol.parse_hello(await asyncio.wait_for(conn.ws.recv(), HELLO_S), side)
-        device = self.pairing.check(h['token'])
+        device = await asyncio.to_thread(self.pairing.check, h['token'])  # an fsync: not on the loop
         if device is None:
             raise ProtocolError('auth', 'this computer is not paired with the server, or it was removed from it: pair it '
                                         'again (tray menu, Server…)')
@@ -313,8 +314,9 @@ class Server:
             if warm:
                 if slot.expire:
                     slot.expire.cancel()
-                if slot.conn is not None:  # the client's new connection for this side: the old one is dead to it
-                    slot.conn.end()
+                if slot.conn is not None:  # the client's new connection for this side: the old one is dead to it (a
+                    slot.conn.ws.transport.abort()  # Wi-Fi drop without a reset: this server has not noticed yet)
+                    self._cut(slot)
             else:
                 slot = self.slots[side] = Slot(side, device, key)
             slot.conn = conn
@@ -411,12 +413,17 @@ class Server:
         for slot in list(self.slots.values()):
             if slot.conn is not conn:
                 continue
-            slot.conn = slot.net.conn = None
-            if (side := slot.engines) is not None:  # a pause closes the clause the drop cut, its voice is not said: the
-                side.inp.feed(np.zeros(SAMPLE_RATE // 2, np.float32))  # client sends that clause again
-                side.interrupt()
+            self._cut(slot)
             slot.expire = self._loop.call_later(self.warm_s, self._expire, slot)
             log.info('%s: the client left; its engines stay %g s', slot.side, self.warm_s)
+
+    def _cut(self, slot: Slot) -> None:
+        """The side's connection is gone: a pause closes the clause it cut, and that clause's voice is not said; the
+        client sends the clause again on its next connection (client.KEEP_S), so it is heard whole, once."""
+        slot.conn = slot.net.conn = None
+        if (side := slot.engines) is not None:
+            side.inp.feed(np.zeros(SAMPLE_RATE // 2, np.float32))
+            side.interrupt()
 
     def _expire(self, slot: Slot) -> None:
         if slot.conn is None:
@@ -454,7 +461,7 @@ class Server:
 
         def go(_=None):
             t = threading.Thread(target=stop, name=f'stop-{slot.side}', daemon=True)
-            self._stops.append(t)
+            self._stops = [x for x in self._stops if x.is_alive()] + [t]
             t.start()
         if slot.task is None or slot.task.done():
             go()
@@ -473,6 +480,24 @@ def url(host: str, port: int, code: str) -> str:
     return f'https://{f"[{host}]" if ":" in host else host}:{port}/#{code}'
 
 
+def fetch(s, pairs: list[str], accept: bool = False) -> int:
+    """`serve --fetch en-ru`: the models a pair needs both ways round (either computer's language may be 'mine'), each
+    side local, as `peresmeshnik models fetch` gets them (its license screen, --accept-licenses): a headless server or a
+    container gets its models before it starts. 0: all there."""
+    from peresmeshnik import config, languages, models
+    ids = []
+    for p in pairs:
+        a, _, b = p.partition('-')
+        if a not in config.LANGS or b not in config.LANGS or a == b:
+            print(f'--fetch {p}: two different languages of {", ".join(config.LANGS)}, like en-ru', file=sys.stderr)
+            return 2
+        for mine, theirs in ((a, b), (b, a)):
+            t = copy.deepcopy(s)
+            t.my_lang, t.their_lang, t.them_to_me, t.me_to_them, t.forced_cloud = mine, theirs, 'local', 'local', []
+            ids += languages.needed_models(t)
+    return models.cli(['fetch', *dict.fromkeys(ids), *(['--accept-licenses'] if accept else [])])
+
+
 def cli(argv=None) -> int:
     from peresmeshnik import config
     s = config.load()
@@ -487,6 +512,9 @@ def cli(argv=None) -> int:
                     help='the log keeps what was said and its translation too (default: numbers only)')
     ap.add_argument('--code', '--pair', action='store_true', help='a new pairing code (one use, 10 minutes)')
     ap.add_argument('--list', action='store_true', help='the paired computers')
+    ap.add_argument('--fetch', metavar='SRC-TGT', action='append', default=[],
+                    help='download the models of this language pair (both ways round) first, then serve; again for more')
+    ap.add_argument('--accept-licenses', action='store_true', help='with --fetch: accept restricted licenses without asking')
     ap.add_argument('--revoke', metavar='NAME', help='unpair a computer: its token stops working')
     a = ap.parse_args(argv)
     folder = config.data_dir() / 'server'
@@ -505,6 +533,8 @@ def cli(argv=None) -> int:
     except ValueError as e:
         print(e, file=sys.stderr)
         return 2
+    if a.fetch and (rc := fetch(s, a.fetch, a.accept_licenses)):
+        return rc
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(name)s: %(message)s')
     logging.getLogger('websockets').setLevel(logging.WARNING)
     srv = Server(folder, s, hosts(a.host), a.port, a.log)

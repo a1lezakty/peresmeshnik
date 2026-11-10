@@ -17,8 +17,8 @@ import time
 from pathlib import Path
 
 import psutil
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QKeySequence
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QVBoxLayout,
+    QWidget,
     QWizard,
     QWizardPage,
 )
@@ -463,6 +464,55 @@ class CallSoundPage(QWizardPage):
         return not self.running
 
 
+HF_TEXT = ('Your cloned voice without an NVIDIA GPU speaks through Kyutai\'s Pocket TTS. Its weights are behind a '
+           'button on Hugging Face: open the page, sign in, accept the conditions, then make a read token (Settings → '
+           'Access Tokens) and paste it here. It is kept in the settings folder, readable only by you, and sent only to '
+           'huggingface.co.')
+
+
+def gated(ms: list) -> list:
+    """The models of `ms` behind Hugging Face's "accept the conditions" (`token = "hf"`, stream S1), not here yet."""
+    base = models.root()  # ponytail: getattr until S1's Model.token is merged, then m.token
+    return [m for m in ms if getattr(m, 'token', '') == 'hf' and not models.is_fetched(m, base)]
+
+
+class HfTokenBox(QWidget):
+    """The models page's box for gated models: their page (accept the conditions there) and the user's token."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.text = QLabel(HF_TEXT)
+        self.text.setWordWrap(True)
+        self.open = QPushButton('Open the page')
+        self.token = QLineEdit()
+        self.token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.save = QPushButton('Save the token')
+        self.save.clicked.connect(self._save)
+        self.token.returnPressed.connect(self._save)
+        self.open.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self.page)))
+        row = QHBoxLayout()
+        for w in (self.open, self.token, self.save):
+            row.addWidget(w)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.text)
+        lay.addLayout(row)
+        self.page = ''
+
+    def show_for(self, ms: list) -> None:
+        """Shown while a gated model is missing; the page of the first (all of them are Kyutai's one card)."""
+        self.setVisible(bool(ms))
+        if ms:
+            self.page = ms[0].url.split('/resolve/')[0]
+            self.token.setPlaceholderText('a token is saved' if models.hf_token() else 'hf_…')
+
+    def _save(self) -> None:
+        if t := self.token.text().strip():
+            models.save_hf_token(t)
+            self.token.clear()
+            self.token.setPlaceholderText('a token is saved')
+
+
 class ModelsPage(QWizardPage):
     progress = Signal(float, float, str)  # done bytes, total bytes, current model: past 2 GB a Qt int overflows
     finished = Signal(str)  # '' or the error
@@ -483,7 +533,9 @@ class ModelsPage(QWizardPage):
         self.bar = QProgressBar()
         self.state = QLabel()
         self.state.setWordWrap(True)
-        for x in (self.list, self.consent, self.button, self.bar, self.state):
+        self.hf = HfTokenBox()
+        self.hf.setVisible(False)
+        for x in (self.list, self.consent, self.hf, self.button, self.bar, self.state):
             lay.addWidget(x)
         self.progress.connect(self._progress)
         self.finished.connect(self._finished)
@@ -548,6 +600,7 @@ class ModelsPage(QWizardPage):
     def _finished(self, err: str) -> None:
         self.busy = False
         todo, extra = self.missing(), self.extra()
+        self.hf.show_for(gated(todo + extra))  # Hugging Face refused (models.Gated: no token, conditions not accepted)
         self.button.setEnabled(bool(todo) or bool(extra) and self.consent.isChecked())
         self.bar.setVisible(bool(todo) or bool(err))
         self.state.setText(f'Download failed: {err}. Press Download again to resume.' if err else

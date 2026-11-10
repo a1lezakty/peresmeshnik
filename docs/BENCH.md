@@ -15,6 +15,7 @@ by `python bench/report.py`. Measured 2026-11-07.
 | `vast-b-pipeline` | AMD Ryzen 9 7950X3D (a shared rented server), the app's 2 threads per engine | stage 1 pipeline: cost, quality, real-time lags |
 | `ubuntu-latest`, `windows-latest` | GitHub Actions runners, 4 vCPU | stage 1 working-mode gate (with `macos-15`) |
 | `i7-13700-2t`, `rtx-a4000` | the i7-13700 server above, 2 threads per run, at most 8 at once / its RTX A4000 | stage 5 call scenarios |
+| `vast-a-cpu6`, `vm-client` | the Ryzen 5 5600X server above, 6 threads / the EPYC VM above as a client only (no models) | stage 8 remote: the pipeline behind a WebSocket |
 
 All CPU runs pin every thread pool (`--threads`, `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`) and
 run under `nice`; the rented servers host other services, so absolute times can be a few percent
@@ -2306,3 +2307,57 @@ German is the one where it does not hold up: in the engine run above it went on 
 Polish, Turkish, Chinese, Japanese, Arabic: no tail either way, the period stays. English and Russian are left as they
 are here (stage 5 measures the clone's tails in them: Russian had 4 of 18 with the period, 0 with a comma). Whether a
 comma at the end sounds unfinished (rising) is a check by ear (USER-CHECKS).
+
+## Remote: the network in front of the local pipeline (stage 8, package 0)
+
+Measured 2026-11-10 with `bench/remote_rt.py`. A server runs the app's local pipeline (`make_local`: VAD, ASR, MT, the
+stock Piper voice) behind a WebSocket; the client sends `tests/data/call-en.ogg` / `call-ru.ogg` (about 31 s, en → ru and
+ru → en) at its own pace in 32 ms int16 frames and gets the captions, the latencies and the voice back. 3 runs per
+language and row, clauses of all 6 pooled. Every clause is said (`max_lag` 0) so that all runs have the same clauses;
+the voice then mostly waits behind the speech before it, so the columns that show the network are **first audio**
+(clause end on the client's clock → its first voice chunk on the client, the play queue aside) and **network part**
+(that minus the server's own clause end → first chunk). Where: **A** = `vast-a-cpu6` (x86 CPU, the server on 6 threads,
+2 threads per engine), **C** = `vast-c-a4000` (ASR and MT on the RTX A4000, Piper on 4 CPU threads; the box shared
+with other jobs), **VM** = `vm-client`. VM → A: TCP RTT 99 ms; VM → C: 305 ms (another continent). The server listens
+on loopback only: the client reaches it through ssh port forwarding, `-N` (no terminal) or `-tt` with a remote
+`sleep` (a terminal).
+
+| run | runs / clauses | frame RTT p50 / p95 / p99 / max, ms | acks > 100 ms apart | first audio p50 / p95, s | network part p50 / p95, ms |
+|---|---|---|---|---|---|
+| A, local (no network) | 6 / 45 | — | — | 0.61 / 3.06 | 2 / 4 |
+| A, local, `--max-lag 4` (the app's queue for them → me) | 2 / 12 | — | — | 0.54 / 1.67 | 1 / 4 |
+| A, WebSocket loop on the box | 9 / 68 | 0.3 / 0.5 / 0.6 / 1.9 | 0 | 0.61 / 3.39 | 3 / 6 |
+| VM → A, `ssh -N`, the voice as Piper yields it (a sentence) | 6 / 45 | 164.5 / 227.7 / 230.5 / 485.8 | 1396 | 0.93 / 3.21 | 156 / 497 |
+| VM → A, `ssh -tt`, a sentence | 6 / 45 | 99.4 / 100.0 / 104.8 / 392.1 | 6 | 0.90 / 3.17 | 107 / 400 |
+| VM → A, `ssh -tt`, **100 ms pieces** | 6 / 45 | 99.2 / 99.8 / 105.5 / 396.0 | 7 | 0.70 / 3.17 | **102 / 106** |
+| VM → A, `ssh -N`, 100 ms pieces | 6 / 45 | 164.6 / 227.8 / 231.0 / 490.1 | 1403 | 0.70 / 3.16 | 102 / 105 |
+| C, local, GPU | 6 / 42 | — | — | 0.78 / 1.99 | 0 / 4 |
+| C, local, CPU 4 threads | 6 / 43 | — | — | 0.88 / 2.36 | 0 / 4 |
+| C, WebSocket loop on the box, GPU | 6 / 43 | 0.4 / 1.2 / 3.0 / 84.1 | 1 | 1.16 / 2.21 | 2 / 6 |
+| VM → C, `ssh -N`, a sentence | 12 / 84 | 458.3 / 617.0 / 1169.0 / 1482.4 | 1162 | 2.04 / 3.55 | 418 / 1483 |
+| VM → C, `ssh -tt`, a sentence | 6 / 41 | 313.5 / 315.9 / 835.1 / 2035.5 | 10 | 1.76 / 3.23 | 319 / 946 |
+| VM → C, `ssh -tt`, **100 ms pieces** | 6 / 42 | 310.1 / 313.5 / 699.7 / 1126.2 | 19 | 0.80 / 2.00 | **314 / 421** |
+| VM → C, `ssh -tt`, 100 ms pieces, 4 congested minutes on the path | 6 / 42 | 304.9 / 4630.5 / 6835.4 / 7173.5 | 264 | 1.62 / 6.65 | 312 / 5800 |
+
+Up: 257 kbit/s (16 kHz int16 and a frame number). Down: 250–290 kbit/s on average, 2.5–2.7 Mbit/s at the peak
+second: Piper speaks 20–30 times faster than real time, so a sentence comes in one burst. `TCP_NODELAY` is on for the
+WebSocket on both ends (asyncio sets it). No underrun in any run (a voice piece that comes after the playback ran dry),
+with the first piece of a clause held 0, 40, 80, 120, 150 or 200 ms. The C rows with 100 ms pieces ran on other cores
+of the box and with less load than the C rows above them; compare their network part, not their first audio.
+
+- **With the voice in 100 ms pieces the network adds one round trip** to a clause's first audio: 102 / 106 ms
+  (p50 / p95) at 99 ms RTT, 314 / 421 ms at 305 ms. A whole sentence (100+ KB after a pause) takes several round trips:
+  p95 0.40 s at 99 ms, 0.95 s at 305 ms. The protocol sends `Speech` in pieces of about 100 ms.
+- **`ssh -N` leaves Nagle on its own connection** (OpenSSH turns it off only for a session with a terminal): small
+  messages wait for the previous ACK, the frame RTT is 164 ms on a 99 ms path and the acks come in bursts. The voice
+  pieces hardly feel it, pings, acks and captions do. A tunnel for the remote server: `ssh -tt -L … host sleep
+  infinity` or Tailscale.
+- **`remote.jitter_ms` = 40 by default**, not 80: on these wired paths nothing ran dry even at 0 (the TTS is far
+  ahead of real time, a clause's pieces come together); 40 is a margin for Wi-Fi, which the user's home run checks
+  (USER-CHECKS).
+- **No Opus or UDP**: 0.26 Mbit/s up and a 2.7 Mbit/s peak down fit any home link, and TCP lost nothing. A congested
+  path costs seconds, not audio (the last row: frames up to 1.1 s late at the server, the network part 5.8 s at p95),
+  which is what the remote side's "too slow" fallback is for.
+- **GPU against CPU on the server**: on C the A4000 takes 0.1 s off the median first audio (0.78 against 0.88 s) and
+  more off the tail (p95 1.99 against 2.36 s, max 2.2 against 4.0 s); captions 0.65 against 0.77 s. The voice is Piper
+  on the CPU either way. A 6-core CPU server (A) was at 0.61 s.

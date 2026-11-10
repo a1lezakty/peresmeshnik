@@ -56,3 +56,31 @@ def test_contact_kept_without_recording(tmp_path):
     with pytest.raises(voice.NotMine, match='headphones') as e:
         voice.mine(v.name, tmp_path)
     assert 'Анна' not in str(e.value)
+
+
+@pytest.mark.parametrize('meta, why', [({'kind': 'them', 'consent': {'how': 'call-saved'}}, 'headphones'),
+                                       ({'kind': 'me', 'consent': None}, 'not confirmed')])
+def test_me_side_speaks_only_my_confirmed_voice(monkeypatch, tmp_path, meta, why):
+    """RESEARCH-clone 6.1-6.2: a contact's voice, or mine not confirmed at the microphone, never goes into the call:
+    the clone is not even made, the stock voice speaks and the side says why."""
+    from test_voice_pack import me_side
+    side, s, made, _ = me_side(monkeypatch, tmp_path, key=False, meta=meta)
+    side._local(s)
+    assert made == [None] and len(side.errors) == 1, side.errors
+    assert why in side.errors[0] and 'a stock voice speaks instead of your cloned voice' in side.errors[0]
+
+
+def test_cloud_fallback_never_speaks_a_contact_as_me(monkeypatch, tmp_path):
+    from peresmeshnik import config, languages, models
+    from peresmeshnik.cloud import fallback
+    from peresmeshnik.local import clone
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': True)  # the clone keeps up here
+    monkeypatch.setattr(models, 'path', lambda i: tmp_path / i)  # every model downloaded
+    monkeypatch.setattr(clone, 'voice_cmd', lambda: ['voice-runner'])  # the voice pack is installed
+    monkeypatch.setattr(voice, 'voices_dir', lambda: tmp_path)
+    s = config.Settings()
+    s.me_to_them, s.my_lang, s.their_lang = 'cloud', 'ru', 'en'
+    s.local.voice = voice.save_them('Анна', 'ru', 5.0, {}).name
+    assert fallback.stock('me', s) and 'headphones' in fallback._clone_not_ready(s, 'en')  # the stock voice, and why
+    s.local.voice = voice.save(*speech(), 'me', 'ru', 'text', consent={'how': 'mic-live', 'at': '', 'wer': 0.0}).name
+    assert not fallback.stock('me', s) and fallback._clone_not_ready(s, 'en') == ''  # my confirmed voice: the clone

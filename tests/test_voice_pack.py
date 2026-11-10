@@ -266,13 +266,14 @@ class FakeDirection:
         self.closed = True
 
 
-def me_side(monkeypatch, tmp_path, clone_error=None, key=True):
+def me_side(monkeypatch, tmp_path, clone_error=None, key=True, meta=None):
     from peresmeshnik import app, config, languages, models, pipeline, voice
     monkeypatch.setattr(languages, 'gpu', lambda engine='': True)  # an NVIDIA GPU: the clone is chosen (clone_why)
     s = config.Settings()
     s.me_to_them, s.local.voice = 'local', 'me'
     monkeypatch.setattr(models, 'path', lambda model_id: tmp_path)
-    monkeypatch.setattr(voice, 'load', lambda name, root=None: Voice(name, 'xtts', tmp_path))
+    meta = {'kind': 'me', 'consent': {'how': 'mic-live'}} if meta is None else meta  # voice.json v2: mine, confirmed
+    monkeypatch.setattr(voice, 'load', lambda name, root=None: Voice(name, 'xtts', tmp_path, meta))
     made = []
 
     def make_local(src, tgt, settings=None, tts=None, voice=None, **k):

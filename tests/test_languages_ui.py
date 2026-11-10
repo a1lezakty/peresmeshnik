@@ -322,12 +322,12 @@ def test_controller_makes_its_sides_again_for_a_new_pair(tmp_path, monkeypatch):
     ctl.set_languages().result(30)
     assert all(d.closed.is_set() for d in first) and ctl.on and len(ctl.sides) == 2
     assert sorted((d.src, d.tgt) for d in Direction.made[2:]) == [('de', 'ja'), ('ja', 'de')]
-    assert states[-1].startswith('translating (') and states[-1].endswith('languages de ⇄ ja)'), states
+    assert states[-1].startswith('translating (') and states[-1].endswith('Deutsch (German) ⇄ 日本語 (Japanese))'), states
     ctl.set_translation(False).result(30)
     s.my_lang = 'fr'
     ctl.set_languages().result(30)
     assert len(Direction.made) == 4 and not ctl.on  # off: nothing made now
-    assert states[-1] == 'idle, translation off (languages fr ⇄ ja)'
+    assert states[-1] == 'idle, translation off (Français (French) ⇄ 日本語 (Japanese))'
     ctl.quit()
 
 
@@ -380,7 +380,8 @@ def test_while_a_side_is_made_again_the_call_and_i_hear_each_other(tmp_path, mon
     ctl.set_languages().result(30)  # me -> them made, but its start fails: closed, the loop stays on
     assert [x.name for x in ctl.sides] == ['them'] and ctl.on
     assert log[-5:] == [('_loopback', True), ('closed', 'de'), ('made', 'de'), ('closed', 'de'), ('pair', 'me', 'de', 'ja')], log
-    assert ('_loopback', False) not in log and any('me → them cannot start for de ⇄ ja: the microphone is gone' in x for x in states)
+    assert ('_loopback', False) not in log and any(
+        'me → them cannot start for Deutsch (German) ⇄ 日本語 (Japanese): the microphone is gone' in x for x in states)
     monkeypatch.setattr(app.Side, 'start', real_start)
 
     log.clear()
@@ -389,7 +390,8 @@ def test_while_a_side_is_made_again_the_call_and_i_hear_each_other(tmp_path, mon
     n = len(states)
     ctl.set_languages().result(30)
     assert [x.name for x in ctl.sides] == ['me'] and ctl.on
-    assert ('_through_stop',) not in log and any(st.startswith('error: them → me cannot start for de ⇄ ja: no ja-de') for st in states)
+    assert ('_through_stop',) not in log and any(
+        st.startswith('error: them → me cannot start for Deutsch (German) ⇄ 日本語 (Japanese): no ja-de') for st in states)
     note = 'note: me → them: your cloned voice cannot speak Japanese: a stock voice speaks instead'
     assert note not in states[n:]  # the tray said it with the pair
     ctl.set_translation(False).result(30)

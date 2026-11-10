@@ -347,8 +347,11 @@ def save(pcm: np.ndarray, sr: int, name: str, lang: str, transcript: str | None 
     report = check(x, sr)  # of what is kept: at most MAX_S
     peak = float(np.max(np.abs(x))) or 1.0
     gain = min(10 ** ((TARGET_DB - report.level_db) / 20), 10 ** (-1 / 20) / peak)
-    path = (root or voices_dir()) / name
+    base = root or voices_dir()
+    path = base / name
     path.mkdir(parents=True, exist_ok=True)
+    for d in (base, path):  # the user's voice (enough to clone it) and its latents: theirs only (L-09; Linux, a shared
+        d.chmod(0o700)  # machine with a 0755 home). The rest of the data folder keeps the umask
     for old in path.glob('*.pt'):  # engine caches of an older recording
         old.unlink()
     sf.write(path / 'reference.wav', np.clip(x * gain, -1, 1), sr, subtype='PCM_16')

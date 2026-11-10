@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
+import logging
 import os
 import shlex
 import struct
@@ -37,6 +38,8 @@ from peresmeshnik.local.xtts import SR, budget_samples, cap_pauses, guard, split
 RUNNER = voicepack.runner_dir() / 'voice_runner.py'  # ships with the app: it always matches it
 ERR = 0xFFFFFFFF  # voice_runner.py: a synth reply that ends with an error
 
+
+log = logging.getLogger(__name__)
 
 class CloneUnavailable(RuntimeError):
     """The clone cannot speak here: no voice pack, no CUDA, the runner did not start or died. The app falls back."""
@@ -90,8 +93,11 @@ class VoicePackClone:
     the direction ends with a message instead of hanging. Its stderr: `log` (<data dir>/logs/voice-runner.log, new
     at each start)."""
 
+    MAX_ERRORS = 3  # clauses in a row the runner (alive) could not say: then the clone is given up (L-43)
+
     def __init__(self, model_dir: Path | str, threads: int = 2, cmd: list[str] | None = None, start_s: float = 120.0,
                  reply_s: float = 30.0, log: Path | None = None):
+        self._errors = 0
         cmd = [*(cmd or voice_cmd() or []), '--model-dir', str(model_dir), '--threads', str(threads)]
         self._log, self.reply_s, self._hung = log or config.data_dir() / 'logs' / 'voice-runner.log', reply_s, False
         try:  # a file, not the app's stderr: a windowed .exe has none and the runner's first traceback would kill it
@@ -172,8 +178,16 @@ class VoicePackClone:
         try:
             while n := self._u32():
                 if n == ERR:
-                    self._reply()
+                    try:
+                        self._reply()
+                    except RuntimeError as e:  # the runner lives on: this clause is lost, not the clone (L-43)
+                        self._errors += 1
+                        if self._errors >= self.MAX_ERRORS:
+                            raise
+                        log.warning('the voice pack could not say a clause, it is left out: %s', e)
+                        return
                 yield np.frombuffer(self._read(n), '<f4')
+            self._errors = 0
         except GeneratorExit:  # the caller stopped (barge-in): the runner stops at its next chunk; the rest is read away
             self._send({'cmd': 'stop', 'id': rid})
             while n := self._u32():

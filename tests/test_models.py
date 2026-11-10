@@ -195,3 +195,15 @@ def test_the_default_engines_cover_the_14_languages():
     # X<->ru direct where through English loses the speaker's gender and ты / вы; X->en, en->X: the pivots
     assert [loc.mt[f'{x}-ru'] for x in ('de', 'tr')] == ['opus-mt-de-ru', 'mt-tr-ru-via-en'] and loc.mt['ru-uk'] == 'opus-mt-ru-uk'
     assert all(reg[loc.mt[f'{x}-en']].pivot and reg[loc.mt[f'en-{x}']].pivot for x in set(LANGS) - {'en'})
+
+
+def test_a_missing_model_points_to_the_wizard(tmp_path):
+    """M-07: the built app has no `peresmeshnik` command: a missing model sends the user to the setup wizard (the command
+    stays, for a source install); the clone without a recorded voice too."""
+    with pytest.raises(models.ModelMissing) as e:
+        models.path('piper-ru_RU-dmitri-medium', tmp_path)
+    assert str(e.value).index('setup wizard') < str(e.value).index('peresmeshnik models fetch')
+    import inspect
+
+    from peresmeshnik import app
+    assert 'python -m peresmeshnik' not in inspect.getsource(app.Side._local)

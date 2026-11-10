@@ -291,6 +291,11 @@ def record(seconds: float, device: int | str | None = None, sample_rate: int = S
     return np.concatenate(frames)[:int(seconds * sample_rate)] if frames else np.zeros(0, np.float32)
 
 
+def finite(x: np.ndarray) -> np.ndarray:
+    """NaN / inf (a GPU's synthesis, a driver) as silence: one such sample made the level and the gain NaN for good (L-45)."""
+    return x if np.isfinite(x).all() else np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+
+
 class LiveSwitch:
     """The me -> them `Direction` with "translation <-> live voice": wraps a local or cloud direction; `set_live(True)`
     sends the microphone out as is and stops feeding the translation, `set_live(False)` goes back. Each switch is an
@@ -332,6 +337,7 @@ class LiveSwitch:
 
     # Direction
     def feed(self, pcm: np.ndarray) -> None:
+        pcm = finite(pcm)
         self._mic(pcm)
         if not self.live:
             self.inner.feed(pcm)
@@ -393,6 +399,7 @@ class LiveSwitch:
         """`buf` (queued, not put out yet) + `x`, translated speech, at the live voice's level and under PEAK. A lower
         gain (a louder peak or level) ramps the end of `buf` down over up to 5 ms; a higher one comes back at RISE_DB,
         a limiter's release, so the cloud's short chunks, each with its own peak, do not pump the level."""
+        x = finite(x)
         self._tts(x)
         if not (peak := float(np.abs(x).max()) if len(x) else 0.0):
             return np.concatenate([buf, x])  # silence (the clone's pause after a sentence) stays as it is

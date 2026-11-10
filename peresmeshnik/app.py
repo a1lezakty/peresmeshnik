@@ -41,6 +41,16 @@ from peresmeshnik.engines import SAMPLE_RATE, Caption, Latency, Speech
 
 log = logging.getLogger('peresmeshnik.app')
 ARROW = {'them': 'them → me', 'me': 'me → them'}
+
+
+def pair_name(s) -> str:
+    """The pair as the tray says it: 'Русский (Russian) ⇄ English' (L-28: not the codes)."""
+    from peresmeshnik.languages import label
+    return f'{label(s.my_lang)} ⇄ {label(s.their_lang)}'
+
+
+def engines(sides) -> str:
+    return ', '.join(f'{ARROW[x.name]}: {x.engine}' for x in sides)
 RESTARTS = 3  # a side that fails this often within a minute stays off, with the reason
 QUIT_S = 5.0  # quit() waits this long for the control thread (a side still loading its models), then exits without it
 MAX_CLONE_RTF = 1.0  # seconds of synthesis per second of speech, warm: above, the clone falls behind for good (me -> them
@@ -531,8 +541,8 @@ class Side:
             d = make_local(self.src, self.tgt, tts=pair.tts, **kw)  # clone cannot speak the language
         else:
             if not s.local.voice:
-                raise RuntimeError('me -> them local needs your voice: enroll it first (python -m peresmeshnik.voice enroll), '
-                                   'or switch "Me -> them" to cloud')
+                raise RuntimeError('me → them local needs your voice: record it in the setup wizard ("Your voice"), '
+                                   'or switch "Me → them" to cloud')
             from peresmeshnik import models, voice
             from peresmeshnik.local.clone import make_clone
             model_dir, v = models.path(s.local.clone), voice.load(s.local.voice)  # missing: said as usual, no fallback
@@ -566,15 +576,19 @@ class Side:
     def _fallback(self, s: config.Settings, why):
         """The clone cannot speak: the stock voice (voice.STOCK), still local; said once. Not the cloud, even with a
         key: local was chosen, so the user's voice does not leave the machine unasked."""
+        from peresmeshnik import languages
         from peresmeshnik.cloud import api_key
         from peresmeshnik.pipeline import make_local
+        if not languages.pick(s.local.tts, self.tgt):  # zh, ar: no stock voice (M-24: not "unknown model ''")
+            raise RuntimeError(f'your cloned voice cannot speak ({why}) and there is no stock voice for '
+                               f'{languages.name(self.tgt)}: switch "Me → them" to cloud')
         d = self._stock(make_local(self.src, self.tgt, settings=s), s)
         try:
             cloud = bool(api_key(s.cloud))
         except SystemExit:  # no key
             cloud = False
-        self.on_error(f'error: {self.name}: the voice clone is off ({why}); a stock voice speaks instead'
-                      + ('. With your Gemini key you can switch "Me → them" to cloud in the settings' if cloud else ''))
+        self.on_error(f'note: {ARROW[self.name]}: a stock voice speaks instead of your cloned voice ({why})'  # it works:
+                      + ('. With your Gemini key you can switch "Me → them" to cloud in the settings' if cloud else ''))  # L-29
         return d
 
     def _clone_died(self, dead):
@@ -638,7 +652,7 @@ class Side:
             except Exception as e:  # BlackHole 2ch gone (VirtualMic says why): the tray, not only a traceback
                 if not failed:
                     log.exception('%s: live voice failed', self.name)
-                    self.on_error(f'error: {self.name}: {e}')
+                    self.on_error(f'error: {ARROW[self.name]}: {e}')
                 failed = now
                 continue
             if failed and now - failed > 2 * self.RETRY_S:  # it has played for a while: the outage is over
@@ -679,7 +693,7 @@ class Side:
             if self.on_failure:
                 self.on_failure(f'the translation failed ({type(e).__name__}: {e})', e)
             else:
-                self.on_error(f'error: {self.name}: {e}')
+                self.on_error(f'error: {ARROW[self.name]}: {e}')
 
     def interrupt(self) -> None:
         """Barge-in: the user talks over this side's voice. What is not heard yet goes; the subtitles stay."""
@@ -1065,7 +1079,7 @@ class Controller:
                 side = self._side(name, s)
             except Exception as e:
                 log.exception('%s', name)
-                failed.append(f'{name}: {e}')
+                failed.append(f'{ARROW[name]}: {e}')
                 continue
             self.sides.append(side)
             if self._quitting:  # it loaded after quit: _off stops it, unstarted
@@ -1087,7 +1101,7 @@ class Controller:
         for f in failed:
             self.on_state(f'error: {f}')
         if self.sides:
-            self.on_state(f'translating ({", ".join(f"{x.name}: {x.engine}" for x in self.sides)}; {call}'
+            self.on_state(f'translating ({engines(self.sides)}; {call}'
                           f'ready in {time.perf_counter() - t:.1f} s)')
         if call.startswith('call app: none'):
             self.on_state('error: choose the call app in the tray menu (Call app): until then the call is not translated')
@@ -1222,7 +1236,7 @@ class Controller:
     def _relanguage(self) -> None:
         s = self.settings or config.load()
         if not self.on:
-            self.on_state(f'idle, translation off (languages {s.my_lang} ⇄ {s.their_lang})')
+            self.on_state(f'idle, translation off ({pair_name(s)})')
             return
         files = {'them': self.them_file, 'me': self.me_file}
         for name in ('them', 'me'):
@@ -1234,13 +1248,12 @@ class Controller:
                 self._make(name, s)
             except Exception as e:
                 log.exception('%s', name)
-                self.on_state(f'error: {ARROW[name]} cannot start for {s.my_lang} ⇄ {s.their_lang}: {e}')
+                self.on_state(f'error: {ARROW[name]} cannot start for {pair_name(s)}: {e}')
             self._pair_to_overlay(s, name)  # its rows in the new languages now (the other side's still in the old)
         if not self.sides:
             self._off()
             return
-        self.on_state(f'translating ({", ".join(f"{x.name}: {x.engine}" for x in self.sides)}; '
-                      f'languages {s.my_lang} ⇄ {s.their_lang})')
+        self.on_state(f'translating ({engines(self.sides)}; {pair_name(s)})')
         self._fonts(s)  # a stock voice instead of the clone: the tray said it with the pair (switch_pair)
 
     def _stock_note(self, s: config.Settings) -> None:

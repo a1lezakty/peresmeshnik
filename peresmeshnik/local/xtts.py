@@ -59,7 +59,13 @@ def normalize(text: str, lang: str) -> str:
     bare, after = r'|h(?!\w)' if lang in ('fr', 'pt') else '', r'(?:\s*Uhr\b)?' if lang == 'de' else ''
     t = re.sub(rf'(?<![\d:])(?<!\d[.,])(\d{{1,2}})(?:{sep}(\d{{2}}){bare})(?![\d:]|[.,]\d){after}', lambda m: _clock(m, lang), t)
     if lang in POINT or lang == 'ja':
-        from num2words import num2words  # coqui-tts' own dependency: its tokenizer reads numbers with it
+        from num2words import num2words as n2w  # coqui-tts' own dependency: its tokenizer reads numbers with it
+
+        def num2words(x, **kw):  # a number it cannot read (70+ digits: OverflowError) stays digits, the clause is said
+            try:
+                return n2w(x, **kw)
+            except Exception:
+                return str(x)
     if lang in POINT:
         thousands, mark, word = POINT[lang]
         t = re.sub(rf'(?<=\d)\{thousands}(?=\d{{3}}(?!\d))', '', t)  # 1.250.000

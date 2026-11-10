@@ -257,3 +257,33 @@ def test_the_frozen_app_has_its_runner_in_its_data(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, '_MEIPASS', str(tmp_path / '_internal'), raising=False)
     assert voicepack.runner_dir() == tmp_path / '_internal' / 'voice-runner'
     assert voicepack.lock_file() == tmp_path / '_internal' / 'voice-runner' / 'pack-windows.json'
+
+
+def test_a_downloaded_file_is_used_only_if_its_sha256_matches(pack):
+    """L-07: a file in voice-pack.download of the right size but other bytes (the power went before its data reached the
+    disk, or it was put there) is downloaded again, not taken as it is (pip would refuse it at every resume)."""
+    lock, where, httpd, _ = pack
+    spec = json.loads(lock.read_text())
+    dl = where.with_name('voice-pack.download')
+    dl.mkdir(parents=True)
+    tts = spec['wheels'][1]
+    (dl / voicepack._name(tts)).write_bytes(b'\0' * tts['size'])  # zeros of the right size
+    assert run(lock, where) == where and voicepack.state(lock, where) == 'ready'
+
+
+def test_a_file_name_from_the_lock_stays_in_the_download_folder():
+    """L-44: an encoded '../' (or a URL without '/') in the lock file's URL cannot name a file outside voice-pack.download."""
+    assert voicepack._name({'url': 'https://x.org/a/torch-2.8.0%2Bcu128-cp312.whl'}) == 'torch-2.8.0+cu128-cp312.whl'
+    for url in ('https://x.org/a/%2e%2e%2f%2e%2e%2fOUT.whl', 'https://x.org/a/..%5COUT.whl', 'no-slash', 'https://x.org/a/'):
+        with pytest.raises(PackError, match='file name'):
+            voicepack._name({'url': url})
+
+
+def test_a_server_sending_more_than_the_pinned_size_does_not_fill_the_disk(server, tmp_path):
+    """L-08: the download stops at the pinned size; a longer answer is cut there (its hash then decides)."""
+    from peresmeshnik import models
+    httpd, url = server
+    (httpd.root / 'big.bin').write_bytes(b'x' * (4 << 20))
+    part = tmp_path / 'big.bin.part'
+    models._download(url + 'big.bin', part, 1000, lambda n: None)
+    assert part.stat().st_size == 1000

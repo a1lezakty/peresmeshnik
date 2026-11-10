@@ -248,3 +248,52 @@ def test_translation_off_gives_the_engines_memory_back(monkeypatch):
     finally:
         gc.enable()
         ctl.quit()
+
+
+@pytest.mark.parametrize('where, bad', [('tts', np.nan), ('tts', np.inf), ('mic', np.nan), ('mic', -np.inf)])
+def test_one_non_finite_sample_does_not_spoil_the_rest_of_the_call(where, bad):
+    """L-45: one NaN / inf in the translated speech (the clone on a GPU) or the microphone (a driver): the live switch's
+    level and gain stayed NaN, and every later clause went into the call as NaN. It is taken as silence."""
+    import queue
+
+    from peresmeshnik.audio.mic import LiveSwitch
+    from peresmeshnik.engines import Speech
+
+    class Inner:
+        def __init__(self):
+            self.q = queue.Queue()
+
+        def feed(self, pcm):
+            pass
+
+        def events(self):
+            while (e := self.q.get()) is not None:
+                yield e
+
+        def close(self):
+            self.q.put(None)
+    inner, out = Inner(), []
+    ls = LiveSwitch(inner)
+    threading.Thread(target=lambda: out.extend(e.pcm for e in ls.events() if isinstance(e, Speech)), daemon=True).start()
+    good = (0.2 * np.sin(2 * np.pi * 200 * np.arange(24000) / 24000)).astype(np.float32)
+    mic = (0.05 * np.sin(2 * np.pi * 150 * np.arange(320) / 16000)).astype(np.float32)
+
+    def clock(seconds):  # the input's clock paces the output
+        for _ in range(int(seconds * 50)):
+            ls.feed(mic)
+            time.sleep(0.02)
+    first = good.copy()
+    if where == 'tts':
+        first[100] = bad
+    else:
+        m = mic.copy()
+        m[5] = bad
+        ls.feed(m)
+    inner.q.put(Speech(first, 24000))
+    clock(1.3)
+    n = sum(map(len, out))
+    inner.q.put(Speech(good, 24000))
+    clock(1.3)
+    ls.close()
+    later = np.concatenate(out)[n:]
+    assert len(later) and np.isfinite(later).all() and np.abs(later).max() > 0.01 and np.isfinite(ls._gain)

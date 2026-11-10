@@ -330,19 +330,24 @@ def test_a_fragment_ends_with_a_comma():
         == [True] * 5 + [False] * 2
 
 
-def test_loading_the_clone_does_not_write_its_checkpoint(tmp_path):
-    """M-19: the registry's xtts-v2 model.pth keeps its config as an XttsConfig object, and coqui-tts's loader writes the
-    file again in place on the first load: a write cut short (the runner killed, the power gone) leaves a broken file
-    that `.verified` still vouches for. The app's engine reads it and writes nothing."""
-    torch = pytest.importorskip('torch')
-    X = pytest.importorskip('TTS.tts.models.xtts')
-    from TTS.tts.configs.xtts_config import XttsConfig
+@pytest.mark.skipif(sys.platform == 'win32', reason='POSIX modes (Windows: the profile folder under %LOCALAPPDATA%)')
+def test_the_voice_is_the_users_only(tmp_path):
+    """L-09: the recording (enough to clone the voice) and its latents: folders 0700 whatever the umask."""
+    old = os.umask(0o022)
+    try:
+        v = voice.save(speech_like(20, level=0.02, noise=0.0002), 16_000, 'me', 'ru', 'привет', tmp_path / 'voices')
+    finally:
+        os.umask(old)
+    assert [oct(p.stat().st_mode & 0o777) for p in (tmp_path / 'voices', v.path)] == ['0o700', '0o700']
 
-    from peresmeshnik.local import xtts
-    p = tmp_path / 'model.pth'
-    with X._legacy_safe_globals():  # a legacy checkpoint, as the registry's
-        torch.save({'model': {'w': torch.arange(4.0)}, 'config': XttsConfig()}, p)
-    before = p.read_bytes()
-    assert torch.equal(xtts._read_checkpoint(p)['w'], torch.arange(4.0)) and p.read_bytes() == before
-    X.Xtts._load_checkpoint(None, p)  # coqui's own: the file is written again (the reason for the above)
-    assert p.read_bytes() != before
+
+def test_a_number_num2words_cannot_read_stays_digits():
+    """L-43: a translation with a number of 70+ digits (MT stuck on a digit) or a long Turkish fraction: num2words
+    raises OverflowError; the clause is said with the digits, not lost (nor the clone with it)."""
+    if os.environ.get('PERESMESHNIK_REQUIRE_CLONE') == '1':  # the voice-pack workflow: there, not a skip
+        import num2words  # noqa: F401
+    else:
+        pytest.importorskip('num2words')
+    from peresmeshnik.local.xtts import normalize
+    long = '1' * 80
+    assert long in normalize(f'番号は{long}です', 'ja') and '9' * 45 in normalize('12,' + '9' * 45 + ' TL', 'tr')

@@ -97,3 +97,29 @@ def test_a_pair_without_ru_or_en_speaks_in_the_clone(env, tmp_path, monkeypatch)
             assert 1.5 < sec < limit and rms > 0.01, (lang, text, sec, rms)
     finally:
         eng.close()
+
+
+CHECKPOINT = '''import importlib.util, sys, torch
+spec = importlib.util.spec_from_file_location('xtts', sys.argv[1])
+xtts = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(xtts)
+from TTS.tts.configs.xtts_config import XttsConfig
+from TTS.tts.models import xtts as X
+p = sys.argv[2]
+with X._legacy_safe_globals():  # a legacy checkpoint, as the registry's
+    torch.save({'model': {'w': torch.arange(4.0)}, 'config': XttsConfig()}, p)
+before = open(p, 'rb').read()
+assert torch.equal(xtts._read_checkpoint(p)['w'], torch.arange(4.0)) and open(p, 'rb').read() == before, 'written'
+X.Xtts._load_checkpoint(None, p)
+print('coqui writes it' if open(p, 'rb').read() != before else 'coqui leaves it')
+'''
+
+
+def test_loading_the_clone_does_not_write_its_checkpoint(env, tmp_path):
+    """M-19: the registry's xtts-v2 model.pth keeps its config as an XttsConfig object, and coqui-tts's own loader writes
+    the file again in place on the first load: a write cut short (the runner killed, the power gone) leaves a broken
+    file that `.verified` still vouches for. The app's engine (xtts.Engine) reads it and writes nothing."""
+    py, _ = env
+    r = subprocess.run([py, '-c', CHECKPOINT, str(Path(xtts.__file__)), str(tmp_path / 'model.pth')],
+                       capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0 and 'coqui writes it' in r.stdout, r.stderr[-2000:]  # the reason for _read_checkpoint

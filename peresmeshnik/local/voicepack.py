@@ -82,7 +82,11 @@ def need_bytes(lock: Path | None = None, where: Path | None = None) -> int:
 
 
 def _name(f: dict) -> str:
-    return urllib.parse.unquote(f['url'].rsplit('/', 1)[1])
+    """The file name in voice-pack.download: the URL's last part, never a path (an encoded '../', L-44)."""
+    name = urllib.parse.unquote(f['url'].rsplit('/', 1)[-1] if '/' in f['url'] else '')
+    if name in ('', '.', '..') or any(c in name for c in '/\\:'):
+        raise PackError(f'not a file name the pack can use: {f["url"]!r}')
+    return name
 
 
 def _have(dl: Path, f: dict) -> int:
@@ -169,8 +173,9 @@ def install(progress=lambda stage, done, total, text='': None, cancel: threading
 def _fetch(f: dict, dl: Path, retries: int, cancel: threading.Event, progress) -> int:
     """One file into `dl`, resumed from its .part, checked against its size and SHA-256."""
     dest = dl / _name(f)
-    if dest.exists() and dest.stat().st_size == f['size']:
-        return f['size']  # checked when it was downloaded
+    if dest.exists() and dest.stat().st_size == f['size'] and models.sha256(dest) == f['sha256']:
+        return f['size']
+    dest.unlink(missing_ok=True)  # its bytes are not the pinned ones (cut before they reached the disk, or put there: L-07)
     part = dest.with_name(dest.name + '.part')
     got = [models._size(part)]
 

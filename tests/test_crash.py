@@ -395,3 +395,33 @@ def test_a_killed_piper_runner_restarts_the_side(app, monkeypatch):
         assert not leaks(reports[0].read_text('utf-8'))
     finally:
         ctl.quit()
+
+
+def test_the_loopholes_of_the_scrub_are_closed(app, monkeypatch):
+    """L-42: what F1 got past the scrub: short words and names, a part of a Chinese or Japanese phrase (no spaces), the
+    words of a clause said long ago, a third-party logger's ready message, the cause of a chained exception kept whole,
+    the home folder URL-encoded and the host's name."""
+    import platform
+    import urllib.parse
+    crash.said('Мой PIN 4821, собака Rex.', 'My PIN is 4821, the dog is Rex.')
+    crash.said('我们明天在新西伯利亚机场见面', '明日ノボシビルスク空港で会いましょう')
+    for i in range(40):  # 40 clauses later
+        crash.said(f'clause {i}', f'фраза {i}')
+    host = platform.node()
+    why = 'the cause: ' + 'Novosibirsk airport ' * 30 + 'END' + '-OF-CAUSE'  # not in the stack's source lines
+    what = f'PIN dog Rex 新西伯利亚 ノボシビルスク at {urllib.parse.quote(str(crash.Path.home()), safe="")} on {host}'
+    try:
+        try:
+            raise OSError(why)
+        except OSError as cause:
+            raise RuntimeError(what) from cause
+    except RuntimeError:
+        logging.getLogger('peresmeshnik.app').exception('control')
+    logging.getLogger('onnxruntime.something').warning('a built message: собака Rex, 明天在新西伯利亚')
+    logged = crash.log_file().read_text('utf-8')
+    print(ascii(logged[-1500:]))
+    for x in ('PIN', 'Rex', 'собака', '新西伯利亚', 'ノボシビルスク', '明天', urllib.parse.quote(str(crash.Path.home()), safe=''),
+              'END-OF-CAUSE'):
+        assert x not in logged, x
+    assert host not in logged or len(host) < 3
+    assert 'RuntimeError' in logged and 'OSError' in logged and 'onnxruntime.something' in logged  # what, still

@@ -13,8 +13,10 @@ app, the voice profile's name, keys or the user's name in paths (`clean`, `scrub
   logger's JSON keeps only its numbers. Every log call of the app passes data as arguments (none builds its message);
 - what is left as text (exception messages, the stack) loses the private values known: the settings' devices, call app
   and voice, the voice profiles, the devices seen this run (`private()`) and listed now, the key and anything shaped like
-  one, the home folder and the user's name, and the last subtitles (`said()`, kept in memory only) whole and word by
-  word (words of 4 letters and more: shorter ones are mostly "the", "and", "это").
+  one, the home folder (URL-encoded too), the user's and the host's names, the last subtitles (`said()`, kept in
+  memory only) whole, every word of 3 letters and more said this run, and any Chinese / Japanese / Korean character
+  said (no spaces there: a part of a phrase is not a word). A third-party logger's message is text built with its
+  data: it is scrubbed as an exception text is. Each exception of a chain has its text cut short.
 """
 from __future__ import annotations
 
@@ -47,6 +49,8 @@ PRIVATE_PROPS = ('.description', '.alias', '.nick', '.product.name', '.serial', 
 NOISY = ('websockets', 'google_genai', 'httpx', 'httpcore', 'urllib3', 'asyncio')
 _private: set[str] = set()
 _said: collections.deque = collections.deque(maxlen=40)  # the last subtitles' texts, in memory only
+_seen: set[str] = set()  # every word (3+ letters) and CJK character said this run, in memory only (L-42)
+CJK = re.compile(r'[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff]')
 _partial: tuple = ()  # the clause in progress: its latest partial subtitle
 _words = None  # their words as one pattern, made when needed
 _lock = threading.Lock()
@@ -66,7 +70,7 @@ def log_file() -> Path:
 def private(*values: str) -> None:
     """Names the app saw that must not reach a report (a device, the call app)."""
     with _lock:
-        _private.update(v for v in values if v and len(v) >= 3)
+        _private.update(v for v in values if v and len(v) >= 2)  # a short one only as a whole word (scrub)
 
 
 def said(*texts: str, final: bool = True) -> None:
@@ -81,7 +85,12 @@ def said(*texts: str, final: bool = True) -> None:
         for t in texts:
             if t and (not _said or _said[-1] != t):
                 _said.append(t)
+                _seen.update(_tokens(t))
         _words = None
+
+
+def _tokens(t: str) -> set[str]:
+    return {*re.findall(r'\w{3,}', t), *CJK.findall(t)}
 
 
 def scrub(text: str, words: bool = True) -> str:
@@ -91,17 +100,21 @@ def scrub(text: str, words: bool = True) -> str:
     with _lock:
         texts = (*_said, *_partial)
         values = sorted(_private | set(texts), key=len, reverse=True)
-        if words and _words is None and texts:
-            words = sorted({w for t in texts for w in re.findall(r'\w{4,}', t)}, key=len, reverse=True)
-            _words = re.compile(r'\b(?:' + '|'.join(map(re.escape, words)) + r')\b', re.IGNORECASE) if words else False
+        if words and _words is None:
+            tokens = _seen.union(*map(_tokens, _partial))
+            ws = sorted((w for w in tokens if not CJK.fullmatch(w)), key=len, reverse=True)
+            cjk = ''.join(sorted(w for w in tokens if CJK.fullmatch(w)))
+            pat = '|'.join(([r'\b(?:' + '|'.join(map(re.escape, ws)) + r')\b'] if ws else []) + ([f'[{cjk}]+'] if cjk else []))
+            _words = re.compile(pat, re.IGNORECASE) if pat else False
         words = words and _words
-    for v in values:
-        text = text.replace(v, '<…>')
+    for v in values:  # any case ("YETI MIC" logged as "Yeti Mic"); a short name ("hp") only as a whole word
+        text = re.sub(rf'\b{re.escape(v)}\b' if len(v) < 4 else re.escape(v), lambda m: '<…>', text, flags=re.IGNORECASE)
     if words:
         text = words.sub('<…>', text)
     text = KEY.sub('<key>', text)
     home = str(Path.home())
-    for h in {home, home.replace('\\', '/'), home.replace('\\', '\\\\')}:
+    from urllib.parse import quote
+    for h in {home, home.replace('\\', '/'), home.replace('\\', '\\\\'), quote(home, safe=''), quote(home)}:
         text = re.sub(re.escape(h), '~', text, flags=re.IGNORECASE if sys.platform == 'win32' else 0)
     try:
         import getpass
@@ -127,15 +140,22 @@ def clean(record: logging.LogRecord) -> str:
         except (TypeError, ValueError):
             pass
     line = scrub(f'{time.strftime("%H:%M:%S", time.localtime(record.created))} {record.levelname[0]} {record.name} {msg}',
-                 words=False)
+                 words=not record.name.startswith('peresmeshnik'))  # another library's message is built with its data
     if record.exc_info and record.exc_info[1] is not None:
         line += '\n' + scrub(_stack(record.exc_info[1]))
     return line
 
 
 def _stack(e: BaseException) -> str:
-    """The stack with the exception's own text cut short (it is the part that may carry data)."""
-    lines = traceback.format_exception(type(e), e, e.__traceback__)
+    """The stack with each exception's own text cut short (the part that may carry data), its causes' too."""
+    te = x = traceback.TracebackException.from_exception(e)
+    seen: set[int] = set()
+    while x is not None and id(x) not in seen:
+        seen.add(id(x))
+        if isinstance(getattr(x, '_str', None), str):  # its text (CPython's name for it)
+            x._str = x._str[:300]
+        x = x.__cause__ or (None if x.__suppress_context__ else x.__context__)
+    lines = list(te.format())
     return ''.join(lines[:-1]) + f'{type(e).__module__}.{type(e).__qualname__}: {str(e)[:300]}'
 
 
@@ -329,6 +349,7 @@ def install(settings=None, verbose: bool = False) -> list[Path]:
     faulthandler and the exception hooks."""
     global _fault
     _known_private(settings)
+    private(platform.node())  # the host's name (often the user's)
     found = []
     d = reports_dir()
     for f in sorted(d.glob('fault-*.txt')) if d.is_dir() else ():

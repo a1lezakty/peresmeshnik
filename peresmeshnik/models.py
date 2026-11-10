@@ -91,7 +91,7 @@ def get(model_id: str) -> Model:
     try:
         return registry()[model_id]
     except KeyError:
-        raise ModelMissing(f'unknown model {model_id!r}; known: {", ".join(registry())}') from None
+        raise ModelMissing(f'unknown model {model_id!r}' if model_id else 'no model chosen') from None  # not 200 ids (M-24)
 
 
 def parts(m: Model) -> list[Model]:
@@ -115,7 +115,8 @@ def path(model_id: str, base: Path | None = None) -> Path:
     """Local folder of a fetched and verified model (of a `via` pair: its first model's). Offline: never downloads."""
     m = get(model_id)
     if not is_fetched(m, base):
-        raise ModelMissing(f'model {model_id} is not downloaded: peresmeshnik models fetch {model_id}')
+        raise ModelMissing(f'model {model_id} is not downloaded: the setup wizard downloads it (Setup wizard… in the tray '
+                           f'menu; from source: peresmeshnik models fetch {model_id})')  # M-07: no CLI in the built app
     return (base or root()) / (m.via[0] if m.via else model_id)
 
 
@@ -145,7 +146,7 @@ def _download(url: str, part: Path, size: int, progress):
             progress(-have)  # the server sent the whole file again
             have = 0
         with open(part, 'ab' if have else 'wb') as f:
-            while b := r.read(1 << 20):
+            while have < size and (b := r.read(min(1 << 20, size - have))):  # never past the pinned size (L-08)
                 f.write(b)
                 have += len(b)
                 progress(len(b))

@@ -77,9 +77,13 @@ class Run:
 def test_the_server_fails_and_the_cut_clause_is_said_locally(srv):
     r = Run(srv)
     try:
-        r.say(np.concatenate([tone(2.0), silence(0.5)]))  # clause A (4 words): the server voices it
-        srv.send(protocol.event(Caption('a a a a', 'A A A A', True, 0)), protocol.event(Latency(0, 'tts_first', 0.5)),
-                 protocol.event(Latency(0, 'voice', 1.5)))  # its voice queued a second on the server: tts_first counts
+        r.say(tone(2.0))  # clause A (4 words): the server voices it
+        a_end = time.monotonic()  # as fed here: a slow runner's pacing catches up, so not "0.5 s of silence later"
+        r.say(silence(0.5))
+        late = time.monotonic() - a_end - 0.1  # its voice began this long after A ended (0.1 s: the cut stays in the pause)
+        srv.send(protocol.event(Caption('a a a a', 'A A A A', True, 0)),
+                 protocol.event(Latency(0, 'tts_first', round(late, 3))),
+                 protocol.event(Latency(0, 'voice', round(late + 1.0, 3))))  # queued a second on the server: tts_first counts
         until(lambda: r.captions())
         r.say(tone(1.0))  # clause B (2 words) ...
         srv.refuse = ('internal', 'restarting')

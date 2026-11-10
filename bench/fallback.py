@@ -177,7 +177,10 @@ def remote(fault: str, at: float, rec: str, s, side: str, paired: dict, tunnel: 
                 heard.append(first - end)  # ponytail: a voice queued right after another has no gap: counted late
     down = next((t for w, t in fb.switched if w == 'down'), None)
     back = next((t for w, t in fb.switched if w == 'back'), None)
-    return {'fault': fault, 'side': side, 'ready_s': round(ready_s, 1), 'rtt_s': fb.cloud.rtt if fb.mode == 'cloud' else None,
+    return {'fault': fault, 'side': side, 'ready_s': round(ready_s, 1),
+            'first_voice_s': round(voice[0] - start, 2) if voice else None,  # the call began -> its first voice heard
+            'dropped': sum(isinstance(e, Latency) and e.what == 'dropped' for _, e in before),
+            'rtt_s': fb.cloud.rtt if fb.mode == 'cloud' else None,
             'caption_s': q([e.s for _, e in before if isinstance(e, Latency) and e.what == 'caption']),
             'voice_s': q([e.s for _, e in before if isinstance(e, Latency) and e.what == 'voice']),
             'heard_s': q(heard), 'voice_after_subtitle_s': q(after_final),

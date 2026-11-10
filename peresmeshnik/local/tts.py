@@ -7,6 +7,7 @@ import shlex
 import shutil
 import struct
 import subprocess
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -19,6 +20,9 @@ RUNNER = Path(__file__).resolve().parents[2] / 'piper-runner' / 'piper_runner.py
 CREATE_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 PIPER, PIPER_JA = 'piper-tts==1.8.0', 'piper-tts[ja]==1.8.0'
 LOG_MAX = 1 << 20  # the runner's stderr log starts over past this
+# a runner that sends nothing this long is killed (hung on a phrase, held by an antivirus): the read ends, crash.Respawn
+# starts it again (M-08). A clause takes 0.1-3 s to synthesize; a start (a voice loads, an exe is scanned) longer
+START_S, REPLY_S, INSTALL_S = 60.0, 10.0, 600.0  # INSTALL_S: from source, uv fetching Piper's packages the first time
 
 
 def log_file() -> Path:
@@ -36,7 +40,9 @@ def voice_path(voice_id: str) -> Path:
 def runner_cmd() -> list[str]:
     if os.environ.get('PERESMESHNIK_PIPER_CMD'):
         return shlex.split(os.environ['PERESMESHNIK_PIPER_CMD'], posix=os.name != 'nt')
-    return [shutil.which('uv') or 'uv', 'run', '--no-project', '--with', PIPER, 'python', str(RUNNER)]
+    # --offline: Piper's packages from uv's cache, no pypi.org at each start, none needed once they are there (M-15);
+    # PiperTts goes online only when that fails by itself (the first start)
+    return [shutil.which('uv') or 'uv', 'run', '--offline', '--no-project', '--with', PIPER, 'python', str(RUNNER)]
 
 
 def with_extra(cmd: list[str], onnx: Path) -> list[str]:
@@ -57,18 +63,40 @@ class PiperTts:
         log.parent.mkdir(parents=True, exist_ok=True)
         self._log = open(log, 'ab' if log.exists() and log.stat().st_size < LOG_MAX else 'wb')
         self._log_at = self._log.tell()
-        self._p = subprocess.Popen([*with_extra(runner_cmd(), onnx), str(onnx), '--threads', str(threads)], stdin=subprocess.PIPE,
-                                   stdout=subprocess.PIPE, stderr=self._log, creationflags=CREATE_NO_WINDOW)
-        self.sample_rate = self._u32()
+        cmd = [*with_extra(runner_cmd(), onnx), str(onnx), '--threads', str(threads)]
+        try:
+            self._start(cmd, START_S)
+        except RuntimeError:
+            if '--offline' not in cmd or self._hung:
+                raise
+            self._p.wait()  # nothing cached yet (its log says so): uv fetches Piper's packages once
+            self._start([c for c in cmd if c != '--offline'], INSTALL_S)
 
-    def _read(self, n: int) -> bytes:
-        b = self._p.stdout.read(n)
+    def _start(self, cmd: list[str], wait_s: float) -> None:
+        self._hung = False
+        self._p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._log,
+                                   creationflags=CREATE_NO_WINDOW)
+        self.sample_rate = self._u32(wait_s)
+
+    def _kill_hung(self) -> None:
+        self._hung = True
+        self._p.kill()
+
+    def _read(self, n: int, wait_s: float | None = None) -> bytes:
+        t = threading.Timer(REPLY_S if wait_s is None else wait_s, self._kill_hung)
+        t.daemon = True
+        t.start()
+        try:
+            b = self._p.stdout.read(n)
+        finally:
+            t.cancel()
         if len(b) < n:  # the reason is in its log, not here: an error of Piper's can quote what was said (reports)
-            raise RuntimeError(f'piper runner exited ({self._p.poll()}): the reason is in logs/piper-runner.log')
+            why = f'did not answer in {t.interval:g} s (killed)' if self._hung else f'exited ({self._p.poll()})'
+            raise RuntimeError(f'piper runner {why}: the reason is in logs/piper-runner.log')
         return b
 
-    def _u32(self) -> int:
-        return struct.unpack('<I', self._read(4))[0]
+    def _u32(self, wait_s: float | None = None) -> int:
+        return struct.unpack('<I', self._read(4, wait_s))[0]
 
     def synth(self, text: str, lang: str, voice: Voice | None = None, speed: float = 1.0) -> Iterator[np.ndarray]:
         """`speed` > 1 speaks faster (Piper's length scale; the pipeline uses it when the voice falls behind)."""

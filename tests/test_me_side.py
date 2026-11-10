@@ -149,3 +149,102 @@ def test_my_voice_at_the_live_level(base):
     assert len(tts.said) >= 3
     assert abs(out - me) <= 2.0, (me, out, before)
     assert np.abs(x).max() <= PEAK + 1e-6
+
+
+class _QuitSide:
+    def __init__(self, name):
+        self.name, self.engine, self.inp, self.started, self.stopped = name, 'local', None, False, False
+
+    def set_live(self, on):
+        pass
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+
+def test_quit_while_warming_up_loads_no_further_side(monkeypatch):
+    """M-09: Quit (or SIGTERM, a logout) while translation warms up: the side being loaded is stopped, the other is never
+    loaded, and quit() waits QUIT_S at most for a side still loading (then exits without it, L-15: and no microphone
+    loop is started on the way out)."""
+    from peresmeshnik import app, config
+    made, loops = [], []
+    rec = str(Path(__file__).parent / 'data' / 'call-en.ogg')
+
+    def side(self, name, s, load_s=1.0):
+        time.sleep(load_s)  # its models load
+        made.append(_QuitSide(name))
+        return made[-1]
+    monkeypatch.setattr(app.Controller, '_side', side)
+    monkeypatch.setattr(app.Controller, '_loopback', lambda self, on: loops.append(on))
+    overlay = type('O', (), {'side': lambda self, name: type('S', (), {'hide': lambda self: None})()})()
+    ctl = app.Controller(overlay, lambda state: None, them_file=rec, me_file=rec, settings=config.Settings())
+    ctl.set_translation(True)
+    time.sleep(0.3)  # 'them' is loading
+    t = time.monotonic()
+    ctl.quit()
+    assert time.monotonic() - t < 2.0 and [x.name for x in made] == ['them'] and made[0].stopped, made
+    assert True not in loops and not ctl.stuck
+    monkeypatch.setattr(app, 'QUIT_S', 0.5)
+    monkeypatch.setattr(app.Controller, '_side', lambda self, name, s: side(self, name, s, 3.0))
+    ctl = app.Controller(overlay, lambda state: None, them_file=rec, me_file=rec, settings=config.Settings())
+    ctl.set_translation(True)
+    time.sleep(0.3)
+    t = time.monotonic()
+    ctl.quit()  # a side that loads for long: quit does not wait for it
+    assert time.monotonic() - t < 1.5 and ctl.stuck
+
+
+def test_a_microphone_helper_that_dies_restarts_its_side(monkeypatch):
+    """L-18: macOS / Windows: the microphone helper of me -> them dies (a trap, a COM failure): the side starts again,
+    as them -> me does when its capture helper dies; no permission is said, not retried."""
+    from peresmeshnik import app, config
+    from peresmeshnik.audio import mic
+    monkeypatch.setattr(mic, 'native', lambda: type('H', (), {'NO_PERMISSION': 'no microphone permission'}))
+    states, died = [], []
+    m = mic.followed('', states.append, on_died=died.append)
+    m.on_end('the recording exited with -11')
+    m.on_end('no microphone permission')
+    assert died == ['the recording exited with -11'] and states == ['error: the microphone stopped: no microphone permission']
+    monkeypatch.setattr(app.sys, 'platform', 'darwin')
+    failed = []
+    ctl = app.Controller(None, states.append, settings=config.Settings())
+    monkeypatch.setattr(ctl, 'failed', lambda inp, why, restart=True: failed.append((inp, why)))
+    inp = ctl._input('me')
+    inp.on_end('the recording exited with -11')
+    assert failed == [(inp, 'the microphone stopped: the recording exited with -11')]
+
+
+def test_translation_off_gives_the_engines_memory_back(monkeypatch):
+    """L-47: after translation off the stopped sides' engines go at once, though callbacks and threads tie them in
+    reference cycles and an idle app hardly runs the cycle collector (disabled here to be sure)."""
+    import gc
+    import weakref
+
+    from peresmeshnik import app, config
+
+    class Engines:  # ~a model's weights, in a cycle with its side as the app's callbacks make one
+        pass
+    sides = []
+
+    def side(self, name, s):
+        x = _QuitSide(name)
+        x.engines = Engines()
+        x.engines.side = x
+        sides.append(weakref.ref(x.engines))
+        return x
+    monkeypatch.setattr(app.Controller, '_side', side)
+    monkeypatch.setattr(app.Controller, '_loopback', lambda self, on: None)
+    rec = str(Path(__file__).parent / 'data' / 'call-en.ogg')
+    overlay = type('O', (), {'side': lambda self, name: type('S', (), {'hide': lambda self: None})()})()
+    ctl = app.Controller(overlay, lambda state: None, them_file=rec, me_file=rec, settings=config.Settings())
+    gc.disable()
+    try:
+        ctl.set_translation(True).result()
+        ctl.set_translation(False).result()
+        assert len(sides) == 2 and [r() for r in sides] == [None, None]
+    finally:
+        gc.enable()
+        ctl.quit()

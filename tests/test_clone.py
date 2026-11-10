@@ -328,3 +328,21 @@ def test_a_fragment_ends_with_a_comma():
     assert closed('我们') == '我们,'
     assert [bool(SENTENCE_END.search(t)) for t in ('Hello.', '你好。', '真的吗？', 'هل أنت هنا؟', '他说「好。」', 'and so,', '然后，')] \
         == [True] * 5 + [False] * 2
+
+
+def test_loading_the_clone_does_not_write_its_checkpoint(tmp_path):
+    """M-19: the registry's xtts-v2 model.pth keeps its config as an XttsConfig object, and coqui-tts's loader writes the
+    file again in place on the first load: a write cut short (the runner killed, the power gone) leaves a broken file
+    that `.verified` still vouches for. The app's engine reads it and writes nothing."""
+    torch = pytest.importorskip('torch')
+    X = pytest.importorskip('TTS.tts.models.xtts')
+    from TTS.tts.configs.xtts_config import XttsConfig
+
+    from peresmeshnik.local import xtts
+    p = tmp_path / 'model.pth'
+    with X._legacy_safe_globals():  # a legacy checkpoint, as the registry's
+        torch.save({'model': {'w': torch.arange(4.0)}, 'config': XttsConfig()}, p)
+    before = p.read_bytes()
+    assert torch.equal(xtts._read_checkpoint(p)['w'], torch.arange(4.0)) and p.read_bytes() == before
+    X.Xtts._load_checkpoint(None, p)  # coqui's own: the file is written again (the reason for the above)
+    assert p.read_bytes() != before

@@ -205,6 +205,16 @@ def folder(voice) -> Path:
     return Path(getattr(voice, 'path', voice))
 
 
+def _read_checkpoint(model_path) -> dict:
+    """The checkpoint's weights, read only. coqui-tts's own loader writes the registry's model.pth again in place (its
+    config is an XttsConfig object there): a write cut short (the runner killed, the power gone) left a broken file
+    that `.verified` still vouches for (M-19)."""
+    import torch
+    from TTS.tts.models.xtts import _legacy_safe_globals
+    with _legacy_safe_globals():
+        return torch.load(model_path, map_location='cpu', weights_only=True)['model']
+
+
 class Engine:
     sample_rate = SR
 
@@ -219,6 +229,7 @@ class Engine:
         cfg = XttsConfig()
         cfg.load_json(str(Path(model_dir) / 'config.json'))
         self.model = Xtts.init_from_config(cfg)
+        self.model._load_checkpoint = _read_checkpoint  # not coqui's, which writes model.pth
         self.model.load_checkpoint(cfg, checkpoint_dir=str(model_dir), eval=True)
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         self.model.to(self.device)

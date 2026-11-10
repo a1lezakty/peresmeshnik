@@ -42,6 +42,7 @@ from peresmeshnik.engines import SAMPLE_RATE, Caption, Latency, Speech
 log = logging.getLogger('peresmeshnik.app')
 ARROW = {'them': 'them → me', 'me': 'me → them'}
 RESTARTS = 3  # a side that fails this often within a minute stays off, with the reason
+QUIT_S = 5.0  # quit() waits this long for the control thread (a side still loading its models), then exits without it
 MAX_CLONE_RTF = 1.0  # seconds of synthesis per second of speech, warm: above, the clone falls behind for good (me -> them
 #                      has no lag limit) and the stock voice speaks; the RTX 3060 runs it at 0.4-0.5 (BENCH), a GTX 10xx
 #                      is not measured
@@ -713,6 +714,20 @@ class CallWatch:
                 self.p.kill()
 
 
+def free_memory() -> None:
+    """The engines of the sides just stopped go now (L-47: ~1 GB held for the rest of the day): callbacks and threads tie
+    them in reference cycles, and an idle app hardly runs the cycle collector; glibc keeps freed heap until trimmed."""
+    import gc
+    gc.collect()
+    if sys.platform.startswith('linux'):
+        try:
+            import ctypes
+            ctypes.CDLL(None).malloc_trim(0)
+        except (OSError, AttributeError):  # not glibc (musl)
+            pass
+
+
+
 class Controller:
     """Turns translation on and off on one control thread; reports states through `on_state(str)`."""
 
@@ -727,6 +742,8 @@ class Controller:
         self.live = False
         self.on = False
         self.startup_error = ''
+        self._quitting = False  # quit() came: _on loads no further side, _off starts nothing for the idle
+        self.stuck = False  # quit() did not wait for a side still loading: the process exits without its thread
         self._pool = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix='control')  # no thread until first use
         self._vmic = self._call = self._router = self._loop = self._call_watch = None
         self._through = self._through_arrival = None  # macOS < 14.4, translation off: the call app's speaker on to the headphones
@@ -931,6 +948,8 @@ class Controller:
         from peresmeshnik.voice import STOCK
         t, failed, call = time.perf_counter(), [], ''
         for name in ('them', 'me'):  # a side that cannot start (no key, no voice pack, no device) does not stop the other
+            if self._quitting:  # quit while the other side loaded (M-09): _off is next on this thread
+                break
             if not (self.devices or files[name]):
                 continue
             try:
@@ -940,6 +959,8 @@ class Controller:
                 failed.append(f'{name}: {e}')
                 continue
             self.sides.append(side)
+            if self._quitting:  # it loaded after quit: _off stops it, unstarted
+                break
             if name == 'me':
                 self._loopback(False)  # the call hears the user until the translation is ready
                 self._watch_call(True)
@@ -952,6 +973,8 @@ class Controller:
                 if s.me_to_them == 'local' and s.local.clone != STOCK and (self.devices or files['me']):
                     self.on_state('warming up: them → me translates, your voice is loading')  # not ready yet
         self.on = bool(self.sides)
+        if self._quitting:
+            return
         for f in failed:
             self.on_state(f'error: {f}')
         if self.sides:
@@ -1218,7 +1241,8 @@ class Controller:
             return inp
         if sys.platform in ('darwin', 'win32'):  # the helper keeps to the saved microphone or the default one by itself
             from peresmeshnik.audio.mic import followed
-            return followed(s.ui.mic, self.on_state)
+            inp = followed(s.ui.mic, self.on_state, on_died=lambda why: self.failed(inp, f'the microphone stopped: {why}'))
+            return inp
         mic_source(s.ui.mic, self._mic)  # no microphone now: this side says why, the other one still starts
         return Microphone(s.ui.mic, self.on_state, self._mic)
 
@@ -1242,11 +1266,14 @@ class Controller:
         if not self.test:  # the test phrase's subtitles stay until the wizard closes
             self.overlay.side('them').hide()
         self._watch_call(False)
-        self._loopback(True)
-        self._through_start()
+        if not self._quitting:  # the idle app's microphone loop and pass-through; not on the way out (L-15)
+            self._loopback(True)
+            self._through_start()
         if self.on or sides:
             self.on = False
             self.on_state('idle, translation off')
+        sides = side = None  # the last references to the stopped sides: their engines go now
+        free_memory()
 
     def _refresh_devices(self) -> dict:
         """macOS: PortAudio opens only the devices of its last refresh; refreshing frees every PortAudio stream of the
@@ -1332,9 +1359,16 @@ class Controller:
             side.set_live(self.live)
 
     def quit(self) -> None:
-        self.submit(self._off).result()
+        self._quitting = True
+        try:
+            if f := self.submit(self._off):
+                f.result(QUIT_S)
+        except concurrent.futures.TimeoutError:  # a side still loads its models (the clone: ~30 s): not waited for
+            log.warning('quit: a side is still loading after %.0f s; exiting without it', QUIT_S)
+            self.stuck = True
+            self._unroute()  # the call app's sound goes back now; the rest goes with the process (cli: os._exit)
         self._through_stop()  # its Core Audio listeners go before the control thread does
-        self._pool.shutdown()
+        self._pool.shutdown(wait=not self.stuck)
         self._loopback(False)
         if self._vmic:
             self._vmic.remove()  # the devices go with the app
@@ -1482,7 +1516,12 @@ def cli(argv=None) -> int:
     qapp.aboutToQuit.connect(lock.unlock)
     qapp.aboutToQuit.connect(crash.uninstall)  # a clean exit: no fault file for the next start
     _quit_on_signals(qapp)
-    return qapp.exec()
+    code = qapp.exec()
+    if ctl.stuck:  # quit() did not wait for a side loading its models: that thread would hold the exit (M-09)
+        sys.stdout.flush()
+        logging.shutdown()
+        os._exit(code)
+    return code
 
 
 def _quit_on_signals(qapp) -> None:

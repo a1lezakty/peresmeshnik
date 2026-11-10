@@ -513,3 +513,24 @@ def test_a_stream_that_will_not_move_back_stops_nothing(monkeypatch):
     assert r.moved == {'2': 'alsa'} and back == ['3']
     with pytest.raises(RuntimeError, match=r'Chromium: stream 1 never.*\(given back: Player\)'):
         cp.return_strays()
+
+
+def test_a_recording_is_read_without_copies_of_itself(tmp_path):
+    """L-17: `run --in` / `app --them-file`: a long stereo 48 kHz recording is read in blocks, down-mixed and resampled
+    on the way; memory stays near the 16 kHz mono result, not three copies of the file (~95 MB per minute)."""
+    import tracemalloc
+
+    import soundfile as sf
+
+    from peresmeshnik.pipeline import read_audio
+    sr, n = 48_000, 48_000 * 20
+    t = np.arange(n) / sr
+    sf.write(tmp_path / 'call.wav', np.stack([np.sin(2 * np.pi * 440 * t), np.zeros(n)], 1).astype(np.float32) * 0.5, sr)
+    tracemalloc.start()
+    x = read_audio(str(tmp_path / 'call.wav'))
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    assert x.dtype == np.float32 and abs(len(x) - 20 * SAMPLE_RATE) <= 1
+    assert peak < 3 * x.nbytes, f'{peak >> 10} KB for {x.nbytes >> 10} KB of audio'
+    ref = np.sin(2 * np.pi * 440 * np.arange(len(x)) / SAMPLE_RATE) * 0.25  # the mix of the two channels
+    assert np.abs(x[100:-100] - ref[100:-100]).max() < 0.01

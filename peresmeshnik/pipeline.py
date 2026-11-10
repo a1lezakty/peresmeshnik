@@ -333,12 +333,15 @@ def cpu_s(direction: LocalDirection | None = None) -> float:
 
 
 def read_audio(path: str) -> np.ndarray:
+    """A recording as 16 kHz mono float32, read a second at a time: memory near the result, not three copies of a long
+    stereo file (L-17)."""
     import soundfile as sf
-    x, sr = sf.read(path, dtype='float32', always_2d=True)
-    x = x.mean(axis=1)
-    if sr != SAMPLE_RATE:  # ponytail: linear resampling, fine for speech; use soxr if quality matters
-        x = np.interp(np.arange(0, len(x), sr / SAMPLE_RATE), np.arange(len(x)), x).astype(np.float32)
-    return x
+
+    from peresmeshnik.audio.resample import Resampler
+    with sf.SoundFile(path) as f:
+        rs = Resampler(f.samplerate, SAMPLE_RATE)  # linear, fine for speech
+        parts = [rs(b.mean(axis=1)) for b in f.blocks(f.samplerate, dtype='float32', always_2d=True)]
+    return np.concatenate(parts) if parts else np.zeros(0, np.float32)
 
 
 def run(direction: LocalDirection, pcm: np.ndarray, realtime: bool = False, frame: int = 512) -> None:

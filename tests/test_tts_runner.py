@@ -89,3 +89,61 @@ def test_onnxruntime_sends_no_telemetry(monkeypatch):
     vad.ort_options(1)
     m.no_telemetry()
     assert len(calls) == 2
+
+
+HUNG = '''import struct, sys, time
+sys.stdout.buffer.write(struct.pack("<I", 22050)); sys.stdout.buffer.flush()
+sys.stdin.readline()
+time.sleep(999)  # hung on the phrase: nothing more comes
+'''
+
+
+def test_a_runner_that_stops_answering_is_killed(tmp_path, monkeypatch):
+    """M-08: a Piper runner that starts and then sends nothing (hung on a phrase, held by an antivirus) is killed after
+    REPLY_S: the read ends with an error (crash.Respawn starts it again), the side is not held for ever; one that never
+    starts gives up after START_S."""
+    import time
+
+    from peresmeshnik import config
+    from peresmeshnik.local import tts
+    (tmp_path / 'hung.py').write_text(HUNG, encoding='utf-8')
+    monkeypatch.setattr(config, 'data_dir', lambda: tmp_path / 'data')
+    monkeypatch.setattr(tts, 'voice_path', lambda voice_id: tmp_path / 'voice.onnx')
+    monkeypatch.setattr(tts, 'REPLY_S', 1.0)
+    monkeypatch.setattr(tts, 'START_S', 1.0)
+    monkeypatch.setattr(tts, 'runner_cmd', lambda: [sys.executable, str(tmp_path / 'hung.py')])
+    t = tts.PiperTts()
+    t0 = time.monotonic()
+    with pytest.raises(RuntimeError, match='did not answer'):
+        list(t.synth('Привет.', 'ru'))
+    assert time.monotonic() - t0 < 5 and t._p.poll() is not None
+    t.close()
+    monkeypatch.setattr(tts, 'runner_cmd', lambda: [sys.executable, '-c', 'import time; time.sleep(999)'])
+    t0 = time.monotonic()
+    with pytest.raises(RuntimeError, match='did not answer'):
+        tts.PiperTts()
+    assert time.monotonic() - t0 < 5
+
+
+def test_the_runner_starts_offline_and_goes_online_only_the_first_time(tmp_path, monkeypatch):
+    """M-15: from source, `uv run` resolves Piper's packages from its cache (--offline): no pypi.org at each start, and
+    no network needed once it was set up; only when that fails by itself (nothing cached yet) does it try online."""
+    from peresmeshnik import config
+    from peresmeshnik.local import tts
+    monkeypatch.delenv('PERESMESHNIK_PIPER_CMD', raising=False)
+    assert '--offline' in tts.runner_cmd()
+    ok = tmp_path / 'ok.py'
+    ok.write_text('import struct, sys\nsys.stdout.buffer.write(struct.pack("<I", 22050)); sys.stdout.buffer.flush()\n'
+                  'sys.stdin.readline()\n', encoding='utf-8')
+    monkeypatch.setattr(config, 'data_dir', lambda: tmp_path / 'data')
+    monkeypatch.setattr(tts, 'voice_path', lambda voice_id: tmp_path / 'voice.onnx')
+    starts = []
+    real = subprocess.Popen
+
+    def popen(cmd, **kw):  # "uv": offline fails (nothing cached), online works
+        starts.append(cmd)
+        return real([sys.executable, '-c', 'raise SystemExit(2)'] if '--offline' in cmd else [sys.executable, str(ok)], **kw)
+    monkeypatch.setattr(tts.subprocess, 'Popen', popen)
+    t = tts.PiperTts()
+    t.close()
+    assert t.sample_rate == 22050 and ['--offline' in c for c in starts] == [True, False]

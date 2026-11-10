@@ -218,7 +218,8 @@ class Mic:
             self._proc = None
 
 
-def followed(saved: str, on_state: Callable[[str], None] = lambda text: None) -> Mic:
+def followed(saved: str, on_state: Callable[[str], None] = lambda text: None,
+             on_died: Callable[[str], None] | None = None) -> Mic:
     """macOS, Windows: the microphone of me -> them, kept by the helper on the saved device, else the default input
     (never a virtual one), back on the saved one when it returns. The helper takes another one at once: the tray says which one
     plays meanwhile, and again when the saved one is back."""
@@ -242,7 +243,12 @@ def followed(saved: str, on_state: Callable[[str], None] = lambda text: None) ->
                 on_state(f'translating (the microphone is back: {name})')
             else:
                 on_state(f'translating ({away["name"] or "your microphone"} went away: {name} meanwhile)')
-    m = Mic(saved, follow=True, on_device=on_device, on_end=lambda why: on_state(f'error: the microphone stopped: {why}'))
+    def end(why: str) -> None:
+        if on_died and native().NO_PERMISSION not in why:  # the helper died: its side starts again (L-18)
+            on_died(why)
+        else:  # no permission: starting again would not help
+            on_state(f'error: the microphone stopped: {why}')
+    m = Mic(saved, follow=True, on_device=on_device, on_end=end)
     return m
 
 

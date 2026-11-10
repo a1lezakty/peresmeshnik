@@ -18,6 +18,7 @@ from collections.abc import Callable
 from peresmeshnik.audio.coreaudio import hold, portaudio_lock, refresh_portaudio, release  # noqa: F401
 
 log = logging.getLogger('peresmeshnik.winaudio')
+SETTLE_S = 0.3  # device events within this of the first are one change (a headset brings several at once)
 BLOCK = 1024  # as macOS: one buffer size for every stream (room for a Python callback waiting for the GIL)
 
 
@@ -93,12 +94,16 @@ def stream_args(name: str) -> dict:
 
 class DeviceWatch:
     """`on_change()` (on a thread of its own) when the default render device changes or a device's state does: the
-    native helper's `watch` emits one JSON line per event (no polling). close() ends it; after it no call comes."""
+    native helper's `watch` emits one JSON line per event (no polling). A burst (a headset: its stereo and hands-free
+    endpoints and a new default) is one call, SETTLE_S after its first event, so the output is refreshed once, not
+    once per line; a change of the default microphone is none of the output's business. close() ends it; after it no
+    call comes."""
 
     def __init__(self, on_change: Callable[[], None]):
         from peresmeshnik.audio.capture_windows import CREATE_NO_WINDOW, helper
         self.on_change = on_change
         self._stopped = False
+        self._pending = threading.Lock()  # held from a burst's first event until its call
         self._proc = subprocess.Popen([helper(), 'watch'], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                       stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW)
         threading.Thread(target=self._read, name='winaudio-watch', daemon=True).start()
@@ -111,10 +116,12 @@ class DeviceWatch:
                 ev = json.loads(line.decode(errors='replace'))
             except ValueError:
                 continue
-            if ev.get('event') in ('default', 'state'):
-                threading.Thread(target=self._fire, daemon=True).start()
+            if ev.get('event') == 'state' or (ev.get('event') == 'default' and ev.get('flow') == 'render'):
+                if self._pending.acquire(blocking=False):  # else a call is due already: this event is in it
+                    threading.Timer(SETTLE_S, self._fire).start()
 
     def _fire(self) -> None:
+        self._pending.release()  # an event from now on is a new change (the refresh below may not have seen it)
         if not self._stopped:
             self.on_change()
 

@@ -97,11 +97,16 @@ def app_of(bundle: str) -> str:
     return re.sub(r'\.helper(\..*)?$', '', bundle, flags=re.IGNORECASE)
 
 
+OURS = ('org.peresmeshnik.', 'io.github.a1lezakty.peresmeshnik')  # the helpers' and the app's bundle ids
+
+
 def players() -> list[dict]:
-    """The apps playing now, one per app, ours left out: [{'key' (bundle id), 'name'}] (capture_pipewire.apps shape)."""
+    """The apps playing now, one per app, ours left out: [{'key' (bundle id), 'name'}] (capture_pipewire.apps shape).
+    Ours: this process and every Peresmeshnik program (peresmeshnik-audio plays the translation into BlackHole 2ch:
+    picked as the call app, the tap would take our own voice)."""
     seen = {}
     for p in processes():
-        if p['playing'] and p['bundle'] and p['pid'] != os.getpid():
+        if p['playing'] and p['bundle'] and p['pid'] != os.getpid() and not p['bundle'].startswith(OURS):
             key = app_of(p['bundle'])
             name = 'Safari (WebKit)' if key == WEBKIT else re.sub(r' Helper( \(.*\))?$', '', p['name'])
             seen.setdefault(key, {'key': key, 'name': name or key})
@@ -195,8 +200,12 @@ class ProcessTap:
             if again and on_frames is self._on_frames:
                 log.info('call tap: %s; starting it again', self.status)
                 self._restarts.append(time.monotonic())
-                self._spawn_locked()  # the new rate comes in the new header
-                return
+                try:
+                    self._spawn_locked()  # the new rate comes in the new header
+                    return
+                except Exception as e:  # not a silent capture thread: the side ends with the reason (and restarts)
+                    log.exception('call tap: starting it again')
+                    why = f'the tap helper did not start again: {e}'
         self.on_end(why)
 
     @staticmethod

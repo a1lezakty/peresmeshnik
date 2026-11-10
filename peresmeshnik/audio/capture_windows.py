@@ -4,9 +4,10 @@ The native helper `peresmeshnik-loopback` (native/windows/loopback) captures onl
 plays (`ActivateAudioInterfaceAsync`, `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`, mono float32 on stdout): the
 counterpart of the macOS process tap. The call app is `Ui.call_app` on Windows = its exe name (e.g. `Telegram.exe`);
 its process tree (a browser's tab processes, a call app's helpers) is captured with it. The loopback takes the sound
-BEFORE the app's audio session volume, so the mute spike (set that volume to 0) silences the real speakers but not
-the loopback. The helper is $PERESMESHNIK_LOOPBACK (the installed app sets it), else native/windows/loopback/build of
-this checkout.
+AFTER the app's audio session volume (measured on the runner, stage 7: a session at 0 gives silence), so the call
+app is not muted but ducked to DUCK (-46 dB: near silent under the translation) and the loopback brings its sound
+back up by 1/DUCK. The helper is $PERESMESHNIK_LOOPBACK (the installed app sets it), else native/windows/loopback/build
+of this checkout.
 
 Unlike the macOS tap, process loopback needs the target process id, not a name, so the exe name is resolved to the
 root pid of its process tree here (psutil); an app not running has nothing to tap.
@@ -38,9 +39,12 @@ RATE = 48000  # the helper requests this mix format (AUTOCONVERTPCM), so the hea
 EXIT = {2: 'bad arguments to the loopback helper', 3: 'the call app is not running',
         4: 'access denied to the call app\'s loopback', 5: 'Windows older than 10 2004 (build 19041) has no process '
         'loopback: update Windows, or route the call app through a second virtual cable',
-        6: 'the process loopback failed (a Windows audio error)', 7: 'the loopback\'s mix format changed'}
+        6: 'the process loopback failed (a Windows audio error)',
+        7: 'the loopback stream was reset (a Windows audio change)'}
 RESTART = 7
 RESTART_S, RESTARTS = 1.0, 5
+DUCK = 0.005  # the call app's session volume while translating; below 0.01, so a saved level never takes it for one
+_gain = 1.0  # 1/DUCK while the call app is ducked (mute_call .. restore_call): the loopback's sound at its level again
 
 
 def helper() -> str:
@@ -84,12 +88,14 @@ def sessions() -> list[dict]:
 
 
 def players() -> list[dict]:
-    """The apps playing now, one per app, ours left out: [{'key' (exe name), 'name'}] (capture_pipewire.apps shape)."""
+    """The apps playing now, one per app, ours left out: [{'key' (exe name), 'name'}] (capture_pipewire.apps shape).
+    Ours: this process (python.exe from a checkout) and every Peresmeshnik program (peresmeshnik-audio plays the
+    translation into the virtual cable: picked as the call app, its voice would be muted)."""
     import psutil
     me = {psutil.Process().name().lower()}
     seen = {}
     for s in sessions():
-        if s['playing'] and s['name'] and s['name'].lower() not in me:
+        if s['playing'] and s['name'] and s['name'].lower() not in me and not s['name'].lower().startswith('peresmeshnik'):
             key = s['name']  # the exe name, e.g. Telegram.exe
             seen.setdefault(key.lower(), {'key': key, 'name': key.removesuffix('.exe')})
     return list(seen.values())
@@ -207,7 +213,10 @@ class ProcessLoopback:
             self.rate = int(m[1])
             rs, n = Resampler(self.rate, SAMPLE_RATE), self.rate * 32 // 1000 * 4  # 32 ms, as the Linux capture
             while len(b := proc.stdout.read(n)) == n:
-                on_frames(rs(np.frombuffer(b, '<f4')))
+                x = np.frombuffer(b, '<f4')
+                if _gain != 1.0:  # ducked: the sound before the duck (a few ms) would clip, so it is bounded
+                    x = np.clip(x * _gain, -1.0, 1.0)
+                on_frames(rs(x))
         proc.wait()
         why = EXIT.get(proc.returncode) or f'the loopback helper ended ({proc.returncode}): {self.status}'
         if proc.returncode == 3:
@@ -217,7 +226,7 @@ class ProcessLoopback:
             now = time.monotonic()
             self._restarts = [t for t in self._restarts if now - t < 60]
             if len(self._restarts) >= RESTARTS:
-                again, why = False, f'the loopback mix format keeps changing ({len(self._restarts)} restarts in a minute)'
+                again, why = False, f'the loopback keeps being reset ({len(self._restarts)} restarts in a minute): {self.status}'
             elif self._restarts:
                 time.sleep(max(0.0, self._restarts[-1] + RESTART_S - now))
         with self._lock:
@@ -227,8 +236,12 @@ class ProcessLoopback:
             if again and on_frames is self._on_frames:
                 log.info('call loopback: %s; starting it again', self.status)
                 self._restarts.append(time.monotonic())
-                self._spawn_locked()
-                return
+                try:
+                    self._spawn_locked()
+                    return
+                except Exception as e:  # not a silent capture thread: the side ends with the reason (and restarts)
+                    log.exception('call loopback: starting it again')
+                    why = f'the loopback helper did not start again: {e}'
         self.on_end(why)
 
     @staticmethod
@@ -241,17 +254,25 @@ class ProcessLoopback:
             proc.wait()
 
 
-# ---- the mute spike: hold the call app's sessions at 0 (variant A), new ones too -------------------------------
-# A `mute` helper sets every session of the call app's tree to 0 and mutes new ones as they appear (a call that
-# starts, a new browser tab). It is mute-only: Python owns the restore, from a per-app original level in a file. So a
-# crash (either side) never loses the original: the helper dying leaves the sessions at 0, the file still has the
-# level, and the next restore_call (translation off, loopback end, or the next start) puts it back. The saved level
-# is the app's non-zero original and is never overwritten by a near-zero (Windows persists a muted 0 across a
-# restart, and a fresh helper would read that 0 — the file, not the live reading, is the source of truth).
+# ---- the mute spike: hold the call app's sessions at DUCK (variant A), new ones too ----------------------------
+# A `mute` helper sets every session of the call app's tree to DUCK and ducks new ones as they appear (a call that
+# starts, a new browser tab, a headset plugged in); the loopback is brought back up by 1/DUCK (_gain). It is
+# mute-only: Python owns the restore, from a per-app original level in a file. So a crash (either side) never loses
+# the original: the helper dying leaves the sessions ducked, the file still has the level, and the next restore_call
+# (translation off, loopback end, or the next start) puts it back. The saved level is the app's original (>= 0.01)
+# and is never overwritten by a near-zero (Windows persists a ducked level across a restart, and a fresh helper would
+# read it — the file, not the live reading, is the source of truth). Windows keeps an app's volume per device, so the
+# file also has the devices it was ducked on; an entry goes only when every one of them got its level back. What
+# cannot be given back now (the call app closed before translation was turned off, a headset unplugged) is watched
+# for by a `keep` helper: on the app's next session there (opened at the persisted level, below 0.01) it sets the
+# level and says so. The keep helper lives while the app runs (it is a tray app), event-driven.
 # ponytail: one level per app restored to the whole tree, so a second window's tab volumes are flattened on restore.
+# ponytail: one _gain for the module: one call app is translated at a time.
 
 _muter: subprocess.Popen | None = None
-_muter_lock = threading.Lock()
+_keepers: dict[str, subprocess.Popen] = {}  # app -> its keep helper
+_muter_lock = threading.Lock()  # _muter, _keepers
+_state_lock = threading.RLock()  # the file: read-modify-write from restore_call and the helpers' pumps
 
 
 def _mute_state() -> Path:
@@ -259,34 +280,59 @@ def _mute_state() -> Path:
     return config.config_dir() / 'muted-session.json'
 
 
+def _entry(v) -> dict:
+    """An app's saved state {'level': its original, 'devices': endpoint ids still at 0}. A file of 0.3.0 has the bare
+    level: no devices, so any session given back clears it."""
+    if isinstance(v, dict):
+        return {'level': float(v.get('level', 0.0)), 'devices': [str(x) for x in v.get('devices', [])]}
+    return {'level': float(v), 'devices': []}
+
+
 def _load_state() -> dict:
     try:
         d = json.loads(_mute_state().read_text())
-        return d if isinstance(d, dict) else {}
     except (OSError, ValueError):
         return {}
+    out = {}
+    for app, v in (d.items() if isinstance(d, dict) else ()):
+        try:
+            out[app] = _entry(v)
+        except (TypeError, ValueError, AttributeError):
+            log.warning('mute: a bad entry for %s in %s', app, _mute_state())
+    return out
 
 
 def _write_state(d: dict) -> None:
+    """Whole or not at all (a temporary file, then os.replace): a crash or a reader mid-write never sees half a file,
+    which would read as no saved level at all."""
     try:
         if d:
             _mute_state().parent.mkdir(parents=True, exist_ok=True)
-            _mute_state().write_text(json.dumps(d))
+            tmp = _mute_state().with_suffix('.tmp')
+            tmp.write_text(json.dumps(d))
+            os.replace(tmp, _mute_state())
         elif _mute_state().exists():
             _mute_state().unlink()
     except OSError as e:
         log.warning('mute: could not save the call volume: %s', e)
 
 
-def _remember(app: str, level: float) -> None:
-    """Record the call app's original level. Never overwrite a saved non-zero with a near-zero: a crash leaves the
-    app at 0 and Windows persists it, so a fresh helper reads 0 — the saved non-zero is the true original."""
-    if level < 0.01:
-        return
-    d = _load_state()
-    if d.get(app, 0.0) < 0.01 or level > d[app]:  # first non-zero, or a louder original (keep the max)
-        d[app] = level
-        _write_state(d)
+def _remember(app: str, level: float, device: str = '') -> None:
+    """Record the call app's original level and the device it was muted on. Never overwrite a saved non-zero with a
+    near-zero: a crash leaves the app at 0 and Windows persists it, so a fresh helper reads 0 — the saved non-zero is
+    the true original (the device is recorded all the same: it is at 0 now)."""
+    with _state_lock:
+        d = _load_state()
+        e = d.get(app, {'level': 0.0, 'devices': []})
+        changed = level >= 0.01 and level > e['level']  # first non-zero, or a louder original (keep the max)
+        if changed:
+            e['level'] = level
+        if device and device not in e['devices']:
+            e['devices'].append(device)
+            changed = True
+        if changed:
+            d[app] = e
+            _write_state(d)
 
 
 def session_volume(app: str) -> float | None:
@@ -299,35 +345,49 @@ def session_volume(app: str) -> float | None:
     return max(vols) if vols else None
 
 
-def set_session_volume(app: str, level: float) -> bool:
+def set_session_volume(app: str, level: float) -> list[str]:
+    """Set the call app's sessions (its tree, every device there now) to `level`: the endpoint ids where one was set,
+    [] when none was (the app is not running, or has no session)."""
     pid = tree_root(app)
     if pid is None:
-        return False
+        return []
     r = _run(['volume', '--pid', str(pid), '--tree', '--set', f'{level:.4f}'])
-    return r.returncode == 0
+    if r.returncode:
+        return []
+    return [json.loads(line).get('device', '') for line in r.stdout.splitlines() if line.startswith('{')]
+
+
+def _stop(proc: subprocess.Popen) -> None:
+    try:
+        proc.stdin.close()  # a helper's sign to stop (neither mute nor keep restores anything on its way out)
+        proc.wait(5)
+    except Exception:
+        proc.kill()
 
 
 def mute_call(app: str) -> None:
-    """Start the mute helper on the call app's tree (and new sessions), remembering each session's original level. A
-    leftover (another app, or a crash) is restored first, so the helper reads true originals and other apps keep
-    theirs."""
-    global _muter
-    restore_call()  # restore any leftover first: the helper then reads real levels, not a crash's persisted 0
+    """Start the mute helper on the call app's tree (and new sessions), remembering each session's original level
+    and device. A leftover (another app, or a crash) is restored first, so the helper reads true originals and other
+    apps keep theirs; the app's own keep helper is not started (it would undo the mute)."""
+    global _muter, _gain
+    restore_call(muting=app)  # restore any leftover first: the helper then reads real levels, not a crash's persisted 0
     pid = tree_root(app)
     if pid is None:
         log.warning('mute: %s is not running', app)
         return
-    proc = subprocess.Popen([helper(), 'mute', '--pid', str(pid), '--tree'], stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW)
+    proc = subprocess.Popen([helper(), 'mute', '--pid', str(pid), '--tree', '--level', f'{DUCK:.4f}'],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            creationflags=CREATE_NO_WINDOW)
+    _gain = 1 / DUCK
 
     def pump() -> None:
-        for line in proc.stdout:  # one {"event":"muted","pid","level"} per session, as they are muted
+        for line in proc.stdout:  # one {"event":"muted","pid","level","device"} per session, as they are muted
             try:
                 ev = json.loads(line.decode('utf-8', 'replace'))
             except ValueError:
                 continue
             if ev.get('event') == 'muted':
-                _remember(app, float(ev['level']))
+                _remember(app, float(ev['level']), ev.get('device', ''))
                 log.info('mute: %s session %s volume %.2f -> 0', app, ev.get('pid'), ev['level'])
 
     with _muter_lock:
@@ -335,23 +395,79 @@ def mute_call(app: str) -> None:
     threading.Thread(target=pump, name='mute-pump', daemon=True).start()
 
 
-def restore_call() -> None:
+def restore_call(muting: str = '') -> None:
     """Stop the mute helper (mute-only; Python owns restore) and put each saved app's level back, clearing an entry
-    only when it was actually applied (returncode 0). A level that cannot be applied yet (the app is not running) is
-    kept for a later restore, so nothing is lost if the helper died or the app is gone."""
-    global _muter
+    only where it was actually applied: on every device it was muted on. What cannot be applied yet (the app is not
+    running, its device is unplugged) is kept and watched for by a keep helper (but not for `muting`, the app about
+    to be muted), so nothing is lost if the helper died or the app is gone."""
+    global _muter, _gain
+    _gain = 1.0
     with _muter_lock:
         proc, _muter = _muter, None
-    if proc is not None:
-        try:
-            proc.stdin.close()  # the helper stops muting new sessions and exits (it does not restore)
-            proc.wait(5)
-        except Exception:
-            proc.kill()
-    d = _load_state()
-    for app, level in list(d.items()):
-        level = float(level)
-        if level < 0.01 or set_session_volume(app, level):  # applied (or nothing to restore): drop it
+        keepers = list(_keepers.values())
+        _keepers.clear()
+    for p in ([proc] if proc is not None else []) + keepers:
+        _stop(p)
+    with _state_lock:
+        d = _load_state()
+        for app, e in list(d.items()):
+            if e['level'] < 0.01:  # nothing known to put back
+                d.pop(app)
+                continue
+            got = set(set_session_volume(app, e['level']))
+            e['devices'] = [x for x in e['devices'] if x not in got]
+            if got and not e['devices']:  # applied everywhere it was muted: drop it
+                d.pop(app)
+                log.info('mute: %s sessions restored to %.2f', app, e['level'])
+        _write_state(d)
+    for app, e in d.items():
+        if app != muting:
+            _keep(app, e)
+
+
+def _keep(app: str, e: dict) -> None:
+    """A keep helper for the level of `app` not given back yet: on the app's next session on one of e['devices'] (any
+    device for an entry of 0.3.0) it sets the level if the session is at 0, and says "restored" per device."""
+    args = [helper(), 'keep', '--exe', app, '--level', f'{e["level"]:.4f}']
+    for dev in e['devices']:
+        args += ['--device', dev]
+    try:
+        proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                creationflags=CREATE_NO_WINDOW)
+    except (OSError, RuntimeError) as ex:
+        log.warning('mute: cannot watch for %s to give its volume back: %s', app, ex)
+        return
+    log.info('mute: %s is still at 0 on %s: its volume goes back when it plays there', app, e['devices'] or 'a device')
+
+    def pump() -> None:
+        for line in proc.stdout:  # {"event":"restored","pid","device"} per session given back (or found not at 0)
+            try:
+                ev = json.loads(line.decode('utf-8', 'replace'))
+            except ValueError:
+                continue
+            if ev.get('event') == 'restored' and _restored(app, ev.get('device', '')):
+                break
+        with _muter_lock:
+            if _keepers.get(app) is proc:
+                _keepers.pop(app)
+        _stop(proc)
+
+    with _muter_lock:
+        _keepers[app] = proc
+    threading.Thread(target=pump, name='mute-keep', daemon=True).start()
+
+
+def _restored(app: str, device: str) -> bool:
+    """The keep helper gave `app` its level back on `device`: True when the app's entry is done."""
+    with _state_lock:
+        d = _load_state()
+        e = d.get(app)
+        if e is not None:
+            e['devices'] = [x for x in e['devices'] if x != device]
+            if e['devices']:
+                _write_state(d)
+                return False
             d.pop(app)
-            log.info('mute: %s sessions restored to %.2f', app, level)
-    _write_state(d)
+            _write_state(d)
+            log.info('mute: %s volume given back (%.2f)', app, e['level'])
+        return True

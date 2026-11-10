@@ -163,28 +163,128 @@ def session_volume(pid: int) -> float:
     return max(vols) if vols else -1.0
 
 
+class RawTap:
+    """The helper's raw loopback of `pid` (48 kHz mono float32, no resampling), read all the time; take(s) is what
+    came in the next s seconds."""
+
+    def __init__(self, pid: int):
+        import re
+
+        from peresmeshnik.audio.capture_windows import CREATE_NO_WINDOW, helper
+        self.p = subprocess.Popen([helper(), 'tap', '--pid', str(pid)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW)
+        self.rate = int(re.search(rb'rate=(\d+)', self.p.stdout.readline())[1])
+        self.got, self.lock = [], threading.Lock()
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self):
+        while b := self.p.stdout.read(4096):
+            with self.lock:
+                self.got.append(np.frombuffer(b, '<f4'))
+
+    def take(self, s: float) -> np.ndarray:
+        with self.lock:
+            self.got.clear()
+        time.sleep(s)
+        with self.lock:
+            return np.concatenate(self.got) if self.got else np.zeros(0, np.float32)
+
+    def close(self):
+        self.p.stdin.close()
+        self.p.wait(5)
+
+
+def set_volume(pid: int, level: float) -> None:
+    from peresmeshnik.audio.capture_windows import helper
+    subprocess.run([helper(), 'volume', '--pid', str(pid), '--tree', '--set', f'{level:.4f}'], capture_output=True, check=True)
+    time.sleep(0.6)  # the loopback's buffer (up to 200 ms) and the pipe hold sound from before the change
+
+
+def lined_up(ref: np.ndarray, x: np.ndarray) -> np.ndarray:
+    """The part of `ref` (a periodic source, longer than a period plus x) that `x` is: by the best integer lag."""
+    n = len(ref) + len(x)
+    c = np.fft.irfft(np.fft.rfft(ref, n) * np.conj(np.fft.rfft(x, n)), n)[:len(ref) - len(x) + 1]
+    lag = int(np.argmax(c))
+    return ref[lag:lag + len(x)]
+
+
+def snr_db(ref: np.ndarray, x: np.ndarray) -> float:
+    return float(10 * np.log10(np.sum(ref ** 2) / max(float(np.sum((x - ref) ** 2)), 1e-30)))
+
+
+SPEECH = os.path.join(os.path.dirname(__file__), 'data', 'call-en.ogg')
+
+
 @pytest.mark.usefixtures('helper_ok', 'cable')
-def test_mute_spike_zeroes_the_session_but_keeps_the_loopback():
-    """Variant A: the process loopback takes the sound BEFORE the audio session volume. Setting the session volume to
-    0 makes the call app contribute silence to the device mix (a Windows guarantee), while the loopback still has the
-    tone. The runner has no real recording of the virtual cable, so the output silence is read back from the session
-    volume; hearing the muted speakers on real hardware is a USER-CHECKS line."""
-    from peresmeshnik.audio.capture_windows import ProcessLoopback, helper
-    set_default_output(CABLE_IN)
+@pytest.mark.parametrize('source', ['tone', 'speech'])
+def test_ducked_session_brought_back_up_matches_full_volume(source):
+    """H-11 (stage 7): the process loopback is taken AFTER the session volume (at 0 it is silence), so the call app
+    is ducked to DUCK, not muted, and the loopback brought back up by 1/DUCK. Brought back up, the sound matches the
+    one at volume 1 within -40 dB (SNR >= 40 dB, the level error included) at every level 0.002..0.01: no threshold
+    or step near DUCK. The speech loop and the tone are periodic, so the captures line up sample for sample."""
+    from peresmeshnik.audio.capture_windows import DUCK
+    player = play_tone(CABLE_IN, 440.0 if source == 'tone' else SPEECH)
+    tap = None
+    rows = []
+    try:
+        tap = RawTap(player.pid)
+        set_volume(player.pid, 1.0)
+        ref = tap.take(4.5)
+        assert rms(ref) > 0.05, 'the loopback heard nothing at volume 1'
+        x = tap.take(1.5)[: tap.rate]
+        rows.append((1.0, rms(x) / rms(ref), snr_db(lined_up(ref, x), x)))  # the method's own floor
+        for level in (0.1, 0.01, 0.007, DUCK, 0.003, 0.002):
+            set_volume(player.pid, level)
+            x = tap.take(1.5)[: tap.rate] / level
+            rows.append((level, rms(x) / rms(ref), snr_db(lined_up(ref, x), x)))
+    finally:
+        if tap:
+            tap.close()
+        set_volume(player.pid, 1.0)
+        player.kill()
+        player.wait()
+    print(f'\n{source}: level -> brought back up / volume 1, SNR dB: ' +
+          '; '.join(f'{lv:g} -> {ratio:.4f}, {snr:.1f}' for lv, ratio, snr in rows))
+    bad = [(lv, round(snr, 1)) for lv, ratio, snr in rows if lv <= 0.01 and snr < 40]
+    assert not bad, f'below 40 dB after bringing it back up: {bad}'
+
+
+@pytest.mark.usefixtures('helper_ok', 'cable')
+def test_mute_helper_ducks_and_the_loopback_keeps_the_sound(monkeypatch):
+    """The stage-4 spike, measured after the buffer from before the change is gone (it measured that buffer, so it
+    passed though a session at 0 gives the loopback silence): the mute helper ducks the session to DUCK, and the
+    ProcessLoopback brought back up (_gain, as mute_call sets it) has the tone at its full-volume level."""
+    from peresmeshnik.audio import capture_windows as cw
     player = play_tone(CABLE_IN, 440.0)
-    frames = Frames()
-    cap = ProcessLoopback(pid=player.pid)
+    frames, muter = Frames(), None
+    cap = cw.ProcessLoopback(pid=player.pid)
     cap.start(frames)
     try:
-        assert until(lambda: rms(frames.audio()) > 0.05, 10), 'the loopback heard no tone'
-        assert session_volume(player.pid) > 0.5, 'the session had no (full) volume to start with'
-        subprocess.run([helper(), 'volume', '--pid', str(player.pid), '--tree', '--set', '0'], capture_output=True, check=True)
-        assert session_volume(player.pid) < 0.01, 'the session volume was not set to 0'  # the output mix now gets silence
+        assert until(lambda: player_sessions(cw.helper(), player), 8), 'the player has no session'
+        set_volume(player.pid, 1.0)
         frames.got.clear()
-        assert until(lambda: rms(frames.audio()) > 0.05, 5), 'the loopback lost the tone after muting'  # taken before the volume
+        time.sleep(1.5)
+        full = rms(frames.audio())
+        assert full > 0.1, 'the loopback heard no tone'
+        muter = subprocess.Popen([cw.helper(), 'mute', '--pid', str(player.pid), '--tree', '--level', f'{cw.DUCK:.4f}'],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                 creationflags=cw.CREATE_NO_WINDOW)
+        assert json.loads(muter.stdout.readline())['event'] == 'muted'
+        monkeypatch.setattr(cw, '_gain', 1 / cw.DUCK)
+        vols = [x['volume'] for x in player_sessions(cw.helper(), player)]
+        assert vols and all(abs(v - cw.DUCK) < 1e-3 for v in vols), vols  # what the speakers get: -46 dB
+        time.sleep(0.6)
+        frames.got.clear()
+        time.sleep(1.5)
+        ducked = rms(frames.audio())
+        print(f'\nloopback rms at volume 1 {full:.4f}, ducked to {cw.DUCK} and brought back up {ducked:.4f}')
+        assert abs(20 * np.log10(ducked / full)) < 0.5, (full, ducked)
     finally:
-        subprocess.run([helper(), 'volume', '--pid', str(player.pid), '--tree', '--set', '1'], capture_output=True)
+        if muter:
+            muter.stdin.close()
+            muter.wait(5)
         cap.stop()
+        set_volume(player.pid, 1.0)
         player.kill()
         player.wait()
 
@@ -211,12 +311,13 @@ def test_mute_helper_mutes_a_session_that_appears_after_it_starts():
             time.sleep(0.4)
         assert 0 <= vol < 0.01, f'the new session was not muted: {vol}'
     finally:
-        muter.stdin.close()  # restores every muted session and exits
+        muter.stdin.close()  # mute-only: it stops muting and exits, the app restores
         try:
             muter.wait(5)
         except subprocess.TimeoutExpired:
             muter.kill()
-        if player:
+        if player:  # else Windows keeps python.exe at 0 here and the next tone player starts silent
+            subprocess.run([helper(), 'volume', '--pid', str(player.pid), '--tree', '--set', '1'], capture_output=True)
             player.kill()
             player.wait()
 
@@ -242,6 +343,184 @@ def test_list_shows_the_playing_process():
     finally:
         player.kill()
         player.wait()
+
+
+# ---- the helper's ends and the volume given back (stage 7: H-06, M-21, L-14) ---------------------------------
+
+def player_sessions(helper_path: str, player) -> list[dict]:
+    """The tone player's sessions (its tree): [{'pid', 'device', 'volume'}]."""
+    got = subprocess.run([helper_path, 'volume', '--pid', str(player.pid), '--tree'], capture_output=True, text=True).stdout
+    return [json.loads(line) for line in got.splitlines() if line.startswith('{')]
+
+
+@pytest.mark.usefixtures('helper_ok', 'cable')
+def test_tap_says_not_running_when_the_call_app_closes():
+    """S2-L1: the call app closed while translating is "<app> is not running" (exit 3: the side is only un-muted),
+    not a helper that died (exit 0 -> a restart, a crash report and "restarted after an error")."""
+    from peresmeshnik.audio.capture_windows import ProcessLoopback, helper
+    player = play_tone(CABLE_IN, 440.0)
+    assert until(lambda: player_sessions(helper(), player), 8), 'the player has no session'
+    subprocess.run([helper(), 'volume', '--pid', str(player.pid), '--tree', '--set', '1'], capture_output=True)
+    ended, frames = [], Frames()
+    cap = ProcessLoopback(pid=player.pid, on_end=ended.append)
+    cap.start(frames)
+    try:
+        assert until(lambda: rms(frames.audio()) > 0.05, 10), 'the loopback heard no tone'
+        player.kill()
+        player.wait()
+        assert until(lambda: bool(ended), 10), 'the loopback did not end with the app'
+        assert ended == [f'{player.pid} is not running'], ended
+    finally:
+        cap.stop()
+
+
+@pytest.mark.usefixtures('helper_ok', 'cable')
+def test_volume_and_mute_name_the_device():
+    """S2-07: Windows keeps an app's volume per device, so the app saves where it muted and what it gave back."""
+    from peresmeshnik.audio.capture_windows import CREATE_NO_WINDOW, helper
+    player = play_tone(CABLE_IN, 440.0)
+    muter = None
+    try:
+        assert until(lambda: player_sessions(helper(), player), 8), 'the player has no session'
+        devices = {x['device'] for x in player_sessions(helper(), player)}
+        assert all(d.startswith('{') for d in devices), devices  # endpoint ids: {0.0.0.00000000}.{guid}
+        muter = subprocess.Popen([helper(), 'mute', '--pid', str(player.pid), '--tree'], stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW)
+        ev = json.loads(muter.stdout.readline())
+        assert ev['event'] == 'muted' and ev['device'] in devices, ev
+    finally:
+        if muter:
+            muter.stdin.close()
+            muter.wait(5)
+        subprocess.run([helper(), 'volume', '--pid', str(player.pid), '--tree', '--set', '1'], capture_output=True)
+        player.kill()
+        player.wait()
+
+
+def keeper(helper_path: str, exe: str, level: float, devices=()) -> tuple[subprocess.Popen, list]:
+    """A `keep` helper and the list its "restored" lines go to (a reader thread)."""
+    from peresmeshnik.audio.capture_windows import CREATE_NO_WINDOW
+    args = [helper_path, 'keep', '--exe', exe, '--level', str(level)]
+    for d in devices:
+        args += ['--device', d]
+    proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            creationflags=CREATE_NO_WINDOW)
+    events = []
+    threading.Thread(target=lambda: [events.append(json.loads(x)) for x in proc.stdout if x.startswith(b'{')],
+                     daemon=True).start()
+    return proc, events
+
+
+@pytest.mark.usefixtures('helper_ok', 'cable')
+def test_keep_gives_a_session_at_0_its_level_back():
+    """F1-02: the call app was muted and could not get its level back (it closed first). `keep` finds its session at
+    0 (Windows starts it at the persisted 0) and sets the saved level; the line says so."""
+    import psutil
+
+    from peresmeshnik.audio.capture_windows import helper
+    player = play_tone(CABLE_IN, 440.0)
+    proc = None
+    try:
+        assert until(lambda: player_sessions(helper(), player), 8), 'the player has no session'
+        subprocess.run([helper(), 'volume', '--pid', str(player.pid), '--tree', '--set', '0'], capture_output=True, check=True)
+        device = player_sessions(helper(), player)[0]['device']
+        exe = psutil.Process(player_sessions(helper(), player)[0]['pid']).name()
+        proc, events = keeper(helper(), exe, 0.7, [device])
+        mine = lambda: [e for e in events if in_tree(e['pid'], player.pid)]  # noqa: E731
+        assert until(mine, 8), f'no "restored" for the player: {events}'
+        assert mine()[0]['device'] == device and mine()[0]['was'] < 0.01, mine()
+        vols = [x['volume'] for x in player_sessions(helper(), player)]
+        assert vols and all(abs(v - 0.7) < 0.02 for v in vols), vols
+    finally:
+        if proc:
+            proc.stdin.close()
+            proc.wait(5)
+        subprocess.run([helper(), 'volume', '--pid', str(player.pid), '--tree', '--set', '1'], capture_output=True)
+        player.kill()
+        player.wait()
+
+
+@pytest.mark.usefixtures('helper_ok', 'cable')
+def test_keep_catches_the_apps_next_session():
+    """The call app starts again after it was left at 0: its new session is caught as it appears. Windows may or may
+    not open it at the persisted 0 (printed: the runner's answer); either way it is not left at 0."""
+    import psutil
+
+    from peresmeshnik.audio.capture_windows import helper
+    first = play_tone(CABLE_IN, 440.0)
+    assert until(lambda: player_sessions(helper(), first), 8), 'the player has no session'
+    exe = psutil.Process(player_sessions(helper(), first)[0]['pid']).name()
+    subprocess.run([helper(), 'volume', '--pid', str(first.pid), '--tree', '--set', '0'], capture_output=True, check=True)
+    first.kill()
+    first.wait()
+    proc, events = keeper(helper(), exe, 0.6)
+    player = None
+    try:
+        time.sleep(1.0)  # let it register its session notifications
+        player = play_tone(CABLE_IN, 440.0)  # a new session, after the helper started
+        mine = lambda: [e for e in events if in_tree(e['pid'], player.pid)]  # noqa: E731
+        assert until(mine, 8), f'no "restored" for the new session: {events}'
+        print(f'the new session opened at {mine()[0]["was"]:.2f} (a persisted 0: {mine()[0]["was"] < 0.01})')
+        vols = [x['volume'] for x in player_sessions(helper(), player)]
+        assert vols and min(vols) >= 0.01, vols
+    finally:
+        proc.stdin.close()
+        proc.wait(5)
+        if player:
+            subprocess.run([helper(), 'volume', '--pid', str(player.pid), '--tree', '--set', '1'], capture_output=True)
+            player.kill()
+            player.wait()
+
+
+@pytest.mark.skipif(os.environ.get('PERESMESHNIK_AUDIOSRV_RESTART') != '1',
+                    reason='restarts Windows Audio: its own CI step (PERESMESHNIK_AUDIOSRV_RESTART=1)')
+@pytest.mark.usefixtures('helper_ok', 'cable')
+def test_tap_ends_when_windows_audio_restarts():
+    """S2-06: Windows Audio restarted under a running capture (a driver update, a crash of the service). A process
+    loopback is not told (no error, no event: before the fix the helper waited forever, the side silent). The helper
+    watches the service, waits for it to run again and exits 7; ProcessLoopback starts it again and hears the app
+    (or, if Windows is not ready yet, the side ends with a reason and restarts). The app here is this process, its
+    PortAudio opened anew after the restart, as a call app's audio would be."""
+    import sounddevice as sd
+
+    from peresmeshnik.audio import winaudio
+    from peresmeshnik.audio.capture_windows import ProcessLoopback
+
+    def tone_stream():
+        dev = winaudio.device_index(CABLE_IN)
+        sr = int(sd.query_devices(dev)['default_samplerate'])
+        phase = [0.0]
+
+        def cb(out, frames, t, status):
+            k = phase[0] + 2 * np.pi * 440 / sr * np.arange(frames)
+            out[:] = (0.3 * np.sin(k)).astype(np.float32)[:, None]
+            phase[0] = float(k[-1] + 2 * np.pi * 440 / sr) % (2 * np.pi)
+        s = sd.OutputStream(device=dev, channels=1, samplerate=sr, dtype='float32', callback=cb)
+        s.start()
+        return s
+
+    frames, ended = Frames(), []
+    cap = ProcessLoopback(pid=os.getpid(), on_end=ended.append)
+    cap.start(frames)
+    stream = None
+    try:
+        stream = tone_stream()
+        assert until(lambda: rms(frames.audio()[-SR:]) > 0.05, 8), 'the loopback heard no tone before the restart'
+        stream.close()
+        subprocess.run(['powershell', '-NoProfile', '-Command', 'Restart-Service Audiosrv -Force'], check=True, timeout=90)
+        sd._terminate()
+        sd._initialize()
+        assert until(has_cable, 30), 'VB-Cable did not come back'
+        stream = tone_stream()
+        frames.got.clear()
+        ok = until(lambda: bool(ended) or rms(frames.audio()[-SR:]) > 0.05, 45)
+        print(f'\nafter Windows Audio restarted: restarts {len(cap._restarts)}, ended {ended}, '
+              f'heard again {rms(frames.audio()[-SR:]) > 0.05}; {cap.status!r}')
+        assert ok, f'the capture stays silent 45 s after Windows Audio restarted: {cap.status!r}'
+    finally:
+        if stream:
+            stream.close()
+        cap.stop()
 
 
 # ---- the headphones through WASAPI (needs a device) ---------------------------------------------

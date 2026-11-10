@@ -142,9 +142,10 @@ def _pack(s, gpu: Gpu, needed: set[str]) -> list[Component]:
                      'your own voice on an NVIDIA GPU: its own Python with torch', st == 'ready',
                      (spec['installed_bytes'] if st == 'ready' else du(folder))  # not a walk over ~8 GB of torch each time
                      + du(folder.with_name('voice-pack.download')), gpu_clone and not no,
-                     'a stock voice speaks instead of yours' if gpu_clone else '', no, True, False,
-                     lambda progress, cancel: voicepack.install(progress, cancel),
-                     lambda: [shutil.rmtree(p, ignore_errors=True) for p in (folder, folder.with_name('voice-pack.download'))])]
+                     'a stock voice speaks instead of yours' if gpu_clone else '', no, consent=True,
+                     _fetch=lambda progress, cancel: voicepack.install(progress, cancel),
+                     _remove=lambda: [shutil.rmtree(p, ignore_errors=True)
+                                      for p in (folder, folder.with_name('voice-pack.download'))])]
     if add := spec.get('addon'):
         low = f'the addon needs {add["vram_gb"]} GB of GPU memory; this computer has {languages.gpu_text(gpu.vram)}' \
             if gpu.vram < add.get('vram_gb', 0) else ''
@@ -165,8 +166,8 @@ def _pack(s, gpu: Gpu, needed: set[str]) -> list[Component]:
         out.append(Component(ADDON, 'Qwen3 + Chatterbox (addon to the voice pack)', 0 if ready else size,
                              ' + '.join(dict.fromkeys(models.get(i).license for i in add['models'])),
                              models.get(add['models'][0]).license_url,
-                             'a faster, closer clone of your voice on an NVIDIA GPU', ready, 0, False, '', no or low, True,
-                             False, fetch, remove))
+                             'a faster, closer clone of your voice on an NVIDIA GPU', ready, 0, False, '', no or low,
+                             consent=True, _fetch=fetch, _remove=remove))
     return out
 
 

@@ -101,6 +101,11 @@ def test_the_voice_pack_and_its_addon_only_where_they_run(tmp_path, monkeypatch)
     assert components.ADDON not in {c.id for c in components.listing(s, CARD)}
     rows = {c.id: c for c in components.listing(s, Gpu())}
     assert 'NVIDIA' in rows[components.VOICE_PACK].unavailable and not rows[components.VOICE_PACK].recommended
+    from peresmeshnik.ui.components import ComponentsBox
+    monkeypatch.setattr(components, 'listing', lambda s: [pack, addon])
+    box = ComponentsBox(s)
+    box.refresh()  # the box shows them (a field out of place broke it on Windows)
+    assert box.tree.topLevelItemCount() == 2 and not box.consent.isHidden()
 
 
 def settle(seconds=0.05):

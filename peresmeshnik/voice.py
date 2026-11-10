@@ -430,6 +430,17 @@ def save_them(name: str, lang: str, seconds: float, states: dict[str, tuple[np.n
     return Voice(name=vid, engine='reference', path=path, meta=meta)
 
 
+def profiles(root: Path | None = None) -> list[Voice]:
+    """The saved voices: mine and the contacts' (not the wizard's take in progress, `.new` / `.old`)."""
+    out = []
+    for p in sorted((root or voices_dir()).glob('*/voice.json')):
+        if not p.parent.name.endswith(('.new', '.old')):
+            try:
+                out.append(load(p.parent.name, root))
+            except (OSError, ValueError):  # a broken voice.json: not listed (deleted with the folder)
+                pass
+    return out
+
 def names(root: Path | None = None) -> set[str]:
     """What in the voices folder may name a person, for crash reports to scrub: the names on the voices screen and
     folders the user named (v1 `--name`); not the app's own ids ('me', 'them-<hex>'), which name nobody."""
@@ -672,11 +683,10 @@ def main(argv=None) -> int:
         ap.error('--engine needs --model-dir')
 
     if a.cmd == 'list':
-        root = a.voices or voices_dir()
-        for p in sorted(root.glob('*/voice.json')):
-            m = load(p.parent.name, root).meta
+        for v in profiles(a.voices):
+            m = v.meta
             print(f"{m['name']}\t{m['lang']}\t{m['seconds']:.0f} s\t{m['created']}\t{m['kind']}\t"
-                  f"{(m['consent'] or {}).get('how', 'not confirmed')}\t{p.parent}")
+                  f"{(m['consent'] or {}).get('how', 'not confirmed')}\t{v.path}")
         return 0
     if a.cmd == 'check':
         r = check(*read_audio(a.file))

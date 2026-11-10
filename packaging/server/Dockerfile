@@ -39,10 +39,13 @@ RUN uv python install 3.12 \
       --build-constraints voice-runner/requirements-linux-cuda.txt \
  && uv cache clean
 
-# not root: the GPU works for any user of the container (NVIDIA Container Toolkit); a named volume takes /data's owner, a
-# folder of the host mounted at /data must belong to uid 1000
-RUN useradd --uid 1000 --create-home peresmeshnik && mkdir -p /data && chown peresmeshnik /data
-USER peresmeshnik
+# not root but uid 1000 (Ubuntu 24.04 images have it already, as `ubuntu`): the GPU works for any user of the container
+# (NVIDIA Container Toolkit). The folders down to the voices' are made here, its own: a new named volume takes them as
+# they are (else the runtime makes them for the --tmpfs, root's, and the server cannot write its certificate); a folder
+# of the host mounted at /data must belong to uid 1000
+RUN (id -u 1000 >/dev/null 2>&1 || useradd --uid 1000 --create-home peresmeshnik) \
+ && mkdir -p /data/data/Peresmeshnik/server/voices && chown -R 1000 /data
+USER 1000
 VOLUME /data
 EXPOSE 47000
 # any `peresmeshnik` command: `serve --fetch en-ru` once (it shows the models' licenses: -it), then `serve`, which

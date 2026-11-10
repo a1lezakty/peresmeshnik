@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
 import copy
 import errno
 import hashlib
@@ -59,8 +60,9 @@ HELLO_S = 3.0  # the first message comes this soon after the connection, else it
 VOICE_S = 120.0  # a voice upload (at most protocol.VOICE_MAX) takes at most this long
 PING_S = 5.0  # a client gone without a reset (Wi-Fi) is noticed in twice this: its side goes warm, another computer may come
 KEY = {'them': 'them_to_me', 'me': 'me_to_them'}
-MAX_UNAUTH, PER_IP = 32, 2  # connections without a checked token yet: in all, and from one address (anyone on the LAN
-# holding silent ones does not lock the paired laptop out); each holds at most MAX_QUEUE messages of protocol.CHUNK
+MAX_UNAUTH, PER_IP = 32, 2  # connections without a checked token yet: in all (then the oldest of them goes for a new
+# one), and from one address (anyone on the LAN holding silent ones does not lock the paired laptop out); each holds at
+# most MAX_QUEUE messages of protocol.CHUNK
 MAX_QUEUE = 4
 QUEUE_MAX = 1000  # messages waiting for a client that reads too slowly (~100 s of voice): then it is cut off
 STOP_S = 60.0  # stopping waits this long for a side still loading its models (then its engines are stopped)
@@ -87,9 +89,9 @@ class Conn:
     """One client connection: what goes down is queued here (from any thread) and sent in order by `run`. Speech is
     tagged with the barge-in count it was made under: after an interrupt the speech queued before it is not sent."""
 
-    def __init__(self, ws, loop: asyncio.AbstractEventLoop, ip: str = ''):
-        self.ws, self.loop, self.epoch, self.ip = ws, loop, 0, ip
-        self.authed = False  # its hello's token was checked (Server.unauth)
+    def __init__(self, ws, loop: asyncio.AbstractEventLoop):
+        self.ws, self.loop, self.epoch = ws, loop, 0
+        self.authed = False  # its hello's token was checked (Server.waiting)
         self.q: asyncio.Queue = asyncio.Queue()
 
     def put(self, data, speech: bool = False) -> None:
@@ -247,7 +249,7 @@ class Server:
         self.ports: list[int] = []
         self.device = ''
         self._stops: list[threading.Thread] = []
-        self.unauth: dict[str, int] = {}  # address -> its connections without a checked token now (PER_IP, MAX_UNAUTH)
+        self.waiting: dict = {}  # connection -> its address, oldest first: no checked token yet (PER_IP, MAX_UNAUTH)
         self._filter = NoText()
         self._stop: asyncio.Event | None = None
         self.lock: asyncio.Lock | None = None
@@ -319,26 +321,33 @@ class Server:
         from websockets.exceptions import ConnectionClosed
         # small messages (pong, captions, the voice's pieces) not held back: asyncio sets it on Linux only (CI: not on
         # Windows or macOS), BENCH remote-0
-        ws.transport.get_extra_info('socket').setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        sock, peer = ws.transport.get_extra_info('socket'), ws.remote_address
+        if sock is None or peer is None:  # gone before its handler ran
+            return
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         path = ws.request.path
         side = next((x for x in protocol.SIDES if path == protocol.side_path(x)), None)
         if side is None and path != protocol.PAIR_PATH:
             await ws.close(1008, 'not found')
             return
-        ip = ws.remote_address[0]
-        if self.unauth.get(ip, 0) >= PER_IP or sum(self.unauth.values()) >= MAX_UNAUTH:  # silent ones: not one more
+        ip = peer[0]  # taken now: once the client has its answer it may close, and the address goes with the socket
+        if self.unauth.get(ip, 0) >= PER_IP:  # this address holds silent ones already: not one more
             await ws.close(1013, 'too many connections')
             return
-        self.unauth[ip] = self.unauth.get(ip, 0) + 1
+        if len(self.waiting) >= MAX_UNAUTH:  # silent ones from many addresses: the oldest goes, not the newcomer
+            old = next(iter(self.waiting))
+            del self.waiting[old]
+            old.transport.abort()
+        self.waiting[ws] = ip
         if side is None:
             try:
-                await self._pair(ws)
+                await self._pair(ws, ip)
             except (TimeoutError, ConnectionClosed):
                 pass
             finally:
-                self._authed(ip)
+                self.waiting.pop(ws, None)
             return
-        conn = Conn(ws, self._loop, ip)
+        conn = Conn(ws, self._loop)
         sender = asyncio.create_task(conn.run())
         try:
             if (slot := await self._open(conn, side)) is not None:
@@ -356,8 +365,7 @@ class Server:
                 log.exception('%s: the session failed', side)
                 conn.put(protocol.error('internal', f'{type(e).__name__}: {e}'))
         finally:
-            if not conn.authed:
-                self._authed(ip)
+            self.waiting.pop(ws, None)
             self._left(conn)
             conn.end()
             try:
@@ -365,14 +373,12 @@ class Server:
             except (TimeoutError, ConnectionClosed):
                 ws.transport.abort()
 
-    def _authed(self, ip: str) -> None:
-        """A connection from `ip` showed its token (or ended): no longer counted."""
-        if (n := self.unauth.get(ip, 0) - 1) > 0:
-            self.unauth[ip] = n
-        else:
-            self.unauth.pop(ip, None)
+    @property
+    def unauth(self) -> dict[str, int]:
+        """Address -> its connections without a checked token now."""
+        return dict(collections.Counter(self.waiting.values()))
 
-    async def _pair(self, ws) -> None:
+    async def _pair(self, ws, ip: str) -> None:
         """/v1/pair: only while a code is open (one use, pairing.CODE_S); the device paired is said on the terminal."""
         p = self.pairing
         if not p.code or p.used or p.clock() > p.until or p.tries >= pairing.CODE_TRIES:
@@ -387,7 +393,7 @@ class Server:
         await ws.send(a)
         if (d := json.loads(a))['type'] == 'paired':  # the name as kept (another device of that name: a suffix)
             name = ''.join(c for c in await asyncio.to_thread(p.check, d['token']) or '' if c.isprintable())
-            print(f'paired: {name} from {ws.remote_address[0]}', flush=True)  # the terminal, not the log
+            print(f'paired: {name} from {ip}', flush=True)  # the terminal, not the log
 
     async def _revoked(self) -> None:
         """Every REVOKE_S: a device unpaired meanwhile (`serve --revoke`, another process) loses its sessions, warm too."""
@@ -415,7 +421,7 @@ class Server:
             raise ProtocolError('auth', 'this computer is not paired with the server, or it was removed from it: pair it '
                                         'again (tray menu, Server…)')
         conn.authed = True
-        self._authed(conn.ip)
+        self.waiting.pop(conn.ws, None)
         sha = hashlib.sha256(h['token'].encode()).hexdigest()
         v = h['voice']
         key = (h['src'], h['tgt'], v and v['sha256'])
@@ -514,8 +520,8 @@ class Server:
         try:
             v = voice.load(folder.name, folder.parent)
             return voice.why_not_mine(v) if side == 'me' else ''
-        except (OSError, ValueError, TypeError, AttributeError) as e:
-            raise ProtocolError('voice', f'the voice profile does not read: {type(e).__name__}: {e}') from None
+        except (OSError, ValueError, TypeError, AttributeError, RecursionError) as e:  # a nesting bomb in voice.json too
+            raise ProtocolError('voice', f'the voice profile does not read: {type(e).__name__}') from None
 
     def _build(self, slot: Slot, h: dict) -> ServerSide:
         """The side's engines, on a thread (seconds; a clone ~30 s). Raises ProtocolError('lang') when this server cannot

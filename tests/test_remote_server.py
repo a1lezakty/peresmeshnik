@@ -295,7 +295,7 @@ def test_a_damaged_voice_and_leftovers(tmp_path, made):
                 assert ('more' in a['text']) is (len(sent) > ref['bytes'])  # refused before the extra is kept
         bad_ones = [b'not a zip']  # a zip whose voice.json does not read, or is not an object: refused once (not 'internal',
         for i, bad in enumerate(['{not json', '[]', '"x"', '{"version": "2"}',  # retried forever)
-                                 '{"version": 2, "kind": "me", "consent": "x"}']):
+                                 '{"version": 2, "kind": "me", "consent": "x"}', '[' * 100_000]):
             (tmp_path / f'bad{i}').mkdir()
             (tmp_path / f'bad{i}' / 'voice.json').write_text(bad)
             bad_ones.append(protocol.pack_voice(tmp_path / f'bad{i}'))
@@ -554,16 +554,18 @@ def test_must_auth_first_and_limits(srv, made, monkeypatch):
     assert getattr(e.value.rcvd, 'code', 1009) == 1009  # Windows: the rest of the send is reset before the close is read
     monkeypatch.setattr(server, 'HELLO_S', 10.0)
     monkeypatch.setattr(server, 'MAX_UNAUTH', 2)
+    monkeypatch.setattr(server, 'PER_IP', 10)  # here: silent ones from many addresses
     until(lambda: not srv.unauth)
     with raw(srv) as a, raw(srv, 'me') as b:
         until(lambda: sum(srv.unauth.values()) == 2)
-        with raw(srv) as c, pytest.raises(ConnectionClosed) as e:
-            c.recv(timeout=5)
-        assert e.value.rcvd.code == 1013
-        a.send(hello(token))  # a token shown: no longer counted
-        assert answer(a)['type'] == 'ready' and sum(srv.unauth.values()) == 1
-        b.close()
-    until(lambda: not srv.unauth)
+        with raw(srv) as c:  # all places taken: the oldest silent one goes, the newcomer stays
+            with pytest.raises(ConnectionClosed):
+                a.recv(timeout=5)
+            c.send(hello(token))
+            assert answer(c)['type'] == 'ready'
+            assert sum(srv.unauth.values()) == 1  # b only: a token shown is no longer counted
+        b.send(hello(token, 'me', 'ru', 'en'))
+        assert answer(b)['type'] == 'ready' and not srv.unauth
 
 
 def test_must_a_voice_is_per_device(tmp_path, made):
@@ -596,13 +598,15 @@ def test_must_bind_private_only(tmp_path):
     assert all(pairing.private(h) for h in server.hosts(''))
 
 
-def test_must_pairing(srv, made, tmp_path, capsys):
+def test_must_pairing(srv, made, tmp_path, capsys, monkeypatch):
     """7: /v1/pair only while a code is open; one use; at most 10 minutes; the device paired said on the terminal."""
     assert pairing.CODE_S <= 600
     with raw(srv, path=protocol.PAIR_PATH) as ws:  # no code open: refused before anything is read
         assert answer(ws)['code'] == 'code'
     code = srv.pairing.new_code()
-    out = []  # the server says it after its answer: read until it is there
+    check = pairing.Pairing.check  # the line is said after the answer: by then the client has closed (its address
+    monkeypatch.setattr(pairing.Pairing, 'check', lambda self, t: time.sleep(0.3) or check(self, t))  # gone with it)
+    out = []  # read until it is there
 
     def said():
         out.append(capsys.readouterr().out)

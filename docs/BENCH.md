@@ -2475,3 +2475,39 @@ Shtorm weights, int8; Qwen3 on the A4000 beside them):
   (0.09–0.19), a Russian voice at 0.34–0.46. The words stay (WER 3–11 %). The studio English reader above had 0.36–0.39.
 - Qwen3 loses similarity across languages too (0.29–0.42 against 0.62–0.75) and, in the speaker-vector mode, runs away
   on Russian with the two English female voices (WER 74 % and 129 %).
+
+**A wider search for a cloned Russian voice on a CPU** (rows `vNN-chatterbox`, `vNN-voxtream` in
+`bench/results/voices.jsonl`). Of the candidates found (F5-TTS Russian fine-tunes, OuteTTS, Audio8, Fish Speech,
+CosyVoice3, Russian XTTS fine-tunes, GPT-SoVITS with Russian weights, Supertonic 3 style fitting, voice converters on
+top of a stock voice) only two claim a clone in Russian with a CPU runtime; both measured on the same eight voices,
+voice → Russian, 5 s reference, the same 6 sentences. Chatterbox Multilingual v3 as GGUF q8 through `tts-cli` of
+codec.cpp (lower case + NFKD, `[ru]` prefix, 4 threads); VoXtream2-RU (`simba9/voxtream2-ru`, its own Russian text
+front end, torch on the CPU, 4 threads, `VOXTREAM_BEST_OF=1`), on 5 of the 8 voices.
+
+| voice → Russian (sim / WER) | Pocket ru (CPU) | Qwen3 (A4000) | Chatterbox GGUF (CPU) | VoXtream2-RU (CPU) |
+|---|---|---|---|---|
+| English, male | 0.18 / 4 % | 0.42 / 4 % | 0.50 / 14 % | 0.43 / 14 % |
+| English, female | 0.19 / 11 % | 0.32 / 74 % | 0.39 / 9 % | 0.39 / 13 % |
+| English, female | 0.15 / 4 % | 0.29 / 129 % | 0.60 / 14 % | 0.53 / 13 % |
+| Spanish, male | 0.23 / 7 % | 0.39 / 3 % | 0.57 / 10 % | — |
+| Russian, male | 0.44 / 7 % | 0.62 / 3 % | 0.72 / 9 % | 0.61 / 11 % |
+| Russian, male | 0.34 / 7 % | 0.66 / 7 % | 0.74 / 13 % | — |
+| Russian, female | 0.45 / 3 % | 0.75 / 13 % | 0.75 / 4 % | 0.70 / 7 % |
+| Russian, female | 0.46 / 7 % | 0.69 / 4 % | 0.70 / 7 % | — |
+
+| speed, i7-13700, 4 physical cores, nothing else on them (3 sentences) | first audio | RTF | memory | streaming |
+|---|---|---|---|---|
+| Chatterbox GGUF q8 | the whole clause: 6.4–11.6 s for 2.6–5.2 s of speech | 2.2 | 1.6 GB | no |
+| VoXtream2-RU | 2.9–3.5 s | 9.7 | 6.2 GB | yes, 80 ms frames |
+| Pocket TTS, Shtorm weights, 2 threads (above) | 0.10 s | 0.20 | 1.2 GB | yes |
+
+- **Both carry a foreign voice into Russian far better than the Russian Pocket weights** (0.39–0.60 against 0.15–0.23)
+  and better than Qwen3 on the GPU (0.29–0.42), without Qwen3's runaway on the two English female voices. A cloned
+  Russian that keeps an English speaker recognisable is possible; the Pocket weights are what loses it.
+- **Neither holds a live pace on a CPU:** Chatterbox is 2.2× slower than real time and speaks only after the whole
+  clause (the S3Gen decoder takes about two thirds of it; `--timesteps 4/2` does not help); VoXtream streams, but
+  10× slower than real time and in 6.2 GB. The whole pipeline was not run: with an RTF above 1 the voice falls behind
+  every clause.
+- Chatterbox GGUF ran away once in 48 sentences (a short one with Latin letters: 20 s of repeats instead of 2.5 s; the
+  GGUF port has no alignment analyser) — a length check as for XTTS would be needed. The similarity rows were made with
+  the two engines sharing the same physical cores (hyper-threads), their own speed fields are slower than the table.

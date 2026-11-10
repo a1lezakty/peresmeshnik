@@ -8,6 +8,10 @@ version is the top of its GitHub release notes (`.github/workflows/release.yml`)
 - Your cloned voice speaks into the call only once confirmed: read two random phrases at the microphone; the app hears
   the words and matches the voice of every part of the recording. A voice recorded or imported in 0.3.0 speaks in a
   stock voice until confirmed once (tray → Voices…). Tray → **Voices…** lists, confirms and deletes the voices.
+- The installer puts only the app on the computer. The wizard's **Components** page (and tray → **Components…**) lists
+  what can be downloaded — the pair's models, the clone engines, the NVIDIA voice pack — with size, license and what
+  it is for, ticked where it suits this computer and the pair; nothing downloads before Download, an unticked one says
+  what the pair does without it, and anything downloaded can be removed there.
 - Back to 0.3.0 after this version: its `python -m peresmeshnik.voice list` stops at a kept voice of someone you talk to
   (`them-…`, it has no `quality`).
 - **Your cloned voice without an NVIDIA GPU, on any computer, a Mac too:** Kyutai's Pocket TTS on the CPU (onnxruntime,

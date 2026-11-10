@@ -257,6 +257,7 @@ side has no subtitles of what was dropped; them -> me takes MAX_LAG_S."""
                     c['dropped'] = 'barge-in' if end_wall < self._cut else round(lag, 3)
                     st['dropped'] += 1
                     log.info(json.dumps(c | {'translation': translation}, ensure_ascii=False))
+                    self._events.put(Latency(c['clause'], 'dropped', round(lag, 3)))  # no voice comes for it (a remote client)
                     continue
                 if self.max_lag_s is not None and self._speeds and lag > FAST_AFTER_S:
                     speed = round(1 + (MAX_SPEED - 1) * min(1.0, (lag - FAST_AFTER_S) / max(self.max_lag_s - FAST_AFTER_S, 1e-3)), 3)

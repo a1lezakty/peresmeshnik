@@ -7,7 +7,7 @@ import time
 import numpy as np
 import pytest
 
-from peresmeshnik.engines import SAMPLE_RATE, Caption, Speech
+from peresmeshnik.engines import SAMPLE_RATE, Caption, Latency, Speech
 from peresmeshnik.pipeline import LocalDirection, run
 
 FRAME = 512
@@ -376,8 +376,8 @@ class LongTts(ToneTts):
             yield np.zeros(int(self.sample_rate / speed), np.float32)
 
 
-def voice_rows(tts, max_lag_s, seconds=4.0):
-    rows = []
+def voice_rows(tts, max_lag_s, seconds=4.0, events=None):
+    rows, events = [], [] if events is None else events
     handler = logging.Handler()
     handler.emit = lambda r: rows.append(json.loads(r.getMessage()))
     log = logging.getLogger('peresmeshnik.latency')
@@ -385,9 +385,11 @@ def voice_rows(tts, max_lag_s, seconds=4.0):
     log.setLevel(logging.INFO)
     try:
         d = LocalDirection(EnergyVad(), WordAsr(), UpperMt(), tts, 'en', 'ru', max_clause_s=1.0, max_lag_s=max_lag_s)
-        threading.Thread(target=lambda: list(d.events()), daemon=True).start()
+        t = threading.Thread(target=lambda: events.extend(d.events()), daemon=True)
+        t.start()
         run(d, np.concatenate([tone(seconds), silence(0.6)]), realtime=True)
         d.finish()
+        t.join(5)
     finally:
         log.removeHandler(handler)
     return rows
@@ -396,10 +398,13 @@ def voice_rows(tts, max_lag_s, seconds=4.0):
 def test_queue_policy_caps_the_voice_lag():
     free = voice_rows(LongTts(), None)
     assert max(r['voice_lag_s'] for r in free) > 2.5 and not any('dropped' in r for r in free)  # falls ever further behind
-    capped = voice_rows(LongTts(), 1.5)
+    events = []
+    capped = voice_rows(LongTts(), 1.5, events=events)
     spoken = [r for r in capped if 'dropped' not in r]
     assert spoken and max(r['voice_lag_s'] for r in spoken) < 1.5 + 0.3  # + one TTS first-chunk time
     assert any('dropped' in r for r in capped)  # and it costs whole clauses (their captions stay)
+    dropped = [e.clause for e in events if isinstance(e, Latency) and e.what == 'dropped']  # each one said (a remote
+    assert dropped == [r['clause'] for r in capped if 'dropped' in r]  # client waits for no voice of it)
     tts = LongTts(speeds=True)
     voice_rows(tts, 3.0)
     assert max(tts.speeds) > 1.0 and all(1.0 <= s <= 1.4 for s in tts.speeds)  # behind: faster, within the cap

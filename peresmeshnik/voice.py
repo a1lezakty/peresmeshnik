@@ -525,9 +525,11 @@ LIVE_PHRASES = {  # read at the microphone to confirm a voice, two at random (a 
 }
 LIVE_WER = 0.3  # the live reading: the app's ASR heard the screen text (RESEARCH-clone 6.1, as loose as check_clone's)
 SPEAKER = 'wespeaker-resnet34'  # registry id: the speaker vector ("the same voice"; S2: who is speaking now)
-# cosine of the speaker vectors, the live reading against the profile's recording: the same person in another session
-# passes, another person does not. ponytail: provisional, set from the stage 8 measurement (BENCH)
-MATCH = 0.5
+# cosine of the speaker vectors, the live reading (silence cut out) against the profile's recording. Stage 8, LibriSpeech
+# dev-clean (40 people, another chapter as another session), 5 s live: another person of the same sex passes <= 0.64 %
+# in every condition (17 423 pairs, p99 0.43); the same person is refused 2.8 % clean, 6-8 % with a laptop mic at
+# SNR 20 dB, 14-20 % at 10 dB, 21 % against a phone-band file: a refusal asks for a quieter place, a try again helps
+MATCH = 0.45
 
 
 def live_phrases(lang: str, n: int = 2) -> list[str]:
@@ -540,6 +542,18 @@ def _to(pcm: np.ndarray, sr: int, to: int) -> np.ndarray:
     x = np.asarray(pcm, np.float32)
     x = x.mean(axis=1) if x.ndim > 1 else x
     return x if sr == to else np.interp(np.arange(0, len(x), sr / to), np.arange(len(x)), x).astype(np.float32)
+
+
+def _speech(pcm: np.ndarray, sr: int) -> np.ndarray:
+    """Only the speech of a short recording: its 30 ms frames above the background, as check() counts them (the
+    silence before, between and after the phrases out: other people then match ~0.02 less, the same as much, BENCH)."""
+    x = np.asarray(pcm, np.float32)
+    x = x.mean(axis=1) if x.ndim > 1 else x
+    f = _frames(x - x.mean(), sr)
+    db = 10 * np.log10(np.mean(f ** 2, axis=1) + 1e-12)
+    live = db[db > -100]
+    keep = f[db > max(float(np.percentile(live, 10)) + 6 if len(live) else -120.0, -60.0)]
+    return keep.reshape(-1).astype(np.float32) if len(keep) else x
 
 
 class Speaker:
@@ -570,9 +584,13 @@ def confirm_live(ref: Voice, pcm: np.ndarray, sr: int, said: list[str], asr, spe
     from peresmeshnik.engines import SAMPLE_RATE
     heard = asr.recognize(_to(pcm, sr, SAMPLE_RATE), lang=ref.meta.get('lang')).text
     err = wer(' '.join(said), heard)
-    sim = float(speaker.embed(*read_audio(ref.path / 'reference.wav')) @ speaker.embed(pcm, sr))
+    sim = float(speaker.embed(*read_audio(ref.path / 'reference.wav')) @ speaker.embed(_speech(pcm, sr), sr))
     why = ([f'the words heard are not the ones on the screen ({err:.0%} differ): read them as written'] if err > LIVE_WER
            else []) + ([f'this is not the voice of the recording (similarity {sim:.2f})'] if sim < MATCH else [])
+    if sim < MATCH and (r := check(pcm, sr)).speech_s and r.snr_db < FAIR_DB:  # the same person: refused 3x as often
+        why.append(f'the background is loud (your speech only {r.snr_db:.0f} dB above it): try again somewhere quiet')
+    if sim < MATCH and ref.meta.get('quality', {}).get('band_db', 0.0) < BAND_DB:
+        why.append('the recording sounds like a phone call: one from a better microphone matches more reliably')
     if why:
         return None, 'Not confirmed: ' + '; '.join(why) + '.'
     return {'how': how, 'at': _now(), 'wer': round(err, 3), 'similarity': round(sim, 3)}, ''

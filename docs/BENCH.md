@@ -2306,3 +2306,39 @@ German is the one where it does not hold up: in the engine run above it went on 
 Polish, Turkish, Chinese, Japanese, Arabic: no tail either way, the period stays. English and Russian are left as they
 are here (stage 5 measures the clone's tails in them: Russian had 4 of 18 with the period, 0 with a comma). Whether a
 comma at the end sounds unfinished (rising) is a check by ear (USER-CHECKS).
+
+## Stage 8: the speaker-match threshold that confirms my voice (S3)
+
+The live check (`voice.confirm_live`) compares the speaker vector of a ~5 s live reading with the profile's recording
+(an imported file or the wizard's take). Model: WeSpeaker ResNet34 VoxCeleb (`wespeaker-resnet34`, 26.5 MB), run as the
+app runs it (onnx-asr 0.12.0's numpy Kaldi fbank, mean over time out, `feats` → `embs`, 256-d). Script:
+`bench/speaker_threshold.py` (stages `embed`, `report`, `timing`, `padded`, `report_padded`); a CPU server, 2 threads.
+
+Data: LibriSpeech dev-clean, 40 people (20 f, 20 m). File = the first 40 s of a chapter; live = 3 / 5 / 8 s from
+another chapter of the same person (another session: 667 pairs), the same chapter (379), another person of the same
+sex (17 423), of the other sex (18 294). File as is, through Opus 24 kbit/s, or through an 8 kHz phone band; live as
+is or as a laptop mic (100–7000 Hz, speech at −30 dBFS, white or pink noise at SNR 20 and 10 dB).
+
+Cosine, 5 s live:
+
+| file / live | same person, another session p1 / p5 / p50 | another person, same sex p95 / p99 / max | EER |
+|---|---|---|---|
+| clean / clean | 0.27 / 0.57 / 0.79 | 0.37 / 0.43 / 0.59 | 2.5 % |
+| clean / white noise, SNR 20 | 0.16 / 0.39 / 0.64 | 0.32 / 0.40 / 0.54 | 3.9 % |
+| clean / white noise, SNR 10 | 0.15 / 0.31 / 0.55 | 0.31 / 0.39 / 0.53 | 5.0 % |
+| Opus 24k / clean | 0.26 / 0.56 / 0.77 | 0.36 / 0.43 / 0.59 | 2.6 % |
+| 8 kHz phone / clean | 0.21 / 0.33 / 0.55 | 0.28 / 0.34 / 0.52 | 3.9 % |
+
+Refused / passed at the chosen **0.45** (`voice.MATCH`), same person / another person of the same sex: clean 2.8 % /
+0.64 %; Opus file 3.1 % / 0.59 %; laptop mic SNR 20: 6–8 % / ≤ 0.25 %; SNR 10: 14–20 % / ≤ 0.15 %; an 8 kHz phone file:
+21 % / 0.04 %. Another person passes at most 0.64 % in all 15 conditions. One threshold cannot also keep the same person
+under 5 % in noise (that needs ≤ 0.30): a refusal says when the background is loud or the file sounds like a phone, and
+a second try (the best of two) brings the noisy SNR 20 case to 4–5 %. An 8 s live window with 1.5 s of room noise
+before and after and a pause between the phrases: the same as 5 s of speech; with the silence cut out (as the app does)
+other people match ~0.02 less (0.99 → 0.58 % passed), the same person as much (3.3 → 3.0 % refused). Time per vector,
+1 thread: 5 s — 176 ms, 40 s — 1.41 s (Ryzen 5 5600X).
+
+Not measured: real laptop microphones, a person on different days; Russian (FLEURS has no speaker ids: only
+other-sex pairs, p99 0.33, max 0.42). 40 English readers, pairs of one person not independent: the 1 % is a rough
+bound. The CI step runs the real model on `tests/data`: the reader matches herself at 0.88, FLEURS people at −0.03
+and 0.20.

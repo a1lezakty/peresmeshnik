@@ -114,9 +114,11 @@ def test_confirm_live(tmp_path, heard, sim, why):
     said = voice.live_phrases('ru')
     assert len(said) == 2 and set(said) <= set(voice.LIVE_PHRASES['ru'])
     v = voice.save(*speech(), 'me.new', 'ru', 'text', tmp_path)
+    v.meta['quality']['band_db'] = -70.0  # a phone-band recording: said with a refusal
     asr = Asr(' '.join(said) if heard is None else heard)
     consent, text = voice.confirm_live(v, *speech(6, 24_000), said, asr, Speaker(sim), 'import+mic-match')
     assert asr.langs == ['ru'] and why in text and (consent is None) == bool(why), text
+    assert ('phone call' in text) == (sim < voice.MATCH) and 'background is loud' not in text  # no noise floor here
     if consent:
         assert consent['how'] == 'import+mic-match' and consent['wer'] == 0 and consent['similarity'] == pytest.approx(0.8)
         assert voice.mine(voice.set_consent('me.new', consent, tmp_path).name, tmp_path)
@@ -169,3 +171,13 @@ def test_crash_report_names_no_voice(app, tmp_path):  # noqa: F811 (the fixture 
     text = next(crash.reports_dir().glob('crash-*.txt')).read_text('utf-8')
     assert 'Анна' not in text and 'Смирнова' not in text and 'Petrov' not in text, text[-800:]
     assert f'({them.name})' in text and ': them -> me' in text
+
+
+def test_a_refusal_in_noise_asks_for_a_quieter_place(tmp_path):
+    """BENCH stage 8: the same person is refused 3x as often with a noisy laptop mic: the refusal says so."""
+    v = voice.save(*speech(), 'me', 'ru', 'text', tmp_path)
+    x, sr = speech(6, 24_000)
+    noisy = x + np.random.default_rng(0).normal(0, 0.05, len(x)).astype(np.float32)  # ~10 dB below the speech
+    said = voice.LIVE_PHRASES['ru'][:2]
+    _, text = voice.confirm_live(v, noisy, sr, said, Asr(' '.join(said)), Speaker(0.3))
+    assert 'the background is loud' in text and 'somewhere quiet' in text, text

@@ -20,6 +20,7 @@ import math
 import os
 import re
 import struct
+import zipfile
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -227,6 +228,16 @@ def weights_file(model_dir: Path) -> Path:
     return found[0]
 
 
+def registry_sha256(model_id: str, name: str) -> str:
+    """The sha256 of the weights file `name` in the registry row `model_id` (checked on download, not re-hashed here);
+    '' when the registry has no such row or file (a folder given by hand, tests)."""
+    from peresmeshnik import models
+    try:
+        return models.get(model_id).files[name]['sha256']
+    except (models.ModelMissing, KeyError):
+        return ''
+
+
 def settings(model_dir: Path) -> tuple[float, float]:
     """(temperature, EOS logit threshold): pocket_tts' defaults, or a config.yaml's top-level default_temperature /
     default_eos_threshold. ponytail: those two keys by a regex, no YAML parser (not an app dependency)."""
@@ -244,7 +255,9 @@ class PocketTts:
     def __init__(self, model_dir: Path | str, threads: int = 2, model_id: str = '', int8: bool = False):
         import sentencepiece
         model_dir = Path(model_dir)
-        w = read_safetensors(weights_file(model_dir))
+        wfile = weights_file(model_dir)
+        w = read_safetensors(wfile)
+        self._weights_sha = registry_sha256(model_id, wfile.name)  # new weights of the same model: a new voice state
         self.temp, self.eos_logit = settings(model_dir)
         self.model_id = (model_id or model_dir.name) + ('-int8' if int8 else '')  # the voice state differs a little
         self.graphs = Graphs(w, threads, int8=int8)
@@ -268,12 +281,14 @@ class PocketTts:
         key = (str(folder), st.st_ino, st.st_mtime_ns, st.st_size)
         if key not in self._states:
             digest = f'{STATE_V}:{hashlib.sha256(ref.read_bytes()).hexdigest()}'
+            if self._weights_sha:
+                digest += f':{self._weights_sha}'
             cache = folder / f'pocket-{self.model_id}.npz'
             state = None
             try:
                 with np.load(cache) as z:
                     state = z['state'] if str(z['ref']) == digest else None
-            except (OSError, ValueError, KeyError):
+            except (OSError, ValueError, KeyError, EOFError, zipfile.BadZipFile):  # a broken or cut file: made again
                 pass
             if state is None:
                 state = self.condition(*profiles.read_audio(ref))

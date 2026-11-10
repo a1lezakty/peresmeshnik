@@ -90,6 +90,24 @@ def latin(word: str) -> str:
     return ''.join(out)
 
 
+def _digits(g: str) -> str:
+    """A group of digits as said in a phone number or a date: '05' -> 'ноль пять', '00' -> 'ноль ноль'."""
+    zeros = len(g) - len(g.lstrip('0'))
+    return ' '.join([_UNITS[0]] * zeros + ([number(int(g))] if g.strip('0') else []))
+
+
+# '10.11.2026', '1,2,3', '192.168.0.1': groups, not a decimal fraction
+_GROUPS = re.compile(r'(?<![\d.,])\d+(?:[.,]\d+){2,}')
+# '+7 (999) 123-45-67', '8-800-555-35-35', '123-45-67': a phone when it starts with '+' or has two dashes
+_PHONE = re.compile(r'(?<![\w.,+])(\+ ?)?\(?\d+\)?(?:[ -]\(?\d+\)?)+(?!\w)')
+
+
+def _say_groups(m: re.Match) -> str:
+    if m.re is _PHONE and not (m[1] or m[0].count('-') >= 2):
+        return m[0]  # '1 000 000', '2020-2021': numbers, _NUM's
+    return ('плюс ' if m.re is _PHONE and m[1] else '') + ', '.join(_digits(g) for g in re.findall(r'\d+', m[0]))
+
+
 _NUM = re.compile(r'(?<![\d.,])(-|−)?(\d{1,3}(?:\s\d{3})+|\d+)(?:[.,](\d+))?(?:-[а-яё]{1,3}\b)?(\s*%)?')
 
 
@@ -103,12 +121,15 @@ def _say_number(m: re.Match) -> str:
 
 
 def russian(text: str) -> str:
-    """Digits and Latin letters as words the Russian Pocket model reads; clock times '9:05' -> 'девять ноль пять'."""
+    """Digits and Latin letters as words the Russian Pocket model reads; clock times '9:05' -> 'девять ноль пять';
+    dates, versions and phones group by group. No digit is left: the model has none."""
     text = re.sub(r'\b(\d{1,2}):(\d{2})\b', lambda m: f'{number(int(m[1]))} '
                   f'{"ноль " if m[2][0] == "0" and m[2] != "00" else ""}{number(int(m[2])) if m[2] != "00" else "ноль ноль"}',
                   text)
+    text = _PHONE.sub(_say_groups, _GROUPS.sub(_say_groups, text))
     text = re.sub(r'(?<=[^\W\d_])(?=\d)|(?<=\d)(?=[^\W\d_])', ' ', text)  # 'MP3', '5кг': apart
     text = _NUM.sub(_say_number, text)
+    text = re.sub(r'\d+', lambda m: ' '.join(_UNITS[int(d)] for d in m[0]), text)  # anything left: digit by digit
     return re.sub(r'[A-Za-z]+', lambda m: latin(m[0]), text)
 
 

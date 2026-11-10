@@ -223,3 +223,34 @@ def test_real_weights_speak(tmp_path):
     wav = np.concatenate(list(eng.synth('Hello there, this is a test.', 'en', v)))
     assert np.isfinite(wav).all() and 0.5 < len(wav) / 24_000 < 6
     eng.close()
+
+
+def test_the_voice_state_follows_the_weights_and_survives_a_broken_file(model, tmp_path, monkeypatch):
+    """The cache file names the weights' sha256 from the registry: other weights, the state made again; a broken or cut
+    file is made again too, never raised."""
+    assert pocket.registry_sha256('pocket-tts-en', 'model.safetensors').startswith('bc96b824')
+    assert pocket.registry_sha256('', 'model.safetensors') == pocket.registry_sha256('x', 'model.safetensors') == ''
+    eng = model[0]
+    v = voice.save(np.random.default_rng(8).standard_normal(16_000 * 3).astype(np.float32) * 0.1, 16_000, 'me', 'ru',
+                   root=tmp_path)
+    calls = []
+    real = eng.condition
+    monkeypatch.setattr(eng, 'condition', lambda pcm, sr: calls.append(sr) or real(pcm, sr))
+    cache = v.path / 'pocket-pocket-tts-test.npz'
+    eng.state(v)
+    good = cache.read_bytes()
+    for broken in (b'not a zip', good[:len(good) // 2], b''):
+        eng.forget(v)
+        cache.write_bytes(broken)
+        eng.state(v)
+    assert len(calls) == 4 and cache.read_bytes() != b''
+    eng.forget(v)
+    eng.state(v)
+    assert len(calls) == 4  # the file made again is read
+    monkeypatch.setattr(eng, '_weights_sha', 'f' * 64)  # new weights of the same model in the registry
+    eng.forget(v)
+    eng.state(v)
+    assert len(calls) == 5
+    eng.forget(v)
+    eng.state(v)
+    assert len(calls) == 5

@@ -26,3 +26,17 @@ def test_russian_for_the_model_has_stress_marks():
     """prepare(): the words, then a stress mark (U+0301) after each stressed vowel, as Shtorm-PocketTTS-RU was trained."""
     said = pt.prepare('Привет, в 2026 году.', 'ru')
     assert said.replace('\u0301', '') == pt.russian('Привет, в 2026 году.') and said.count('\u0301') >= 4
+
+
+@pytest.mark.parametrize('text, said', [
+    ('10.11.2026', 'десять, одиннадцать, две тысячи двадцать шесть'),
+    ('1,2,3', 'один, два, три'), ('версия 1.2.3.', 'версия один, два, три.'),
+    ('+7 (999) 123-45-67', 'плюс семь, девятьсот девяносто девять, сто двадцать три, сорок пять, шестьдесят семь'),
+    ('8-800-555-35-35', 'восемь, восемьсот, пятьсот пятьдесят пять, тридцать пять, тридцать пять'),
+    ('звони 123-05-00', 'звони сто двадцать три, ноль пять, ноль ноль'),
+    ('3,5 и 2.75', 'три целых пять десятых и две целых семьдесят пять сотых'),
+    ('1 000 000', 'один миллион'), ('1:2:3', 'один:два:три')])
+def test_groups_phones_and_no_digit_left(text, said):
+    """Dates, versions and phones group by group, not as a decimal fraction; whatever is left, digit by digit."""
+    assert pt.russian(text) == said
+    assert not any(c.isdigit() for c in pt.prepare(text, 'ru'))

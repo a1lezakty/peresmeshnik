@@ -141,15 +141,19 @@ def frame(v):
     return np.full(FRAME, v, np.float32)
 
 
-CONFIRMED = {'version': 2, 'kind': 'me', 'name': 'me', 'consent': {'how': 'mic-live'}}  # voice.json v2 (S3)
+CONFIRMED = {'version': 2, 'kind': 'me', 'name': 'me', 'consent': {'how': 'mic-live'}}  # voice.json v2 (S3); its
+# consent names the recording it checked (ref_sha256): profile() fills it in
 
 
 def profile(folder, size=int(2.5 * protocol.CHUNK), meta=CONFIRMED):
     """My confirmed voice (a recording as big as `size`), and engines' caches the server must not keep: a pickle
     (xtts.pt) and a state nothing on the server reads (state.npy)."""
+    import hashlib
     folder.mkdir()
+    (folder / 'reference.wav').write_bytes(wav := os.urandom(size))
+    if isinstance(meta, dict) and isinstance(c := meta.get('consent'), dict) and 'ref_sha256' not in c:
+        meta = {**meta, 'consent': {**c, 'ref_sha256': hashlib.sha256(wav).hexdigest()}}
     (folder / 'voice.json').write_text(json.dumps(meta))
-    (folder / 'reference.wav').write_bytes(os.urandom(size))
     (folder / 'state.npy').write_bytes(b'a state')
     (folder / 'xtts.pt').write_bytes(b'a pickle')
     return protocol.pack_voice(folder)
@@ -290,7 +294,8 @@ def test_a_damaged_voice_and_leftovers(tmp_path, made):
                 assert (a['type'], a['code']) == ('error', 'voice'), a
                 assert ('more' in a['text']) is (len(sent) > ref['bytes'])  # refused before the extra is kept
         bad_ones = [b'not a zip']  # a zip whose voice.json does not read, or is not an object: refused once (not 'internal',
-        for i, bad in enumerate(['{not json', '[]', '"x"']):  # retried forever)
+        for i, bad in enumerate(['{not json', '[]', '"x"', '{"version": "2"}',  # retried forever)
+                                 '{"version": 2, "kind": "me", "consent": "x"}']):
             (tmp_path / f'bad{i}').mkdir()
             (tmp_path / f'bad{i}' / 'voice.json').write_text(bad)
             bad_ones.append(protocol.pack_voice(tmp_path / f'bad{i}'))
@@ -311,10 +316,10 @@ def test_a_new_hello_while_the_voice_unpacks(srv, made, tmp_path, monkeypatch):
     """The side's new connection comes while the old one's voice is unpacked: the old session goes, its folder too."""
     gate, inside, done, unpack = threading.Event(), threading.Event(), threading.Event(), server.Server._unpack
 
-    def slow(data, folder):
+    def slow(data, folder, side):
         inside.set()
         gate.wait(5)
-        unpack(data, folder)  # into the folder its _drop removed: made again
+        unpack(data, folder, side)  # into the folder its _drop removed: made again
         done.set()
     monkeypatch.setattr(server.Server, '_unpack', staticmethod(slow))
     token = srv.pairing.add('laptop')
@@ -669,10 +674,11 @@ def test_must_not_a_browser(srv, made):
 
 @pytest.mark.parametrize('meta', [{'kind': 'me', 'name': 'me'},  # v1: from an older app
                                   {**CONFIRMED, 'kind': 'them', 'consent': {'how': 'call-saved'}},  # a contact's
-                                  {**CONFIRMED, 'consent': None}])  # mine, not confirmed
+                                  {**CONFIRMED, 'consent': None},  # mine, not confirmed
+                                  {**CONFIRMED, 'consent': {'how': 'mic-live', 'ref_sha256': 'ab' * 32}}])  # another take
 def test_must_only_my_confirmed_voice_speaks_as_me(srv, made, tmp_path, meta):
-    """12: me -> them speaks only with my own voice confirmed live (voice.json v2); anything else sent on 'me': a stock
-    voice and why, and that voice is gone at once."""
+    """12, FIXES 3: me -> them speaks only with my own voice confirmed live, this very recording (the app's one rule,
+    voice.why_not_mine); anything else sent on 'me': a stock voice and why, and that voice is gone at once."""
     token = srv.pairing.add('laptop')
     v = profile(tmp_path / 'v', 1000, meta)
     with raw(srv, 'me') as ws:
@@ -764,7 +770,8 @@ def test_the_voice_goes_first_when_the_server_stops(tmp_path, made, monkeypatch)
         ws.send(hello(token, 'me', 'ru', 'en', voice=protocol.voice_ref(v)))
         assert answer(ws)['type'] == 'send_voice'
         ws.send(v)
-        until(lambda: any(srv.voices.iterdir()))  # unpacked; the engines load
+        until(lambda: 'me' in srv.slots and srv.slots['me'].task is not None)  # unpacked; the engines load
+        assert any(srv.voices.iterdir())
         srv.stop()
         until(lambda: not any(srv.voices.iterdir()), 1.0)
         assert not made  # still loading

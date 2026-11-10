@@ -28,7 +28,7 @@ the client has them (its LiveSwitch wraps the stream; none here, `_Unswitched`).
 - guarded: only private addresses without --public, no browser (an Origin header is refused), the token checked right
   after hello and before anything else, at most MAX_UNAUTH connections without one, /v1/pair only while a code is open,
   a device unpaired by another process (`--revoke`) cut off within REVOKE_S, "me -> them" only with my own voice
-  confirmed live (`not_mine`), nothing but SAFE files kept of an uploaded profile (no pickle is ever loaded from it).
+  confirmed live (`voice.why_not_mine`), nothing but SAFE files kept of an uploaded profile (no pickle is ever loaded from it).
 """
 from __future__ import annotations
 
@@ -68,19 +68,6 @@ REVOKE_S = 5.0  # a device unpaired from another process (`serve --revoke`) lose
 SAFE = {'.json', '.wav'}  # what is kept of an uploaded profile (voice.json, reference.wav): nothing else is read here,
 # and no cache from the laptop is trusted (xtts.pt, qwen3.pt are pickles: the engines compute them here again)
 TEXT = ('text', 'translation')  # what pipeline.py logs that was said
-
-
-def not_mine(meta: dict) -> str:
-    """'' for my own voice confirmed at the microphone (voice.json v2: kind 'me', consent by a live reading), else why
-    not: only that may speak as me (M-20), whatever the client says."""
-    # ponytail: S3's voice.why_not_mine is the same rule; this goes when stream S3 lands in main
-    if meta.get('version', 1) < 2:
-        return 'a profile of an older app: update the app on the laptop'
-    if meta.get('kind') != 'me':
-        return 'it is not your own voice'
-    if (meta.get('consent') or {}).get('how') not in ('mic-live', 'import+mic-match'):
-        return 'it is not confirmed as your own voice yet'
-    return ''
 
 
 class NoText(logging.Filter):
@@ -513,24 +500,22 @@ class Server:
         if len(data) != v['bytes'] or (await asyncio.to_thread(hashlib.sha256, data)).hexdigest() != v['sha256']:
             raise ProtocolError('voice', 'the voice profile arrived damaged (its size or sha256 is not the one in hello)')
         slot.folder = Path(tempfile.mkdtemp(prefix=f'{slot.side}-', dir=self.voices))  # 0700
-        meta = await asyncio.to_thread(self._unpack, data, slot.folder)
-        return not_mine(meta) if slot.side == 'me' else ''
+        return await asyncio.to_thread(self._unpack, data, slot.folder, slot.side)
 
     @staticmethod
-    def _unpack(data: bytearray, folder: Path) -> dict:
-        """protocol.unpack_voice, only the SAFE files kept, and a voice.json the app can read (a broken one is refused
-        once, not retried forever) -> its meta."""
+    def _unpack(data: bytearray, folder: Path, side: str) -> str:
+        """protocol.unpack_voice, only the SAFE files kept, then the app's own rule of who speaks as me (M-20,
+        voice.why_not_mine: my voice, confirmed live, this very recording) -> '' or why not. A profile that does not
+        read (not JSON, not an object, a field of the wrong type) is refused once, not retried forever."""
         from peresmeshnik import voice
         protocol.unpack_voice(bytes(data), folder)
         for f in [f for f in folder.rglob('*') if f.is_file() and f.suffix.lower() not in SAFE]:
             f.unlink()
         try:
-            meta = voice.load(folder.name, folder.parent).meta
-        except (OSError, ValueError) as e:
-            raise ProtocolError('voice', f'the voice profile does not read: {e}') from None
-        if not isinstance(meta, dict):
-            raise ProtocolError('voice', 'the voice profile does not read: its voice.json is not an object')
-        return meta
+            v = voice.load(folder.name, folder.parent)
+            return voice.why_not_mine(v) if side == 'me' else ''
+        except (OSError, ValueError, TypeError, AttributeError) as e:
+            raise ProtocolError('voice', f'the voice profile does not read: {type(e).__name__}: {e}') from None
 
     def _build(self, slot: Slot, h: dict) -> ServerSide:
         """The side's engines, on a thread (seconds; a clone ~30 s). Raises ProtocolError('lang') when this server cannot

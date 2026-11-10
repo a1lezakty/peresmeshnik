@@ -254,10 +254,10 @@ def clone_engine(lang: str, side: str = 'me_to_them', *, platform: Platform | No
     if side not in SIDES:
         raise ValueError(f'side {side!r}: one of {SIDES}')
     p = platform or Platform()
-    whys = [(e, clone_why(e, lang, p.gpu, p.os)) for e in clone_engines() if covers(e, lang)]
+    whys = [(e, clone_why(e, lang, p.gpu, **({'os': p.os} if p.os else {}))) for e in clone_engines() if covers(e, lang)]
     if e := next((e for e, why in whys if not why), None):
         return e, ''
-    why = whys[0][1] if whys else f'no cloned voice speaks {name(lang)}'  # the best engine's reason
+    why = whys[0][1] if whys else f'your cloned voice cannot speak {name(lang)}'  # the best engine's reason
     return None, why.replace('your', 'their') if side == 'them_to_me' else why  # the other person's voice
 
 
@@ -265,7 +265,7 @@ def direction(s, side: str, has_gpu: bool | None = None) -> Direction:
     """What `side` of the pair in settings `s` runs on locally, and why not. A model with `needs = "gpu"` in the
     registry is not offered without an NVIDIA GPU (`has_gpu` None: look for nvidia-smi, and for the ASR and the MT also for
     CUDA in their engine in the app): for the ASR, the MT and a stock voice the side is then not local (`why`); for the
-    clone (`clone_why`) the stock voice speaks instead (`notes`), if there is one."""
+    clone (`clone_engine`: its engine per platform and language) the stock voice speaks instead (`notes`), if there is one."""
     from peresmeshnik.voice import STOCK
     src, tgt = (s.their_lang, s.my_lang) if side == 'them_to_me' else (s.my_lang, s.their_lang)
     loc, why, notes = s.local, [], []
@@ -288,13 +288,14 @@ def direction(s, side: str, has_gpu: bool | None = None) -> Direction:
         stock, no_voice = '', f'the voice for {name(tgt)} needs an NVIDIA GPU ({stock})'
     tts, voice = stock, 'stock' if stock else ''
     if side == 'me_to_them' and loc.clone != STOCK:
-        if instead := clone_why(loc.clone, tgt, asked):  # None: it looks at the card itself
+        engine, instead = clone_engine(tgt, side, platform=Platform(gpu=asked))  # None: it looks at the card itself
+        if instead:
             if stock:
                 notes.append(f'{instead}: a stock voice speaks instead')
             else:
                 no_voice = f'{instead}; {no_voice}'
         else:
-            tts, voice = loc.clone, 'clone'
+            tts, voice = engine, 'clone'
             if not stock:  # the clone's fallback (app.py) is the stock voice
                 notes.append(f'no stock voice for {name(tgt)} takes over if your cloned voice fails')
     if not tts:
@@ -359,9 +360,10 @@ def table(s=None) -> str:
         return f'— (cloud; {i} from source with onnxruntime-gpu on an NVIDIA GPU)' if needs_gpu(i) else cell(i)
     rows = ['| Language | Speech recognition | Stock voice | Your cloned voice | Cloud (Gemini Live) |', '|---|---|---|---|---|']
     for c in LANGS:
-        clone = loc.clone if covers(loc.clone, c) and reg[loc.clone].role == 'clone' else ''
+        cpu, nvidia = (clone_engine(c, platform=Platform('linux', g))[0] for g in (False, True))
+        clone = ' or '.join([f'{nvidia} (NVIDIA GPU)'] * (nvidia != cpu) + [cpu] * bool(cpu))
         rows.append(f'| {label(c)} | {asr(pick(loc.asr, c))} | {cell(pick(loc.tts, c))} | '
-                    f'{clone + " (NVIDIA GPU)" if clone else "— (cloud or a stock voice)"} | {"✔" if c in CLOUD else "—"} |')
+                    f'{clone or "— (cloud or a stock voice)"} | {"✔" if c in CLOUD else "—"} |')
     gpu_mark = {True: ' (NVIDIA GPU)', False: ''}
     pairs = [k.replace('-', ' → ') + gpu_mark[needs_gpu(loc.mt[k])] for k in sorted(loc.mt) if k != '*' and pick(loc.mt, k)]
     if (any_pair := loc.mt.get('*', '')) in reg:  # one model for every pair of its languages

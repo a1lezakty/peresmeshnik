@@ -342,7 +342,7 @@ def test_a_clone_slower_than_real_time_gives_way_to_the_stock_voice(monkeypatch,
     side, s, made, cloud = me_side(monkeypatch, tmp_path, slow, key=False)
     d = side._local(s)
     assert made == [slow, None] and d.warm == 1  # the clone made and dropped, the stock voice warmed up
-    m = re.search(r'the GPU is too slow for the clone: (\d+\.\d) s of synthesis per second', side.errors[0])
+    m = re.search(r'this computer is too slow for the clone: (\d+\.\d) s of synthesis per second', side.errors[0])
     assert len(side.errors) == 1 and m and float(m[1]) > app.MAX_CLONE_RTF, side.errors  # 1.5, more on a slow runner
     assert app.clone_rtf(slow, 'de', None) > app.MAX_CLONE_RTF  # a language without a test phrase: the English one
 

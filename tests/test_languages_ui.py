@@ -48,8 +48,8 @@ def before_stage6(reg: dict) -> dict:
 def stand_ins(monkeypatch, url='https://example.invalid/', files=None, consent=()):
     """German and Japanese on stand-in models (served by `url`); `wire(s)` puts them into settings, with a stand-in clone
     that speaks English only (XTTS speaks both: a test must not fetch its 1.9 GB). Silero VAD counts as downloaded: a test
-    never fetches a real model."""
-    reg = before_stage6(REGISTRY)
+    never fetches a real model. The stand-in clone is the only clone engine (languages.clone_engine picks among them)."""
+    reg = {k: m for k, m in before_stage6(REGISTRY).items() if m.role != 'clone'}
     for role, ids in STAND_INS.items():
         for mid in ids:
             reg[mid] = models.Model(mid, role, (mid.split('-', 1)[1],), 'CPML' if mid in consent else 'MIT',
@@ -725,14 +725,14 @@ def test_local_from_the_tray_or_settings_downloads_its_models_first(tmp_path, mo
 
 def test_voice_page_without_an_nvidia_gpu_asks_for_no_recording(tmp_path, monkeypatch):
     """M-23: no NVIDIA GPU (a Mac, most laptops): me -> them local speaks in the stock voice, says why, and wants no
-    recording; nothing says the clone "runs on the CPU"."""
+    recording; nothing says the clone "runs on the CPU". Stage 8: Polish (English has Pocket TTS on the CPU)."""
     from peresmeshnik.ui import wizard
     monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
-    s = config.Settings(me_to_them='local')
+    s = config.Settings(me_to_them='local', their_lang='pl')
     page = wizard.VoicePage(type('W', (), {'s': s})())
     page.initializePage()
     assert page.isComplete() and page.record_button.isHidden() and page.own.isHidden()
-    assert languages.clone_why(s.local.clone, 'en') in page.subTitle() and 'runs on the CPU' not in page.subTitle()
+    assert languages.clone_why(s.local.clone, 'pl') in page.subTitle() and 'runs on the CPU' not in page.subTitle()
 
 
 def test_languages_page_says_what_a_cloud_side_falls_back_on(tmp_path, monkeypatch):
@@ -903,7 +903,7 @@ def test_languages_page_says_the_clone_once_on_a_mac(tmp_path, monkeypatch):
     monkeypatch.setattr(wizard, 'MACOS', True)
     monkeypatch.setattr(languages.sys, 'platform', 'darwin')
     monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
-    s = config.Settings(me_to_them='local')
+    s = config.Settings(me_to_them='local', their_lang='pl')  # Polish: no clone on a Mac (English: Pocket TTS, stage 8)
     config.save(s)
     page = wizard.LanguagesPage(type('W', (), {'s': s})())
     text = page.why['me_to_them'].text()

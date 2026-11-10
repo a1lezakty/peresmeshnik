@@ -562,11 +562,11 @@ class Side:
                 raise RuntimeError('me → them local needs your voice: record it in the setup wizard ("Your voice"), '
                                    'or switch "Me → them" to cloud')
             from peresmeshnik import models, voice
-            from peresmeshnik.local.clone import make_clone
-            model_dir = models.path(s.local.clone)  # missing: said as usual, no fallback
-            try:
+            from peresmeshnik.local.clone import make_engine
+            model_dir = models.path(pair.tts)  # missing: said as usual, no fallback
+            try:  # pair.tts: languages.clone_engine's for this computer and the language
                 v = voice.mine(s.local.voice)  # M-20: only my own voice, confirmed at the microphone; a contact's never
-                tts = make_clone(model_dir, threads=s.local.threads)
+                tts = make_engine(pair.tts, model_dir, threads=s.local.threads)
             except RuntimeError as e:  # not my confirmed voice (voice.NotMine), no voice pack, no CUDA, no runner
                 return self._fallback(s, e)
             d = make_local(self.src, self.tgt, tts=tts, voice=v, **kw)
@@ -578,7 +578,8 @@ class Side:
                 return self._fallback(s, e)
             if rtf > MAX_CLONE_RTF:
                 d.close()
-                return self._fallback(s, f'the GPU is too slow for the clone: {rtf:.1f} s of synthesis per second of speech')
+                return self._fallback(s, f'this computer is too slow for the clone: {rtf:.1f} s of synthesis per second '
+                                      'of speech')
             return d
         return self._stock(d, s)
 

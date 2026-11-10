@@ -1133,3 +1133,91 @@ url = "https://huggingface.co/coqui/XTTS-v2/resolve/6c2b0d75eae4b7047358e3b6bd93
 "vocab.json" = { sha256 = "928260878a59da8a72a2a5b7687fea29d5106137669d90945430fe17e415304a", size = 361219 }
 "speakers_xtts.pth" = { sha256 = "f0f6137c19a4eab0cbbe4c99b5babacf68b1746e50da90807708c10e645b943b", size = 7754818 }
 "LICENSE.txt" = { sha256 = "190f6d7c19b8984f91b97712b94ce92d2b2e640fc677dacab966e955ece9d043", size = 4014 }
+
+# Kyutai Pocket TTS (100M): a cloned voice live on any CPU, Mac too (local/pocket.py, onnxruntime: our graph, these
+# weights). A model per language; the weights with voice cloning are in a gated repo: the user accepts its conditions
+# on Hugging Face and gives the wizard a token (models.hf_token). RESEARCH-clone §7, BENCH stage 8.
+[pocket-tts-en]
+role = "clone"
+langs = ["en"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/kyutai/pocket-tts"
+note = "Kyutai Pocket TTS (English), CC-BY-4.0: a gated repo, your Hugging Face token"
+token = "hf"
+url = "https://huggingface.co/kyutai/pocket-tts/resolve/db04f0e653473e5c7333c69686ac92b7460b0c1d/languages/english/"
+[pocket-tts-en.files]
+"model.safetensors" = { sha256 = "bc96b82436c5ec00d3118ef3b01bc3358423e1766ecae3dca0aeea84789e7d74", size = 219029196 }
+"tokenizer.model" = { sha256 = "d461765ae179566678c93091c5fa6f2984c31bbe990bf1aa62d92c64d91bc3f6", size = 59339 }
+
+[pocket-tts-fr]
+role = "clone"
+langs = ["fr"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/kyutai/pocket-tts"
+note = "Kyutai Pocket TTS (French), CC-BY-4.0: a gated repo, your Hugging Face token"
+token = "hf"
+url = "https://huggingface.co/kyutai/pocket-tts/resolve/db04f0e653473e5c7333c69686ac92b7460b0c1d/languages/french/"
+[pocket-tts-fr.files]
+"model.safetensors" = { sha256 = "08404fdbce73127ef0c2189dc173cc07d8f721389ecc2e2482053479a6ce114c", size = 219029196 }
+"tokenizer.model" = { sha256 = "dd8dc8cfad3c4b3711a8629ede27d5be934eb98bcb00462bf91ed40fb8f6f38a", size = 60690 }
+
+[pocket-tts-de]
+role = "clone"
+langs = ["de"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/kyutai/pocket-tts"
+note = "Kyutai Pocket TTS (German), CC-BY-4.0: a gated repo, your Hugging Face token"
+token = "hf"
+url = "https://huggingface.co/kyutai/pocket-tts/resolve/db04f0e653473e5c7333c69686ac92b7460b0c1d/languages/german/"
+[pocket-tts-de.files]
+"model.safetensors" = { sha256 = "3b6702b36f4387735031226cc012f7b90a7a13e6bee4d3b0ce3929736e5e150a", size = 219029196 }
+"tokenizer.model" = { sha256 = "b3d6fb751a0bbc0b18df78687a03c11e4f2fbb0fa4b8f85e83064cd9d80ee34b", size = 60347 }
+
+[pocket-tts-es]
+role = "clone"
+langs = ["es"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/kyutai/pocket-tts"
+note = "Kyutai Pocket TTS (Spanish), CC-BY-4.0: a gated repo, your Hugging Face token"
+token = "hf"
+url = "https://huggingface.co/kyutai/pocket-tts/resolve/db04f0e653473e5c7333c69686ac92b7460b0c1d/languages/spanish/"
+[pocket-tts-es.files]
+"model.safetensors" = { sha256 = "ca87ef1aadc9280a97358a5250d8a508e15b5c10d502e8e1c1d4afd4d784de96", size = 219029196 }
+"tokenizer.model" = { sha256 = "9714c8ce180d8147ab4c1406cd759619828f95d7000c87c41dc9ccec527a3e89", size = 61063 }
+
+[pocket-tts-pt]
+role = "clone"
+langs = ["pt"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/kyutai/pocket-tts"
+note = "Kyutai Pocket TTS (Portuguese), CC-BY-4.0: a gated repo, your Hugging Face token"
+token = "hf"
+url = "https://huggingface.co/kyutai/pocket-tts/resolve/db04f0e653473e5c7333c69686ac92b7460b0c1d/languages/portuguese/"
+[pocket-tts-pt.files]
+"model.safetensors" = { sha256 = "32ddeaeb06f8e824d85c030d31625e08b0e6b6e2283d20024dcc18786065dbd4", size = 219029196 }
+"tokenizer.model" = { sha256 = "fe9db388dc987c8a26bb88789d2f20989e68e00d8534442a141ecccec21cedba", size = 61351 }
+
+[pocket-tts-it]
+role = "clone"
+langs = ["it"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/kyutai/pocket-tts"
+note = "Kyutai Pocket TTS (Italian), CC-BY-4.0: a gated repo, your Hugging Face token"
+token = "hf"
+url = "https://huggingface.co/kyutai/pocket-tts/resolve/db04f0e653473e5c7333c69686ac92b7460b0c1d/languages/italian/"
+[pocket-tts-it.files]
+"model.safetensors" = { sha256 = "11c226c14deb3e403d6a3fb5a52cb5cffdce85b93ba782344cea430370e2d4ab", size = 219029196 }
+"tokenizer.model" = { sha256 = "1ef32ed65d0264239fb9d9ecb36a089a637f6e6c5c5a1a8e7df37ce486ec21da", size = 60905 }
+
+[pocket-tts-ru]  # Shtorm-PocketTTS-RU v2 "fast" by ArtShtorm, a Russian fine-tune; text with stress marks (local/pocket_text.py)
+role = "clone"
+langs = ["ru"]
+license = "CC-BY-4.0"
+license_url = "https://huggingface.co/ArtShtorm/Shtorm-PocketTTS-RU"
+note = "Shtorm-PocketTTS-RU by ArtShtorm (a fine-tune of Kyutai Pocket TTS), CC-BY-4.0"
+url = "https://huggingface.co/ArtShtorm/Shtorm-PocketTTS-RU/resolve/33f6c328d62c4da5c1227bbe081e89b574a6183a/"
+[pocket-tts-ru.files]
+"model_fast.safetensors" = { sha256 = "de8ad576d3d549372a34b40df03d6e6b8f668e857dac32f61934e9c5c1da8d52", size = 438033312 }
+"tokenizer.model" = { sha256 = "95d0b8e61951408c7744e09fb5b87ff8e318612b0c8168cc593ea0a812f34f81", size = 316834 }
+"config.yaml" = { sha256 = "846a765376d4482997950a8493b30dfd6a54ccfd1ac8831ae23e674469781ff2", size = 1219 }
+"README.md" = { sha256 = "5253773a84ab40189b1daaffdc0c52f0ff273da64a87691fc35df202052b67fc", size = 5140 }

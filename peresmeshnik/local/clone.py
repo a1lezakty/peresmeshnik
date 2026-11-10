@@ -98,6 +98,19 @@ def make_clone(model_dir: Path | str, threads: int = 2):
         raise CloneUnavailable(f'the voice clone needs the voice pack (torch, coqui-tts): {e}') from e
 
 
+def make_engine(model_id: str, model_dir: Path | str, threads: int = 2):
+    """The clone engine of the registry's `model_id` (`languages.clone_engine` picks it): Pocket TTS in this process on
+    onnxruntime (local/pocket.py), XTTS-v2 through the voice pack (`make_clone`). Raises CloneUnavailable with the reason
+    when it cannot speak here."""
+    if model_id.startswith('pocket-tts'):
+        from peresmeshnik.local.pocket import PocketTts
+        try:
+            return PocketTts(model_dir, threads=threads, model_id=model_id)
+        except (OSError, ValueError) as e:  # onnxruntime cannot load it, a broken weights file
+            raise CloneUnavailable(f'Pocket TTS did not start: {e}') from e
+    return make_clone(model_dir, threads)
+
+
 class VoicePackClone:
     """XttsClone's interface over the voice pack's runner (voice-runner/voice_runner.py: the protocol is there).
     `info`: what the runner got (device, torch, VRAM). A runner that fails at start raises CloneUnavailable; one that

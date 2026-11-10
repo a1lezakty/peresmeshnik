@@ -593,4 +593,4 @@ def test_a_clone_not_ready_falls_back_to_the_stock_voice(monkeypatch):
         asked.append((model_id, lang))
         return 'your cloned voice needs an NVIDIA GPU'
     monkeypatch.setattr(languages, 'clone_why', clone_why, raising=False)  # stream B's, merged after this one
-    assert fallback.voice_why('me', s) == '' and fallback.stock('me', s) and asked[-1] == (s.local.clone, 'en')
+    assert fallback.voice_why('me', s) == '' and fallback.stock('me', s) and (s.local.clone, 'en') in asked

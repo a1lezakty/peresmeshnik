@@ -54,14 +54,14 @@ Linux with an NVIDIA GPU they can run here ([below](#trying-it-from-source-linux
 <!-- languages:begin (generated: python -m peresmeshnik.languages) -->
 | Language | Speech recognition | Stock voice | Your cloned voice | Cloud (Gemini Live) |
 |---|---|---|---|---|
-| English | parakeet-tdt-0.6b-v3 | piper-en_US-john-medium | xtts-v2 (NVIDIA GPU) | ✔ |
-| Русский (Russian) | gigaam-v3-e2e-ctc | piper-ru_RU-dmitri-medium | xtts-v2 (NVIDIA GPU) | ✔ |
+| English | parakeet-tdt-0.6b-v3 | piper-en_US-john-medium | xtts-v2 (NVIDIA GPU) or pocket-tts-en | ✔ |
+| Русский (Russian) | gigaam-v3-e2e-ctc | piper-ru_RU-dmitri-medium | xtts-v2 (NVIDIA GPU) or pocket-tts-ru | ✔ |
 | Українська (Ukrainian) | parakeet-tdt-0.6b-v3 | piper-uk_UA-ukrainian_tts-medium | — (cloud or a stock voice) | ✔ |
-| Deutsch (German) | parakeet-tdt-0.6b-v3 | piper-de_DE-thorsten-medium | xtts-v2 (NVIDIA GPU) | ✔ |
-| Français (French) | fastconformer-fr-pc | piper-fr_FR-siwis-medium | xtts-v2 (NVIDIA GPU) | ✔ |
-| Español (Spanish) | parakeet-tdt-0.6b-v3 | piper-es_MX-ald-medium | xtts-v2 (NVIDIA GPU) | ✔ |
-| Italiano (Italian) | parakeet-tdt-0.6b-v3 | piper-it_IT-paola-medium | xtts-v2 (NVIDIA GPU) | ✔ |
-| Português (Portuguese) | parakeet-tdt-0.6b-v3 | piper-pt_BR-faber-medium | xtts-v2 (NVIDIA GPU) | ✔ |
+| Deutsch (German) | parakeet-tdt-0.6b-v3 | piper-de_DE-thorsten-medium | xtts-v2 (NVIDIA GPU) or pocket-tts-de | ✔ |
+| Français (French) | fastconformer-fr-pc | piper-fr_FR-siwis-medium | xtts-v2 (NVIDIA GPU) or pocket-tts-fr | ✔ |
+| Español (Spanish) | parakeet-tdt-0.6b-v3 | piper-es_MX-ald-medium | xtts-v2 (NVIDIA GPU) or pocket-tts-es | ✔ |
+| Italiano (Italian) | parakeet-tdt-0.6b-v3 | piper-it_IT-paola-medium | xtts-v2 (NVIDIA GPU) or pocket-tts-it | ✔ |
+| Português (Portuguese) | parakeet-tdt-0.6b-v3 | piper-pt_BR-faber-medium | xtts-v2 (NVIDIA GPU) or pocket-tts-pt | ✔ |
 | Polski (Polish) | parakeet-tdt-0.6b-v3 | piper-pl_PL-gosia-medium | xtts-v2 (NVIDIA GPU) | ✔ |
 | Türkçe (Turkish) | — (cloud; whisper-large-v3-turbo from source with onnxruntime-gpu on an NVIDIA GPU) | piper-tr_TR-dfki-medium | xtts-v2 (NVIDIA GPU) | ✔ |
 | 中文 (Chinese) | — (cloud; whisper-large-v3-turbo from source with onnxruntime-gpu on an NVIDIA GPU) | — (cloud) | xtts-v2 (NVIDIA GPU) | ✔ |

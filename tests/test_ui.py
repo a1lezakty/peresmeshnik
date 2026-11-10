@@ -205,8 +205,9 @@ def test_wizard_asks_for_the_right_models(monkeypatch):
                                 'gigaam-v3-e2e-ctc', 'opus-mt-ru-en', 'piper-en_US-john-medium']
     s.cloud.subtitles, s.them_to_me = True, 'cloud'
     assert needed_models(s) == ['silero-vad']
-    s.me_to_them = 'local'  # no NVIDIA GPU: no clone (M-23), the stock voice
-    assert needed_models(s) == ['silero-vad', 'gigaam-v3-e2e-ctc', 'opus-mt-ru-en', s.local.tts[s.their_lang]]
+    s.me_to_them = 'local'  # no NVIDIA GPU: Pocket TTS on the CPU (stage 8), the stock voice its fallback
+    assert needed_models(s) == ['silero-vad', 'gigaam-v3-e2e-ctc', 'opus-mt-ru-en', 'pocket-tts-en',
+                                s.local.tts[s.their_lang]]
     monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
     assert needed_models(s) == ['silero-vad', 'gigaam-v3-e2e-ctc', 'opus-mt-ru-en', 'xtts-v2',
                                 s.local.tts[s.their_lang]]  # the stock voice: the clone's fallback

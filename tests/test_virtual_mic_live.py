@@ -403,29 +403,30 @@ def test_record_counts_sound_not_wall_time(monkeypatch):
     from peresmeshnik.audio import mic as mic_mod
 
     class LateMic:
-        def __init__(self, device, sample_rate, stop_after=None):
-            self.sr, self.stop_after, self.stopped = sample_rate, stop_after, threading.Event()
+        """Its sound begins `late` s after start (the helper starting), then `give` s of it in 20 ms pieces as fast as it
+        can, and it goes silent: counted pieces, no clock per piece (no runner is too slow for it)."""
+
+        def __init__(self, sample_rate, late, give):
+            self.sr, self.late, self.give, self.stopped = sample_rate, late, give, threading.Event()
 
         def start(self, on_frames):
             def run():
-                time.sleep(0.5)  # the helper starting
-                if self.stop_after is not None:  # gives this much at once and goes silent (no runner is too slow for it)
-                    for _ in range(round(self.stop_after * 50)):
-                        on_frames(np.full(self.sr // 50, 0.1, np.float32))
-                    return
-                while not self.stopped.wait(0.02):
+                time.sleep(self.late)
+                for _ in range(round(self.give * 50)):
+                    if self.stopped.is_set():
+                        return
                     on_frames(np.full(self.sr // 50, 0.1, np.float32))
             threading.Thread(target=run, daemon=True).start()
 
         def stop(self):
             self.stopped.set()
 
-    progress = []
-    monkeypatch.setattr(mic_mod, 'Mic', lambda device, sample_rate, **k: LateMic(device, sample_rate))
+    progress = []  # its sound begins after the 1.5 s asked: by wall time none came yet, counted in sound all of it
+    monkeypatch.setattr(mic_mod, 'Mic', lambda device, sample_rate, **k: LateMic(sample_rate, late=1.7, give=2.0))
     x = mic_mod.record(1.5, sample_rate=8000, on_progress=progress.append)
     assert len(x) == 12000 and progress == [1, 1.5]
     monkeypatch.setattr(mic_mod, 'START_S', 0.5)
-    monkeypatch.setattr(mic_mod, 'Mic', lambda device, sample_rate, **k: LateMic(device, sample_rate, stop_after=0.4))
+    monkeypatch.setattr(mic_mod, 'Mic', lambda device, sample_rate, **k: LateMic(sample_rate, late=0.5, give=0.4))
     t = time.monotonic()
     x = mic_mod.record(1.5, sample_rate=8000)
     assert len(x) == 3200 and time.monotonic() - t < 1.5 + 0.5 + 0.5

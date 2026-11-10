@@ -52,11 +52,12 @@ that runs here brings it back. Where your cloned voice does not speak the langua
 Polish, Turkish, Chinese, Japanese, Korean, Arabic), a stock voice speaks instead, and the wizard says so.
 
 **The other person's voice.** "Them → me" speaks in the voice of the person talking, where a cloned voice speaks your
-language on this computer: from their first 3 seconds of clear speech, closer after 5, 10 and 20 s; until then a stock
-voice. Only you hear it, in your headphones: it never goes into the call (only your own confirmed voice does), and it is
-forgotten when translation goes off unless you keep it (tray: Keep the voice of the person in this call…, with their
-agreement). With two people or more on their side, each phrase is said in the voice of whoever said it. Off:
-`their_voice = false` under `[local]` in the settings.
+language on this computer (as for your own voice): from their first 3 seconds of clear speech, closer after 5, 10 and 20
+s; until then a stock voice. Only you hear it, in your headphones: it never goes into the call (only your own confirmed
+voice does), and it is forgotten when translation goes off unless you keep it (tray: Keep the voice of the person in
+this call…, with their agreement; with the NVIDIA voice pack it is kept only during the call). With two people or more
+on their side, each phrase is said in the voice of whoever said it. Off: `their_voice = false` under `[local]` in the
+settings.
 
 Speech recognition of Turkish, Chinese and Korean on this computer is Whisper on an NVIDIA GPU, through a CUDA build of
 onnxruntime: the macOS and Windows apps have none, so there these three are recognized in the cloud. From source on
@@ -103,7 +104,7 @@ macOS 14 Sonoma or later on Apple Silicon (M1 and newer).
    **BlackHole 2ch** as the microphone. On macOS older than 14.4 also BlackHole 16ch (`blackhole-16ch`) as
    the call app's speaker: the app takes the call's sound from there.
 4. Start Peresmeshnik: its icon is in the menu bar (no Dock icon). The installer puts only the app on the computer;
-   the wizard's **Components** page lists what to download (0.6–2.8 GB for a pair, typically 1.2–1.8 GB), ticked
+   the wizard's **Components** page lists what to download (0.6–2.8 GB for a pair, typically 1.2–1.9 GB), ticked
    where it suits this computer and the pair, with each one's size and license; nothing downloads before Download.
    A direction in the cloud needs your Gemini key ([above](#peresmeshnik)).
 5. macOS asks once for two permissions, both in System Settings → Privacy & Security: **Microphone**
@@ -152,7 +153,7 @@ Windows 10 version 2004 or later, or Windows 11 (x64).
    **CABLE Output** as the microphone.
 4. Start Peresmeshnik from the Start menu: its icon is in the notification area (Windows may put it behind the
    ^ arrow at first; drag it out to keep it in view). The installer puts only the app on the computer; the
-   wizard's **Components** page lists what to download (0.6–2.8 GB for a pair, typically 1.2–1.8 GB), ticked where it
+   wizard's **Components** page lists what to download (0.6–2.8 GB for a pair, typically 1.2–1.9 GB), ticked where it
    suits this computer and the pair, with each one's size and license; nothing downloads before Download. A direction in the
    cloud needs your Gemini key ([above](#peresmeshnik)). Use headphones: through speakers the microphone hears the
    translation.

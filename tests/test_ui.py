@@ -202,6 +202,7 @@ def test_wizard_asks_for_the_right_models(monkeypatch):
     monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
     s = config.Settings()  # them -> me local, me -> them cloud with local subtitles and its fallback voice (H-09)
     assert needed_models(s) == ['silero-vad', 'parakeet-tdt-0.6b-v3', s.local.mt['en-ru'], 'piper-ru_RU-dmitri-medium',
+                                'pocket-tts-ru', 'wespeaker-resnet34',  # them -> me in their voice (S2)
                                 'gigaam-v3-e2e-ctc', 'opus-mt-ru-en', 'piper-en_US-john-medium']
     s.cloud.subtitles, s.them_to_me = True, 'cloud'
     assert needed_models(s) == ['silero-vad']

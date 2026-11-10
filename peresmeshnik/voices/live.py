@@ -123,11 +123,12 @@ class LiveVoice:
 
     def them(self) -> tuple[dict, str, float] | None:
         """The voice of the person who spoke last, for the tray's "keep the voice" (voice.save_them): ({model id: (state, sha256 of its
-        weights)}: the engine's and the speaker vector's, their language, seconds of their speech); None: none yet."""
-        from peresmeshnik import models
+        weights)}: the engine's and the speaker vector's, their language, seconds of their speech); None: none yet, or
+        an engine of the voice pack (NVIDIA), whose voice is the runner's for this call only (COMMON-stage8 23:49)."""
+        from peresmeshnik import languages, models
         from peresmeshnik.voice import SPEAKER
         p = self.speaking
-        if p is None or p.voice is None or self.dead:
+        if p is None or p.voice is None or self.dead or languages.needs_gpu(self.engine_id):
             return None
         return ({self.engine_id: (p.voice.state, models.get(self.engine_id).fingerprint),
                  SPEAKER: (p.vec / (np.linalg.norm(p.vec) + 1e-12), models.get(SPEAKER).fingerprint)},
@@ -149,7 +150,7 @@ class LiveVoice:
     def _work(self, make_engine, make_speaker) -> None:
         try:
             self.engine, self.speaker = make_engine(), make_speaker()
-            if not hasattr(self.engine, 'condition'):  # XTTS through the voice pack: a voice only from a folder
+            if not hasattr(self.engine, 'condition'):  # a voice only from a folder (the voice pack before its condition)
                 self.engine.close()
                 self.engine = None
                 self.fail(f'{self.engine_id} cannot take a voice during a call')

@@ -66,8 +66,11 @@ def test_a_pair_on_stand_in_models_needs_only_its_own(monkeypatch):
     s.local.mt.update({'de-ja': 'mt-many', 'ja-de': 'mt-many'})  # a multilingual model: both languages in its langs
     s.local.tts.update(de='tts-de', ja='tts-ja')
     assert all(languages.direction(s, side, has_gpu=True).local for side in languages.SIDES)
-    assert languages.needed_models(s) == ['silero-vad', 'asr-ja', 'mt-many', 'tts-de', 'asr-de', 'clone-ja',
-                                          'tts-ja']  # the stock voice: the clone's fallback (S2)
+    assert languages.needed_models(s) == ['silero-vad', 'asr-ja', 'mt-many', 'tts-de', 'clone-de', 'wespeaker-resnet34',
+                                          'asr-de', 'clone-ja', 'tts-ja']  # them -> me: in their voice (S2); me -> them:
+    # the stock voice, the clone's fallback
+    s.local.their_voice = False
+    assert 'clone-de' not in languages.needed_models(s)
     no_clones(monkeypatch, *stand_ins, stub('clone-de', 'clone', 'de'))  # no clone engine has Japanese: the stock voice
     me = languages.direction(s, 'me_to_them', has_gpu=True)
     assert me.local and me.voice == 'stock' and me.tts == 'tts-ja' and 'cannot speak Japanese' in me.notes[0]
@@ -110,6 +113,8 @@ def test_readme_pair_sizes_are_the_registrys(monkeypatch):
     cloud) is the registry's: the smallest and largest, and the quartiles as "typically"."""
     from pathlib import Path
     monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
+    monkeypatch.setattr(models, 'hf_token', lambda: None)  # their voice in Kyutai's gated weights: not without a token
+    monkeypatch.setattr(models, 'is_fetched', lambda m, base=None: False)
     xs = []
     for a in languages.LANGS:
         for b in set(languages.LANGS) - {a}:

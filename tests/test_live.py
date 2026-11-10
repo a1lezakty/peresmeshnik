@@ -187,9 +187,43 @@ def test_the_tray_gets_the_voice_speaking_now():
     them = SimpleNamespace(directions=[(SimpleNamespace(tts=live.TheirVoice(FakeStock(), v)), True, True)])
     me = SimpleNamespace(directions=[(SimpleNamespace(tts=FakeStock()), True, True)])
     ctl = SimpleNamespace(sides=[me, them])
-    v.them = lambda: 'their voice'  # voices/live.py: needs S3's speaker model row for its sha256
-    assert app.Controller.them_voice(ctl) == 'their voice'
+    assert app.Controller.them_voice(ctl) is None  # nothing made yet: the tray says so
+    for i in range(3):
+        v._add(speech(1.2, 0.3, i))
+    states, lang, seconds = app.Controller.them_voice(ctl)
+    assert set(states) == {'pocket-tts-ru', 'wespeaker-resnet34'} and lang == 'en' and seconds == 3.6
     assert app.Controller.them_voice(SimpleNamespace(sides=[me])) is None
+
+
+def test_a_voice_kept_from_the_tray_is_theirs_from_the_first_clause_of_the_next_call(tmp_path):
+    """S3's profile: them() -> voice.save_them (the tray's RememberDialog.keep) -> live.kept: the same state and speaker
+    vector, `kind = them`, no recording of their speech; the next call speaks it from their first clause."""
+    from peresmeshnik import voice
+    v = voice_of()
+    for i in range(3):
+        v._add(speech(1.2, 0.1, i))  # B: 3.6 s, their voice is made
+    states, lang, seconds = v.them()
+    saved = voice.save_them('Anna', lang, seconds, states, tmp_path)
+    assert saved.meta['kind'] == 'them' and sorted(p.name for p in saved.path.iterdir()) == [
+        'pocket-tts-ru.npy', 'voice.json', 'wespeaker-resnet34.npy']
+    [(vec, state, s)] = live.kept('pocket-tts-ru', tmp_path)
+    assert np.array_equal(state, v.speaking.voice.state) and vec @ [0, 1] > 0.99 and s == seconds
+    assert live.kept('pocket-tts-en', tmp_path) == []  # another engine: made again in that call
+    eng = FakeClone()
+    w = voice_of(eng, kept=live.kept('pocket-tts-ru', tmp_path))
+    w._add(speech(1.2, 0.1, 9))
+    assert np.array_equal(w.voice().state, state) and eng.made == []
+
+
+def test_a_voice_pack_voice_speaks_in_the_call_and_is_not_offered_to_keep():
+    """NVIDIA (the voice pack's Qwen3-TTS / XTTS): their voice is an id in that call's runner, so the tray does not offer
+    to keep it (COMMON-stage8 23:49); in the call it speaks as Pocket's does."""
+    v = live.LiveVoice(FakeClone, AmpSpeaker, 'xtts-v2', 'en')
+    v._q.put(None)
+    v._thread.join()
+    for i in range(3):
+        v._add(speech(1.2, 0.3, i))
+    assert v.voice() is not None and v.them() is None
 
 
 def test_an_engine_that_takes_a_voice_only_from_a_folder_is_closed_at_once():

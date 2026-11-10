@@ -156,6 +156,23 @@ def test_tray_switches_the_pair_fetching_only_its_models(tmp_path, monkeypatch, 
     assert (config.load().my_lang, config.load().their_lang) == ('ja', 'de')
 
 
+@pytest.fixture(autouse=True)
+def _no_tray_icon_left(monkeypatch):
+    """A Tray made here may outlive its test (its menu holds its callbacks): its icon, left shown, takes
+    a place in the macOS runner's menu bar, and enough of them push the app's own off the screen
+    (test_macos.py::test_app_menu_bar_icon_hotkey_and_sigterm). Hidden after each test, as test_macos does."""
+    from peresmeshnik.ui import tray as tray_mod
+    made, init = [], tray_mod.Tray.__init__
+
+    def record(self, *a, **k):
+        init(self, *a, **k)
+        made.append(self)
+    monkeypatch.setattr(tray_mod.Tray, '__init__', record)
+    yield
+    for t in made:
+        t.icon.hide()
+
+
 def tray_with(monkeypatch, tmp_path, s, on=True):
     from peresmeshnik.ui import tray as tray_mod
     monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))

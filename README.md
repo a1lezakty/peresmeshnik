@@ -112,7 +112,8 @@ another app's own menus is not detected and the hotkey takes it over everywhere)
 Removing it: quit it from its menu, drag Peresmeshnik from Applications to the Bin, then delete two folders it
 leaves: `~/Library/Application Support/Peresmeshnik` (settings with your Gemini key, your voice recording, logs, crash
 reports) and `~/Library/Caches/Peresmeshnik` (the models). The two permissions go with
-`tccutil reset All io.github.a1lezakty.peresmeshnik`. The key alone: Settings… → Forget the key → Save (a key in `GEMINI_API_KEY` stays: unset it there).
+`tccutil reset All io.github.a1lezakty.peresmeshnik`. The key alone: Settings… → Forget the key → Save (a key in
+`GEMINI_API_KEY` stays: unset it there).
 
 Checked so far only on GitHub's `macos-15` runners (a virtual M1 without GPU, without a real call or real
 headphones): the app starts from the .dmg, its menu-bar icon, overlay and hotkey work there, it idles at
@@ -178,14 +179,14 @@ Your cloned voice runs in a venv of its own (PyTorch and coqui-tts, ~7 GB with C
 (every package pinned and checked by its SHA-256, and so is the setuptools that builds the two packages that come as source,
 docopt and unidic-lite; with CPU-only PyTorch: `requirements-linux.txt` in both places and `--index-strategy unsafe-best-match`), then start the
 app with `PERESMESHNIK_VOICE_CMD="$HOME/.local/share/Peresmeshnik/clone-venv/bin/python voice-runner/voice_runner.py"`.
-Turkish, Chinese and Korean speech recognition on an NVIDIA GPU (Whisper, 1.6 GB more) needs onnxruntime with CUDA in the app's own
-environment, in place of the CPU one (CUDA 12 and cuDNN 9 installed): `uv pip uninstall onnxruntime`,
+Turkish, Chinese and Korean speech recognition on an NVIDIA GPU (Whisper, 1.6 GB more) needs onnxruntime with CUDA in
+the app's own environment, in place of the CPU one (CUDA 12 and cuDNN 9 installed): `uv pip uninstall onnxruntime`,
 `uv pip install onnxruntime-gpu==1.31.1`, then start with `uv run --no-sync peresmeshnik app` (a plain `uv run` puts
 the CPU one back). These steps are not checked by the project; its benchmarks ran Whisper with onnxruntime-gpu
 1.31.1.
-What stays when you stop using it: `~/.config/Peresmeshnik` (settings with your Gemini key), `~/.local/share/Peresmeshnik`
-(your voice recording, logs, crash reports, the clone's venv if you made it there) and `~/.cache/Peresmeshnik` (the
-models).
+What stays when you stop using it: `~/.config/Peresmeshnik` (settings with your Gemini key),
+`~/.local/share/Peresmeshnik` (your voice recording, logs, crash reports, the clone's venv if you made it there) and
+`~/.cache/Peresmeshnik` (the models).
 
 **Models pile up.** The app does not delete models: every pair you try keeps its own in the `models` folder of the
 cache folder above (macOS `~/Library/Caches/Peresmeshnik/models`, Windows `%LOCALAPPDATA%\Peresmeshnik\Cache\models`,
@@ -201,9 +202,9 @@ downloads them again.
   most every 15 min while it stays down: nothing runs on a timer) and goes back to it at the next phrase. Going local
   needs that direction's speech recognition, translation and stock voice on this computer: the wizard downloads them
   for a cloud direction too, unless its subtitles come from the cloud ("Subtitles from the cloud") or its languages
-  have no local models; a noncommercial stock voice (Turkish, Korean, Japanese) only if you accept its license. Your cloned voice takes over where it is ready, else the stock voice. Without a local path
-  the wizard says so beforehand, the tray says what is missing, and the hotkey gives the call your own voice
-  meanwhile.
+  have no local models; a noncommercial stock voice (Turkish, Korean, Japanese) only if you accept its license. Your
+  cloned voice takes over where it is ready, else the stock voice. Without a local path the wizard says so beforehand,
+  the tray says what is missing, and the hotkey gives the call your own voice meanwhile.
 - **A crash.** A report goes to the `reports` folder in the app's data folder (macOS `~/Library/Application
   Support/Peresmeshnik`, Windows `%LOCALAPPDATA%\Peresmeshnik`, Linux `~/.local/share/Peresmeshnik`), and the tray menu
   shows **Crash report…**: read it, copy it, or open a GitHub issue with it and send it yourself — the app sends
@@ -230,13 +231,13 @@ to over a pipe. Its license and those of the other bundled packages are in
 
 The Windows voice pack (your own voice on an NVIDIA GPU, downloaded by the wizard after you accept its licenses) is a
 Python of its own with PyTorch (BSD-3-Clause; most of its 3.7 GB are the NVIDIA CUDA and cuDNN libraries inside it,
-under [NVIDIA's license terms](https://docs.nvidia.com/cuda/eula/)) and coqui-tts (MPL-2.0), with the text tools for Chinese and Japanese
-(pypinyin, cutlet with jaconv and mojimoji, fugashi with MeCab, the UniDic dictionary: MIT, Apache-2.0, BSD-3-Clause;
-[docs/MODELS.md](docs/MODELS.md)); the XTTS-v2 model it runs is under the
-[Coqui Public Model License](https://huggingface.co/coqui/XTTS-v2/blob/main/LICENSE.txt) (noncommercial only). It needs an NVIDIA GPU with 6 GB of memory
-or more, compute capability 6.1 or newer (GeForce GTX 10xx and later; a GTX 10xx is not measured: the app
-measures the clone at start and uses the stock voice if the card is slower than real time) and driver 570.65 or
-newer (528.33 to 570.64: not checked, may work); the wizard checks before the download.
+under [NVIDIA's license terms](https://docs.nvidia.com/cuda/eula/)) and coqui-tts (MPL-2.0), with the text tools for
+Chinese and Japanese (pypinyin, cutlet with jaconv and mojimoji, fugashi with MeCab, the UniDic dictionary: MIT,
+Apache-2.0, BSD-3-Clause; [docs/MODELS.md](docs/MODELS.md)); the XTTS-v2 model it runs is under the
+[Coqui Public Model License](https://huggingface.co/coqui/XTTS-v2/blob/main/LICENSE.txt) (noncommercial only). It needs
+an NVIDIA GPU with 6 GB of memory or more, compute capability 6.1 or newer (GeForce GTX 10xx and later; a GTX 10xx is
+not measured: the app measures the clone at start and uses the stock voice if the card is slower than real time) and
+driver 570.65 or newer (528.33 to 570.64: not checked, may work); the wizard checks before the download.
 
 ---
 

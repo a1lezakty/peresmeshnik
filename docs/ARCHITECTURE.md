@@ -540,8 +540,10 @@ engines. (The stage 0 plan to pick a tier by RAM and a timed self-test was not b
   (`voice-runner/voice_runner.py`, shipped with the app so it always matches it; `local/clone.py`
   `VoicePackClone` over a pipe, the Piper runner's protocol): the app's process never loads torch
   (no second OpenMP or CUDA runtime in it), and a runner that dies or hangs ends the direction,
-  which falls back to the local stock voice. `languages.clone_why` checks the GPU before the download (≥ 6 GB on every OS;
-  on Windows also compute capability ≥ 6.1, driver ≥ 570.65; 528.33–570.64 not checked, allowed with a note; the clone's real-time factor measured at warm-up, above 1 the stock voice). Them → me stays on the CPU (onnxruntime, CTranslate2).
+  which falls back to the local stock voice. `languages.clone_why` checks the GPU before the
+  download (≥ 6 GB on every OS; on Windows also compute capability ≥ 6.1, driver ≥ 570.65;
+  528.33–570.64 not checked, allowed with a note; the clone's real-time factor measured at
+  warm-up, above 1 the stock voice). Them → me stays on the CPU (onnxruntime, CTranslate2).
 - GPU: macOS uses CoreML/Metal where it pays (llama.cpp Metal, onnxruntime CoreML EP). On Linux a
   source install with torch and coqui-tts runs the clone in-process (`XttsClone`).
 - Piper (GPL, with espeak-ng) is never imported: it runs as its own process. Its upstream CLI has

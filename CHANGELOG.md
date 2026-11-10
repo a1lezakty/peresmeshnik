@@ -24,16 +24,17 @@ Chinese, Japanese, Korean, Arabic — both ways.
   directions start again in the new one (meanwhile the call and you hear each other untranslated). A direction you
   keep on this computer goes to the cloud for a new pair only after you say yes, and comes back with a pair that runs
   here. "Local" chosen in the tray or the settings downloads its models first.
-- Where your cloned voice does not speak the language, or no NVIDIA GPU here runs it (too little memory; on Windows
-  also an old driver or GPU), a stock voice speaks instead, and the app says so before the download: no clone download
-  and no recording asked for nothing (and none for a cloud side whose clone could not take over). Recording or importing a voice asks you
-  to confirm it is your own.
+- Where your cloned voice does not speak the language, or no NVIDIA GPU here runs it (too little memory; on Windows also
+  an old driver or GPU), a stock voice speaks instead, and the app says so before the download: no clone download and no
+  recording asked for nothing (and none for a cloud side whose clone could not take over). Recording or importing a
+  voice asks you to confirm it is your own.
 - A direction in the cloud gets its stock voice too, so it goes on locally when the cloud fails (unless its subtitles
   come from the cloud; a noncommercial voice — Turkish, Korean, Japanese — only when you accept its license).
 - **Your cloned voice in 13 of the 14 languages** (all but Ukrainian) with an NVIDIA GPU: first audio in about 0.2 s and
-  3–5 times faster than real time in each of them on an RTX A4000 (other cards not measured); money and clock times
-  are said right, and most other numbers (Japanese digits, Turkish and Arabic decimals, a currency sign apart from its
-  number); Chinese and Japanese sentences are no longer cut short. The voice pack for Windows brings the text tools for Chinese and Japanese (it is a new download).
+  3–5 times faster than real time in each of them on an RTX A4000 (other cards not measured); money and clock times are
+  said right, and most other numbers (Japanese digits, Turkish and Arabic decimals, a currency sign apart from its
+  number); Chinese and Japanese sentences are no longer cut short. The voice pack for Windows brings the text tools for
+  Chinese and Japanese (it is a new download).
 - A text to read for your voice recording in each of the 14 languages: public-domain prose (Kafka, Daudet, Collodi,
   Lu Xun, Akutagawa and others).
 - Subtitles in Chinese, Japanese, Korean and Arabic (right to left). Without a font for the script (some Linux

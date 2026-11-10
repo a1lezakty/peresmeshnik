@@ -12,10 +12,11 @@ version is the top of its GitHub release notes (`.github/workflows/release.yml`)
   (`them-…`, it has no `quality`).
 - **Your cloned voice without an NVIDIA GPU, on any computer, a Mac too:** Kyutai's Pocket TTS on the CPU (onnxruntime,
   no torch) speaks English, French, German, Spanish, Portuguese and Italian in your voice, and Russian
-  (Shtorm-PocketTTS-RU, with stress marks). Your voice starts about 2 s after you finish a phrase, and with both
-  directions cloned at once 4 cores keep up. Its English to Italian weights download with your Hugging Face token, of
-  an account that accepted Kyutai's conditions. Polish, Turkish, Chinese, Japanese, Korean and Arabic without an NVIDIA
-  GPU: a stock voice, and the wizard says why.
+  (Shtorm-PocketTTS-RU, with stress marks). Your voice starts about 2 s after you finish a phrase; both directions
+  cloned at once kept up on 4 cores of a desktop CPU (P-cores of an i7-13700; a weaker laptop is not measured yet). Its
+  English to Italian weights download with your Hugging Face token, of an account that accepted Kyutai's conditions
+  (without it: a stock voice, said why). Polish, Turkish, Chinese, Japanese, Korean and Arabic without an NVIDIA GPU: a
+  stock voice, and the wizard says why.
 - On an NVIDIA GPU XTTS-v2 as before. Qwen3-TTS (streaming, the first sound in ~0.1 s, with Chatterbox Multilingual
   saying again a clause it does not stop on) is in the voice pack's runner but not chosen yet: the pack does not have
   its packages.

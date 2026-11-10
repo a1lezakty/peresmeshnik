@@ -20,7 +20,7 @@ app = Analysis(
     hiddenimports=collect_submodules('peresmeshnik'),  # commands and engines are imported by name, when used
     datas=[(str(ROOT / 'peresmeshnik' / 'models.toml'), 'peresmeshnik'),
            (str(ROOT / 'peresmeshnik' / 'ui' / 'samples'), 'peresmeshnik/ui/samples'),
-           (str(ROOT / 'peresmeshnik' / 'local' / 'pocket_onnx'), 'peresmeshnik/local/pocket_onnx'),  # Pocket TTS graphs
+           (str(ROOT / 'peresmeshnik' / 'local' / 'pocket_onnx'), 'peresmeshnik/local/pocket_onnx'),  # Pocket TTS graphs, their MIT LICENSE
            *((str(ROOT / 'peresmeshnik' / 'local' / f), 'peresmeshnik/local')  # Russian stress (silero-stress, MIT)
              for f in ('stress_ru.npz', 'stress_ru.LICENSE.txt')),
            (str(ROOT / 'assets' / 'icons'), 'assets/icons'),  # ui/tray.py finds them two levels above itself

@@ -2419,7 +2419,8 @@ v02, female). "Voice" is from a clause's end to its translated voice starting.
 | both, my voice = FLEURS v04 (slow) | 7.6 s (10.2) | 8.8 s | 1 % | 0.87 s (1.6) | 2.77 GB | 2.28 |
 | me → them alone, FLEURS v04 | 6.6 s (8.8) | 9.1 s | 0 % | — | 0.89 GB | 1.38 |
 
-- Both sides cloned keep up on 4 cores: the second side adds 0.1–0.5 s to the first one's voice.
+- Both sides cloned keep up on 4 P-cores of a desktop i7-13700 (a weaker 4-core laptop: not measured): the second side adds
+  0.1–0.5 s to the first one's voice.
 - **The clone speaks at the pace of its voice sample.** A slow speaker's sample made 36 s of English out of 33 s of
   dense Russian (the reader's: 27 s), and the voice fell 8–10 s behind in a monologue; it catches up at pauses. The
   engine's speed is not the cause (RTF 0.15–0.21 in both).

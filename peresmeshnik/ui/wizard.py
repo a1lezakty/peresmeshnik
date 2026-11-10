@@ -47,7 +47,7 @@ from peresmeshnik.languages import (
 from peresmeshnik.languages import nvidia as gpu  # tests patch it here
 from peresmeshnik.local import voicepack
 from peresmeshnik.remote import pairing
-from peresmeshnik.ui.components import ComponentsBox
+from peresmeshnik.ui.components import PACK_CONSENT, ComponentsBox
 from peresmeshnik.ui.overlay import font_note
 from peresmeshnik.ui.tray import LANGS, MIC_LABEL, SIDES, device_combo, save_key
 
@@ -76,10 +76,6 @@ def has_key(s: config.Settings) -> bool:
         return False
 
 
-PACK_CONSENT = ('I accept the licenses of the voice pack: PyTorch (BSD-3-Clause) with the NVIDIA CUDA and cuDNN libraries '
-                'inside it (NVIDIA\'s license terms: docs.nvidia.com/cuda/eula, most of the download), coqui-tts '
-                '(MPL-2.0), and of the XTTS-v2 voice model it runs, the Coqui Public Model License '
-                '(huggingface.co/coqui/XTTS-v2): noncommercial use only, it binds me as the user')
 
 
 def gpu_note(g: Gpu) -> str:

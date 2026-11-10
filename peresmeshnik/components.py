@@ -43,6 +43,11 @@ PACK_LICENSE = 'BSD-3-Clause (PyTorch) + NVIDIA CUDA terms + MPL-2.0 (coqui-tts)
 PACK_URL = 'https://docs.nvidia.com/cuda/eula/'
 
 
+class Cancelled(RuntimeError):
+    def __init__(self):
+        super().__init__('cancelled: what is downloaded stays for the next try')
+
+
 @dataclass
 class Component:
     id: str  # a registry id (models.toml), VOICE_PACK or ADDON
@@ -59,6 +64,7 @@ class Component:
     consent: bool = False  # a restricted license (noncommercial, territory): accepted before the download
     token: bool = False  # a gated Hugging Face repo: the download needs the user's token (models.hf_token)
     note: str = ''  # the registry's note: authors, what the license asks
+    required: bool = False  # the chosen setup runs on it here: it cannot be unticked (`instead` says how to do without)
     _fetch: Callable = field(default=None, repr=False)
     _remove: Callable = field(default=None, repr=False)
 
@@ -83,49 +89,54 @@ def _rmtree(folder: Path) -> None:
     shutil.rmtree(folder, ignore_errors=True)
 
 
-def _model(m: models.Model, base: Path, recommended: bool, why: str, instead: str = '', unavailable: str = '') -> Component:
+def _model(m: models.Model, base: Path, recommended: bool, why: str, instead: str = '', unavailable: str = '',
+           required: bool = False) -> Component:
     def fetch(progress, cancel):
         done = [0]
 
-        def step(n):
+        def step(n):  # models.fetch reads in 1 MB pieces: Cancel stops within one (the .part stays to resume)
+            if cancel.is_set():
+                raise Cancelled
             done[0] += n
             progress('downloading', done[0], m.size, m.id)
-        if not cancel.is_set():
-            models.fetch(m.id, base, step)
-    return Component(m.id, f'{ROLE.get(m.role, m.role)}: {m.id}', 0 if models.is_fetched(m, base) else m.size, m.license,
-                     m.license_url, why, models.is_fetched(m, base), du(base / m.id), recommended and not unavailable,
-                     instead, unavailable, m.consent, getattr(m, 'token', '') == 'hf', m.note, fetch,
-                     lambda: _rmtree(base / m.id))
+        step(0)
+        models.fetch(m.id, base, step)
+    here = models.is_fetched(m, base)
+    return Component(m.id, f'{ROLE.get(m.role, m.role)}: {m.id}', 0 if here else m.size, m.license, m.license_url, why,
+                     here, du(base / m.id), recommended and not unavailable, instead, unavailable, m.consent,
+                     getattr(m, 'token', '') == 'hf', m.note, required and not unavailable, fetch, lambda: _rmtree(base / m.id))
 
 
-def _uses(s) -> dict[str, tuple[str, str]]:
-    """What the chosen pair runs each model on, per part: id -> (why, instead)."""
+def _uses(s) -> dict[str, tuple[str, str, bool]]:
+    """What the chosen setup runs each model on, per part: id -> (why, instead, required). Required: Silero VAD, a local
+    side's ASR, MT and stock voice, a cloud side's local subtitles and its fallback voice; `instead` then says how not to
+    need it. The clone and its voice check are a choice: without them a stock voice speaks."""
     reg = models.registry()
-    use = {'silero-vad': ('tells speech from silence: every setup needs it', 'nothing runs')}
+    use = {'silero-vad': ('tells speech from silence: every setup needs it', 'needed for every setup', True)}
     for side in languages.SIDES:
         d, arrow, engine = languages.direction(s, side), ARROW[side], getattr(s, side)  # as needed_models asks it
         if not (engine == 'local' or engine == 'cloud' and not languages.cloud_subtitles(s, side)):  # remote: the server's
             continue
         lang, cloud = languages.name(d.tgt), engine == 'cloud'
-        away = 'the cloud makes the subtitles instead' if cloud else \
-            f'{arrow} does not run here' + (' (the cloud can, with your Gemini key)' if d.cloud else '')
+        away = (f'needed for the subtitles of {arrow} on this computer; not to download it, choose subtitles from the '
+                'cloud on the Languages page') if cloud else \
+            (f'needed for {arrow} on this computer; not to download it, choose cloud for this direction on the '
+             'Languages page')
         for i, why in ((d.asr, f'{arrow}: hears {languages.name(d.src)}' + (' (the subtitles)' if cloud else '')),
                        (d.mt, f'{arrow}: translates {languages.name(d.src)} → {lang}' + (' (the subtitles)' if cloud else ''))):
             for p in models.parts(reg[i]) if i in reg else []:  # '' (none), or not a registry row: nothing to list
-                use.setdefault(p.id, (why, away))
+                use.setdefault(p.id, (why, away, True))
         stock = languages.fallback_voice(s, side) if cloud else languages.pick(s.local.tts, d.tgt)
         if stock:
-            use.setdefault(stock, (f'{arrow}: speaks {lang} when the cloud fails', 'that side stops while the cloud is down')
-                           if cloud else (f'{arrow}: speaks {lang} in a stock voice', 'subtitles only')
-                           if side == 'them_to_me' else (f'{arrow}: takes over in a stock voice if your cloned voice fails',
-                                                         'nothing takes over if your cloned voice fails')
-                           if d.voice == 'clone' else (f'{arrow}: speaks {lang} in a stock voice',
-                                                       'nothing speaks for you: choose cloud for me → them'))
+            use.setdefault(stock, (f'{arrow}: speaks {lang} when the cloud fails' if cloud else
+                                   f'{arrow}: speaks {lang} in a stock voice'
+                                   + (', and takes over if your cloned voice fails' if d.voice == 'clone' else ''),
+                                   away, True))
         if d.voice == 'clone' and not cloud:
-            use.setdefault(d.tts, (f'{arrow}: speaks {lang} in your own voice',
-                                   'a stock voice speaks instead' if stock else 'nothing speaks: choose cloud for me → them'))
+            use.setdefault(d.tts, (f'{arrow}: speaks {lang} in your own voice', 'a stock voice speaks instead' if stock else
+                                   'nothing speaks for you: choose cloud for me → them', False))
             use.setdefault('wespeaker-resnet34', ('confirms at the microphone that the voice is yours',
-                                                  'your voice cannot be confirmed: a stock voice speaks into the call'))
+                                                  'your voice cannot be confirmed: a stock voice speaks into the call', False))
     return use
 
 
@@ -136,33 +147,41 @@ def _pack(s, gpu: Gpu, needed: set[str]) -> list[Component]:
     spec = json.loads(voicepack.lock_file().read_text())
     no = 'needs an NVIDIA GPU' if not (gpu.vram or gpu.why) else languages.gpu_why(gpu)
     st, gpu_clone = voicepack.state(), any(languages.needs_gpu(i) for i in needed if models.get(i).role == 'clone')
-    dl = sum(f['size'] for f in [spec['python'], spec['pip'], *spec['wheels'], *spec.get('archives', [])])
+    dl = voicepack.need_bytes() - spec['installed_bytes'] - voicepack.MARGIN  # what is not downloaded yet
     folder = voicepack.folder()
+
+    def remove():
+        (folder / '.complete').unlink(missing_ok=True)  # first: a pack Windows deletes only in part is never "ready"
+        for p in (folder, folder.with_name('voice-pack.download')):
+            shutil.rmtree(p, ignore_errors=True)
     out = [Component(VOICE_PACK, 'NVIDIA voice pack (XTTS-v2)', 0 if st == 'ready' else dl, PACK_LICENSE, PACK_URL,
                      'your own voice on an NVIDIA GPU: its own Python with torch', st == 'ready',
                      (spec['installed_bytes'] if st == 'ready' else du(folder))  # not a walk over ~8 GB of torch each time
                      + du(folder.with_name('voice-pack.download')), gpu_clone and not no,
                      'a stock voice speaks instead of yours' if gpu_clone else '', no, consent=True,
-                     _fetch=lambda progress, cancel: voicepack.install(progress, cancel),
-                     _remove=lambda: [shutil.rmtree(p, ignore_errors=True)
-                                      for p in (folder, folder.with_name('voice-pack.download'))])]
+                     _fetch=lambda progress, cancel: voicepack.install(progress, cancel), _remove=remove)]
     if add := spec.get('addon'):
         low = f'the addon needs {add["vram_gb"]} GB of GPU memory; this computer has {languages.gpu_text(gpu.vram)}' \
             if gpu.vram < add.get('vram_gb', 0) else ''
         ms, base = [models.get(i) for i in add['models']], models.root()
         ready = voicepack.state(addon=True) == 'ready' and all(models.is_fetched(m, base) for m in ms)
 
-        def fetch(progress, cancel):  # into the same pack, then its models (their rows are this one)
-            voicepack.install(progress, cancel, addon=True)
+        wheels = sum(f['size'] for f in [*add['wheels'], *add.get('archives', [])])
+
+        def fetch(progress, cancel):  # into the same pack, then its models (their rows are this one): one count, onwards
+            voicepack.install(lambda stage, done, total, text='': progress(stage, done, wheels + sum(m.size for m in ms),
+                                                                            text), cancel, addon=True)
+            at = wheels
             for m in ms:
-                if not cancel.is_set():
-                    _model(m, base, False, '').fetch(progress, cancel)
+                _model(m, base, False, '').fetch(lambda stage, done, total, text='', at=at: progress(stage, at + done,
+                                                 wheels + sum(m.size for m in ms), text), cancel)
+                at += m.size
 
         def remove():
             voicepack.uninstall(addon=True)
             for m in ms:
                 _rmtree(base / m.id)
-        size = sum(f['size'] for f in [*add['wheels'], *add.get('archives', [])]) + sum(m.size for m in ms)
+        size = wheels + sum(m.size for m in ms if not models.is_fetched(m, base))
         out.append(Component(ADDON, 'Qwen3 + Chatterbox (addon to the voice pack)', 0 if ready else size,
                              ' + '.join(dict.fromkeys(models.get(i).license for i in add['models'])),
                              models.get(add['models'][0]).license_url,
@@ -181,11 +200,12 @@ def listing(s, gpu: Gpu | None = None) -> list[Component]:
     out = {}
     for i in [*languages.needed_models(s), *languages.optional_models(s)]:
         for p in models.parts(models.get(i)):
-            why, instead = use.get(p.id, ('a cloud direction falls back on it when the cloud fails',
-                                          'that side stops while the cloud is down'))
-            out.setdefault(p.id, _model(p, base, i in needed, why, instead))
-    if (i := 'wespeaker-resnet34') in use and i not in out:  # not a pair's model, but the clone speaks only after it
-        out[i] = _model(reg[i], base, True, *use[i])
+            why, instead, required = use.get(p.id, ('a cloud direction falls back on it when the cloud fails', '', False))
+            if i not in needed:  # optional_models: a cloud side's fallback voice under a license to accept
+                instead, required = 'that side stops while the cloud is down', False
+            out.setdefault(p.id, _model(p, base, i in needed, why, instead, required=required))
+    if (i := 'wespeaker-resnet34') in use and i in reg and i not in out:  # not a pair's model; the clone speaks after it
+        out[i] = _model(reg[i], base, True, *use[i][:2])
     for m in reg.values():
         if m.role == 'clone' and m.id not in out and languages.covers(m.id, s.their_lang):
             out[m.id] = _model(m, base, False, f'speaks {languages.name(s.their_lang)} in your own voice',

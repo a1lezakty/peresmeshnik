@@ -24,6 +24,13 @@ from PySide6.QtWidgets import (
 )
 
 from peresmeshnik import components, models
+from peresmeshnik.local import voicepack
+
+PACKS = (components.VOICE_PACK, components.ADDON)
+PACK_CONSENT = ('I accept the licenses of the voice pack: PyTorch (BSD-3-Clause) with the NVIDIA CUDA and cuDNN libraries '
+                'inside it (NVIDIA\'s license terms: docs.nvidia.com/cuda/eula, most of the download), coqui-tts '
+                '(MPL-2.0), and of the XTTS-v2 voice model it runs, the Coqui Public Model License '
+                '(huggingface.co/coqui/XTTS-v2): noncommercial use only, it binds me as the user')
 
 HF_TEXT = ('Your cloned voice without an NVIDIA GPU speaks through Kyutai\'s Pocket TTS. Its weights are behind a '
            'button on Hugging Face: open the page, sign in, accept the conditions, then make a read token (Settings → '
@@ -89,7 +96,9 @@ class ComponentsBox(QWidget):
         self.without = QLabel()  # unticked: what the pair does instead
         self.without.setWordWrap(True)
         self.consent = QCheckBox()
-        self.consent.toggled.connect(lambda: self.busy or self._finished(''))
+        self.consent.toggled.connect(lambda: self._update(''))
+        self.pack_consent = QCheckBox(PACK_CONSENT)  # the voice pack (and its addon): its own licenses, said as they are
+        self.pack_consent.toggled.connect(lambda: self._update(''))
         self.hf = HfTokenBox()
         self.hf.setVisible(False)
         self.button = QPushButton('Download')
@@ -104,13 +113,13 @@ class ComponentsBox(QWidget):
         row.addWidget(self.stop)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        for x in (self.tree, self.without, self.consent, self.hf):
+        for x in (self.tree, self.without, self.consent, self.pack_consent, self.hf):
             lay.addWidget(x)
         lay.addLayout(row)
         lay.addWidget(self.bar)
         lay.addWidget(self.state)
         self.progress.connect(self._progress)
-        self.finished.connect(self._finished)
+        self.finished.connect(self._done)
 
     def refresh(self) -> None:
         """The list anew (after a pair change, a download, a removal); a tick the user changed stays."""
@@ -122,29 +131,35 @@ class ComponentsBox(QWidget):
                                   c.unavailable or c.why])
             it.setData(0, Qt.ItemDataRole.UserRole, c.id)
             for col in range(4):
-                it.setToolTip(col, '\n'.join(x for x in (c.unavailable or c.why, c.note, c.license_url) if x))
+                it.setToolTip(col, '\n'.join(x for x in (c.unavailable or c.why, c.instead and f'Without it: {c.instead}.',
+                                                         c.note, c.license_url) if x))
             if c.installed:
                 it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
             elif c.unavailable:
                 it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEnabled)
             else:
-                it.setCheckState(0, Qt.CheckState.Checked if self.ticked.setdefault(c.id, c.recommended)
-                                 else Qt.CheckState.Unchecked)
+                it.setCheckState(0, Qt.CheckState.Checked if self.wanted(c) else Qt.CheckState.Unchecked)
+                if c.required:  # ticked for good: the hint says how not to need it
+                    it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
             self.tree.addTopLevelItem(it)
             if c.on_disk:  # installed, or a download of another pair that stopped half way
                 rm = QPushButton('Remove')
                 rm.clicked.connect(lambda _=False, c=c: self.remove(c))
                 self.tree.setItemWidget(it, 4, rm)
         self.tree.blockSignals(False)
-        self._finished('')
+        self._update('')
+
+    def wanted(self, c) -> bool:
+        """Ticked: what the user ticked or unticked, else the default (another pair's default changes with it)."""
+        return c.required or self.ticked.get(c.id, c.recommended)
 
     def _ticked(self, it: QTreeWidgetItem) -> None:
         self.ticked[it.data(0, Qt.ItemDataRole.UserRole)] = it.checkState(0) == Qt.CheckState.Checked
-        self._finished('')
+        self._update('')
 
     def todo(self) -> list:
         """Ticked and not here, the pair's own first: an optional one failing does not hold them."""
-        out = [c for c in self.rows if not c.installed and not c.unavailable and self.ticked.get(c.id)]
+        out = [c for c in self.rows if not c.installed and not c.unavailable and self.wanted(c)]
         return sorted(out, key=lambda c: not c.recommended)
 
     def missing(self) -> list:
@@ -152,9 +167,13 @@ class ComponentsBox(QWidget):
         return [c for c in self.todo() if c.recommended]
 
     def download(self) -> None:
+        if self.busy:  # one download at a time: a second install into the same voice pack breaks it
+            return
         todo = self.todo()
-        if any(c.consent for c in todo) and not self.consent.isChecked():
-            self.state.setText('Accept the restricted licenses first, or untick them.')
+        pack = [c for c in todo if c.id in PACKS]
+        if any(c.consent and c.id not in PACKS for c in todo) and not self.consent.isChecked() or \
+                pack and not self.pack_consent.isChecked():
+            self.state.setText('Accept the licenses first, or untick what they are for.')
             return
         self.busy = True
         self.cancel.clear()
@@ -181,8 +200,9 @@ class ComponentsBox(QWidget):
                     done[0] = start + c.size
                 except Exception as e:  # the network, the disk, a token refused (models.Gated): the others still go
                     errors.append(f'{c.title}: {e}')
-                    if c.recommended and not isinstance(e, getattr(models, 'Gated', ())):
-                        break  # the pair's own: stop here, Download resumes it
+                    if isinstance(e, (components.Cancelled, voicepack.Cancelled)) or \
+                            c.recommended and not isinstance(e, getattr(models, 'Gated', ())):
+                        break  # cancelled, or the pair's own: stop here, Download resumes it
             self.finished.emit('; '.join(errors))
         threading.Thread(target=run, name='components-fetch', daemon=True).start()
 
@@ -212,6 +232,7 @@ class ComponentsBox(QWidget):
 
     def _buttons(self) -> None:
         todo = self.todo()
+        self.tree.setEnabled(not self.busy)  # no ticks, no Remove while it downloads
         self.button.setEnabled(not self.busy and bool(todo))
         self.stop.setVisible(self.busy)
         self.bar.setVisible(self.busy or bool(todo))
@@ -219,20 +240,25 @@ class ComponentsBox(QWidget):
             if w := self.tree.itemWidget(self.tree.topLevelItem(i), 4):
                 w.setEnabled(not self.busy)
 
-    def _finished(self, err: str) -> None:
-        if self.busy:
-            self.busy = False
-            self.refresh()  # what is here now
+    def _done(self, err: str) -> None:
+        """The download thread ended: only here it is not busy any more."""
+        self.busy = False
+        self.refresh()  # what is here now
+        self._update(err)
+
+    def _update(self, err: str) -> None:
         todo = self.todo()
-        need = [c for c in todo if c.consent]
+        need = [c for c in todo if c.consent and c.id not in PACKS]
         self.consent.setVisible(bool(need))
         self.consent.setText('I accept the restricted licenses (noncommercial use only, they bind me as the user): '
                              + ', '.join(f'{c.title} ({c.license})' for c in need))
+        self.pack_consent.setVisible(any(c.id in PACKS for c in todo))
         self.hf.show_for(next((c.license_url for c in todo if c.token), ''))
-        off = [c for c in self.rows if c.recommended and not c.installed and not self.ticked.get(c.id) and c.instead]
+        off = [c for c in self.rows if not (c.installed or c.unavailable or self.wanted(c)) and c.instead]
         self.without.setText('<br>'.join(f'Without {c.title}: {c.instead}.' for c in off))
         self.without.setVisible(bool(off))
         self.state.setText(f'Download failed: {err}. Press Download again to resume.' if err else
+                           self.state.text() if self.busy else
                            f'{len(todo)} to download, {mb(sum(c.size for c in todo))}.' if todo else
                            f'Everything ticked is here. Folder: {models.root()}')
         self._buttons()

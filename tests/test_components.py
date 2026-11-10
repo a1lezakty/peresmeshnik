@@ -4,6 +4,7 @@ the ticked ones after Download and says what the pair does without an unticked o
 import json
 import os
 import sys
+import threading
 import time
 from types import SimpleNamespace
 
@@ -46,7 +47,8 @@ def test_the_pairs_models_ticked_other_pairs_to_remove(base):
     vad, asr = rows['silero-vad'], rows['parakeet-tdt-0.6b-v3']
     assert vad.installed and vad.size == 0 and vad.on_disk > 1000 and 'every setup' in vad.why
     assert not asr.installed and asr.size == models.get(asr.id).size and asr.license == 'CC-BY-4.0'
-    assert 'hears English' in asr.why and 'the cloud can' in asr.instead
+    assert 'hears English' in asr.why and asr.required and 'choose cloud for this direction' in asr.instead  # FIXES 2
+    assert vad.required and all(c.required for i, c in rows.items() if i in need)  # no clone here: all of it runs the pair
     old = rows['opus-mt-de-ru']
     assert old.installed and not old.recommended and 'not used' in old.why
     clone = rows['xtts-v2']  # me -> them in the cloud: offered, not ticked; no NVIDIA GPU here: why not
@@ -91,7 +93,10 @@ def test_the_voice_pack_and_its_addon_only_where_they_run(tmp_path, monkeypatch)
     s = config.Settings(my_lang='ru', their_lang='en', me_to_them='local')
     rows = {c.id: c for c in components.listing(s, CARD)}
     pack, addon = rows[components.VOICE_PACK], rows[components.ADDON]
-    assert pack.recommended and pack.size == 3000 and pack.consent and not pack.unavailable
+    assert pack.recommended and pack.size == 3000 and pack.consent and not pack.unavailable and not pack.required
+    (tmp_path / 'voice-pack.download').mkdir()
+    (tmp_path / 'voice-pack.download' / 'torch.whl.part').write_bytes(b'x' * 400)  # FIXES 7: what is left to download
+    assert components.listing(s, CARD)[-2].size == 2600
     assert not addon.recommended and not addon.unavailable and addon.size == 1000 + models.get('xtts-v2').size
     assert True in states and 'xtts-v2' not in rows  # the addon's models come with it, not as rows of their own
     small = Gpu(6.0, (580, 0), 8.6)
@@ -105,7 +110,15 @@ def test_the_voice_pack_and_its_addon_only_where_they_run(tmp_path, monkeypatch)
     monkeypatch.setattr(components, 'listing', lambda s: [pack, addon])
     box = ComponentsBox(s)
     box.refresh()  # the box shows them (a field out of place broke it on Windows)
-    assert box.tree.topLevelItemCount() == 2 and not box.consent.isHidden()
+    assert box.tree.topLevelItemCount() == 2 and box.consent.isHidden() and not box.pack_consent.isHidden()  # FIXES 7
+    assert 'PyTorch' in box.pack_consent.text()
+    box.download()
+    assert not box.busy and 'Accept' in box.state.text()
+    (tmp_path / 'voice-pack').mkdir()
+    (tmp_path / 'voice-pack' / '.complete').write_text('x')
+    monkeypatch.setattr(components.shutil, 'rmtree', lambda p, ignore_errors=False: None)  # Windows: files still held
+    pack.remove()
+    assert not (tmp_path / 'voice-pack' / '.complete').exists()  # FIXES 6: never "ready" half removed
 
 
 def settle(seconds=0.05):
@@ -124,25 +137,29 @@ def test_the_box_downloads_only_the_ticked_and_says_what_goes_without(monkeypatc
     from peresmeshnik.ui.components import ComponentsBox
     here, got = {'old'}, []
 
-    def row(cid, recommended, consent=False, instead=''):
+    def row(cid, recommended, consent=False, instead='', required=False):
         def fetch(progress, cancel):
             progress('downloading', 500, 1000, cid)
             got.append(cid)
             here.add(cid)
         return components.Component(cid, f'Row {cid}', 0 if cid in here else 1000, 'MIT', 'https://x', 'for the pair',
                                     cid in here, 2000 if cid in here else 0, recommended, instead, '', consent,
-                                    _fetch=fetch, _remove=lambda: here.discard(cid))
-    monkeypatch.setattr(components, 'listing', lambda s: [row('asr', True, instead='the cloud can'), row('nc', False, True),
-                                                          row('old', False)])
+                                    required=required, _fetch=fetch, _remove=lambda: here.discard(cid))
+    monkeypatch.setattr(components, 'listing', lambda s: [
+        row('asr', True, instead='needed for them → me on this computer', required=True),
+        row('clone', True, instead='a stock voice speaks instead'), row('nc', False, True), row('old', False)])
     on, asked = [True], []
     box = ComponentsBox(config.Settings(), translating=lambda: on[0])
     box.confirm = lambda text: asked.append(text) or True
     box.refresh()
-    assert [c.id for c in box.missing()] == ['asr'] and box.consent.isHidden() and box.without.isHidden()
-    item(box, box.rows[0]).setCheckState(0, Qt.CheckState.Unchecked)  # the pair's ASR unticked: said, Next is free
-    assert box.missing() == [] and 'Without Row asr: the cloud can.' in box.without.text()
-    item(box, box.rows[0]).setCheckState(0, Qt.CheckState.Checked)
-    item(box, box.rows[1]).setCheckState(0, Qt.CheckState.Checked)  # a restricted license: asked first
+    assert [c.id for c in box.missing()] == ['asr', 'clone'] and box.consent.isHidden() and box.without.isHidden()
+    asr, clone = item(box, box.rows[0]), item(box, box.rows[1])
+    assert not asr.flags() & Qt.ItemFlag.ItemIsUserCheckable and 'Without it: needed for them' in asr.toolTip(0)  # FIXES 2
+    asr.setCheckState(0, Qt.CheckState.Unchecked)  # even so: the pair's ASR stays
+    assert [c.id for c in box.missing()] == ['asr', 'clone']
+    clone.setCheckState(0, Qt.CheckState.Unchecked)  # the clone is a choice: said what speaks instead, Next waits less
+    assert [c.id for c in box.missing()] == ['asr'] and 'Without Row clone: a stock voice speaks instead.' in box.without.text()
+    item(box, box.rows[2]).setCheckState(0, Qt.CheckState.Checked)  # a restricted license: asked first
     assert not box.consent.isHidden() and 'Row nc (MIT)' in box.consent.text()
     box.download()
     assert got == [] and 'Accept' in box.state.text()
@@ -152,6 +169,7 @@ def test_the_box_downloads_only_the_ticked_and_says_what_goes_without(monkeypatc
     while box.busy and time.monotonic() < end:
         settle()
     assert got == ['asr', 'nc'] and not box.missing() and box.state.text().startswith('Everything ticked is here')
+    assert 'clone' not in here and 'stock voice' in box.without.text()  # FIXES 4: the user's untick stays
     box.remove(next(c for c in box.rows if c.id == 'old'))  # translating: not now
     assert 'old' in here and 'translation off' in box.state.text() and asked == []
     on[0] = False
@@ -193,3 +211,96 @@ def test_the_tray_opens_components(tmp_path, monkeypatch):
     d = t.windows[-1]
     assert isinstance(d, ComponentsDialog) and d.box.rows and d.box.translating() and not d.busy()
     d.close()
+
+
+def test_a_tick_while_it_downloads_keeps_it_busy(monkeypatch):
+    """FIXES 1: a tick meanwhile does not end `busy`: Download and Remove stay off, no second download starts."""
+    from peresmeshnik.ui.components import ComponentsBox
+    go, started = threading.Event(), []
+
+    def fetch(progress, cancel):
+        started.append(1)
+        go.wait(5)
+    rows = [components.Component('pack', 'Row pack', 1000, 'MIT', 'https://x', '', False, 0, True, _fetch=fetch),
+            components.Component('opt', 'Row opt', 1000, 'MIT', 'https://x', '', False, 0, False, _fetch=fetch)]
+    monkeypatch.setattr(components, 'listing', lambda s: rows)
+    box = ComponentsBox(config.Settings())
+    box.refresh()
+    box.download()
+    settle(0.1)
+    item(box, rows[1]).setCheckState(0, Qt.CheckState.Checked)
+    box.consent.setChecked(True)
+    assert box.busy and not box.button.isEnabled() and not box.tree.isEnabled()
+    box.download()
+    settle(0.1)
+    assert started == [1]
+    go.set()
+    end = time.monotonic() + 5
+    while box.busy and time.monotonic() < end:
+        settle()
+    assert not box.busy and box.tree.isEnabled()
+
+
+def test_cancel_stops_inside_a_model(monkeypatch, base):
+    """FIXES 5: Cancel stops within the 1 MB pieces of a big model, not after it; the .part stays to resume."""
+    pieces = []
+
+    def fetch(mid, where, progress):
+        for _ in range(5):
+            progress(1 << 20)
+            pieces.append(1)
+    monkeypatch.setattr(models, 'fetch', fetch)
+    c = components._model(models.get('xtts-v2'), base, True, '')
+    stop = threading.Event()
+    with pytest.raises(components.Cancelled):
+        c.fetch(lambda stage, done, total, text='': stop.set(), stop)
+    assert pieces == []  # the first piece's report already stopped it
+
+
+def test_the_addon_counts_onwards(tmp_path, monkeypatch):
+    """FIXES 7: the addon's bar goes on from its wheels into its models, never back."""
+    monkeypatch.setattr(components, 'sys', SimpleNamespace(platform='win32'))
+    monkeypatch.setattr(voicepack, 'state', lambda addon=False: 'none')
+    monkeypatch.setattr(voicepack, 'folder', lambda: tmp_path / 'voice-pack')
+    monkeypatch.setattr(voicepack, 'lock_file', lambda: lock(tmp_path))
+    monkeypatch.setattr(voicepack, 'install', lambda progress, cancel, addon=False: progress('downloading', 1000, 1000, 'w'))
+    monkeypatch.setattr(models, 'fetch', lambda mid, where, step: [step(1 << 20) for _ in range(3)])
+    seen = []
+    (addon,) = [c for c in components.listing(config.Settings(), CARD) if c.id == components.ADDON]
+    addon.fetch(lambda stage, done, total, text='': seen.append(done))
+    assert seen == sorted(seen) and seen[0] == 1000 and seen[-1] == 1000 + 3 * (1 << 20)
+
+
+def test_another_pairs_default_follows_the_pair(monkeypatch):
+    """FIXES 4: only the user's own ticks are kept: me -> them cloud (the clone unticked by default), then local: the clone
+    is ticked, as for that setup."""
+    from peresmeshnik.ui.components import ComponentsBox
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
+    monkeypatch.setattr(languages, 'nvidia_once', lambda: CARD)
+    s = config.Settings(my_lang='ru', their_lang='en', me_to_them='cloud')
+    box = ComponentsBox(s)
+    box.refresh()
+    assert 'xtts-v2' not in {c.id for c in box.todo()}
+    s.me_to_them = 'local'
+    box.refresh()
+    assert 'xtts-v2' in {c.id for c in box.todo()} and not box.ticked
+
+
+def test_the_wizard_goes_on_without_the_clone_not_without_the_pair(monkeypatch):
+    """FIXES 2: Next waits for what the setup runs on; the clone unticked, Next is free and says the stock voice speaks."""
+    from peresmeshnik.ui import wizard
+    here = {'vad'}
+    rows = lambda s: [components.Component(i, f'Row {i}', 0 if i in here else 9, 'MIT', 'https://x', '', i in here, 0,  # noqa: E731
+                                           True, instead, required=req)
+                      for i, instead, req in (('vad', 'needed for every setup', True),
+                                              ('clone', 'a stock voice speaks instead', False))]
+    monkeypatch.setattr(components, 'listing', rows)
+    page = wizard.ModelsPage(type('W', (), {'s': config.Settings()})())
+    page.initializePage()
+    assert not page.isComplete()  # the clone is ticked by default: it waits for it
+    item(page.box, page.box.rows[1]).setCheckState(0, Qt.CheckState.Unchecked)
+    assert page.isComplete() and 'Without Row clone: a stock voice speaks instead.' in page.box.without.text()
+    here.discard('vad')
+    page.initializePage()
+    item(page.box, page.box.rows[0]).setCheckState(0, Qt.CheckState.Unchecked)  # locked: stays
+    assert not page.isComplete() and [c.id for c in page.box.missing()] == ['vad']

@@ -126,12 +126,14 @@ def test_tray_switches_the_pair_fetching_only_its_models(tmp_path, monkeypatch, 
     t = tray_mod.Tray(Ctl())
     asked = []
     t.confirm = lambda text: asked.append(text) or False
+    t.ask = lambda text, choose=True: asked.append(text) or 'no'
     pick = {k: {a.data()[1]: a for a in g.actions()} for k, g in t.langs.items()}
     assert len(pick['my_lang']) == 14 and pick['my_lang']['ru'].isChecked() and pick['their_lang']['en'].isChecked()
     pick['my_lang']['de'].trigger()  # de <-> en: no German models -> both sides to the cloud, asked first (H-02)
     settle(0.1)
     assert 'Google' in asked[-1] and config.load().my_lang == 'ru' and not calls  # declined: nothing changes
     t.confirm = lambda text: asked.append(text) or 'Google' in text  # yes to the cloud, no to restricted licenses
+    t.ask = lambda text, choose=True: asked.append(text) or ('no' if 'restricted' in text else 'yes')
     pick['my_lang']['de'].trigger()
     settle(0.1)
     assert (config.load().my_lang, config.load().them_to_me, config.load().me_to_them) == ('de', 'cloud', 'cloud')
@@ -141,7 +143,9 @@ def test_tray_switches_the_pair_fetching_only_its_models(tmp_path, monkeypatch, 
     pick['my_lang']['de'].setChecked(True)
     t.switch_pair('de', 'ja')
     assert 'mt-de-ja (CPML' in asked[-1] and config.load().my_lang == 'ru' and len(calls) == 1  # declined: nothing changes
+    assert 'download' in asked[-1] and 'MB' in asked[-1] and 'Choose…' in asked[-1]  # the size, asked first (FIXES-comp 3)
     t.confirm = lambda text: True
+    t.ask = lambda text, choose=True: 'yes'
     t.switch_pair('de', 'ja')
     end = time.monotonic() + 30
     while len(calls) < 2 and time.monotonic() < end:
@@ -193,6 +197,7 @@ def tray_with(monkeypatch, tmp_path, s, on=True):
     t.said = []
     t.message = t.said.append
     t.confirm = lambda text: True  # a real question box would wait for a click
+    t.ask = lambda text, choose=True: 'yes'
     return t, calls
 
 
@@ -914,3 +919,45 @@ def test_languages_page_says_the_clone_once_on_a_mac(tmp_path, monkeypatch):
     text = page.why['me_to_them'].text()
     monkeypatch.undo()
     assert text.count('keeps up') == 1 and 'On a Mac' not in text, text
+
+
+def test_the_tray_asks_before_it_downloads_and_never_fetches_the_clone_unasked(tmp_path, monkeypatch):
+    """FIXES-components 3: a pair or an engine from the tray downloads only after Yes to its size (No: nothing changes;
+    Choose…: the Components window for that setup, the pair changes once its models are there); the clone is not
+    downloaded unless chosen there: a stock voice speaks, and the tray says so."""
+    from peresmeshnik.ui.components import ComponentsDialog
+    s = wire(config.Settings(my_lang='ru', their_lang='en', them_to_me='local', me_to_them='cloud'))
+    t, calls = tray_with(monkeypatch, tmp_path, s)
+    got, asked, answer = [], [], ['no']
+
+    def fetch(mid, *a, **k):
+        got.append(mid)
+        for p in models.parts(models.get(mid)):
+            (models.root() / p.id).mkdir(parents=True, exist_ok=True)
+            (models.root() / p.id / models.MARKER).write_text(p.fingerprint + '\n')
+    monkeypatch.setattr(models, 'fetch', fetch)
+    t.ask = lambda text, choose=True: asked.append(text) or answer[0]
+    t.switch_pair('ru', 'en', {'me_to_them': 'local'})
+    settle(0.2)
+    assert len(asked) == 1 and 'MB' in asked[0] and 'clone-en' not in asked[0] and got == [] and calls == []
+    assert config.load().me_to_them == 'cloud'
+    answer[0] = 'choose'
+    t.switch_pair('ru', 'en', {'me_to_them': 'local'})
+    settle(0.2)
+    d = t.windows[-1]
+    assert isinstance(d, ComponentsDialog) and got == [] and config.load().me_to_them == 'cloud'
+    d.box.consent.setChecked(True)  # the clone's license; ticked there by default: chosen by the user
+    d.box.download()
+    assert wait_for(lambda: calls)  # its models are here: the pair changes
+    assert config.load().me_to_them == 'local' and 'clone-en' in got
+    d.close()
+    s = config.load()
+    s.me_to_them = 'cloud'
+    config.save(s)
+    (models.root() / 'clone-en' / models.MARKER).unlink()
+    got.clear()
+    answer[0] = 'yes'
+    t.switch_pair('ru', 'en', {'me_to_them': 'local'})  # only the clone is missing: not asked, not fetched, said
+    assert wait_for(lambda: len(calls) == 2)
+    assert config.load().me_to_them == 'local' and got == [] and len(asked) == 2
+    assert any('your cloned voice (clone-en' in m and 'a stock voice speaks' in m for m in t.said), t.said

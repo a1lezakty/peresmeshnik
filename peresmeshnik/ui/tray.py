@@ -301,8 +301,13 @@ class Tray(QObject):
 
     def confirm(self, text: str) -> bool:
         """Yes / No, in front: a tray app is not active by itself, its question would open behind the other windows."""
+        return self.ask(text, choose=False) == 'yes'
+
+    def ask(self, text: str, choose: bool = True) -> str:
+        """'yes', 'no' or 'choose' (a "Choose…" button), in front as `confirm`."""
         from PySide6.QtWidgets import QMessageBox
         box = QMessageBox(QMessageBox.Question, 'Peresmeshnik', text, QMessageBox.Yes | QMessageBox.No)
+        pick = box.addButton('Choose…', QMessageBox.ActionRole) if choose else None
         box.setDefaultButton(QMessageBox.No)
         box.show()
         box.raise_()
@@ -310,7 +315,9 @@ class Tray(QObject):
         if sys.platform == 'darwin':
             from peresmeshnik.ui import macos
             macos.front(int(box.winId()))
-        return box.exec() == QMessageBox.Yes
+        box.exec()
+        return 'choose' if pick is not None and box.clickedButton() is pick else \
+            'yes' if box.clickedButton() is box.button(QMessageBox.Yes) else 'no'
 
     def switch_pair(self, my: str, their: str, engines: dict[str, str] | None = None) -> None:
         """Another pair, or another engine for a side (`engines`, the user's choice; 'subtitles': 'cloud' or 'local' is
@@ -378,11 +385,27 @@ class Tray(QObject):
             self.sync()
             return
         todo = [m for m in map(models.get, languages.needed_models(s)) if not models.is_fetched(m)]
+        if clone := [m for m in todo if m.role == 'clone']:  # nobody chose it here: Components… downloads it
+            todo = [m for m in todo if m not in clone]
+            notes.append(f'{SIDES["me_to_them"]}: your cloned voice ({clone[0].id}, {models.size(clone[0]) / 1e9:.1f} GB) is '
+                         'not downloaded: a stock voice speaks; Components… in this menu downloads it')
         lic = ', '.join(dict.fromkeys(p.license for m in todo for p in models.parts(m)))  # a pair through English: both
         restricted = list(dict.fromkeys(f'{p.id} ({p.license}, {p.license_url})' for m in todo for p in models.parts(m)
                                         if p.consent))
-        if restricted and not self.confirm(f'{name} needs models under restricted licenses (noncommercial use only, they bind '
-                                           f'you as the user): {", ".join(restricted)}. Download and accept them?'):
+        engines_now = {**engines, **{k: getattr(s, k) for k in kept}, **({'subtitles': subs} if subs else {})}
+        answer = self.ask(f'{name}: download {sum(map(models.size, todo)) / 1e6:,.0f} MB ({lic})?'
+                          + (f' Under restricted licenses (noncommercial use only, they bind you as the user): '
+                             f'{", ".join(restricted)}; Yes accepts them.' if restricted else '')
+                          + ' Choose… shows what is downloaded and lets you pick.') if todo else 'yes'
+        if answer == 'no':
+            self.sync()
+            return
+        if answer == 'choose':  # the pair changes once what it needs is downloaded there
+            from peresmeshnik.ui.components import ComponentsDialog
+            self._pair = s, moved, back, engines_now
+            d = ComponentsDialog(s, translating=lambda: bool(getattr(self.ctl, 'on', False)))
+            d.box.finished.connect(lambda err, s=s, box=d.box: err or box.missing() or self._pair_ready(s, ''))
+            self._show(d)
             self.sync()
             return
         extra = [m for m in map(models.get, languages.optional_models(s)) if not models.is_fetched(m)]
@@ -395,7 +418,7 @@ class Tray(QObject):
         lic = ', '.join(dict.fromkeys(p.license for m in todo + extra for p in models.parts(m)))
         if note := font_note([my, their]):
             notes.append(note)
-        self._pair = s, moved, back, {**engines, **{k: getattr(s, k) for k in kept}, **({'subtitles': subs} if subs else {})}
+        self._pair = s, moved, back, engines_now
         if not todo and not extra:
             if notes:
                 self.message(f'{name}: ' + '. '.join(notes))

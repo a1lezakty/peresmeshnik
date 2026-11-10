@@ -11,7 +11,8 @@ version is the top of its GitHub release notes (`.github/workflows/release.yml`)
 - The installer puts only the app on the computer. The wizard's **Components** page (and tray → **Components…**) lists
   what can be downloaded — the pair's models, the clone engines, the NVIDIA voice pack — with size, license and what
   it is for, ticked where it suits this computer and the pair; nothing downloads before Download, an unticked one says
-  what the pair does without it, and anything downloaded can be removed there.
+  what the pair does without it, and anything downloaded can be removed there. A pair or an engine chosen in the tray
+  downloads only after Yes to its size (or Choose…); your cloned voice is downloaded only when you tick it.
 - Back to 0.3.0 after this version: its `python -m peresmeshnik.voice list` stops at a kept voice of someone you talk to
   (`them-…`, it has no `quality`).
 - **Your cloned voice without an NVIDIA GPU, on any computer, a Mac too:** Kyutai's Pocket TTS on the CPU (onnxruntime,

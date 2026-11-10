@@ -487,10 +487,15 @@ def _direction(name: str, s):
     return languages.direction(s, 'them_to_me' if name == 'them' else 'me_to_them')
 
 
-def _clone_not_ready(s, lang: str, engine: str) -> str:
-    """Why the clone engine `languages.direction` chose cannot speak `lang` now ('' = it can): here at all (the app's one
-    answer, `languages.clone_why`: the language, the GPU), then enrolled, its voice pack (an NVIDIA engine's), its model."""
+def _clone_not_ready(s, lang: str, engine: str = '') -> str:
+    """Why the clone engine `languages.direction` chose (`engine`; '': the one `languages.clone_engine` picks here for
+    `lang`) cannot speak `lang` now ('' = it can): here at all (the app's one answer, `languages.clone_why`: the language,
+    the GPU), then enrolled, my own confirmed voice, its voice pack (an NVIDIA engine's) or token, its model."""
     from peresmeshnik import languages, models
+    if not engine:
+        engine, why = languages.clone_engine(lang)
+        if why:
+            return why
     if why := languages.clone_why(engine, lang):
         return why
     if not s.local.voice:

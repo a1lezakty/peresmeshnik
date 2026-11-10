@@ -138,9 +138,11 @@ class Fallback:
 
     def __init__(self, name: str, tgt: str, cloud_subtitles: bool, make_cloud, make_local, make_tts, voice=None,
                  voice_why: str = '', preload: bool = False, on_state=lambda text: None, voice_note: str = '',
-                 label: tuple[str, str] = ('the cloud', 'in the cloud'), retry_s: float | None = None, on_mode=None):
+                 label: tuple[str, str] = ('the cloud', 'in the cloud'), retry_s: float | None = None, on_mode=None,
+                 wait_ready: bool = False):
         """`label`: what the tray calls the primary path, and where the side is back ('the server', 'on the server');
-        `on_mode(mode)`: 'cloud' (the primary path again), 'local', 'down'."""
+        `on_mode(mode)`: 'cloud' (the primary path again), 'local', 'down'; `wait_ready`: the primary path may take long
+        to be ready (a server loading its models): 'down' for the app meanwhile (not the cloud: it connects in ~1 s)."""
         self.name, self.tgt, self.voice, self.on_state = name, tgt, voice, on_state
         self.label, self.retry_base, self.on_mode = label, RETRY_S if retry_s is None else retry_s, on_mode
         self.retry_max = RETRY_MAX_S if retry_s is None else 30 * retry_s  # the server: a try is a TCP connect, cheap
@@ -186,7 +188,7 @@ class Fallback:
         for d in (self.cloud, self.local):
             if d:
                 self._pump(d)
-        if on_mode and hasattr(self.cloud, 'ready'):
+        if on_mode and wait_ready:
             threading.Thread(target=self._await_ready, args=(self.cloud,), name=f'{name}-ready', daemon=True).start()
 
     # Direction --------------------------------------------------------------------------------------
@@ -561,8 +563,10 @@ def my_voice(s) -> tuple[bytes | None, str]:
     try:
         meta = json.loads((folder / 'voice.json').read_text('utf-8'))
     except (OSError, ValueError):
+        meta = None
+    if not isinstance(meta, dict):  # no file, not JSON, or JSON but not an object
         return None, 'your voice profile is not there or cannot be read'
-    consent = meta.get('consent') if isinstance(meta, dict) else None
+    consent = meta.get('consent')
     if not (meta.get('version') == 2 and meta.get('kind') == 'me' and isinstance(consent, dict) and consent.get('how') in MINE):
         return None, 'your voice is not confirmed by a live recording'
     try:
@@ -619,7 +623,7 @@ def make(name: str, s, key: str, on_state=lambda text: None, on_respawn=lambda e
             make_cloud=lambda: RemoteDirection(remote['address'], name, src, tgt, remote['token'], remote['fp'], voice=up,
                                                jitter_ms=s.remote.jitter_ms, stall_s=s.remote.slow_s, on_state=on_state),
             make_local=local, make_tts=tts, voice=voice, voice_why=why, on_state=on_state, voice_note=note,
-            label=('the server', 'on the server'), retry_s=s.remote.retry_s, on_mode=on_mode)
+            label=('the server', 'on the server'), retry_s=s.remote.retry_s, on_mode=on_mode, wait_ready=True)
     return Fallback(
         name, tgt, languages.cloud_subtitles(s, d.side),
         make_cloud=lambda: GeminiDirection(src, tgt, key, s.cloud, fail_fast=True),

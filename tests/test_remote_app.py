@@ -203,8 +203,9 @@ def test_only_my_confirmed_voice_goes_up(tmp_path, monkeypatch):
     s.local.voice = 'v'
     assert fallback.my_voice(s)[1] == 'your voice profile is not there or cannot be read'  # no folder
     (tmp_path / 'v').mkdir()
-    (tmp_path / 'v' / 'voice.json').write_text('{broken')
-    assert fallback.my_voice(s)[1] == 'your voice profile is not there or cannot be read'
+    for bad in ('{broken', '[]', '"x"', 'null'):  # not JSON, or JSON but not an object: no exception out of make()
+        (tmp_path / 'v' / 'voice.json').write_text(bad)
+        assert fallback.my_voice(s) == (None, 'your voice profile is not there or cannot be read')
     for meta, ok in (({'name': 'v'}, False),  # v1: not checked live (an imported file could be anyone's)
                      ({'version': 2, 'kind': 'me', 'consent': {'how': 'mic-live'}}, True),
                      ({'version': 2, 'kind': 'me', 'consent': {'how': 'import+mic-match'}}, True),
@@ -257,6 +258,31 @@ def test_the_server_loading_its_models_is_down_for_the_app(srv, monkeypatch, tmp
         assert side.directions[0][0].mode == 'cloud' and not side.live
     finally:
         side.stop()
+
+
+def test_the_cloud_connecting_is_not_down():
+    """The cold start's 'down' is the server's (models to load); Gemini, ready a bit after 1 s, never goes down for it."""
+    class Slow:
+        def __init__(self):
+            self.ready, self._end = threading.Event(), threading.Event()
+            threading.Timer(1.5, self.ready.set).start()
+
+        def feed(self, pcm):
+            pass
+
+        def events(self):
+            self._end.wait()
+            return iter(())
+
+        def close(self):
+            self._end.set()
+    for wait_ready, want in ((False, []), (True, ['down', 'cloud'])):
+        modes = []
+        fb = Fallback('them', 'ru', True, make_cloud=Slow, make_local=lambda t: None, make_tts=TextTts, on_mode=modes.append,
+                      wait_ready=wait_ready)
+        time.sleep(2.0)
+        assert modes == want
+        fb.close()
 
 
 def test_the_hotkey_and_on_mode_in_any_order():

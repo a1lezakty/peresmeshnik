@@ -123,6 +123,7 @@ class Tray(QObject):
         self.call_apps.connect(self._show_call_apps)
         m.addSeparator()
         m.addAction('Settings…', self.open_settings)
+        m.addAction('Server…', self.open_server)  # translation on another computer: pairing
         m.addAction('Setup wizard…', self.open_wizard)
         m.addAction('Voices…', self.open_voices)
         self.remember = m.addAction('Keep the voice of the person in this call…', self.remember_voice)
@@ -278,6 +279,11 @@ class Tray(QObject):
     def _engine_chosen(self, action) -> None:
         """A side's engine from the menu: through switch_pair, so "local" downloads its models first (M-07)."""
         key, engine = action.data()
+        from peresmeshnik.remote import pairing
+        if engine == 'remote' and pairing.load() is None:  # pair first: the window puts both directions there after it
+            self.sync()
+            self.open_server()
+            return
         base, chosen = (self._pair[0], self._pair[3]) if self._pair else (config.load(), {})  # a change on its way: further
         self.switch_pair(base.my_lang, base.their_lang, {**chosen, key: engine})
 
@@ -453,6 +459,10 @@ class Tray(QObject):
 
     def open_settings(self) -> None:
         self._show(SettingsDialog(self))
+
+    def open_server(self) -> None:
+        from peresmeshnik.ui.server import ServerDialog
+        self._show(ServerDialog(self))
 
     def open_wizard(self) -> None:
         from peresmeshnik.ui.wizard import SetupWizard

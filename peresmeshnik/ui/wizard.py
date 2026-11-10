@@ -11,13 +11,10 @@ import copy
 import json
 import logging
 import os
-import shutil
-import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
-from typing import NamedTuple
 
 import psutil
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -39,7 +36,15 @@ from PySide6.QtWidgets import (
 )
 
 from peresmeshnik import config, languages, models
-from peresmeshnik.languages import needed_models  # noqa: F401 (the models page asks it; tests patch it here)
+from peresmeshnik.languages import (
+    MIN_DRIVER,
+    MIN_DRIVER_COMPAT,
+    Gpu,
+    gpu_text,
+    needed_models,  # noqa: F401 (the models page asks it; tests patch it here)
+    version_text,
+)
+from peresmeshnik.languages import nvidia as gpu  # tests patch it here
 from peresmeshnik.local import voicepack
 from peresmeshnik.ui.overlay import font_note
 from peresmeshnik.ui.tray import LANGS, MIC_LABEL, SIDES, device_combo, save_key
@@ -69,103 +74,35 @@ def has_key(s: config.Settings) -> bool:
         return False
 
 
-MIN_VRAM_GB = 5.5  # the clone (XTTS-v2 ~2 GB) next to them -> me on CUDA (~0.6 GB): a 6 GB card (6144 MiB, some report less)
-
-
 PACK_CONSENT = ('I accept the licenses of the voice pack: PyTorch (BSD-3-Clause) with the NVIDIA CUDA and cuDNN libraries '
                 'inside it (NVIDIA\'s license terms: docs.nvidia.com/cuda/eula, most of the download), coqui-tts '
                 '(MPL-2.0), and of the XTTS-v2 voice model it runs, the Coqui Public Model License '
                 '(huggingface.co/coqui/XTTS-v2): noncommercial use only, it binds me as the user')
 
 
-MIN_DRIVER = (570, 65)  # Windows: CUDA 12.8 GA's driver (the pack's torch 2.8.0+cu128; NVIDIA's CUDA 12.8.0 notes)
-MIN_DRIVER_COMPAT = (528, 33)  # CUDA 12.x minor version compatibility on Windows: below 570.65 not checked, may work
-MIN_CC = 6.1  # the pack's Windows torch is built for sm_61 .. sm_120 (its _cuda_getArchFlags, the voice-pack job)
-
-
-class Gpu(NamedTuple):
-    vram: float = 0.0  # GB
-    driver: tuple[int, ...] = ()
-    cc: float = 0.0  # compute capability; 0: not known (a driver too old to say)
-    why: str = ''  # nvidia-smi is there but fails: the driver's own words
-
-    @property
-    def driver_text(self) -> str:
-        return _version(self.driver)
-
-
-def _smi(exe: str, fields: str) -> list[list[str]] | str:
-    try:
-        r = subprocess.run([exe, f'--query-gpu={fields}', '--format=csv,noheader,nounits'], capture_output=True, text=True,
-                           timeout=10, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-    except (OSError, subprocess.SubprocessError) as e:
-        return str(e)
-    rows = [[x.strip() for x in ln.split(',')] for ln in (r.stdout or '').splitlines() if ln.strip()]
-    if rows and all(len(row) == fields.count(',') + 1 and row[0].replace('.', '', 1).isdigit() for row in rows):
-        return rows
-    return ' '.join((r.stdout or '').split())[:200] or f'nvidia-smi exited with {getattr(r, "returncode", "?")}'
-
-
-def gpu() -> Gpu:
-    """The biggest NVIDIA GPU by nvidia-smi (no torch, ~0.1 s): memory, driver, compute capability; Gpu() without one.
-    A driver that does not answer is not "no GPU": `why` says what nvidia-smi said."""
-    exe = shutil.which('nvidia-smi')
-    if not exe:
-        return Gpu()
-    rows = _smi(exe, 'memory.total,driver_version,compute_cap')
-    if isinstance(rows, str):  # a driver before compute_cap (R510) does not know the field
-        rows = old if not isinstance(old := _smi(exe, 'memory.total,driver_version'), str) else rows
-    if isinstance(rows, str):
-        return Gpu(why=rows)
-    best = max(rows, key=lambda row: float(row[0]))
-
-    def num(x: str, kind=float):
-        try:
-            return kind(x)
-        except ValueError:
-            return kind()
-    return Gpu(float(best[0]) / 1024, tuple(num(x, int) for x in best[1].split('.')), num(best[2]) if len(best) > 2 else 0.0)
-
-
-def gpu_text(vram: float) -> str:
-    return f'an NVIDIA GPU with {vram:.0f} GB' if vram else 'no NVIDIA GPU'
-
-
-def _version(v: tuple[int, ...]) -> str:
-    return '.'.join(f'{x:02d}' if i else str(x) for i, x in enumerate(v))
-
-
 def gpu_note(g: Gpu) -> str:
     """A driver between CUDA 12.x's compatibility floor and CUDA 12.8's own: not refused, not checked either."""
     if not g.why and MIN_DRIVER_COMPAT <= g.driver < MIN_DRIVER:
-        return (f'Your NVIDIA driver {g.driver_text} is older than {_version(MIN_DRIVER)} (CUDA 12.8\'s): not checked, it '
+        return (f'Your NVIDIA driver {g.driver_text} is older than {version_text(MIN_DRIVER)} (CUDA 12.8\'s): not checked, it '
                 'may work; if the clone does not start, update it from nvidia.com/drivers.')
     return ''
 
 
 def gpu_refusal(g: Gpu) -> str:
-    """Why the voice pack (Windows) would not run the clone on this GPU, said before its 3.7 GB download; '' if it would."""
-    if g.why:
-        return (f'The NVIDIA driver does not answer ({g.why}): reinstall or update it from nvidia.com/drivers, then open '
-                'this page again.')
-    if g.vram < MIN_VRAM_GB:
-        return (f'The clone of your voice needs an NVIDIA GPU with at least 6 GB of memory; this computer has '
-                f'{gpu_text(g.vram)}.')
-    if g.driver < MIN_DRIVER_COMPAT:
-        return (f'The clone of your voice needs NVIDIA driver {_version(MIN_DRIVER)} or newer; this computer has '
-                f'{g.driver_text or "an older one"}: update it from nvidia.com/drivers (or the NVIDIA app), then open this '
-                'page again.')
-    if g.cc and g.cc < MIN_CC:
-        return (f'This NVIDIA GPU is too old for the voice pack (compute capability {g.cc:g}; it needs {MIN_CC:g} or newer: '
-                'GeForce GTX 10xx and later).')
-    return ''
+    """Why the voice pack (Windows) would not run the clone on this GPU, said before its 3.7 GB download, with what to do;
+    '' if it would. The reason is languages.gpu_why's, the one clone_why gives."""
+    if not (why := languages.gpu_why(g)):
+        return ''
+    tail = (': reinstall or update it from nvidia.com/drivers, then open this page again.' if g.why else
+            ': update it from nvidia.com/drivers (or the NVIDIA app), then open this page again.' if 'driver' in why else '.')
+    return why[0].upper() + why[1:] + tail
 
 
 def tier() -> tuple[str, str]:
-    """(what this machine is, the recommended me -> them engine)."""
-    gb, vram = psutil.virtual_memory().total / 2 ** 30, gpu().vram
-    rec = 'local' if vram >= MIN_VRAM_GB else 'cloud'  # the clone keeps up only on an NVIDIA GPU with room for it (BENCH)
-    return f'{gb:.0f} GB RAM, {gpu_text(vram)}: recommended them → me local, me → them {rec}', rec
+    """(what this machine is, the recommended me -> them engine): local where the clone speaks here (clone_why)."""
+    gb, g = psutil.virtual_memory().total / 2 ** 30, gpu()
+    rec = 'cloud' if languages.clone_why(config.Local().clone, has_gpu=g) else 'local'
+    return f'{gb:.0f} GB RAM, {gpu_text(g.vram)}: recommended them → me local, me → them {rec}', rec
 
 
 class LanguagesPage(QWizardPage):
@@ -262,9 +199,6 @@ class LanguagesPage(QWizardPage):
             if d.src == 'ar' and c.currentText() == 'cloud' and languages.cloud_subtitles(s, key):
                 text += ' Arabic subtitles from the cloud are Egyptian Arabic (Gemini has no other): other dialects come out ' \
                         'worse.'
-            if MACOS and key == 'me_to_them':  # BENCH stage 6: no clone keeps up on an M1's CPU (XTTS, LuxTTS measured)
-                text += ' On a Mac your voice goes to the call through the cloud (or a stock voice): no local clone of it ' \
-                        'keeps up here.'
             self.why[key].setText(text)
         ms, base = [models.get(i) for i in needed_models(s)], models.root()
         todo = [m for m in ms if not models.is_fetched(m, base)]
@@ -779,7 +713,8 @@ class VoicePage(QWizardPage):
                          'local clone.')
         self.prompt.setText(voice.PROMPTS.get(s.my_lang, 'Read any text in your language aloud, at your normal pace.'))
         self.stock.setVisible(self.local() and bool(languages.pick(s.local.tts, s.their_lang)))  # none for zh, ar
-        self.own.setVisible(True)
+        for x in (self.own, self.prompt, self.record_button, self.import_button):  # Back and here again: shown anew
+            x.setVisible(True)
         self.stock.setChecked(s.local.clone == voice.STOCK)
         self.check_button.setVisible(self.local() and not self.stock.isChecked())
         if not WINDOWS:
@@ -789,6 +724,9 @@ class VoicePage(QWizardPage):
             threading.Thread(target=lambda: self.gpu_found.emit(gpu()), name='gpu', daemon=True).start()
         if why := self.clone_off():  # nothing to record for it: said, and the page can be left
             self.setSubTitle(f'"Me → them" speaks in a stock voice for this pair: {why}. No recording is needed.')
+        elif not self.local() and s.local.clone != voice.STOCK and (why := languages.clone_why(s.local.clone, s.their_lang)):
+            self.setSubTitle(f'"Me → them" runs in the cloud, in Gemini\'s voice, and {why}: no recording is needed.')
+        if why:
             for x in (self.stock, self.prompt, self.own, self.record_button, self.import_button, self.check_button):
                 x.setVisible(False)
         if self.voice is None and s.local.voice and (voice.voices_dir() / s.local.voice / 'voice.json').exists():
@@ -836,7 +774,8 @@ class VoicePage(QWizardPage):
             self.pack_out.setText('Checking the NVIDIA GPU…')
             return
         if st == 'gpu':
-            text = gpu_refusal(self.gpu) + ' Choose a stock voice above, or cloud for "me → them" on the first page.'
+            text = gpu_refusal(self.gpu) + (' Choose a stock voice above, or' if not self.stock.isHidden() else ' Choose') \
+                + ' cloud for "me → them" on the first page.'  # no stock voice for zh, ar: the first page is the way out
         elif st == 'ready':
             text = 'The voice pack is installed.'
         else:

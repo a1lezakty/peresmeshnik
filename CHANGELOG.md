@@ -24,8 +24,9 @@ Chinese, Japanese, Korean, Arabic — both ways.
   directions start again in the new one (meanwhile the call and you hear each other untranslated). A direction you
   keep on this computer goes to the cloud for a new pair only after you say yes, and comes back with a pair that runs
   here. "Local" chosen in the tray or the settings downloads its models first.
-- Where your cloned voice does not speak the language, or there is no NVIDIA GPU for it, a stock voice speaks instead,
-  and the app says so: no clone download and no recording asked for nothing. Recording or importing a voice asks you
+- Where your cloned voice does not speak the language, or no NVIDIA GPU here runs it (too little memory; on Windows
+  also an old driver or GPU), a stock voice speaks instead, and the app says so before the download: no clone download
+  and no recording asked for nothing (and none for a cloud side whose clone could not take over). Recording or importing a voice asks you
   to confirm it is your own.
 - A direction in the cloud gets its stock voice too, so it goes on locally when the cloud fails (unless its subtitles
   come from the cloud; a noncommercial voice — Turkish, Korean, Japanese — only when you accept its license).

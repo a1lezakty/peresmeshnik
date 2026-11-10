@@ -16,8 +16,8 @@ runs from source. Not yet tried in a real call (see below).
 - macOS, Windows and Linux. Local models (CPU, Apple Silicon, optional NVIDIA GPU) or cloud
   (Gemini Live), switchable in settings.
 - Voice cloning of **your own voice only** (the wizard asks you to confirm the recording is yours), from a 30–60 s
-  recording, on an NVIDIA GPU with 6 GB or more (Windows, Linux). On a Mac and without such a GPU no clone keeps up
-  live: a stock voice or the cloud speaks for you.
+  recording, on an NVIDIA GPU with 6 GB or more (Windows, Linux; on Windows also a recent driver, see below). On a Mac
+  and without such a GPU no clone keeps up live: a stock voice or the cloud speaks for you.
 - A hotkey switches between translation and your live voice.
 
 **The cloud is Google's, with your own key.** A direction set to the cloud sends its sound to Google Gemini Live: the

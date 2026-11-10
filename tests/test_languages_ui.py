@@ -86,7 +86,7 @@ def test_languages_page_says_before_the_download_what_runs_where(tmp_path, monke
         assert 'subtitles come from the cloud too' in page.why[key].text()
     assert page.download.text().startswith('1 MB for this pair') or page.download.text().startswith('2 MB')  # Silero VAD
     assert page.validatePage() and (page.w.s.my_lang, page.w.s.their_lang, page.w.s.them_to_me) == ('de', 'ja', 'cloud')
-    assert ('On a Mac your voice goes to the call through the cloud' in page.why['me_to_them'].text()) == (sys.platform == 'darwin')
+    assert 'On a Mac your voice goes' not in page.why['me_to_them'].text()  # FIXES-b 4: clone_why's note says it
 
     stand_ins(monkeypatch, files={'w.bin': {'sha256': '0' * 64, 'size': 50_000_000}}, consent=('tts-ja',))
     s = wire(config.Settings(my_lang='de', their_lang='ja', them_to_me='local', me_to_them='local'))
@@ -805,3 +805,34 @@ def test_an_optional_fallback_voice_does_not_hold_the_wizard_or_the_tray(tmp_pat
     page.consent.setChecked(True)
     page.download()
     assert wait_for(lambda: not page.busy, 30) and models.is_fetched(models.get('tts-ja')), page.state.text()
+
+
+def test_voice_page_offers_no_recording_where_the_clone_never_speaks(tmp_path, monkeypatch):
+    """FIXES-b 5 (M-23): me -> them in the cloud on a computer where no clone speaks (a Mac, no suitable NVIDIA GPU): no
+    "optional" recording, the reason instead; where the clone can speak it stays optional (the cloud's fallback)."""
+    from peresmeshnik.ui import wizard
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
+    s = config.Settings(me_to_them='cloud')
+    page = wizard.VoicePage(type('W', (), {'s': s})())
+    page.initializePage()
+    assert page.isComplete() and page.record_button.isHidden() and page.import_button.isHidden()
+    assert languages.clone_why(s.local.clone, 'en') in page.subTitle() and 'Optional' not in page.subTitle()
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': True)  # nvidia-smi says nothing here: taken as able
+    page.initializePage()  # the same page again (Back, then Next): the recording is offered anew
+    assert not page.record_button.isHidden() and not page.prompt.isHidden() and page.subTitle().startswith('Optional')
+
+
+def test_languages_page_says_the_clone_once_on_a_mac(tmp_path, monkeypatch):
+    """FIXES-b 4 (L-30): no hard-coded "On a Mac …" line beside clone_why's own note."""
+    from peresmeshnik.ui import wizard
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    monkeypatch.setenv('GEMINI_API_KEY', 'a-key')
+    monkeypatch.setattr(wizard, 'MACOS', True)
+    monkeypatch.setattr(languages.sys, 'platform', 'darwin')
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
+    s = config.Settings(me_to_them='local')
+    config.save(s)
+    page = wizard.LanguagesPage(type('W', (), {'s': s})())
+    text = page.why['me_to_them'].text()
+    monkeypatch.undo()
+    assert text.count('keeps up') == 1 and 'On a Mac' not in text, text

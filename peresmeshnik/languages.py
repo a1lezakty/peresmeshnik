@@ -13,8 +13,10 @@ and the tests all ask this module.
 from __future__ import annotations
 
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
+from typing import NamedTuple
 
 # code: (English name, its own name)
 NAMES = {
@@ -107,6 +109,94 @@ def needs_gpu(model_id: str) -> bool:
 ENGINE = {'asr': 'onnxruntime', 'mt': 'CTranslate2'}
 
 
+# --- the clone's NVIDIA GPU (nvidia-smi, no torch): memory, driver, compute capability
+
+MIN_VRAM_GB = 5.5  # the clone (XTTS-v2 ~2 GB) next to them -> me on CUDA (~0.6 GB): a 6 GB card (6144 MiB, some report less)
+
+
+MIN_DRIVER = (570, 65)  # Windows: CUDA 12.8 GA's driver (the pack's torch 2.8.0+cu128; NVIDIA's CUDA 12.8.0 notes)
+MIN_DRIVER_COMPAT = (528, 33)  # CUDA 12.x minor version compatibility on Windows: below 570.65 not checked, may work
+MIN_CC = 6.1  # the pack's Windows torch is built for sm_61 .. sm_120 (its _cuda_getArchFlags, the voice-pack job)
+
+
+class Gpu(NamedTuple):
+    vram: float = 0.0  # GB
+    driver: tuple[int, ...] = ()
+    cc: float = 0.0  # compute capability; 0: not known (a driver too old to say)
+    why: str = ''  # nvidia-smi is there but fails: the driver's own words
+
+    @property
+    def driver_text(self) -> str:
+        return version_text(self.driver)
+
+
+def _smi(exe: str, fields: str) -> list[list[str]] | str:
+    try:
+        r = subprocess.run([exe, f'--query-gpu={fields}', '--format=csv,noheader,nounits'], capture_output=True, text=True,
+                           timeout=10, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    except (OSError, subprocess.SubprocessError) as e:
+        return str(e)
+    rows = [[x.strip() for x in ln.split(',')] for ln in (r.stdout or '').splitlines() if ln.strip()]
+    if rows and all(len(row) == fields.count(',') + 1 and row[0].replace('.', '', 1).isdigit() for row in rows):
+        return rows
+    return ' '.join((r.stdout or '').split())[:200] or f'nvidia-smi exited with {getattr(r, "returncode", "?")}'
+
+
+def nvidia() -> Gpu:
+    """The biggest NVIDIA GPU by nvidia-smi (no torch, ~0.1 s): memory, driver, compute capability; Gpu() without one.
+    A driver that does not answer is not "no GPU": `why` says what nvidia-smi said."""
+    exe = shutil.which('nvidia-smi')
+    if not exe:
+        return Gpu()
+    rows = _smi(exe, 'memory.total,driver_version,compute_cap')
+    if isinstance(rows, str):  # a driver before compute_cap (R510) does not know the field
+        rows = old if not isinstance(old := _smi(exe, 'memory.total,driver_version'), str) else rows
+    if isinstance(rows, str):
+        return Gpu(why=rows)
+    best = max(rows, key=lambda row: float(row[0]))
+
+    def num(x: str, kind=float):
+        try:
+            return kind(x)
+        except ValueError:
+            return kind()
+    return Gpu(float(best[0]) / 1024, tuple(num(x, int) for x in best[1].split('.')), num(best[2]) if len(best) > 2 else 0.0)
+
+
+def gpu_text(vram: float) -> str:
+    return f'an NVIDIA GPU with {vram:.0f} GB' if vram else 'no NVIDIA GPU'
+
+
+def version_text(v: tuple[int, ...]) -> str:
+    return '.'.join(f'{x:02d}' if i else str(x) for i, x in enumerate(v))
+
+
+_PROBED: dict = {}  # nvidia-smi's path -> its answer: the card does not change while the app runs
+
+
+def nvidia_once() -> Gpu:
+    exe = shutil.which('nvidia-smi')
+    if exe not in _PROBED:
+        _PROBED[exe] = nvidia()
+    return _PROBED[exe]
+
+
+def gpu_why(g: Gpu, windows: bool = True) -> str:
+    """Why the clone cannot run on this NVIDIA GPU ('' = it can): its memory, and for the Windows voice pack's torch the
+    driver and the compute capability."""
+    if g.why:
+        return f'the NVIDIA driver does not answer ({g.why})'
+    if g.vram < MIN_VRAM_GB:
+        return f'the clone of your voice needs an NVIDIA GPU with at least 6 GB of memory; this computer has {gpu_text(g.vram)}'
+    if windows and g.driver < MIN_DRIVER_COMPAT:
+        return (f'the clone of your voice needs NVIDIA driver {version_text(MIN_DRIVER)} or newer; this computer has '
+                f'{g.driver_text or "an older one"}')
+    if windows and g.cc and g.cc < MIN_CC:
+        return (f'this NVIDIA GPU is too old for the voice pack (compute capability {g.cc:g}; it needs {MIN_CC:g} or newer: '
+                'GeForce GTX 10xx and later)')
+    return ''
+
+
 def gpu(engine: str = '') -> bool:
     """An NVIDIA GPU (nvidia-smi). With `engine` ('asr': onnxruntime, 'mt': CTranslate2) also that this engine runs on it
     inside the app: the built .exe and a from-source install have a CPU-only onnxruntime (local/device.py)."""
@@ -116,16 +206,23 @@ def gpu(engine: str = '') -> bool:
     return {'asr': device.onnx_cuda, 'mt': device.ct2_cuda}.get(engine, lambda: True)()
 
 
-def clone_why(model_id: str, lang: str = '', has_gpu: bool | None = None) -> str:
+def clone_why(model_id: str, lang: str = '', has_gpu: bool | Gpu | None = None) -> str:
     """Why the clone `model_id` cannot speak `lang` live on this computer ('' = it can): the one answer the wizard, the
     tray, the app and the cloud's fallback get (through `direction` or directly). It reads the registry — the model's
-    `langs` and `needs = "gpu"` (XTTS-v2 keeps up only on an NVIDIA GPU, BENCH stage 6) — so another clone engine is a
-    registry row, not a change here. `has_gpu` None: look for nvidia-smi."""
+    `langs` and `needs = "gpu"` (XTTS-v2 keeps up only on an NVIDIA GPU, BENCH stage 6) — and for such a model the GPU
+    (`gpu_why`: memory; on Windows also the voice pack's driver and compute capability), so another clone engine is a
+    registry row, not a change here. `has_gpu`: None looks (nvidia-smi, once per run), a `Gpu` is that card, True / False
+    say there is a suitable one or none."""
     if lang and not covers(model_id, lang):
         return f'your cloned voice cannot speak {name(lang)}'
-    if needs_gpu(model_id) and not (gpu() if has_gpu is None else has_gpu):
+    if not needs_gpu(model_id) or has_gpu is True:
+        return ''
+    g = has_gpu if isinstance(has_gpu, Gpu) else nvidia_once() if has_gpu is None and gpu() else Gpu()
+    if has_gpu is None and gpu() and not (g.vram or g.why):  # nvidia-smi said nothing (a stand-in): taken as able
+        return ''
+    if not (g.vram or g.why):
         return 'no clone of your voice keeps up on a Mac' if sys.platform == 'darwin' else 'your cloned voice needs an NVIDIA GPU'
-    return ''
+    return gpu_why(g, windows=sys.platform == 'win32')
 
 
 def direction(s, side: str, has_gpu: bool | None = None) -> Direction:
@@ -155,7 +252,7 @@ def direction(s, side: str, has_gpu: bool | None = None) -> Direction:
         stock, no_voice = '', f'the voice for {name(tgt)} needs an NVIDIA GPU ({stock})'
     tts, voice = stock, 'stock' if stock else ''
     if side == 'me_to_them' and loc.clone != STOCK:
-        if instead := clone_why(loc.clone, tgt, has_gpu):
+        if instead := clone_why(loc.clone, tgt, asked):  # None: it looks at the card itself
             if stock:
                 notes.append(f'{instead}: a stock voice speaks instead')
             else:

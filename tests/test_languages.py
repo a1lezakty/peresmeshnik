@@ -228,3 +228,21 @@ def test_a_fallback_voice_under_a_license_to_accept_is_optional():
     assert s.local.tts['de'] in languages.needed_models(s) and languages.optional_models(s) == []
     s.their_lang, s.me_to_them = 'ja', 'local'  # chosen local: the voice is the side's own, needed (asked as before)
     assert ja in languages.needed_models(s) and languages.optional_models(s) == []
+
+
+def test_the_clone_needs_a_card_it_runs_on(monkeypatch):
+    """FIXES-b 4: clone_why also looks at the card (once per run): under 6 GB of memory — and on Windows an old driver or
+    GPU for the voice pack's torch — the clone is not offered, said why; the stock voice speaks and nothing of the clone
+    is downloaded. A card that answers nothing (a stand-in nvidia-smi) is taken as able."""
+    big, small = languages.Gpu(8.0, (572, 83), 8.6), languages.Gpu(4.0, (572, 83), 8.6)
+    assert languages.clone_why('xtts-v2', 'en', has_gpu=big) == ''
+    assert 'at least 6 GB' in languages.clone_why('xtts-v2', 'en', has_gpu=small)
+    old = languages.Gpu(8.0, (472, 12), 8.6)
+    assert 'driver 570.65' in languages.gpu_why(old) and languages.gpu_why(old, windows=False) == ''
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
+    monkeypatch.setattr(languages, 'nvidia_once', lambda: small)
+    s = config.Settings(me_to_them='local')
+    me = languages.direction(s, 'me_to_them')
+    assert me.voice == 'stock' and 'at least 6 GB' in me.notes[0] and 'xtts-v2' not in languages.needed_models(s)
+    monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu())
+    assert languages.direction(s, 'me_to_them').voice == 'clone'

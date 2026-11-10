@@ -302,10 +302,10 @@ def test_tier_by_vram(tmp_path, monkeypatch, smi, vram, rec):
 
 def fake_smi(monkeypatch, out, old=None):
     """nvidia-smi answering `out` to the full query, `old` to the one without compute_cap (a driver before R510)."""
-    from peresmeshnik.ui import wizard
-    monkeypatch.setattr(wizard.shutil, 'which', lambda name: 'nvidia-smi' if out is not None and name == 'nvidia-smi' else None)
+    from peresmeshnik import languages
+    monkeypatch.setattr(languages.shutil, 'which', lambda name: 'nvidia-smi' if out is not None and name == 'nvidia-smi' else None)
     answers = {'--query-gpu=memory.total,driver_version,compute_cap': out, '--query-gpu=memory.total,driver_version': old}
-    monkeypatch.setattr(wizard.subprocess, 'run', lambda cmd, **k: types.SimpleNamespace(  # a script would not run on Windows
+    monkeypatch.setattr(languages.subprocess, 'run', lambda cmd, **k: types.SimpleNamespace(  # a script would not run on Windows
         stdout=answers.get(cmd[1], '') or '', returncode=0 if answers.get(cmd[1]) else 6))
 
 
@@ -458,3 +458,14 @@ def test_no_stock_voice_box_where_there_is_none(page):
     page.w.s.their_lang = 'en'
     page.initializePage()
     assert not page.stock.isHidden()
+
+
+
+def test_no_dead_end_where_there_is_no_stock_voice(page, windows):
+    """FIXES-b 3: Chinese (no stock voice) and a GPU the voice pack refuses: the page sends to the first page's cloud, not
+    to a stock-voice box that is not there."""
+    page.w.s.their_lang = 'zh'
+    windows(4.0)
+    text = page.pack_out.text()
+    assert page.pack() == 'gpu' and page.stock.isHidden() and not page.isComplete()
+    assert 'Choose cloud for "me → them" on the first page' in text and 'stock voice above' not in text, text

@@ -24,6 +24,7 @@ registry's `langs` ([`models.toml`](../peresmeshnik/models.toml)); what runs loc
 | [Whisper large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo) (OpenAI), ONNX by [onnx-community](https://huggingface.co/onnx-community/whisper-large-v3-turbo) | ASR tr, zh, ko (stage 6), NVIDIA GPU only | — | MIT | fp16 for onnx-asr; the export's card states no license, the weights are MIT |
 | [onnx-asr](https://github.com/istupakov/onnx-asr) | ONNX runtime wrapper for the three above | MIT | — | ONNX conversions keep the original licenses |
 | [Silero VAD](https://github.com/snakers4/silero-vad) | VAD | MIT | MIT | |
+| [WeSpeaker ResNet34](https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34) (WeSpeaker team) | speaker vector (stage 8): your voice is confirmed when a live reading at the microphone matches the recording; run through onnx-asr's Kaldi features | Apache-2.0 | Apache-2.0 | trained on VoxCeleb (CC-BY-4.0); 26.5 MB, downloaded for the check |
 
 ## Machine translation (MT)
 
@@ -85,6 +86,8 @@ the other 12 public-domain prose, verbatim from these sources (every author died
 | ja | 芥川龍之介 (1927) | トロッコ, 1922 | [www.aozora.gr.jp](https://www.aozora.gr.jp/cards/000879/files/43016_16836.html) |
 | ko | 이효석 (1942) | 메밀꽃 필 무렵, 1936 | [ko.wikisource.org](https://ko.wikisource.org/w/index.php?title=메밀꽃_필_무렵&action=raw) |
 | ar | جبران خليل جبران (1931) | الأجنحة المتكسرة — في باب الهيكل, 1912 | [ar.wikisource.org](https://ar.wikisource.org/w/index.php?title=الأجنحة_المتكسرة/في_باب_الهيكل&action=raw) |
+
+To confirm a voice as yours (stage 8), the app shows two of eight short everyday sentences in your language (`voice.LIVE_PHRASES`), written for the app, the same eight in every language.
 
 ## Cloud
 

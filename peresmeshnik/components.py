@@ -131,7 +131,9 @@ def _uses(s) -> dict[str, tuple[str, str, bool]]:
             use.setdefault(stock, (f'{arrow}: speaks {lang} when the cloud fails' if cloud else
                                    f'{arrow}: speaks {lang} in a stock voice'
                                    + (', and takes over if your cloned voice fails' if d.voice == 'clone' else ''),
-                                   away, True))
+                                   (f'{arrow} goes on in this voice when the cloud fails; not to download it, choose '
+                                    'subtitles from the cloud on the Languages page (then that side stops while the cloud '
+                                    'is down)') if cloud else away, True))
         if d.voice == 'clone' and not cloud:
             use.setdefault(d.tts, (f'{arrow}: speaks {lang} in your own voice', 'a stock voice speaks instead' if stock else
                                    'nothing speaks for you: choose cloud for me → them', False))

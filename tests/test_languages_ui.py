@@ -944,6 +944,12 @@ def test_the_tray_asks_before_it_downloads_and_never_fetches_the_clone_unasked(t
     answer[0] = 'choose'
     t.switch_pair('ru', 'en', {'me_to_them': 'local'})
     settle(0.2)
+    assert t._pair is not None
+    t.windows[-1].close()  # closed with nothing downloaded: that pair is not on its way any more (22:04 1)
+    settle(0.1)
+    assert t._pair is None and config.load().me_to_them == 'cloud'
+    t.switch_pair('ru', 'en', {'me_to_them': 'local'})
+    settle(0.2)
     d = t.windows[-1]
     assert isinstance(d, ComponentsDialog) and got == [] and config.load().me_to_them == 'cloud'
     d.box.consent.setChecked(True)  # the clone's license; ticked there by default: chosen by the user
@@ -959,5 +965,5 @@ def test_the_tray_asks_before_it_downloads_and_never_fetches_the_clone_unasked(t
     answer[0] = 'yes'
     t.switch_pair('ru', 'en', {'me_to_them': 'local'})  # only the clone is missing: not asked, not fetched, said
     assert wait_for(lambda: len(calls) == 2)
-    assert config.load().me_to_them == 'local' and got == [] and len(asked) == 2
+    assert config.load().me_to_them == 'local' and got == [] and len(asked) == 3  # no, choose, choose: this one not asked
     assert any('your cloned voice (clone-en' in m and 'a stock voice speaks' in m for m in t.said), t.said

@@ -405,6 +405,12 @@ class Tray(QObject):
             self._pair = s, moved, back, engines_now
             d = ComponentsDialog(s, translating=lambda: bool(getattr(self.ctl, 'on', False)))
             d.box.finished.connect(lambda err, s=s, box=d.box: err or box.missing() or self._pair_ready(s, ''))
+
+            def let_go(*_, s=s, d=d):  # closed before what the pair needs is here: that pair is not on its way any more
+                if self._pair and self._pair[0] is s and not d.box.busy:
+                    self._pair = None
+            d.finished.connect(let_go)  # closed with nothing downloading
+            d.box.finished.connect(lambda err: d.isVisible() or let_go())  # its download ended after it was closed
             self._show(d)
             self.sync()
             return

@@ -67,6 +67,9 @@ def test_the_clone_brings_the_voice_check_and_its_stock_voice(monkeypatch):
     assert 'a stock voice speaks instead' == clone.instead
     assert check.recommended and 'stock voice speaks into the call' in check.instead
     assert stock.recommended and 'if your cloned voice fails' in stock.why
+    s = config.Settings(my_lang='ru', their_lang='en', them_to_me='local', me_to_them='cloud')  # local subtitles
+    voice = {c.id: c for c in components.listing(s, CARD)}['piper-en_US-john-medium']  # the cloud side's fallback voice
+    assert voice.required and 'when the cloud fails' in voice.why and voice.instead.startswith('me → them goes on in this voice')
 
 
 def lock(tmp_path, addon=True):

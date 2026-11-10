@@ -269,6 +269,7 @@ class FakeDirection:
 def me_side(monkeypatch, tmp_path, clone_error=None, key=True, meta=None):
     from peresmeshnik import app, config, languages, models, pipeline, voice
     monkeypatch.setattr(languages, 'gpu', lambda engine='': True)  # an NVIDIA GPU: the clone is chosen (clone_why)
+    monkeypatch.setattr(languages, 'pack_here', lambda: True)  # and its voice pack is installed
     s = config.Settings()
     s.me_to_them, s.local.voice = 'local', 'me'
     monkeypatch.setattr(models, 'path', lambda model_id: tmp_path)
@@ -402,3 +403,52 @@ def test_no_stock_voice_to_fall_back_to_says_why(monkeypatch, tmp_path):
     with pytest.raises(models.ModelMissing) as e:
         models.get('')
     assert len(str(e.value)) < 40
+
+
+def test_settings_of_0_3_0_without_a_voice_speak_in_the_stock_voice(monkeypatch, tmp_path):
+    """FIXES 3: 0.3.0 said "No recording is needed" where the clone could not speak (a Mac, no NVIDIA GPU) and kept
+    clone = 'xtts-v2' without a voice; stage 8 picks Pocket TTS there. No voice, or its weights not downloaded: the side
+    starts in the stock voice with the reason, as in 0.3.0, not an error."""
+    from peresmeshnik import languages, models
+    side, s, made, _ = me_side(monkeypatch, tmp_path, key=False)
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': False)  # a Mac: Pocket TTS on the CPU
+    monkeypatch.setattr(models, 'hf_token', lambda: 'hf_test')
+    s.local.voice = ''
+    assert languages.direction(s, 'me_to_them').tts == 'pocket-tts-en'
+    d = side._local(s)
+    assert made == [None] and d.warm == 1 and side.errors == [
+        'note: me → them: a stock voice speaks instead of your cloned voice (no voice enrolled (setup wizard, "Your voice"))']
+
+    def missing(model_id):
+        raise models.ModelMissing(f'{model_id} is not downloaded')
+    monkeypatch.setattr(models, 'path', missing)
+    s.local.voice, side.errors[:] = 'me', []
+    d = side._local(s)
+    assert made == [None, None] and 'pocket-tts-en is not downloaded' in side.errors[0]
+
+
+class OrtFail(Exception):
+    """onnxruntime's own errors (Fail, InvalidGraph, RuntimeException) derive from Exception, not RuntimeError."""
+
+
+def test_onnxruntime_errors_give_the_stock_voice(monkeypatch, tmp_path):
+    """FIXES 4: an onnxruntime error making Pocket TTS (its graphs, out of memory) is CloneUnavailable; one at warm-up
+    (the first phrase) falls back to the stock voice too, not an error of the side."""
+    from peresmeshnik.local import clone, pocket
+
+    def broken(*a, **k):
+        raise OrtFail('[ONNXRuntime] Fail: bad allocation')
+    monkeypatch.setattr(pocket, 'PocketTts', broken)
+    with pytest.raises(CloneUnavailable, match='Pocket TTS did not start: .*bad allocation'):
+        clone.make_engine('pocket-tts-en', tmp_path)
+
+    class Warm(FakeDirection):
+        def warm_up(self):
+            raise OrtFail('[ONNXRuntime] RuntimeException: out of memory')
+    from peresmeshnik import pipeline
+    side, s, made, _ = me_side(monkeypatch, tmp_path, key=False)
+    real = pipeline.make_local
+    monkeypatch.setattr(pipeline, 'make_local', lambda *a, tts=None, **k: Warm(tts) if tts == 'clone' else real(*a, tts=tts, **k))
+    d = side._local(s)
+    assert isinstance(d, FakeDirection) and not isinstance(d, Warm) and 'out of memory' in side.errors[0]
+

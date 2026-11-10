@@ -206,6 +206,8 @@ def test_wizard_asks_for_the_right_models(monkeypatch):
     s.cloud.subtitles, s.them_to_me = True, 'cloud'
     assert needed_models(s) == ['silero-vad']
     s.me_to_them = 'local'  # no NVIDIA GPU: Pocket TTS on the CPU (stage 8), the stock voice its fallback
+    from peresmeshnik import models
+    monkeypatch.setattr(models, 'hf_token', lambda: 'hf_test')  # Kyutai's gated weights: with the user's token
     assert needed_models(s) == ['silero-vad', 'gigaam-v3-e2e-ctc', 'opus-mt-ru-en', 'pocket-tts-en',
                                 s.local.tts[s.their_lang]]
     monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
@@ -389,6 +391,33 @@ def test_wizard_models_page_downloads_with_consent(tmp_path, monkeypatch, server
     assert page.isComplete(), page.state.text()
     assert page.state.text() == 'All models are here.'
     assert ('/a.bin', None) in httpd.ranges and any(p == '/a.bin' and r for p, r in httpd.ranges)  # resumed with Range
+
+
+def test_a_gated_model_refused_does_not_stop_the_others(tmp_path, monkeypatch, server):
+    """FIXES 1: the wizard's download goes on past a gated model it cannot get (no token, or the token refused): the
+    others are downloaded, the reason is said."""
+    import hashlib
+
+    from peresmeshnik import models
+    from peresmeshnik.ui import wizard
+    httpd, url = server
+    blob = b'b' * 20_000
+    (httpd.root / 'b.bin').write_bytes(blob)
+    pin = {'b.bin': {'sha256': hashlib.sha256(blob).hexdigest(), 'size': len(blob)}}
+    reg = {'gated': models.Model('gated', 'clone', ('en',), 'CC-BY-4.0', 'https://hf/gated', url, pin, token='hf'),
+           'free': models.Model('free', 'mt', ('en-ru',), 'MIT', 'https://x', url, pin)}
+    monkeypatch.setattr(models, 'registry', lambda: reg)
+    monkeypatch.setattr(models, 'hf_token', lambda: '')
+    monkeypatch.setattr(wizard, 'needed_models', lambda s: ['gated', 'free'])
+    monkeypatch.setenv('PERESMESHNIK_MODELS', str(tmp_path / 'models'))
+    page = wizard.ModelsPage(type('W', (), {'s': config.Settings()})())
+    page.initializePage()
+    page.download()
+    end = time.monotonic() + 30
+    while page.busy and time.monotonic() < end:
+        settle(0.05)
+    assert models.is_fetched(reg['free']) and not models.is_fetched(reg['gated'])
+    assert 'gated is in a gated Hugging Face repo' in page.state.text(), page.state.text()
 
 
 def test_models_page_counts_past_2_gb():

@@ -247,8 +247,9 @@ def _fetch(model_id: str, base: Path | None, progress, retries: int) -> Path:
                 err = 'connection closed early'
             except urllib.error.HTTPError as e:
                 if token and e.code in (401, 403):  # a wrong token, or its account did not accept: retrying won't help
+                    whose = 'the HF_TOKEN environment variable' if os.environ.get('HF_TOKEN', '').strip() else 'your token'
                     raise Gated(f'Hugging Face refused {m.id} ({e.code}): accept its conditions on {m.license_url} with '
-                                'the account of your token, or check the token', m.license_url) from None
+                                f'the account of {whose}, or check that token', m.license_url) from None
                 err = str(e)
             except (OSError, http.client.HTTPException) as e:  # URLError, timeouts, resets, IncompleteRead
                 err = str(e)

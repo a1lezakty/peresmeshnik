@@ -107,7 +107,7 @@ def make_engine(model_id: str, model_dir: Path | str, threads: int = 2):
         try:
             # int8: 1.5x faster and 0.15 GB smaller than fp32 at the same similarity and WER (BENCH stage 8)
             return PocketTts(model_dir, threads=threads, model_id=model_id, int8=True)
-        except (OSError, ValueError) as e:  # onnxruntime cannot load it, a broken weights file
+        except Exception as e:  # a broken weights file; onnxruntime's own errors (Fail, InvalidGraph, out of memory)
             raise CloneUnavailable(f'Pocket TTS did not start: {e}') from e
     if model_id == 'qwen3-tts':  # the voice pack's runner with Qwen3, Chatterbox taking over a voice that breaks down
         from peresmeshnik import models
@@ -115,6 +115,8 @@ def make_engine(model_id: str, model_dir: Path | str, threads: int = 2):
             raise CloneUnavailable('Qwen3-TTS needs the voice pack: install it in the setup wizard (Your voice)')
         return VoicePackClone(model_dir, threads, [*cmd, '--kind', 'qwen3', '--fallback-dir',
                                                    str(models.path(models.get(model_id).fallback))])
+    if model_id != 'xtts-v2':  # chatterbox-mtl: only Qwen3's runner speaks with it, never an engine of its own
+        raise ValueError(f'{model_id} is not a clone engine')
     return make_clone(model_dir, threads)
 
 

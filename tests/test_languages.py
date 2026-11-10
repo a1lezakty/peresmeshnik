@@ -23,7 +23,8 @@ def test_fourteen_languages_with_names_and_cloud_codes():
     assert set(languages.WRITING) == set(languages.LANGS)
 
 
-def test_ru_en_is_local_both_ways():
+def test_ru_en_is_local_both_ways(monkeypatch):
+    monkeypatch.setattr(models, 'hf_token', lambda: 'hf_test')  # Kyutai's gated weights: the user gave a token
     s = config.Settings()
     them, me = (languages.direction(s, side, has_gpu=True) for side in languages.SIDES)
     assert (them.src, them.tgt, me.src, me.tgt) == ('en', 'ru', 'ru', 'en')
@@ -232,6 +233,7 @@ def test_the_cloud_gets_the_mapped_codes():
 
 
 def test_the_clone_is_offered_only_where_it_can_speak(monkeypatch):
+    monkeypatch.setattr(models, 'hf_token', lambda: 'hf_test')
     """M-23: `clone_why` is the one answer to "can the clone speak here": XTTS-v2 keeps up only on an NVIDIA GPU (its
     registry row says `needs = "gpu"`), so without one me -> them local speaks in the stock voice where no CPU engine has
     the language (Polish), nothing of the clone is downloaded and the why is said; a language it has no stock voice for is
@@ -326,6 +328,8 @@ def test_clone_engine_on_this_computer_asks_the_card_once(monkeypatch):
     """platform=None: this computer — sys.platform and its card (nvidia-smi once per run, as clone_why)."""
     monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
     monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(8.0, (572, 83), 8.6))
+    monkeypatch.setattr(models, 'hf_token', lambda: 'hf_test')
+    monkeypatch.setattr(languages, 'pack_here', lambda: True)
     assert languages.clone_engine('en') == ('xtts-v2', '')  # Qwen3-TTS after it until the voice pack has its packages
     monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(4.0, (572, 83), 8.6))
     assert languages.clone_engine('en') == ('pocket-tts-en', '')  # too small a card: Pocket TTS on the CPU
@@ -346,3 +350,40 @@ def test_qwen3_brings_its_fallback_engine():
         assert {'qwen3-tts', 'chatterbox-mtl'} <= set(ids) and 'xtts-v2' not in ids
         s.their_lang = 'pl'
         assert 'xtts-v2' in languages.needed_models(s) and 'chatterbox-mtl' not in languages.needed_models(s)
+
+
+def test_gated_weights_without_a_token_give_the_stock_voice(monkeypatch):
+    """FIXES 1: Kyutai's gated Pocket TTS without the user's token (and not downloaded) is not chosen: the stock voice
+    speaks, said why, and it is not among the models to download; with a token it is chosen again."""
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
+    monkeypatch.setattr(models, 'hf_token', lambda: '')
+    monkeypatch.setattr(models, 'is_fetched', lambda m, base=None: False)
+    s = config.Settings(me_to_them='local')  # ru -> en
+    me = languages.direction(s, 'me_to_them')
+    assert me.voice == 'stock' and me.notes == ('your cloned voice needs a Hugging Face token (Voices…, setup wizard): a '
+                                                'stock voice speaks instead',)
+    assert 'pocket-tts-en' not in languages.needed_models(s)
+    s.their_lang = 'ru'  # Shtorm's Russian weights are not gated
+    assert languages.direction(s, 'me_to_them').tts == 'pocket-tts-ru'
+    s.their_lang = 'en'
+    monkeypatch.setattr(models, 'hf_token', lambda: 'hf_test')
+    assert languages.direction(s, 'me_to_them').tts == 'pocket-tts-en' and 'pocket-tts-en' in languages.needed_models(s)
+
+
+def test_an_nvidia_card_without_the_voice_pack_takes_pocket(monkeypatch):
+    """FIXES 9: Windows with an NVIDIA card of 6 GB or more but no voice pack (and no torch): the next engine that runs
+    here (Pocket TTS), not the stock voice; without one (Polish) the NVIDIA engine stays: its pack is the wizard's offer.
+    FIXES 10: Chatterbox (Qwen3's fallback) is never a clone engine of its own."""
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
+    monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(8.0, (572, 83), 8.6))
+    monkeypatch.setattr(models, 'hf_token', lambda: 'hf_test')
+    monkeypatch.setattr(languages, 'pack_here', lambda: False)
+    assert languages.clone_engine('en') == ('pocket-tts-en', '')
+    assert languages.clone_engine('pl') == ('xtts-v2', '')
+    monkeypatch.setattr(languages, 'pack_here', lambda: True)
+    assert languages.clone_engine('en') == ('xtts-v2', '')
+    assert 'chatterbox-mtl' not in languages.clone_engines() and 'qwen3-tts' in languages.clone_engines()
+    from peresmeshnik.local.clone import make_engine
+    with pytest.raises(ValueError, match='not a clone engine'):
+        make_engine('chatterbox-mtl', '/nowhere')
+

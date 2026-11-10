@@ -606,6 +606,7 @@ def test_a_cloud_side_falls_back_on_pocket_without_a_voice_pack(monkeypatch):
     monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
     monkeypatch.setattr(models, 'path', lambda i: Path('/models') / i)
     monkeypatch.setattr(clone, 'voice_cmd', lambda: None)
+    monkeypatch.setattr(models, 'hf_token', lambda: 'hf_test')  # Kyutai's gated weights: with the user's token
     s = config.Settings()
     s.me_to_them, s.my_lang, s.their_lang, s.local.voice = 'cloud', 'ru', 'en', 'mine'
     assert fallback.local_voice('me', s) == ('pocket-tts-en', '') and not fallback.stock('me', s)

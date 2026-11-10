@@ -13,6 +13,7 @@ and the tests all ask this module.
 """
 from __future__ import annotations
 
+import importlib.util
 import shutil
 import subprocess
 import sys
@@ -243,21 +244,49 @@ def clone_engines() -> list[str]:
     NVIDIA GPU (Qwen3-TTS, then XTTS-v2 for the languages Qwen3 lacks: pl, tr, ar), then those on any CPU, Mac too
     (Pocket TTS, a model per language); models.toml's order within each. A new engine is a registry row."""
     from peresmeshnik import models
-    return [m.id for m in sorted((m for m in models.registry().values() if m.role == 'clone'), key=lambda m: m.needs != 'gpu')]
+    reg = models.registry().values()
+    backups = {m.fallback for m in reg}  # Chatterbox: only where Qwen3 breaks down, never chosen on its own
+    return [m.id for m in sorted((m for m in reg if m.role == 'clone' and m.id not in backups), key=lambda m: m.needs != 'gpu')]
+
+
+def pack_here() -> bool:
+    """Whether an NVIDIA clone engine can start on this computer: the voice pack's runner, or torch in this Python."""
+    from peresmeshnik.local.clone import voice_cmd
+    return voice_cmd() is not None or importlib.util.find_spec('torch') is not None
+
+
+def not_here(engine: str) -> str:
+    """Why `engine` cannot start on this computer as it is now ('' = it can): a gated model without its weights and
+    without the user's Hugging Face token, an NVIDIA engine without the voice pack (or torch from source)."""
+    from peresmeshnik import models
+    m = models.get(engine)
+    if m.token == 'hf' and not models.hf_token() and not models.is_fetched(m):
+        return 'your cloned voice needs a Hugging Face token (Voices…, setup wizard)'
+    if needs_gpu(engine) and not pack_here():
+        return 'the voice pack is not installed (setup wizard, "Your voice")'
+    return ''
 
 
 def clone_engine(lang: str, side: str = 'me_to_them', *, platform: Platform | None = None) -> tuple[str | None, str]:
     """(the clone engine that speaks `lang` live for `side` on `platform` (None: this computer), '') or (None, why not):
     then the stock voice of `lang` speaks, if there is one. The one answer to "can a cloned voice speak here, and which":
     the wizard, the tray, the app, the cloud's fallback and a server's client ask it, nobody checks on their own. Whether
-    its weights are downloaded or its voice pack installed is not asked here (models, local/voicepack.py)."""
+    its weights are downloaded is not asked here (models). On this computer (`platform` without `os`) an engine that
+    cannot start here (`not_here`) gives way to the next one that can: an NVIDIA engine without the voice pack to Pocket
+    TTS; if none can, the NVIDIA engine stays (its pack is the wizard's offer, the app says why at start), a gated one
+    without the user's token does not (the stock voice, said why; with the token it is chosen again)."""
     if side not in SIDES:
         raise ValueError(f'side {side!r}: one of {SIDES}')
     p = platform or Platform()
     whys = [(e, clone_why(e, lang, p.gpu, **({'os': p.os} if p.os else {}))) for e in clone_engines() if covers(e, lang)]
-    if e := next((e for e, why in whys if not why), None):
-        return e, ''
-    why = whys[0][1] if whys else f'your cloned voice cannot speak {name(lang)}'  # the best engine's reason
+    fits = [e for e, why in whys if not why]  # its hardware is there
+    if not p.os:  # this computer: also what is installed here
+        late = {e: not_here(e) for e in fits}
+        fits = [e for e in fits if not late[e]] or [e for e in fits if needs_gpu(e)]
+        whys = [(e, late[e]) for e in late if late[e]] + whys
+    if fits:
+        return fits[0], ''
+    why = next((why for _, why in whys if why), f'your cloned voice cannot speak {name(lang)}')  # the best engine's reason
     return None, why.replace('your', 'their') if side == 'them_to_me' else why  # the other person's voice
 
 

@@ -100,10 +100,11 @@ def gpu_refusal(g: Gpu) -> str:
     return why[0].upper() + why[1:] + tail
 
 
-def tier() -> tuple[str, str]:
-    """(what this machine is, the recommended me -> them engine): local where the clone speaks here (clone_why)."""
+def tier(lang: str = 'en') -> tuple[str, str]:
+    """(what this machine is, the recommended me -> them engine): local where a clone engine speaks `lang` here
+    (languages.clone_engine)."""
     gb, g = psutil.virtual_memory().total / 2 ** 30, languages.nvidia_once()  # the probe direction() asks too: once
-    rec = 'cloud' if languages.clone_why(config.Local().clone, has_gpu=g) else 'local'
+    rec = 'local' if languages.clone_engine(lang, platform=languages.Platform(gpu=g))[0] else 'cloud'
     return f'{gb:.0f} GB RAM, {gpu_text(g.vram)}: recommended them → me local, me → them {rec}', rec
 
 
@@ -116,7 +117,7 @@ class LanguagesPage(QWizardPage):
         self.w = w
         s = w.s
         self.setTitle('Languages and engines')
-        what, self.rec = tier()
+        what, self.rec = tier(s.their_lang)
         self.setSubTitle(f'This computer: {what}.')
         f = QFormLayout(self)
         self.my_lang, self.their_lang = QComboBox(), QComboBox()
@@ -595,14 +596,17 @@ class ModelsPage(QWizardPage):
         total = sum(map(models.size, todo))
 
         def run():
-            done = [0]
+            done, refused = [0], []
             try:
                 for m in todo:
                     def tick(n, m=m):
                         done[0] += n
                         self.progress.emit(done[0], total, m.id)
-                    models.fetch(m.id, progress=tick)
-                self.finished.emit('')
+                    try:
+                        models.fetch(m.id, progress=tick)
+                    except models.Gated as e:  # its token refused: the others still download, the reason is said
+                        refused.append(str(e))
+                self.finished.emit('; '.join(refused))
             except Exception as e:
                 self.finished.emit(str(e))
         threading.Thread(target=run, name='models-fetch', daemon=True).start()
@@ -770,7 +774,7 @@ class VoicePage(QWizardPage):
         s = self.w.s
         if not self.local() or s.local.clone == STOCK or languages.direction(s, 'me_to_them').voice != 'stock':
             return ''
-        return languages.clone_why(s.local.clone, s.their_lang)
+        return languages.clone_engine(s.their_lang)[1]
 
     def initializePage(self) -> None:  # noqa: N802
         from peresmeshnik import voice
@@ -825,8 +829,8 @@ class VoicePage(QWizardPage):
         runner of one's own in $PERESMESHNIK_VOICE_CMD, a build without the pack's files), 'installing', 'gpu' (gpu_refusal:
         too little memory, an old driver or GPU, a driver that does not answer), else voicepack.state()."""
         if not (WINDOWS and self.local() and not self.stock.isChecked()) or self.clone_off() or os.environ.get('PERESMESHNIK_VOICE_CMD') \
-                or not voicepack.lock_file().is_file():
-            return ''
+                or not voicepack.lock_file().is_file() or not languages.needs_gpu(languages.direction(self.w.s, 'me_to_them').tts):
+            return ''  # Pocket TTS: on the CPU in the app itself, no pack, no GPU
         if self.packing:
             return 'installing'
         if self.gpu is None:
@@ -1030,10 +1034,11 @@ class VoicePage(QWizardPage):
 
         def work():
             from peresmeshnik.local.asr import OnnxAsr
-            from peresmeshnik.local.clone import make_clone
+            from peresmeshnik.local.clone import make_engine
             tts = None
             try:
-                tts = make_clone(models.path(s.local.clone), threads=s.local.threads)
+                engine = languages.direction(s, 'me_to_them').tts  # the clone engine of this computer and language
+                tts = make_engine(engine, models.path(engine), threads=s.local.threads)
                 # their language's ASR, also where it does not keep up live (Whisper turbo without CUDA): two phrases
                 asr = OnnxAsr(languages.pick(s.local.asr, s.their_lang), s.local.threads, live=False)
                 self.checked.emit(voice.clone_verdict(voice.check_clone(tts, v, s.their_lang, asr)))

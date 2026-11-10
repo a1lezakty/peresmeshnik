@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import collections
 import contextlib
-import importlib.util
 import inspect
 import logging
 import queue
@@ -500,9 +499,8 @@ def _clone_not_ready(s, lang: str, engine: str) -> str:
     with contextlib.suppress(OSError, ValueError):  # missing or broken: said where it is loaded, as before
         if why := voice.why_not_mine(voice.load(s.local.voice)):  # M-20: a contact's voice never speaks as me
             return why
-    from peresmeshnik.local.clone import voice_cmd
-    if languages.needs_gpu(engine) and voice_cmd() is None and importlib.util.find_spec('torch') is None:
-        return 'the voice pack is not installed (setup wizard, "Your voice")'  # Pocket TTS runs in the app itself
+    if why := languages.not_here(engine):  # an NVIDIA engine's voice pack, a gated model's token
+        return why
     try:
         models.path(engine)
     except models.ModelMissing as e:

@@ -84,12 +84,44 @@ def test_barge_in_stops_the_runner_quickly(pack, me):
 
 
 def test_an_error_is_a_reply(pack, me):
+    """L-43: one clause the runner cannot say (a number num2words cannot read, CUDA out of memory on a long one) is
+    left out, the clone goes on; only errors in a row (MAX_ERRORS) end it, and the side falls back to the stock voice."""
+    assert list(pack.synth('boom', 'en', me)) == []  # left out, no error
+    assert len(say(pack, 'hi', me)) == 3 * 2400  # it goes on
+    for _ in range(VoicePackClone.MAX_ERRORS - 1):
+        assert list(pack.synth('boom', 'en', me)) == []
     with pytest.raises(RuntimeError, match='CUDA out of memory'):
         say(pack, 'boom', me)
-    assert len(say(pack, 'hi', me)) == 3 * 2400  # it goes on
     with pytest.raises(RuntimeError, match='unknown request'):
         pack._send({'cmd': 'dance'})
         pack._reply()
+
+
+def test_the_clone_in_this_process_leaves_one_clause_out_too(monkeypatch, me):
+    """L-43 (review of PR #22): XTTS in this process (Linux from source) as the voice pack: one clause it cannot say is
+    left out, the clone goes on; MAX_ERRORS in a row end it."""
+    from peresmeshnik.local import xtts
+
+    def synth(self, text, lang, voice=None):
+        if text == 'boom':
+            raise RuntimeError('CUDA out of memory')
+        yield np.full(3, 0.5, np.float32)
+    monkeypatch.setattr(xtts.Engine, 'synth', synth)
+    c = object.__new__(clone.XttsClone)  # no model: its synthesis is the stand-in above
+    assert list(c.synth('boom', 'en', me)) == [] and len(list(c.synth('hi', 'en', me))) == 1
+    for _ in range(VoicePackClone.MAX_ERRORS - 1):
+        assert list(c.synth('boom', 'en', me)) == []
+    with pytest.raises(RuntimeError, match='CUDA out of memory'):
+        list(c.synth('boom', 'en', me))
+
+
+def test_a_runner_dying_after_an_error_is_the_clones_death(pack, me):
+    """L-43, the review: the runner died (or was killed by the timeout) right after it said a clause failed: that is the
+    clone gone, said now (the side falls back), not one clause lost and the death seen only at the next one."""
+    wait = pack._wait
+    pack._wait = lambda read: (pack._p.kill(), b'')[1] if read == pack._p.stdout.readline else wait(read)  # died then
+    with pytest.raises(RuntimeError, match='exited'):
+        list(pack.synth('boom', 'en', me))
 
 
 def test_a_dead_runner_raises_instead_of_hanging(pack, me):
@@ -274,14 +306,14 @@ def test_clone_unavailable_falls_back_to_the_stock_voice(monkeypatch, tmp_path):
     side, s, made, _ = me_side(monkeypatch, tmp_path, CloneUnavailable('no CUDA GPU'), key=False)
     d = side._local(s)
     assert made == [None] and d.warm == 1 and side.engine == 'local'  # make_local's own Piper voice
-    assert side.errors == ['error: me: the voice clone is off (no CUDA GPU); a stock voice speaks instead']
+    assert side.errors == ['note: me → them: a stock voice speaks instead of your cloned voice (no CUDA GPU)']  # L-29
 
 
 def test_clone_out_of_vram_at_warm_up_falls_back_to_the_stock_voice_not_the_cloud(monkeypatch, tmp_path):
     side, s, made, cloud = me_side(monkeypatch, tmp_path, 'oom')  # a cloud key is there: still not the cloud
     d = side._local(s)
     assert d is not cloud and side.engine == 'local' and made == ['oom', None]
-    assert side.errors == ['error: me: the voice clone is off (CUDA out of memory); a stock voice speaks instead. With '
+    assert side.errors == ['note: me → them: a stock voice speaks instead of your cloned voice (CUDA out of memory). With '
                            'your Gemini key you can switch "Me → them" to cloud in the settings']  # said, not done
 
 
@@ -324,9 +356,9 @@ def test_clone_that_dies_mid_call_is_replaced(monkeypatch, tmp_path):
     dead = FakeDirection('clone', voice=Voice('me', 'xtts', tmp_path), error=error)
     side.directions = [(LiveSwitch(dead), True, True)]
     side._consume(side.directions[0][0], True, True)  # its events end at once: the worker died
-    assert dead.closed and side.errors == ['error: me: the voice clone is off (the voice pack exited (-11)); '
-                                           'a stock voice speaks instead',
-                                           'error: me: its events ended by themselves']  # the stock voice's: a failure
+    assert dead.closed and side.errors == ['note: me → them: a stock voice speaks instead of your cloned voice '
+                                           '(the voice pack exited (-11))',
+                                           'error: me → them: its events ended by themselves']  # the stock voice's: a failure
     new = side.directions[0][0]
     assert isinstance(new, LiveSwitch) and new.inner.tts is None and new.inner.voice is None  # no second fallback
     new.close()
@@ -350,3 +382,19 @@ def test_an_asr_error_mid_call_is_no_clone_death(monkeypatch, tmp_path):
     side._consume(side.directions[0][0], True, True)
     assert not dead.closed and side.errors == [] and made == []
     assert failures == ['the translation failed (RuntimeError: its events ended by themselves)']
+
+
+def test_no_stock_voice_to_fall_back_to_says_why(monkeypatch, tmp_path):
+    """M-24: they speak Chinese (no stock voice with a usable license), me -> them local, the clone cannot speak here: the
+    side says so and how out (the cloud), not "unknown model ''" with the registry's 200 ids."""
+    import pytest
+
+    from peresmeshnik import models
+    side, s, made, _ = me_side(monkeypatch, tmp_path, CloneUnavailable('no CUDA GPU'), key=False)
+    side.tgt = 'zh'
+    with pytest.raises(RuntimeError) as e:
+        side._local(s)
+    assert 'Chinese' in str(e.value) and 'cloud' in str(e.value) and 'unknown model' not in str(e.value), e.value
+    with pytest.raises(models.ModelMissing) as e:
+        models.get('')
+    assert len(str(e.value)) < 40

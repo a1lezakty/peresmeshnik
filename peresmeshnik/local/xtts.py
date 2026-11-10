@@ -59,7 +59,13 @@ def normalize(text: str, lang: str) -> str:
     bare, after = r'|h(?!\w)' if lang in ('fr', 'pt') else '', r'(?:\s*Uhr\b)?' if lang == 'de' else ''
     t = re.sub(rf'(?<![\d:])(?<!\d[.,])(\d{{1,2}})(?:{sep}(\d{{2}}){bare})(?![\d:]|[.,]\d){after}', lambda m: _clock(m, lang), t)
     if lang in POINT or lang == 'ja':
-        from num2words import num2words  # coqui-tts' own dependency: its tokenizer reads numbers with it
+        from num2words import num2words as n2w  # coqui-tts' own dependency: its tokenizer reads numbers with it
+
+        def num2words(x, **kw):  # a number it cannot read (70+ digits: OverflowError) stays digits, the clause is said
+            try:
+                return n2w(x, **kw)
+            except Exception:
+                return str(x)
     if lang in POINT:
         thousands, mark, word = POINT[lang]
         t = re.sub(rf'(?<=\d)\{thousands}(?=\d{{3}}(?!\d))', '', t)  # 1.250.000
@@ -205,6 +211,16 @@ def folder(voice) -> Path:
     return Path(getattr(voice, 'path', voice))
 
 
+def _read_checkpoint(model_path) -> dict:
+    """The checkpoint's weights, read only. coqui-tts's own loader writes the registry's model.pth again in place (its
+    config is an XttsConfig object there): a write cut short (the runner killed, the power gone) left a broken file
+    that `.verified` still vouches for (M-19)."""
+    import torch
+    from TTS.tts.models.xtts import _legacy_safe_globals
+    with _legacy_safe_globals():
+        return torch.load(model_path, map_location='cpu', weights_only=True)['model']
+
+
 class Engine:
     sample_rate = SR
 
@@ -219,6 +235,7 @@ class Engine:
         cfg = XttsConfig()
         cfg.load_json(str(Path(model_dir) / 'config.json'))
         self.model = Xtts.init_from_config(cfg)
+        self.model._load_checkpoint = _read_checkpoint  # not coqui's, which writes model.pth
         self.model.load_checkpoint(cfg, checkpoint_dir=str(model_dir), eval=True)
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         self.model.to(self.device)

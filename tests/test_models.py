@@ -119,14 +119,84 @@ def test_settings_round_trip(tmp_path):
     s = config.Settings()
     s.me_to_them, s.local.asr['ru'], s.cloud.reconnect_s, s.local.voice = 'local', 'gigaam-v3-e2e-ctc', 300.0, 'my "voice"'
     p = config.save(s, tmp_path / 'settings.toml')
-    assert config.load(p) == s
-    p.write_text('them_to_me = "both"\n')
-    with pytest.raises(ValueError, match='them_to_me'):
-        config.load(p)
-    p.write_text('[local]\nthreads = "two"\nfuture_key = 1\n')
-    with pytest.raises(ValueError, match='local.threads'):
-        config.load(p)
+    assert config.load(p) == s and config.load(p).forced_cloud == []
+    s.them_to_me, s.forced_cloud = 'cloud', ['them_to_me']  # a side the tray moved to the cloud for a pair (H-02)
+    assert config.load(config.save(s, p)) == s
 
+
+def test_a_broken_settings_file_does_not_stop_the_app(tmp_path, monkeypatch):
+    """H-01: nothing in the file raises. A file read only in part (a value the app cannot use, a file that does not
+    parse or cannot be opened) sends nothing to the cloud: both directions are local, `problem` says why (the Gemini
+    key is kept apart, so a default 'cloud' would really go to Google). A file that does not parse is kept aside as
+    settings.toml.bad (not overwritten); one saved by Notepad with a BOM reads as it is."""
+    p = tmp_path / 'settings.toml'
+    p.write_text('their_lang = "de"\nforced_cloud = ["mine"]\nthem_to_me = "both"\nme_to_them = "lokal"\n[local]\n'
+                 'threads = "two"\nfuture_key = 1\n[ui]\nmic = "USB"\n[cloud]\nsubtitles = 1\n')
+    s = config.load(p)
+    assert (s.their_lang, s.ui.mic, s.forced_cloud, s.them_to_me, s.me_to_them, s.local.threads, s.cloud.subtitles) == \
+        ('de', 'USB', [], 'local', 'local', 2, False)
+    assert all(k in config.problem for k in ('forced_cloud', 'them_to_me', 'me_to_them', 'local.threads',
+                                             'cloud.subtitles', 'both directions are local'))
+    assert p.exists() and config.load(tmp_path / 'none.toml') == config.Settings() and not config.problem
+    cloud = 'them_to_me = "cloud"\n'  # the user's own choice: the cloud for them -> me, me -> them by default (cloud)
+    for broken in (cloud + 'me_to_them = local\n', cloud + 'my_lang = "ru\n', cloud + '[local\nthreads = 3\n',
+                   (cloud + 'my_lang = "\xff"\n').encode('latin-1'), cloud + 'me_to_them = 0\n',
+                   cloud + 'me_to_them = ["local"]\n', cloud + '[ui]\nmic = 3\n'):
+        p.write_bytes(broken if isinstance(broken, bytes) else broken.encode())
+        s = config.load(p)
+        assert (s.them_to_me, s.me_to_them) == ('local', 'local') and 'both directions are local' in config.problem, \
+            (broken, config.problem)
+        if not p.exists():  # did not parse: kept aside, and local still at the next load (no file, its .bad there)
+            assert (tmp_path / 'settings.toml.bad').read_bytes() == (broken if isinstance(broken, bytes) else broken.encode())
+            s = config.load(p)
+            assert (s.them_to_me, s.me_to_them) == ('local', 'local') and 'settings.toml.bad' in config.problem, broken
+            config.save(s, p)  # what the wizard or the tray saves next: a file again, as the user sets it from here
+            assert config.load(p).me_to_them == 'local' and not config.problem
+            (tmp_path / 'settings.toml.bad').unlink()
+    p.write_bytes(b'\xef\xbb\xbf' + cloud.encode())  # Notepad's BOM: read as it is, nothing lost
+    assert config.load(p).them_to_me == 'cloud' and not config.problem and p.exists()
+    real = config.Path.read_text
+
+    def locked(self, *a, **k):  # an antivirus holds the file: not readable now, not broken
+        if self == p:
+            raise PermissionError(13, 'in use')
+        return real(self, *a, **k)
+    monkeypatch.setattr(config.Path, 'read_text', locked)
+    s = config.load(p)
+    assert (s.them_to_me, s.me_to_them) == ('local', 'local') and 'in use' in config.problem and p.exists()
+    before, refused = p.read_bytes(), []
+    monkeypatch.setattr(config, 'on_unsaved', [refused.append])
+    s.ui.show_latency = True  # a click in the tray: load, change, save
+    config.save(s, p)  # not over the file it could not read: the user's settings are in it, these are defaults
+    assert p.read_bytes() == before and refused == ['settings.toml cannot be read now, nothing saved'], refused
+
+
+def test_settings_are_written_whole_or_not_at_all(tmp_path, monkeypatch):
+    """H-01: what the app saves by itself (device and app names from the OS) reads back; a save that fails half way
+    leaves the old file as it was."""
+    p = tmp_path / 'settings.toml'
+    for name in ('x\x7fy', 'x\x00y\x1b', 'x\x85y', 'My "USB" mic\\', 'микрофон 🎤', '\ufeffx'):
+        s = config.Settings()
+        s.ui.call_app = name
+        assert config.load(config.save(s, p)).ui.call_app == name and not config.problem, repr(name)
+    s.ui.call_app = 'x\udc80y'  # a lone surrogate (a device name not in UTF-16 norm): TOML cannot hold it
+    assert config.load(config.save(s, p)).ui.call_app == 'x\ufffdy'
+    before = p.read_bytes()
+    real, held = config.os.replace, [PermissionError(13, 'in use'), PermissionError(13, 'in use')]
+
+    def replace(*a):  # Windows: an antivirus or a backup tool holds settings.toml a moment
+        if held:
+            raise held.pop()
+        real(*a)
+    monkeypatch.setattr(config.os, 'replace', replace)
+    s.their_lang = 'fr'
+    assert config.load(config.save(s, p)).their_lang == 'fr' and not held
+    before = p.read_bytes()
+    monkeypatch.setattr(config.os, 'replace', lambda *a: 1 / 0)  # killed between the write and the rename
+    s.their_lang = 'de'
+    with pytest.raises(ZeroDivisionError):
+        config.save(s, p)
+    assert p.read_bytes() == before and [f.name for f in tmp_path.iterdir()] == ['settings.toml']
 
 def test_saved_settings_take_a_new_default(tmp_path, monkeypatch):
     """Saved [local] tables keep only what the user changed: a default changed later (fr's ASR, a new MT) reaches them."""
@@ -164,3 +234,15 @@ def test_the_default_engines_cover_the_14_languages():
     # X<->ru direct where through English loses the speaker's gender and ты / вы; X->en, en->X: the pivots
     assert [loc.mt[f'{x}-ru'] for x in ('de', 'tr')] == ['opus-mt-de-ru', 'mt-tr-ru-via-en'] and loc.mt['ru-uk'] == 'opus-mt-ru-uk'
     assert all(reg[loc.mt[f'{x}-en']].pivot and reg[loc.mt[f'en-{x}']].pivot for x in set(LANGS) - {'en'})
+
+
+def test_a_missing_model_points_to_the_wizard(tmp_path):
+    """M-07: the built app has no `peresmeshnik` command: a missing model sends the user to the setup wizard (the command
+    stays, for a source install); the clone without a recorded voice too."""
+    with pytest.raises(models.ModelMissing) as e:
+        models.path('piper-ru_RU-dmitri-medium', tmp_path)
+    assert str(e.value).index('setup wizard') < str(e.value).index('peresmeshnik models fetch')
+    import inspect
+
+    from peresmeshnik import app
+    assert 'python -m peresmeshnik' not in inspect.getsource(app.Side._local)

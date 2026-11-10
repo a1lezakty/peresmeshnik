@@ -17,6 +17,7 @@ CONTEXT = 64  # samples of the previous frame the model expects in front of each
 def ort_options(threads: int):
     """onnxruntime session options for every engine: fixed threads, pools sleep between calls."""
     import onnxruntime as rt
+    rt.disable_telemetry_events()  # Windows: TraceLogging does not read ORT_DISABLE_TELEMETRY (peresmeshnik/__init__)
     so = rt.SessionOptions()
     so.intra_op_num_threads, so.inter_op_num_threads = threads, 1
     so.add_session_config_entry('session.intra_op.allow_spinning', '0')

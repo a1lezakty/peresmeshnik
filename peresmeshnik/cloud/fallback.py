@@ -26,7 +26,6 @@ import importlib.util
 import inspect
 import logging
 import queue
-import shutil
 import statistics
 import threading
 import time
@@ -55,7 +54,8 @@ class Muted:
     def __init__(self, make):
         self.make, self.want, self.on_error = make, lambda text: False, lambda e: None
         self.lock = threading.Lock()  # one synthesis at a time: the speak worker's, a fallback's re-say of muted clauses
-        self._tts, self.error = None, None
+        self._guard = threading.Lock()  # `_tts` against close(), which does not wait for a synthesis or a load
+        self._tts, self.error, self.closed = None, None, False
 
     def load(self) -> None:
         with self.lock:
@@ -66,14 +66,20 @@ class Muted:
                     pass
 
     def _get(self):  # under the lock
-        if self._tts is None and self.error is None:
+        if self._tts is None and self.error is None and not self.closed:
             try:
-                self._tts = self.make()
+                tts = self.make()
             except Exception as e:  # a missing model or voice pack: the reason goes to the tray
                 log.warning('local voice: %s', e)
                 self.error = e
+            else:
+                with self._guard:  # closed while it started (off right after on, L-19): not kept
+                    if not self.closed:
+                        self._tts, tts = tts, None
+                if tts is not None and hasattr(tts, 'close'):
+                    tts.close()
         if self._tts is None:
-            raise RuntimeError(f'no local voice: {self.error}')
+            raise RuntimeError(f'no local voice: {self.error or "closed"}')
         return self._tts
 
     def synth(self, text, lang, voice=None, speed=1.0):
@@ -92,7 +98,9 @@ class Muted:
             yield rs(chunk)
 
     def close(self) -> None:
-        tts, self._tts = self._tts, None
+        with self._guard:
+            self.closed = True
+            tts, self._tts = self._tts, None
         if tts is not None and hasattr(tts, 'close'):
             tts.close()
 
@@ -116,17 +124,18 @@ class _Noted:
 class Fallback:
     """`make_cloud()`: a fail_fast GeminiDirection (opens its session); `make_local(tts)`: a LocalDirection speaking
     through `tts` (raises when its models are missing); `make_tts()`: the side's local voice; `voice_why`: why there is
-    none here ('' = there is); `preload`: make it now (Piper), not at the first fallback (the clone, ~4 GB)."""
+    none here ('' = there is); `voice_note`: why it is not the user's own (said at the first fallback); `preload`: make
+    it now (Piper), not at the first fallback (the clone, ~4 GB)."""
     supports_live = False
 
     def __init__(self, name: str, tgt: str, cloud_subtitles: bool, make_cloud, make_local, make_tts, voice=None,
-                 voice_why: str = '', preload: bool = False, on_state=lambda text: None):
+                 voice_why: str = '', preload: bool = False, on_state=lambda text: None, voice_note: str = ''):
         self.name, self.tgt, self.voice, self.on_state = name, tgt, voice, on_state
         self.cloud_subtitles, self.make_cloud, self.make_local = cloud_subtitles, make_cloud, make_local
         self.muted = Muted(make_tts)
         self.muted.want = self._want
         self.muted.on_error = lambda e: self._q.put((self, e))
-        self.voice_why = voice_why
+        self.voice_why, self.voice_note = voice_why, voice_note
         self.mode = 'cloud'  # 'cloud' | 'local' (the local voice speaks) | 'down' (no local voice here)
         self._lock = threading.Lock()  # mode, notes, input, targets: feed (capture), the local MT and speech, events
         self._made: collections.deque = collections.deque(maxlen=64)  # [translation, time, say it] not spoken yet
@@ -184,6 +193,8 @@ class Fallback:
     def events(self):
         while (item := self._q.get()) is not None:
             src, e = item
+            if self._closing:  # turned off: what is still queued opens nothing new (M-12) and is not said
+                continue
             if src is self:  # from feed() (no local path to wait for a phrase with) or from Muted
                 if isinstance(e, BaseException) and self.mode == 'local':
                     self._down(str(e), 'its voice failed to start')
@@ -231,10 +242,11 @@ class Fallback:
             self.local.interrupt()
 
     def close(self) -> None:
-        self._closing = True
-        with self._lock:
+        with self._lock:  # a probe or a local path being made now sees `_closing` and closes itself (_try, _cloud_failed)
+            self._closing = True
             leaving, self._to_close = list(self._to_close), set()
-        for d in (self.probe, self.cloud, self.local, *leaving):
+            ds = (self.probe, self.cloud, self.local, *leaving)
+        for d in ds:
             if d:
                 d.close()
         self.muted.close()
@@ -303,23 +315,32 @@ class Fallback:
         self.muted.lock.acquire()  # before a clause is marked to be said: the muted ones the cloud had not said go first
         try:
             with self._lock:
-                self.mode = 'local'
-                if local:  # it hears the input the cloud had not said yet, then the live input
-                    self.local = local
-                    for t, pcm in self._input:
-                        if t >= cut:
-                            local.feed(pcm)
-                for r in self._made:  # not spoken yet: say the ones the cloud had not said
-                    r[2] = r[1] - SETTLE_S > cut
-                again = [t for t, at in self._muted if at - SETTLE_S > cut]
-                self._muted.clear()
-            if local:
+                late = self._closing  # turned off while the local path was made (M-12): it is closed, not kept
+                if not late:
+                    self.mode = 'local'
+                    if local:  # it hears the input the cloud had not said yet, then the live input
+                        self.local = local
+                        for t, pcm in self._input:
+                            if t >= cut:
+                                local.feed(pcm)
+                    for r in self._made:  # not spoken yet: say the ones the cloud had not said
+                        r[2] = r[1] - SETTLE_S > cut
+                    again = [t for t, at in self._muted if at - SETTLE_S > cut]
+                    self._muted.clear()
+            if local and not late:
                 self._pump(local)
         except BaseException:
             self.muted.lock.release()
             raise
+        if late:
+            self.muted.lock.release()
+            if local:
+                local.close()
+            return
         self._say(again)  # releases the lock
-        self.on_state(f'note: {ARROW[self.name]}: the cloud failed ({why}); translating locally until it answers again')
+        note, self.voice_note = self.voice_note, ''  # once
+        self.on_state(f'note: {ARROW[self.name]}: the cloud failed ({why}); translating locally until it answers again'
+                      + (f'; {note}' if note else ''))
 
     def _down(self, reason: str, what: str) -> None:
         self.mode = 'down'
@@ -355,9 +376,15 @@ class Fallback:
 
     def _try(self) -> None:
         try:
-            self.probe = self.make_cloud()
+            probe = self.make_cloud()  # up to CONNECT_S: close() may come meanwhile
         except Exception as e:
             self._probe_failed(e)
+            return
+        with self._lock:
+            if not self._closing:
+                self.probe, probe = probe, None
+        if probe is not None:  # turned off meanwhile (M-12): nobody else would close it
+            probe.close()
             return
         self._pump(self.probe)
 
@@ -400,33 +427,55 @@ def _direction(name: str, s):
     return languages.direction(s, 'them_to_me' if name == 'them' else 'me_to_them')
 
 
-def stock(name: str, s) -> bool:
-    """A Piper voice: them -> me always, me -> them when the settings say so (voice.STOCK: an 8 GB Mac) or the clone
-    cannot speak the language (languages.direction)."""
-    return _direction(name, s).voice != 'clone'
-
-
-def voice_why(name: str, s) -> str:
-    """Why this side has no local voice to fall back to ('' = it has one), without loading anything."""
-    from peresmeshnik import models
-    d = _direction(name, s)
+def _clone_not_ready(s, lang: str) -> str:
+    """Why the clone `languages.direction` chose cannot speak `lang` now ('' = it can): here at all (the app's one
+    answer, `languages.clone_why`: the language, the GPU), then enrolled, its voice pack, its model."""
+    from peresmeshnik import languages, models
+    clone_why = getattr(languages, 'clone_why', None)  # stream B's (stage 7), merged after A: till then `direction`'s
+    if clone_why and (why := clone_why(s.local.clone, lang)):
+        return why
+    if not s.local.voice:
+        return 'no voice enrolled (setup wizard, "Your voice")'
+    from peresmeshnik.local.clone import voice_cmd
+    if voice_cmd() is None and importlib.util.find_spec('torch') is None:  # the pack's runner, or torch here
+        return 'the voice pack is not installed (setup wizard, "Your voice")'
     try:
-        if not d.local:
-            return '; '.join(d.why)
-        if d.voice == 'stock':
-            models.path(d.tts)
-            return ''
-        if not s.local.voice:
-            return 'no voice enrolled (setup wizard, "Your voice")'
-        if not shutil.which('nvidia-smi'):
-            return 'your cloned voice is not live without an NVIDIA GPU'
-        from peresmeshnik.local.clone import voice_cmd
-        if voice_cmd() is None and importlib.util.find_spec('torch') is None:  # the pack's runner, or torch here
-            return 'the voice pack is not installed (setup wizard, "Your voice")'
         models.path(s.local.clone)
     except models.ModelMissing as e:
         return str(e)
     return ''
+
+
+def local_voice(name: str, s) -> tuple[str, str]:
+    """The side's local voice to fall back to, without loading anything: (registry id, '') or ('', why there is none).
+    The clone when `languages.direction` chose it and it is ready, else the language's stock voice (H-09)."""
+    from peresmeshnik import languages, models
+    d = _direction(name, s)
+    if not d.local:
+        return '', '; '.join(d.why)
+    why = _clone_not_ready(s, d.tgt) if d.voice == 'clone' else ''
+    if d.voice == 'clone' and not why:
+        return d.tts, ''
+    i = d.tts if d.voice == 'stock' else languages.pick(s.local.tts, d.tgt)
+    try:
+        if i:
+            models.path(i)
+            return i, ''
+    except models.ModelMissing as e:
+        return '', '; '.join(x for x in (why, str(e)) if x)
+    return '', why
+
+
+def stock(name: str, s) -> bool:
+    """The side falls back to a stock (Piper) voice: them -> me always, me -> them when the settings say so (voice.STOCK:
+    an 8 GB Mac), the clone cannot speak the language here (languages.direction) or is not ready (H-09)."""
+    i = local_voice(name, s)[0]
+    return bool(i) and i != s.local.clone
+
+
+def voice_why(name: str, s) -> str:
+    """Why this side has no local voice to fall back to ('' = it has one), without loading anything."""
+    return local_voice(name, s)[1]
 
 
 def make(name: str, s, key: str, on_state=lambda text: None, on_respawn=lambda e: None) -> Fallback:
@@ -436,8 +485,10 @@ def make(name: str, s, key: str, on_state=lambda text: None, on_respawn=lambda e
     from peresmeshnik.pipeline import MAX_LAG_S, make_local
     d = _direction(name, s)
     src, tgt = d.src, d.tgt
-    voice, piper = None, d.voice == 'stock'
-    if d.voice == 'clone' and s.local.voice:
+    tts_id, why = local_voice(name, s)
+    voice, piper = None, bool(tts_id) and tts_id != s.local.clone
+    note = _clone_not_ready(s, tgt) if piper and d.voice == 'clone' else ''  # a stock voice instead of the clone: why
+    if tts_id == s.local.clone:
         from peresmeshnik import voice as profiles
         try:
             voice = profiles.load(s.local.voice)
@@ -445,12 +496,12 @@ def make(name: str, s, key: str, on_state=lambda text: None, on_respawn=lambda e
             log.warning('me: voice %s: %s', s.local.voice, e)
 
     def tts():
-        if not d.tts:
-            raise RuntimeError('; '.join(d.why))
+        if not tts_id:
+            raise RuntimeError(why)
         if piper:  # crash.Respawn: the runner dies, only it starts again
             from peresmeshnik import crash
             from peresmeshnik.local.tts import PiperTts
-            return crash.Respawn(lambda: PiperTts(d.tts, threads=s.local.threads), on_respawn)
+            return crash.Respawn(lambda: PiperTts(tts_id, threads=s.local.threads), on_respawn)
         from peresmeshnik import models
         from peresmeshnik.local.clone import make_clone  # the voice pack's runner, or XTTS in this process
         return make_clone(models.path(s.local.clone), threads=s.local.threads)
@@ -464,4 +515,5 @@ def make(name: str, s, key: str, on_state=lambda text: None, on_respawn=lambda e
         name, tgt, languages.cloud_subtitles(s, d.side),
         make_cloud=lambda: GeminiDirection(src, tgt, key, s.cloud, fail_fast=True),
         make_local=local,
-        make_tts=tts, voice=voice, voice_why=voice_why(name, s), preload=piper, on_state=on_state)
+        make_tts=tts, voice=voice, voice_why=why, preload=piper, on_state=on_state,
+        voice_note=f'your voice is not ready ({note}), a stock voice speaks for you' if note else '')

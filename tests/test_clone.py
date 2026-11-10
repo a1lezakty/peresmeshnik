@@ -32,6 +32,38 @@ def test_good_recording_passes():
     assert r.level_db == pytest.approx(-20, abs=1.5) and r.snr_db > 35
 
 
+def test_the_clone_reads_its_checkpoint_with_the_apps_reader(monkeypatch, tmp_path):
+    """M-19 (review of PR #22): xtts.Engine loads the model with `_read_checkpoint` (writes nothing), not coqui-tts's
+    loader (writes model.pth again): checked on stand-ins of torch and coqui-tts, so it runs without them."""
+    from peresmeshnik.local import xtts
+    used = []
+
+    class Model:
+        def load_checkpoint(self, cfg, checkpoint_dir, eval):
+            used.append(self._load_checkpoint)  # what coqui's load_checkpoint calls to read the file
+
+        def to(self, device):
+            pass
+    mods = {'torch': types.SimpleNamespace(set_num_threads=lambda n: None, set_num_interop_threads=lambda n: None,
+                                           cuda=types.SimpleNamespace(is_available=lambda: False)),
+            'TTS.tts.configs.xtts_config': types.SimpleNamespace(XttsConfig=type('C', (), {'load_json': lambda s, p: None})),
+            'TTS.tts.models.xtts': types.SimpleNamespace(Xtts=types.SimpleNamespace(init_from_config=lambda cfg: Model()))}
+    for name in ('TTS', 'TTS.tts', 'TTS.tts.configs', 'TTS.tts.models'):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    for name, m in mods.items():
+        monkeypatch.setitem(sys.modules, name, m)
+    xtts.Engine(tmp_path)
+    assert used == [xtts._read_checkpoint]
+
+
+def test_a_dc_offset_is_not_noise():
+    """Stage 7 (C's finding): a microphone with a DC offset (here -40 dBFS) is not "noisy" nor louder: the offset is
+    no sound, the check measures without it."""
+    x = speech_like(45)
+    r, dc = voice.check(x, 16_000), voice.check(x + np.float32(0.01), 16_000)
+    assert dc.ok and dc.snr_db == pytest.approx(r.snr_db, abs=1) and dc.level_db == pytest.approx(r.level_db, abs=0.5), dc
+
+
 @pytest.mark.parametrize('pcm, sr, problem', [
     (speech_like(20), 16_000, 'need 30-60 s'),
     (speech_like(45, talk=0.2), 16_000, 'of speech'),
@@ -328,3 +360,26 @@ def test_a_fragment_ends_with_a_comma():
     assert closed('我们') == '我们,'
     assert [bool(SENTENCE_END.search(t)) for t in ('Hello.', '你好。', '真的吗？', 'هل أنت هنا؟', '他说「好。」', 'and so,', '然后，')] \
         == [True] * 5 + [False] * 2
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='POSIX modes (Windows: the profile folder under %LOCALAPPDATA%)')
+def test_the_voice_is_the_users_only(tmp_path):
+    """L-09: the recording (enough to clone the voice) and its latents: folders 0700 whatever the umask."""
+    old = os.umask(0o022)
+    try:
+        v = voice.save(speech_like(20, level=0.02, noise=0.0002), 16_000, 'me', 'ru', 'привет', tmp_path / 'voices')
+    finally:
+        os.umask(old)
+    assert [oct(p.stat().st_mode & 0o777) for p in (tmp_path / 'voices', v.path)] == ['0o700', '0o700']
+
+
+def test_a_number_num2words_cannot_read_stays_digits():
+    """L-43: a translation with a number of 70+ digits (MT stuck on a digit) or a long Turkish fraction: num2words
+    raises OverflowError; the clause is said with the digits, not lost (nor the clone with it)."""
+    if os.environ.get('PERESMESHNIK_REQUIRE_CLONE') == '1':  # the voice-pack workflow: there, not a skip
+        import num2words  # noqa: F401
+    else:
+        pytest.importorskip('num2words')
+    from peresmeshnik.local.xtts import normalize
+    long = '1' * 80
+    assert long in normalize(f'番号は{long}です', 'ja') and '9' * 45 in normalize('12,' + '9' * 45 + ' TL', 'tr')

@@ -174,6 +174,7 @@ def check(pcm: np.ndarray, sr: int) -> Report:
     x = np.asarray(pcm, dtype=np.float32)
     if x.ndim > 1:
         x = x.mean(axis=1)
+    raw, x = x, x - x.mean(dtype=np.float64) if len(x) else x  # a DC offset is no sound: not noise, not level
     frames = _frames(x, sr) if sr >= 100 and len(x) >= sr // 10 else np.zeros((0, 1))
     db = 10 * np.log10(np.mean(frames ** 2, axis=1) + 1e-12) if len(frames) else np.array([-120.0])
     live = db[db > -100]  # digital silence (gaps, a muted mic) is no noise floor
@@ -183,7 +184,7 @@ def check(pcm: np.ndarray, sr: int) -> Report:
     level = float(10 * np.log10(np.mean(10 ** (speech / 10)))) if len(speech) else -120.0
     r = Report(seconds=round(len(x) / sr, 2), speech_s=round(len(speech) * 0.03, 2), level_db=round(level, 1),
                noise_db=round(noise, 1), snr_db=round(level - noise, 1),
-               clipped=round(float(np.mean(np.abs(x) >= CLIP)) if len(x) else 0.0, 5),
+               clipped=round(float(np.mean(np.abs(raw) >= CLIP)) if len(x) else 0.0, 5),
                band_db=round(_band_db(frames[is_speech] if len(frames) else frames, sr), 1))
     if sr < MIN_SR:
         r.errors.append(f'sample rate {sr} Hz is below {MIN_SR} Hz')
@@ -347,8 +348,11 @@ def save(pcm: np.ndarray, sr: int, name: str, lang: str, transcript: str | None 
     report = check(x, sr)  # of what is kept: at most MAX_S
     peak = float(np.max(np.abs(x))) or 1.0
     gain = min(10 ** ((TARGET_DB - report.level_db) / 20), 10 ** (-1 / 20) / peak)
-    path = (root or voices_dir()) / name
+    base = root or voices_dir()
+    path = base / name
     path.mkdir(parents=True, exist_ok=True)
+    for d in (base, path):  # the user's voice (enough to clone it) and its latents: theirs only (L-09; Linux, a shared
+        d.chmod(0o700)  # machine with a 0755 home). The rest of the data folder keeps the umask
     for old in path.glob('*.pt'):  # engine caches of an older recording
         old.unlink()
     sf.write(path / 'reference.wav', np.clip(x * gain, -1, 1), sr, subtype='PCM_16')

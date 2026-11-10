@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
+import logging
 import os
 import shlex
 import struct
@@ -38,12 +39,26 @@ RUNNER = voicepack.runner_dir() / 'voice_runner.py'  # ships with the app: it al
 ERR = 0xFFFFFFFF  # voice_runner.py: a synth reply that ends with an error
 
 
+log = logging.getLogger(__name__)
+
 class CloneUnavailable(RuntimeError):
     """The clone cannot speak here: no voice pack, no CUDA, the runner did not start or died. The app falls back."""
 
 
 class XttsClone(xtts.Engine):
     """XTTS-v2 in this process: a source install with torch and coqui-tts in its own environment."""
+    _errors = 0  # clauses in a row it could not say: MAX_ERRORS of them end the clone, as VoicePackClone (L-43)
+
+    def synth(self, text: str, lang: str, voice=None):
+        try:
+            yield from super().synth(text, lang, voice)
+        except Exception as e:  # CUDA out of memory on a long clause: this clause is lost, not the clone
+            self._errors += 1
+            if self._errors >= VoicePackClone.MAX_ERRORS:
+                raise
+            log.warning('the clone could not say a clause, it is left out: %s', e)
+            return
+        self._errors = 0
 
     def enroll(self, pcm: np.ndarray, sample_rate: int, transcript: str | None = None, name: str = 'me',
                lang: str = 'ru', root: Path | None = None) -> Voice:
@@ -90,8 +105,11 @@ class VoicePackClone:
     the direction ends with a message instead of hanging. Its stderr: `log` (<data dir>/logs/voice-runner.log, new
     at each start)."""
 
+    MAX_ERRORS = 3  # clauses in a row the runner (alive) could not say: then the clone is given up (L-43)
+
     def __init__(self, model_dir: Path | str, threads: int = 2, cmd: list[str] | None = None, start_s: float = 120.0,
                  reply_s: float = 30.0, log: Path | None = None):
+        self._errors = 0
         cmd = [*(cmd or voice_cmd() or []), '--model-dir', str(model_dir), '--threads', str(threads)]
         self._log, self.reply_s, self._hung = log or config.data_dir() / 'logs' / 'voice-runner.log', reply_s, False
         try:  # a file, not the app's stderr: a windowed .exe has none and the runner's first traceback would kill it
@@ -172,8 +190,16 @@ class VoicePackClone:
         try:
             while n := self._u32():
                 if n == ERR:
-                    self._reply()
+                    r = json.loads(self._wait(self._p.stdout.readline) or b'{}')
+                    if not r:  # it died or was killed (hung) right then: the clone's death, said now
+                        raise self._exited()
+                    self._errors += 1  # it lives on: this clause is lost, not the clone (L-43)
+                    if self._errors >= self.MAX_ERRORS:
+                        raise RuntimeError(f'the voice pack: {r.get("error")}')
+                    log.warning('the voice pack could not say a clause, it is left out: %s', r.get('error'))
+                    return
                 yield np.frombuffer(self._read(n), '<f4')
+            self._errors = 0
         except GeneratorExit:  # the caller stopped (barge-in): the runner stops at its next chunk; the rest is read away
             self._send({'cmd': 'stop', 'id': rid})
             while n := self._u32():

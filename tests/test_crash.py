@@ -27,7 +27,7 @@ def app(tmp_path, monkeypatch):
     monkeypatch.setenv('GEMINI_API_KEY', KEY)
     monkeypatch.setattr(crash, '_private', set())
     monkeypatch.setattr(crash, '_said', crash.collections.deque(maxlen=40))
-    monkeypatch.setattr(crash, '_words', None)
+    monkeypatch.setattr(crash, '_seen', set())
     monkeypatch.setattr(crash, '_partial', ())
     monkeypatch.setattr(crash, 'on_report', [])
     root = logging.getLogger()
@@ -76,7 +76,8 @@ def test_reports_and_the_log_hold_no_user_data(app, monkeypatch):
         logging.getLogger('peresmeshnik.app').exception('control')
 
     def worker():
-        raise ValueError(f'voice {VOICE} at {crash.Path.home() / "voices" / VOICE}: meet on wednesday ({LISTED})')
+        raise ValueError(f'voice {VOICE} at {crash.Path.home() / "voices" / VOICE}: {meet} ({LISTED})')
+    meet = 'meet on ' + 'wednesday'  # a variable: a frame's source line is code, scrubbed of private values only
     t = threading.Thread(target=worker, name='speak')
     t.start()
     t.join()
@@ -395,3 +396,54 @@ def test_a_killed_piper_runner_restarts_the_side(app, monkeypatch):
         assert not leaks(reports[0].read_text('utf-8'))
     finally:
         ctl.quit()
+
+
+def test_the_loopholes_of_the_scrub_are_closed(app, monkeypatch):
+    """L-42: what F1 got past the scrub: short words and names, a part of a Chinese or Japanese phrase (no spaces), the
+    words of a clause said long ago, a third-party logger's ready message, the cause of a chained exception kept whole,
+    the home folder URL-encoded and the host's name."""
+    import platform
+    import urllib.parse
+    crash.said('Мой PIN 4821, собака Rex. Поднимите', 'My PIN is 4821, the dog is Rex. Raise it')
+    crash.said('我们明天在新西伯利亚机场见面', '明日ノボシビルスク空港で会いましょう')
+    for i in range(40):  # 40 clauses later
+        crash.said(f'clause {i}', f'фраза {i}')
+    host = platform.node()
+    why = 'the cause: ' + 'Novosibirsk airport ' * 30 + 'END' + '-OF-CAUSE'  # not in the stack's source lines
+    what = f'PIN dog Rex 新西伯利亚 ノボシビルスク at {urllib.parse.quote(str(crash.Path.home()), safe="")} on {host}'
+    try:
+        try:
+            raise OSError(why)
+        except OSError as cause:
+            raise RuntimeError(what) from cause
+    except RuntimeError:
+        logging.getLogger('peresmeshnik.app').exception('control')
+    logging.getLogger('onnxruntime.something').warning('a built message: собака Rex, 明天在新西伯利亚')
+    logged = crash.log_file().read_text('utf-8')
+    print(ascii(logged[-1500:]))
+    for x in ('PIN', 'Rex', 'собака', '新西伯利亚', 'ノボシビルスク', '明天', urllib.parse.quote(str(crash.Path.home()), safe=''),
+              'END-OF-CAUSE'):
+        assert x not in logged, x
+    assert host not in logged or len(host) < 3
+    assert 'RuntimeError' in logged and 'OSError' in logged and 'onnxruntime.something' in logged  # what, still
+    assert 'raise RuntimeError(what) from cause' in logged  # a frame is code: a word said ("raise") stays there
+
+
+def test_the_apps_own_words_stay_in_what_happened(app):
+    """CI: "the" said in a call does not eat the app's own text from "What happened"; the exception's text in it goes."""
+    crash.said('the dog Rex barked', 'собака Рекс лаяла')
+    e = ValueError('Rex barked at 3')
+    p = crash.report(f'them → me: the translation failed (ValueError: {e})', e)
+    first = p.read_text('utf-8').splitlines()[0]
+    assert first.startswith('What happened: them → me: the translation failed (ValueError: ') and 'Rex' not in first, first
+
+
+def test_a_generic_host_name_is_not_scrubbed(app, monkeypatch):
+    """L-42 (review of PR #22): a host named like the system ("linux", "localhost") is no user's name: the stack keeps
+    "x86_64-linux-gnu"; a host of the user's own is scrubbed."""
+    import platform
+    for host, kept in (('linux', True), ('localhost', True), ('ivans-laptop', False)):
+        monkeypatch.setattr(crash, '_private', set())
+        monkeypatch.setattr(platform, 'node', lambda host=host: host)
+        crash.install(app)
+        assert (crash.scrub(f'lib/x86_64-{host}-gnu/libc.so') == f'lib/x86_64-{host}-gnu/libc.so') is kept, host

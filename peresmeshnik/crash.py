@@ -13,8 +13,10 @@ app, the voice profile's name, keys or the user's name in paths (`clean`, `scrub
   logger's JSON keeps only its numbers. Every log call of the app passes data as arguments (none builds its message);
 - what is left as text (exception messages, the stack) loses the private values known: the settings' devices, call app
   and voice, the voice profiles, the devices seen this run (`private()`) and listed now, the key and anything shaped like
-  one, the home folder and the user's name, and the last subtitles (`said()`, kept in memory only) whole and word by
-  word (words of 4 letters and more: shorter ones are mostly "the", "and", "это").
+  one, the home folder (URL-encoded too), the user's and the host's names, the last subtitles (`said()`, kept in
+  memory only) whole, every word of 3 letters and more said this run, and any Chinese / Japanese / Korean character
+  said (no spaces there: a part of a phrase is not a word). A third-party logger's message is text built with its
+  data: it is scrubbed as an exception text is. Each exception of a chain has its text cut short.
 """
 from __future__ import annotations
 
@@ -47,8 +49,10 @@ PRIVATE_PROPS = ('.description', '.alias', '.nick', '.product.name', '.serial', 
 NOISY = ('websockets', 'google_genai', 'httpx', 'httpcore', 'urllib3', 'asyncio')
 _private: set[str] = set()
 _said: collections.deque = collections.deque(maxlen=40)  # the last subtitles' texts, in memory only
+_seen: set[str] = set()  # every word (3+ letters, lower case) and CJK character said this run, in memory only (L-42)
+CJK = re.compile(r'[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff]')
+WORD = re.compile(rf'{CJK.pattern}+|\w{{3,}}')  # a run of CJK characters (no spaces there), else a word
 _partial: tuple = ()  # the clause in progress: its latest partial subtitle
-_words = None  # their words as one pattern, made when needed
 _lock = threading.Lock()
 _fault = None
 on_report = []  # callbacks(path, quiet): the tray says it once (quiet: the app's own message says it already)
@@ -63,45 +67,54 @@ def log_file() -> Path:
     return config.data_dir() / 'logs' / 'peresmeshnik.log'
 
 
+GENERIC_HOSTS = {'linux', 'localhost', 'ubuntu', 'debian', 'fedora'}  # no user's name: words of a stack ("x86_64-linux-gnu")
+
+
 def private(*values: str) -> None:
     """Names the app saw that must not reach a report (a device, the call app)."""
     with _lock:
-        _private.update(v for v in values if v and len(v) >= 3)
+        _private.update(v for v in values if v and len(v) >= 2)  # a short one only as a whole word (scrub)
 
 
 def said(*texts: str, final: bool = True) -> None:
     """Subtitles shown (what was said and its translation): scrubbed from any text that reaches a report. The finals
     are kept (the last 20 clauses); of the partials only the clause's latest (each grows into the next)."""
-    global _words, _partial
+    global _partial
     with _lock:
         if not final:
-            _partial, _words = tuple(t for t in texts if t), None
+            _partial = tuple(t for t in texts if t)
             return
         _partial = ()
         for t in texts:
             if t and (not _said or _said[-1] != t):
                 _said.append(t)
-        _words = None
+                _seen.update(_tokens(t))
+
+
+def _tokens(t: str) -> set[str]:
+    return {*(w.lower() for w in re.findall(r'\w{3,}', t)), *CJK.findall(t)}
+
+
+def _said_word(m: re.Match, seen: set[str]) -> str:
+    w = m[0]  # a CJK run goes when any of its characters was said: its words have no boundaries to find
+    return '<…>' if (any(c in seen for c in w) if CJK.match(w) else w.lower() in seen) else w
 
 
 def scrub(text: str, words: bool = True) -> str:
-    """Private values out of a text; `words`: the last subtitles' words too (exception texts: a log line's own format
-    string is code, its text arguments are gone already)."""
-    global _words
+    """Private values out of a text; `words`: the words said this run too (exception texts and other libraries' messages;
+    not a log line's own format string nor a stack's frames: they are code, and a run's words would eat them)."""
     with _lock:
         texts = (*_said, *_partial)
         values = sorted(_private | set(texts), key=len, reverse=True)
-        if words and _words is None and texts:
-            words = sorted({w for t in texts for w in re.findall(r'\w{4,}', t)}, key=len, reverse=True)
-            _words = re.compile(r'\b(?:' + '|'.join(map(re.escape, words)) + r')\b', re.IGNORECASE) if words else False
-        words = words and _words
-    for v in values:
-        text = text.replace(v, '<…>')
-    if words:
-        text = words.sub('<…>', text)
+        seen = (_seen.union(*map(_tokens, _partial)) if _partial else _seen) if words else set()  # a set: no pattern
+    for v in values:  # any case ("YETI MIC" logged as "Yeti Mic"); a short name ("hp") only as a whole word
+        text = re.sub(rf'\b{re.escape(v)}\b' if len(v) < 4 else re.escape(v), lambda m: '<…>', text, flags=re.IGNORECASE)
+    if seen:
+        text = WORD.sub(lambda m: _said_word(m, seen), text)
     text = KEY.sub('<key>', text)
     home = str(Path.home())
-    for h in {home, home.replace('\\', '/'), home.replace('\\', '\\\\')}:
+    from urllib.parse import quote
+    for h in {home, home.replace('\\', '/'), home.replace('\\', '\\\\'), quote(home, safe=''), quote(home)}:
         text = re.sub(re.escape(h), '~', text, flags=re.IGNORECASE if sys.platform == 'win32' else 0)
     try:
         import getpass
@@ -127,16 +140,25 @@ def clean(record: logging.LogRecord) -> str:
         except (TypeError, ValueError):
             pass
     line = scrub(f'{time.strftime("%H:%M:%S", time.localtime(record.created))} {record.levelname[0]} {record.name} {msg}',
-                 words=False)
+                 words=not record.name.startswith('peresmeshnik'))  # another library's message is built with its data
     if record.exc_info and record.exc_info[1] is not None:
-        line += '\n' + scrub(_stack(record.exc_info[1]))
+        line += '\n' + _stack(record.exc_info[1])
     return line
 
 
 def _stack(e: BaseException) -> str:
-    """The stack with the exception's own text cut short (it is the part that may carry data)."""
-    lines = traceback.format_exception(type(e), e, e.__traceback__)
-    return ''.join(lines[:-1]) + f'{type(e).__module__}.{type(e).__qualname__}: {str(e)[:300]}'
+    """The stack, scrubbed: each exception's own text (its causes' too) cut short and without the words said, the
+    frames (code) without the private values only."""
+    te = x = traceback.TracebackException.from_exception(e)
+    seen: set[int] = set()
+    while x is not None and id(x) not in seen:
+        seen.add(id(x))
+        if isinstance(getattr(x, '_str', None), str):  # its text (CPython's name for it)
+            x._str = x._str[:300]
+        x = x.__cause__ or (None if x.__suppress_context__ else x.__context__)
+    parts = list(te.format())[:-1] + [f'{type(e).__module__}.{type(e).__qualname__}: {str(e)[:300]}']
+    return ''.join(scrub(p, words=not p.startswith(('Traceback', '  File', '\nThe above', '\nDuring handling')))
+                   for p in parts)
 
 
 class _Handler(logging.handlers.RotatingFileHandler):
@@ -231,9 +253,9 @@ def write(what: str, stack: str, settings=None, log_lines: list[str] | None = No
         _known_private(settings)
         _devices_now()
         text = '\n\n'.join([  # the header is made from the settings' engine ids only: no scrub (it would eat "local")
-            scrub(f'What happened: {what}'), about(settings), scrub('Stack:\n' + stack.rstrip()),
+            scrub(f'What happened: {what}', words=False), about(settings), scrub('Stack:\n' + stack.rstrip(), words=False),
             scrub('The last lines of the log (without what was said, device names or keys):\n' + '\n'.join(
-                _tail() if log_lines is None else log_lines))]) + '\n'
+                _tail() if log_lines is None else log_lines), words=False)]) + '\n'  # both scrubbed with words already
         d = reports_dir()
         d.mkdir(parents=True, exist_ok=True)
         now = time.time()
@@ -251,6 +273,8 @@ def write(what: str, stack: str, settings=None, log_lines: list[str] | None = No
 def report(what: str, e: BaseException | None = None, settings=None, quiet: bool = False) -> Path | None:
     """The app's own report: a direction that died, a helper that ended (`quiet`: the app's message names the report)."""
     stack = _stack(e) if e is not None else ''.join(traceback.format_stack()[:-1])
+    if e is not None and str(e):  # the app's own text keeps its words; the exception's in it (may quote a call) does not
+        what = what.replace(str(e), scrub(str(e)[:300]))
     if settings is None:
         try:
             settings = config.load()
@@ -329,6 +353,8 @@ def install(settings=None, verbose: bool = False) -> list[Path]:
     faulthandler and the exception hooks."""
     global _fault
     _known_private(settings)
+    if len(host := platform.node()) >= 4 and host.lower() not in GENERIC_HOSTS:  # the host's name (often the user's)
+        private(host)
     found = []
     d = reports_dir()
     for f in sorted(d.glob('fault-*.txt')) if d.is_dir() else ():

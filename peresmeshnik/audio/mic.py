@@ -218,7 +218,8 @@ class Mic:
             self._proc = None
 
 
-def followed(saved: str, on_state: Callable[[str], None] = lambda text: None) -> Mic:
+def followed(saved: str, on_state: Callable[[str], None] = lambda text: None,
+             on_died: Callable[[str], None] | None = None) -> Mic:
     """macOS, Windows: the microphone of me -> them, kept by the helper on the saved device, else the default input
     (never a virtual one), back on the saved one when it returns. The helper takes another one at once: the tray says which one
     plays meanwhile, and again when the saved one is back."""
@@ -242,7 +243,12 @@ def followed(saved: str, on_state: Callable[[str], None] = lambda text: None) ->
                 on_state(f'translating (the microphone is back: {name})')
             else:
                 on_state(f'translating ({away["name"] or "your microphone"} went away: {name} meanwhile)')
-    m = Mic(saved, follow=True, on_device=on_device, on_end=lambda why: on_state(f'error: the microphone stopped: {why}'))
+    def end(why: str) -> None:
+        if on_died and native().NO_PERMISSION not in why:  # the helper died: its side starts again (L-18)
+            on_died(why)
+        else:  # no permission: starting again would not help
+            on_state(f'error: the microphone stopped: {why}')
+    m = Mic(saved, follow=True, on_device=on_device, on_end=end)
     return m
 
 
@@ -283,6 +289,11 @@ def record(seconds: float, device: int | str | None = None, sample_rate: int = S
     if not frames and ended:
         raise RuntimeError(ended[0])
     return np.concatenate(frames)[:int(seconds * sample_rate)] if frames else np.zeros(0, np.float32)
+
+
+def finite(x: np.ndarray) -> np.ndarray:
+    """NaN / inf (a GPU's synthesis, a driver) as silence: one such sample made the level and the gain NaN for good (L-45)."""
+    return x if np.isfinite(x).all() else np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 class LiveSwitch:
@@ -326,6 +337,7 @@ class LiveSwitch:
 
     # Direction
     def feed(self, pcm: np.ndarray) -> None:
+        pcm = finite(pcm)
         self._mic(pcm)
         if not self.live:
             self.inner.feed(pcm)
@@ -387,6 +399,7 @@ class LiveSwitch:
         """`buf` (queued, not put out yet) + `x`, translated speech, at the live voice's level and under PEAK. A lower
         gain (a louder peak or level) ramps the end of `buf` down over up to 5 ms; a higher one comes back at RISE_DB,
         a limiter's release, so the cloud's short chunks, each with its own peak, do not pump the level."""
+        x = finite(x)
         self._tts(x)
         if not (peak := float(np.abs(x).max()) if len(x) else 0.0):
             return np.concatenate([buf, x])  # silence (the clone's pause after a sentence) stays as it is

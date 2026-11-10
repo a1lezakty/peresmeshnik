@@ -448,7 +448,7 @@ def test_live_voice_with_a_dead_output_says_so(monkeypatch):
         inp.cb(np.zeros(320, np.float32))
     assert wait_for(lambda: side._live_q.empty() and errors)
     side.stop()
-    assert errors == ['error: them: BlackHole 2ch: the playback stopped (peresmeshnik-audio: BlackHole 2ch went away)']
+    assert errors == ['error: them → me: BlackHole 2ch: the playback stopped (peresmeshnik-audio: BlackHole 2ch went away)']
     assert plays == [320]
 
 
@@ -505,7 +505,7 @@ def test_live_voice_plays_again_when_the_output_is_back(monkeypatch):
         time.sleep(0.01)
     assert wait_for(lambda: side._live_q.empty())
     side.stop()
-    assert errors == ['error: them: BlackHole 2ch: the playback stopped (exit 4)']  # once for the whole outage
+    assert errors == ['error: them → me: BlackHole 2ch: the playback stopped (exit 4)']  # once for the whole outage
     assert fails == [0] and len(plays) > 10  # it plays again
 
 

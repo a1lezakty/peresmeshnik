@@ -471,7 +471,7 @@ def test_side_reports_a_dead_direction_and_closes_the_cloud_on_a_failed_start(mo
     side = Side('them', s, FakeIn(), FakeOut(), type('O', (), {'show': lambda self, c: None})(), errors.append)
     side.start()
     side.stop()
-    assert errors == ['error: them: quota exceeded']
+    assert errors == ['error: them → me: quota exceeded']
 
     s.them_to_me, s.cloud.subtitles = 'cloud', False  # cloud voice + local subtitles that fail to load
     opened = []

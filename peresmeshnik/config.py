@@ -5,13 +5,18 @@
     s.local.threads, s.cloud.translate_model, s.them_to_me ...
     config.save(s)
 
-Unknown keys (from a newer version) are ignored with a warning; a wrong type is an error.
+Unknown keys (from a newer version) are ignored with a warning; a value of the wrong type keeps its default, a file that
+does not parse is kept aside as settings.toml.bad and the defaults are used. A file read only in part sends nothing to the
+cloud: both directions are local, and `problem` says why (the app shows it at start and when translation goes on).
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import sys
+import tempfile
+import time
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 
@@ -114,6 +119,9 @@ class Settings:
     their_lang: str = 'en'
     them_to_me: str = 'local'  # 'local' | 'cloud'
     me_to_them: str = 'cloud'  # default for an 8 GB Mac (ARCHITECTURE §6): no live local clone there
+    # the sides ('them_to_me', 'me_to_them') the app itself moved to the cloud, for a pair they cannot run locally: they
+    # go back to 'local' with a pair that can (a side the user set to 'cloud' is not here)
+    forced_cloud: list[str] = field(default_factory=list)
     models_dir: str = ''  # '' = <cache dir>/models; $PERESMESHNIK_MODELS wins
     local: Local = field(default_factory=Local)
     cloud: Cloud = field(default_factory=Cloud)
@@ -130,7 +138,11 @@ def settings_path() -> Path:
 OLD_DEFAULTS = {'local.mt': {'en-ru': 'opus-mt-en-ru'}}
 
 
-def _fill(obj, data: dict, where: str = ''):
+problem = ''  # what the last load() could not use, for the user ('' = nothing)
+on_unsaved: list = []  # callbacks(why): a save() refused (its settings came from a file that could not be read)
+
+
+def _fill(obj, data: dict, bad: list[str], where: str = ''):
     for k, v in data.items():
         if not hasattr(obj, k):
             print(f'settings: unknown key {where}{k} ignored', file=sys.stderr)
@@ -138,29 +150,57 @@ def _fill(obj, data: dict, where: str = ''):
         cur = getattr(obj, k)
         if is_dataclass(cur):
             if not isinstance(v, dict):
-                raise ValueError(f'settings: [{where}{k}] must be a table')
-            _fill(cur, v, f'{where}{k}.')
+                bad.append(f'[{where}{k}] must be a table')
+                continue
+            _fill(cur, v, bad, f'{where}{k}.')
             continue
         if isinstance(cur, float) and type(v) is int:
             v = float(v)
-        if type(v) is not type(cur) or (isinstance(v, dict) and not all(isinstance(x, str) for x in v.values())):
-            raise ValueError(f'settings: {where}{k} must be {type(cur).__name__}, got {v!r}')
+        if type(v) is not type(cur) or (isinstance(v, dict | list) and not all(isinstance(x, str) for x in
+                                                                               (v.values() if isinstance(v, dict) else v))):
+            bad.append(f'{where}{k} must be {type(cur).__name__}, got {v!r}')
+            continue
         if isinstance(cur, dict) and any(cur.get(x) == y for x, y in v.items()):  # a table saved whole
             v = {x: y for x, y in v.items() if OLD_DEFAULTS.get(f'{where}{k}', {}).get(x) != y}
         setattr(obj, k, {**cur, **v} if isinstance(cur, dict) else v)
 
 
 def load(path: Path | None = None) -> Settings:
+    """Never raises on what the file holds: a broken file must not stop the app (H-01); `problem` names what was not used."""
     import tomllib
-    s, path = Settings(), path or settings_path()
-    if path.exists():
-        _fill(s, tomllib.loads(path.read_text('utf-8')))
+    global problem
+    s, path, bad = Settings(), path or settings_path(), []
+    try:
+        _fill(s, tomllib.loads(path.read_text('utf-8-sig')), bad)  # -sig: Notepad's BOM
+    except FileNotFoundError:  # none yet (the wizard writes it); or kept aside as .bad: local till a new one is saved
+        if (keep := path.with_name(path.name + '.bad')).exists():
+            bad.append(f'it did not parse and is kept as {keep.name}')
+    except ValueError as e:  # TOML or UTF-8: kept aside, not overwritten by the next save
+        keep = path.with_name(path.name + '.bad')
+        try:
+            os.replace(path, keep)
+            bad.append(f'it does not parse ({e}), it is kept as {keep.name}')
+        except OSError as e2:  # held by an antivirus, or gone meanwhile
+            bad.append(f'it does not parse ({e}) and could not be kept aside ({e2})')
+    except OSError as e:  # cannot be opened now (an antivirus holds it): not broken, not moved, not saved over
+        bad.append(f'it cannot be opened ({e})')
+        s._unread = path  # save() refuses these: the user's settings are in that file, these are defaults
     for k in ('them_to_me', 'me_to_them'):
-        if getattr(s, k) not in ENGINES:
-            raise ValueError(f'settings: {k} must be one of {ENGINES}, got {getattr(s, k)!r}')
+        if getattr(s, k) not in ENGINES:  # local, not the default: a typo must not send the voice to Google unasked
+            bad.append(f'{k} must be one of {ENGINES}, got {getattr(s, k)!r}: local is used')
+            setattr(s, k, 'local')
+    if wrong := set(s.forced_cloud) - {'them_to_me', 'me_to_them'}:
+        bad.append(f'forced_cloud may hold only them_to_me, me_to_them, got {sorted(wrong)}')
+        s.forced_cloud = []
     if not 0.2 <= (r := s.local.mic_echo_rho_on) <= 0.8:  # near 0 it zeroes my speech, near 1 lets every echo through
         s.local.mic_echo_rho_on = min(max(r, 0.2), 0.8)
         print(f'settings: local.mic_echo_rho_on {r} is outside 0.2..0.8, {s.local.mic_echo_rho_on} used', file=sys.stderr)
+    if bad:  # read in part: nothing goes to the cloud by a mistake in the file (the key is kept apart, H-01)
+        s.them_to_me = s.me_to_them = 'local'
+        bad.insert(0, f'{path.name} could not be read whole, both directions are local now')
+    for b in bad:
+        print(f'settings: {b}', file=sys.stderr)
+    problem = f'{bad[0]}: {"; ".join(bad[1:])}' if bad else ''
     return s
 
 
@@ -169,10 +209,13 @@ def _toml(v) -> str:
         return 'true' if v else 'false'
     if isinstance(v, int | float):
         return repr(v)
-    if isinstance(v, str):
-        return json.dumps(v, ensure_ascii=False)  # JSON string escapes are valid TOML basic strings
+    if isinstance(v, str):  # JSON string escapes are valid TOML basic strings; TOML also wants DEL escaped and cannot
+        # hold a lone surrogate (a device name from the OS not in UTF-16 norm): U+FFFD, and the file stays readable
+        return json.dumps(re.sub('[\ud800-\udfff]', '\ufffd', v), ensure_ascii=False).replace('\x7f', '\\u007f')
+    if isinstance(v, list):
+        return '[' + ', '.join(_toml(x) for x in v) + ']'
     if isinstance(v, dict):
-        return '{ ' + ', '.join(f'{json.dumps(k)} = {_toml(x)}' for k, x in v.items()) + ' }'
+        return '{ ' + ', '.join(f'{_toml(k)} = {_toml(x)}' for k, x in v.items()) + ' }'
     raise TypeError(f'cannot write {v!r} to TOML')
 
 
@@ -182,6 +225,12 @@ def _changed(v, default):
 
 def save(s: Settings, path: Path | None = None) -> Path:
     path = path or settings_path()
+    if getattr(s, '_unread', None) == path:  # a click in the tray after a load that could not open the file
+        why = f'{path.name} cannot be read now, nothing saved'
+        print(f'settings: {why}', file=sys.stderr)
+        for cb in on_unsaved:
+            cb(why)
+        return path
     top, tables = [], []
     for f in fields(s):
         v = getattr(s, f.name)
@@ -191,6 +240,23 @@ def save(s: Settings, path: Path | None = None) -> Path:
                                                      for g in fields(v)))
         else:
             top.append(f'{f.name} = {_toml(v)}\n')
+    data = ''.join(top + tables).encode('utf-8')
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(''.join(top + tables), 'utf-8')
+    fd, tmp = tempfile.mkstemp(prefix=path.name, suffix='.tmp', dir=path.parent)  # whole or not at all: a crash or
+    try:  # a full disk mid-write leaves the old file (H-01)
+        with os.fdopen(fd, 'wb') as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        for wait in (0.05, 0.2, 0.5, None):  # Windows: an antivirus or a backup tool holds the file a moment
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if wait is None:
+                    raise
+                time.sleep(wait)
+    except BaseException:
+        os.unlink(tmp)
+        raise
     return path

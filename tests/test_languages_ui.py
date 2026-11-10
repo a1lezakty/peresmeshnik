@@ -196,11 +196,11 @@ def test_tray_pair_switch_details(tmp_path, monkeypatch):
     s = wire(config.Settings(them_to_me='local', me_to_them='local'))
     t, calls = tray_with(monkeypatch, tmp_path, s, on=False)
     switched = []
-    real_switch, t.switch_pair = t.switch_pair, lambda my, their: switched.append((my, their))
+    real_switch, t.switch_pair = t.switch_pair, lambda my, their, engines=None: switched.append((my, their))
     pick = {k: {a.data()[1]: a for a in g.actions()} for k, g in t.langs.items()}
     pick['my_lang']['ru'].trigger()  # already mine
     assert switched == []
-    t._pair = (config.Settings(my_lang='de', their_lang='ja'), [], [])  # de -> ja downloading
+    t._pair = (config.Settings(my_lang='de', their_lang='ja'), [], [], {})  # de -> ja downloading
     pick['their_lang']['ko'].trigger()
     assert switched == [('de', 'ko')]  # from the pair on its way, not from the saved ru / en
     t._pair, t.switch_pair = None, real_switch
@@ -268,7 +268,7 @@ def test_settings_window_changes_only_the_pair_without_a_restart(tmp_path, monke
     t, calls = tray_with(monkeypatch, tmp_path, wire(config.Settings()))
     restarts, switched = [], []
     t.restart = lambda: restarts.append(1)
-    t.switch_pair = lambda my, their: switched.append((my, their))
+    t.switch_pair = lambda my, their, engines=None: switched.append((my, their))
     d = tray_mod.SettingsDialog(t)
     d.their_lang.setCurrentIndex(d.their_lang.findData('ja'))
     d.save()
@@ -667,3 +667,69 @@ def test_languages_page_brings_back_a_side_it_moved_to_the_cloud(tmp_path, monke
     page.their_lang.setCurrentIndex(page.their_lang.findData('fr'))
     page.their_lang.setCurrentIndex(page.their_lang.findData('ja'))
     assert engines() == ('local', 'cloud')
+
+
+def test_local_from_the_tray_or_settings_downloads_its_models_first(tmp_path, monkeypatch, server):
+    """M-07: "local" chosen in the tray menu (or the settings window) for a side whose models are not here: they are
+    downloaded first, as for a new pair, then it is saved and the sides are made again — not saved at once into a start
+    that fails. A pair the side cannot run locally: said why, nothing changes."""
+    from peresmeshnik.ui import tray as tray_mod
+    httpd, url = server
+    blob = b'm' * 40_000
+    (httpd.root / 'w.bin').write_bytes(blob)
+    s = wire(config.Settings(my_lang='de', their_lang='ja', them_to_me='cloud', me_to_them='cloud'))
+    s.local.clone, s.cloud.subtitles = 'piper', True  # the cloud's subtitles: a cloud side needs nothing local
+    t, calls = tray_with(monkeypatch, tmp_path, s)
+    stand_ins(monkeypatch, url, files={'w.bin': {'sha256': hashlib.sha256(blob).hexdigest(), 'size': len(blob)}})
+    local = {k: next(a for a in g.actions() if a.data()[1] == 'local') for k, g in t.engines.items()}
+    local['them_to_me'].trigger()
+    assert config.load().them_to_me == 'cloud' and any('downloading' in m for m in t.said), t.said  # not yet
+    assert wait_for(lambda: calls, 30)
+    got = config.load()
+    assert (got.them_to_me, got.me_to_them) == ('local', 'cloud') and len(calls) == 1
+    fetched = sorted(p.name for p in (tmp_path / 'models').iterdir() if (p / models.MARKER).exists())
+    assert {'asr-ja', 'mt-ja-de', 'tts-de'} <= set(fetched) and 'asr-de' not in fetched  # them -> me's own, nothing else
+
+    d = tray_mod.SettingsDialog(t)
+    d.engine['me_to_them'].setCurrentText('local')
+    d.save()
+    assert wait_for(lambda: len(calls) == 2, 30) and config.load().me_to_them == 'local'
+    assert 'asr-de' in [p.name for p in (tmp_path / 'models').iterdir() if (p / models.MARKER).exists()]
+
+    got.my_lang, got.their_lang, got.them_to_me = 'de', 'fr', 'cloud'  # nothing local for French
+    config.save(got)
+    t.sync()
+    local['them_to_me'].trigger()
+    settle(0.1)
+    assert config.load().them_to_me == 'cloud' and len(calls) == 2
+    assert 'Them → me cannot run on this computer for German ⇄ French (no local speech recognition for French' in t.said[-1]
+    assert local['them_to_me'].isChecked() is False  # the menu shows what runs
+
+
+def test_voice_page_without_an_nvidia_gpu_asks_for_no_recording(tmp_path, monkeypatch):
+    """M-23: no NVIDIA GPU (a Mac, most laptops): me -> them local speaks in the stock voice, says why, and wants no
+    recording; nothing says the clone "runs on the CPU"."""
+    from peresmeshnik.ui import wizard
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
+    s = config.Settings(me_to_them='local')
+    page = wizard.VoicePage(type('W', (), {'s': s})())
+    page.initializePage()
+    assert page.isComplete() and page.record_button.isHidden() and page.own.isHidden()
+    assert languages.clone_why(s.local.clone, 'en') in page.subTitle() and 'runs on the CPU' not in page.subTitle()
+
+
+def test_languages_page_says_what_a_cloud_side_falls_back_on(tmp_path, monkeypatch):
+    """H-09: a cloud side says whether it goes on locally when the cloud fails (its stock voice is downloaded) or stops
+    until the cloud is back (subtitles from the cloud: nothing local to fall back on)."""
+    from peresmeshnik.ui import wizard
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    monkeypatch.setenv('PERESMESHNIK_MODELS', str(tmp_path / 'models'))
+    monkeypatch.setenv('GEMINI_API_KEY', 'a-key')
+    stand_ins(monkeypatch)
+    s = wire(config.Settings(my_lang='de', their_lang='ja', them_to_me='cloud', me_to_them='cloud'))
+    s.local.clone = 'piper'
+    config.save(s)
+    page = wizard.LanguagesPage(type('W', (), {'s': s})())
+    assert 'If the cloud fails, it goes on on this computer' in page.why['them_to_me'].text()
+    page.subtitles.setChecked(True)
+    assert 'If the cloud fails, it stops until the cloud is back' in page.why['them_to_me'].text()

@@ -269,12 +269,10 @@ class Tray(QObject):
             self.message(BROWSER_NOTE)
 
     def _engine_chosen(self, action) -> None:
+        """A side's engine from the menu: through switch_pair, so "local" downloads its models first (M-07)."""
         key, engine = action.data()
-        s = config.load()
-        setattr(s, key, engine)
-        s.forced_cloud = [k for k in s.forced_cloud if k != key]  # the user's own choice now: a pair does not move it back
-        config.save(s)
-        self.restart()
+        base, chosen = (self._pair[0], self._pair[3]) if self._pair else (config.load(), {})  # a change on its way: further
+        self.switch_pair(base.my_lang, base.their_lang, {**chosen, key: engine})
 
     def _lang_chosen(self, action) -> None:
         key, code = action.data()
@@ -285,32 +283,54 @@ class Tray(QObject):
         pair[key] = code
         if (pair['my_lang'], pair['their_lang']) == (base.my_lang, base.their_lang):  # the language it has: nothing to do
             return
-        self.switch_pair(pair['my_lang'], pair['their_lang'])
+        self.switch_pair(pair['my_lang'], pair['their_lang'], self._pair[3] if self._pair else None)
 
     def confirm(self, text: str) -> bool:
+        """Yes / No, in front: a tray app is not active by itself, its question would open behind the other windows."""
         from PySide6.QtWidgets import QMessageBox
-        return QMessageBox.question(None, 'Peresmeshnik', text) == QMessageBox.Yes
+        box = QMessageBox(QMessageBox.Question, 'Peresmeshnik', text, QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.No)
+        box.show()
+        box.raise_()
+        box.activateWindow()
+        if sys.platform == 'darwin':
+            from peresmeshnik.ui import macos
+            macos.front(int(box.winId()))
+        return box.exec() == QMessageBox.Yes
 
-    def switch_pair(self, my: str, their: str) -> None:
-        """Another pair without restarting the app: a local side that cannot run for it goes to the cloud only when the
-        user says yes (its sound goes to Google), and is remembered as moved (`forced_cloud`): a later pair it can run
-        brings it back to local. What a local side does differently is said (a stock voice instead of the clone); its
-        missing models are fetched first (size and licenses said, restricted ones asked) while translation goes on with
-        the old pair; then it is saved and the sides are made again for it (Controller.set_languages)."""
+    def switch_pair(self, my: str, their: str, engines: dict[str, str] | None = None) -> None:
+        """Another pair, or another engine for a side (`engines`, the user's choice), without restarting the app: a local
+        side that cannot run for the pair goes to the cloud only when the user says yes (its sound goes to Google), and
+        is remembered as moved (`forced_cloud`): a later pair it can run brings it back to local; a side the user sets to
+        local where it cannot run is said why and nothing changes. What a local side does differently is said (a stock
+        voice instead of the clone); the missing models are fetched first (size and licenses said, restricted ones asked)
+        while translation goes on as it is; then it is saved and the sides are made again (Controller.set_languages)."""
         from peresmeshnik import models
         from peresmeshnik.ui.overlay import font_note
         from peresmeshnik.ui.wizard import has_key
         s = config.load()
-        if (my, their) == (s.my_lang, s.their_lang):  # back to the pair it runs in: another's download is let go (unused)
+        if kept := [k for k, v in (engines or {}).items() if v == getattr(s, k) and k in s.forced_cloud]:
+            s.forced_cloud = [k for k in s.forced_cloud if k not in kept]  # the cloud the app chose, now the user's too
+            config.save(s)
+        engines = {k: v for k, v in (engines or {}).items() if v != getattr(s, k)}
+        if (my, their) == (s.my_lang, s.their_lang) and not engines:  # back to what runs: another's download is let go
             self._pair = None
             self.status.setText(self.icon.toolTip().removeprefix('Peresmeshnik: ')[:120])  # the last state, as before it
             self.sync()
             return
+        pair = f'{languages.name(my)} ⇄ {languages.name(their)}'
+        name = ', '.join(([pair] if (my, their) != (s.my_lang, s.their_lang) else []) + [f'{SIDES[k]}: {v}' for k, v in engines.items()])
         s.my_lang, s.their_lang = my, their
-        name = f'{languages.name(my)} ⇄ {languages.name(their)}'
+        for key, engine in engines.items():
+            setattr(s, key, engine)
+            s.forced_cloud = [k for k in s.forced_cloud if k != key]  # the user's own choice: a pair does not move it back
         notes, moved, back, why = [], [], [], {}
         for key in languages.SIDES:
             d = languages.direction(s, key)
+            if getattr(s, key) == 'local' and not d.local and key in engines:
+                self.message(f'{SIDES[key]} cannot run on this computer for {pair} ({"; ".join(d.why)}): not changed')
+                self.sync()
+                return
             if getattr(s, key) == 'local' and not d.local:
                 setattr(s, key, 'cloud')
                 moved.append(key)
@@ -343,13 +363,13 @@ class Tray(QObject):
             return
         if note := font_note([my, their]):
             notes.append(note)
-        self._pair = s, moved, back
+        self._pair = s, moved, back, engines
         if not todo:
             if notes:
                 self.message(f'{name}: ' + '. '.join(notes))
             return self._pair_ready(s, '')
-        self.message(f'{name}: downloading {sum(map(models.size, todo)) / 1e6:,.0f} MB ({lic}); translation goes on with the '
-                     'old pair meanwhile' + ''.join(f'. {n}' for n in notes))
+        self.message(f'{name}: downloading {sum(map(models.size, todo)) / 1e6:,.0f} MB ({lic}); translation goes on as it is '
+                     'meanwhile' + ''.join(f'. {n}' for n in notes))
         self.status.setText(f'downloading the models for {name}')  # the Translation check stays as it is
 
         def work():
@@ -357,24 +377,24 @@ class Tray(QObject):
                 for m in todo:
                     models.fetch(m.id)  # one download per model at a time (the wizard may fetch it too)
                 self.pair_ready.emit(s, '')
-            except Exception as e:  # the network: the .part files stay, choosing the pair again resumes them
+            except Exception as e:  # the network: the .part files stay, choosing it again resumes them
                 self.pair_ready.emit(s, str(e))
         threading.Thread(target=work, name='pair-fetch', daemon=True).start()
 
     def _pair_ready(self, s: config.Settings, err: str) -> None:
         if not self._pair or s is not self._pair[0]:  # another pair was chosen since
             return
-        (_, moved, back), self._pair = self._pair, None
+        (_, moved, back, engines), self._pair = self._pair, None
         name = f'{languages.name(s.my_lang)} ⇄ {languages.name(s.their_lang)}'
         if err:
             self.set_state(f'error: {name} not changed: the download failed ({err}); choose it again to resume')
             self.sync()
             return
-        saved = config.load()  # the pair, and the sides it moved; the rest as saved now (changed meanwhile)
+        saved = config.load()  # the pair, and the sides it or the user moved; the rest as saved now (changed meanwhile)
         saved.my_lang, saved.their_lang = s.my_lang, s.their_lang
-        for key in moved + back:
-            setattr(saved, key, 'cloud' if key in moved else 'local')
-        saved.forced_cloud = [k for k in languages.SIDES if k in moved or (k in saved.forced_cloud and k not in back)]
+        for key in moved + back + list(engines):
+            setattr(saved, key, getattr(s, key))
+        saved.forced_cloud = [k for k in languages.SIDES if k in moved or (k in saved.forced_cloud and k not in back + list(engines))]
         config.save(saved)
         self.sync()
         self.ctl.set_languages()  # its control thread knows whether translation is on (a start may be under way)
@@ -544,10 +564,7 @@ class SettingsDialog(QDialog):
         if pair[0] == pair[1]:
             self.note.setText('Choose two different languages.')
             return
-        for key, c in self.engine.items():
-            if c.currentText() != getattr(s, key):  # the user's own choice: a pair does not move it back
-                s.forced_cloud = [k for k in s.forced_cloud if k != key]
-            setattr(s, key, c.currentText())
+        engines = {key: c.currentText() for key, c in self.engine.items()}  # saved with the pair, once its models are here
         s.cloud.subtitles = self.subtitles.isChecked()
         s.local.threads = self.threads.value()
         s.local.voice = self.voice.currentData()
@@ -561,10 +578,10 @@ class SettingsDialog(QDialog):
             s.ui.headphones, s.ui.mic = self.headphones.currentData(), self.mic.currentData()
         if new_key := bool(self.key.text().strip()):
             save_key(self.key.text(), s.cloud)
-        if new_key or s != config.load():  # the pair as it was: a new one is saved once its models are here (switch_pair)
+        if new_key or s != config.load():  # the pair and the engines as they were: switch_pair saves them, models first
             config.save(s)
             self.tray.sync()
             self.tray.restart()
-        if pair != (s.my_lang, s.their_lang):
-            self.tray.switch_pair(*pair)
+        if pair != (s.my_lang, s.their_lang) or any(v != getattr(s, k) for k, v in engines.items()):
+            self.tray.switch_pair(*pair, engines)
         self.accept()

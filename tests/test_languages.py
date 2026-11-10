@@ -30,7 +30,7 @@ def test_ru_en_is_local_both_ways():
     assert them.local and me.local and them.subtitles
     assert them.models == (s.local.asr['en'], s.local.mt['en-ru'], s.local.tts['ru'])
     assert (me.tts, me.voice, me.notes) == (s.local.clone, 'clone', ())
-    assert languages.direction(s, 'me_to_them', has_gpu=False).notes  # the clone falls behind without an NVIDIA GPU
+    assert languages.direction(s, 'me_to_them', has_gpu=False).notes  # no clone without an NVIDIA GPU: a stock voice
     s.local.clone = 'piper'
     me = languages.direction(s, 'me_to_them', has_gpu=False)
     assert (me.tts, me.voice, me.notes) == (s.local.tts['en'], 'stock', ())
@@ -100,10 +100,11 @@ def test_a_model_that_needs_a_gpu_is_not_offered_without_one(monkeypatch):
     assert languages.direction(s, 'them_to_me', has_gpu=True).local
     me = languages.direction(s, 'me_to_them', has_gpu=False)
     assert me.local and (me.tts, me.voice) == ('tts-ja', 'stock')
-    assert me.notes == ('your cloned voice needs an NVIDIA GPU: a stock voice speaks instead',)
+    assert me.notes == (f'{languages.clone_why("clone-big", has_gpu=False)}: a stock voice speaks instead',)
     assert languages.direction(s, 'me_to_them', has_gpu=True).voice == 'clone'
     s.local.tts = {'de': 'tts-de'}  # and no stock voice for Japanese: no local voice, and why
-    assert languages.direction(s, 'me_to_them', has_gpu=False).why == ('your cloned voice needs an NVIDIA GPU',)
+    assert languages.direction(s, 'me_to_them', has_gpu=False).why == (
+        f'{languages.clone_why("clone-big", has_gpu=False)}; no local voice for Japanese',)
     assert '| 日本語 (Japanese) | asr-ja (NVIDIA GPU) |' in languages.table(s)
     fake_registry(monkeypatch, stub('asr-de', 'asr', 'de'), stub('mt-many', 'mt', 'de', 'ja'), stub('tts-ja', 'tts', 'ja', needs='gpu'))
     s.local.clone, s.local.tts = 'piper', {'ja': 'tts-ja'}  # a stock voice that needs one: said so, not "no voice"
@@ -180,3 +181,36 @@ def test_the_cloud_gets_the_mapped_codes():
     assert _Link(d, 'transcribe').config().input_audio_transcription.language_codes == ['ar-EG']
     assert (languages.CLOUD_TRANSLATE['zh'], languages.CLOUD_TRANSCRIBE['zh'], languages.CLOUD_TRANSCRIBE['es']) == \
         ('zh-Hans', 'cmn-Hans-CN', 'es-419')
+
+
+def test_the_clone_is_offered_only_where_it_can_speak(monkeypatch):
+    """M-23: `clone_why` is the one answer to "can the clone speak here": XTTS-v2 keeps up only on an NVIDIA GPU (its
+    registry row says `needs = "gpu"`), so without one me -> them local speaks in the stock voice, nothing of the clone is
+    downloaded and the why is said; a language it has no stock voice for is then not local at all (M-24), said why."""
+    s = config.Settings(me_to_them='local')
+    assert languages.clone_why(s.local.clone, 'en', has_gpu=True) == ''
+    assert languages.clone_why(s.local.clone, 'en', has_gpu=False) in ('your cloned voice needs an NVIDIA GPU',
+                                                                       'no clone of your voice keeps up on a Mac')
+    assert languages.clone_why(s.local.clone, 'uk', has_gpu=True) == 'your cloned voice cannot speak Ukrainian'
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
+    me = languages.direction(s, 'me_to_them')
+    assert me.local and me.voice == 'stock' and me.tts == s.local.tts['en']
+    assert me.notes == (f'{languages.clone_why(s.local.clone, "en")}: a stock voice speaks instead',)
+    assert 'xtts-v2' not in languages.needed_models(s)
+    s.their_lang = 'zh'  # no stock voice for Chinese
+    me = languages.direction(s, 'me_to_them')
+    assert not me.local and me.why == (f'{languages.clone_why(s.local.clone, "zh")}; no local voice for Chinese',)
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
+    me = languages.direction(s, 'me_to_them')
+    assert me.voice == 'clone' and 'no stock voice for Chinese takes over if your cloned voice fails' in me.notes
+
+
+def test_a_cloud_side_downloads_its_fallback_voice():
+    """H-09: a cloud side with local subtitles can go local when the cloud fails: its stock voice is downloaded too; with
+    the cloud's subtitles (no local ASR + MT) there is nothing local to fall back on, so nothing is."""
+    s = config.Settings(my_lang='ru', their_lang='de', them_to_me='cloud', me_to_them='cloud')
+    s.local.clone = 'piper'
+    ids = languages.needed_models(s)
+    assert s.local.tts['ru'] in ids and s.local.tts['de'] in ids  # them -> me speaks Russian, me -> them German
+    s.cloud.subtitles = True
+    assert languages.needed_models(s) == ['silero-vad']

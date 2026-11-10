@@ -6,11 +6,13 @@ and the tests all ask this module.
     languages.LANGS                              # ('en', 'ru', 'uk', 'de', ...)
     languages.label('de')                        # 'Deutsch (German)'
     d = languages.direction(s, 'me_to_them')     # Direction: d.local, d.why, d.notes, d.asr/mt/tts, d.voice
+    languages.clone_why(s.local.clone, 'de')     # '' = the clone of my voice speaks German live here, else why not
     languages.needed_models(s)                   # registry ids the chosen engines need, nothing more
 """
 from __future__ import annotations
 
 import shutil
+import sys
 from dataclasses import dataclass
 
 # code: (English name, its own name)
@@ -113,11 +115,23 @@ def gpu(engine: str = '') -> bool:
     return {'asr': device.onnx_cuda, 'mt': device.ct2_cuda}.get(engine, lambda: True)()
 
 
+def clone_why(model_id: str, lang: str = '', has_gpu: bool | None = None) -> str:
+    """Why the clone `model_id` cannot speak `lang` live on this computer ('' = it can): the one answer the wizard, the
+    tray, the app and the cloud's fallback get (through `direction` or directly). It reads the registry — the model's
+    `langs` and `needs = "gpu"` (XTTS-v2 keeps up only on an NVIDIA GPU, BENCH stage 6) — so another clone engine is a
+    registry row, not a change here. `has_gpu` None: look for nvidia-smi."""
+    if lang and not covers(model_id, lang):
+        return f'your cloned voice cannot speak {name(lang)}'
+    if needs_gpu(model_id) and not (gpu() if has_gpu is None else has_gpu):
+        return 'no clone of your voice keeps up on a Mac' if sys.platform == 'darwin' else 'your cloned voice needs an NVIDIA GPU'
+    return ''
+
+
 def direction(s, side: str, has_gpu: bool | None = None) -> Direction:
     """What `side` of the pair in settings `s` runs on locally, and why not. A model with `needs = "gpu"` in the
     registry is not offered without an NVIDIA GPU (`has_gpu` None: look for nvidia-smi, and for the ASR and the MT also for
     CUDA in their engine in the app): for the ASR, the MT and a stock voice the side is then not local (`why`); for the
-    clone the stock voice speaks instead (`notes`), if there is one."""
+    clone (`clone_why`) the stock voice speaks instead (`notes`), if there is one."""
     from peresmeshnik.voice import STOCK
     src, tgt = (s.their_lang, s.my_lang) if side == 'them_to_me' else (s.my_lang, s.their_lang)
     loc, why, notes = s.local, [], []
@@ -140,17 +154,15 @@ def direction(s, side: str, has_gpu: bool | None = None) -> Direction:
         stock, no_voice = '', f'the voice for {name(tgt)} needs an NVIDIA GPU ({stock})'
     tts, voice = stock, 'stock' if stock else ''
     if side == 'me_to_them' and loc.clone != STOCK:
-        if not covers(loc.clone, tgt):
-            instead = f'your cloned voice cannot speak {name(tgt)}'
-        elif needs_gpu(loc.clone) and not has_gpu:
-            instead = no_voice = 'your cloned voice needs an NVIDIA GPU'
+        if instead := clone_why(loc.clone, tgt, has_gpu):
+            if stock:
+                notes.append(f'{instead}: a stock voice speaks instead')
+            else:
+                no_voice = f'{instead}; {no_voice}'
         else:
-            instead, tts, voice = '', loc.clone, 'clone'
-            if not has_gpu:
-                notes.append('your cloned voice falls behind the conversation without an NVIDIA GPU: '
-                             'the cloud or a stock voice keeps up')
-        if instead and stock:
-            notes.append(f'{instead}: a stock voice speaks instead')
+            tts, voice = loc.clone, 'clone'
+            if not stock:  # the clone's fallback (app.py) is the stock voice
+                notes.append(f'no stock voice for {name(tgt)} takes over if your cloned voice fails')
     if not tts:
         why.append(no_voice)
     return Direction(side, src, tgt, asr, mt, tts, voice, tuple(why), tuple(notes), src in CLOUD and tgt in CLOUD)
@@ -171,8 +183,8 @@ def needed_models(s) -> list[str]:
             ids += d.models
             if d.voice == 'clone':  # the clone's fallback (~60 MB): the stock voice when the clone cannot speak (S2)
                 ids += [i for i in [pick(s.local.tts, d.tgt)] if i]
-        elif not cloud_subtitles(s, side):
-            ids += [d.asr, d.mt]
+        elif not cloud_subtitles(s, side):  # local subtitles, and with its stock voice the side's way when the cloud fails
+            ids += [d.asr, d.mt] + [i for i in [d.tts if d.voice == 'stock' else pick(s.local.tts, d.tgt)] if i]
     return list(dict.fromkeys(ids))
 
 

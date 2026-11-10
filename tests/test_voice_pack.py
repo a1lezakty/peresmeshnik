@@ -267,7 +267,8 @@ class FakeDirection:
 
 
 def me_side(monkeypatch, tmp_path, clone_error=None, key=True):
-    from peresmeshnik import app, config, models, pipeline, voice
+    from peresmeshnik import app, config, languages, models, pipeline, voice
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': True)  # an NVIDIA GPU: the clone is chosen (clone_why)
     s = config.Settings()
     s.me_to_them, s.local.voice = 'local', 'me'
     monkeypatch.setattr(models, 'path', lambda model_id: tmp_path)

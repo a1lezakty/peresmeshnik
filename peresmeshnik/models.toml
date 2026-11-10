@@ -1106,6 +1106,7 @@ license = "CPML-1.0"
 license_url = "https://huggingface.co/coqui/XTTS-v2/blob/main/LICENSE.txt"  # coqui.ai is closed
 note = "Coqui Public Model License: noncommercial use only"
 consent = true
+needs = "gpu"  # keeps up live only on an NVIDIA GPU (BENCH stage 6): languages.clone_why
 url = "https://huggingface.co/coqui/XTTS-v2/resolve/6c2b0d75eae4b7047358e3b6bd9325f857d43f77/"
 [xtts-v2.files]
 "config.json" = { sha256 = "ef262b1454dd2a77e1461b0b2cd53e19b8a7624cc131b837d36df67356bc75e8", size = 4368 }

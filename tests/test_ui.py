@@ -196,14 +196,18 @@ def test_selftest_finds_the_chirp_only_when_it_is_there():
     assert selftest.find(sine, ref)[0] < selftest.MIN_SCORE  # a steady tone is no chirp
 
 
-def test_wizard_asks_for_the_right_models():
+def test_wizard_asks_for_the_right_models(monkeypatch):
+    from peresmeshnik import languages
     from peresmeshnik.ui.wizard import needed_models
-    s = config.Settings()  # them -> me local, me -> them cloud with local subtitles
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
+    s = config.Settings()  # them -> me local, me -> them cloud with local subtitles and its fallback voice (H-09)
     assert needed_models(s) == ['silero-vad', 'parakeet-tdt-0.6b-v3', s.local.mt['en-ru'], 'piper-ru_RU-dmitri-medium',
-                                'gigaam-v3-e2e-ctc', 'opus-mt-ru-en']
+                                'gigaam-v3-e2e-ctc', 'opus-mt-ru-en', 'piper-en_US-john-medium']
     s.cloud.subtitles, s.them_to_me = True, 'cloud'
     assert needed_models(s) == ['silero-vad']
-    s.me_to_them = 'local'
+    s.me_to_them = 'local'  # no NVIDIA GPU: no clone (M-23), the stock voice
+    assert needed_models(s) == ['silero-vad', 'gigaam-v3-e2e-ctc', 'opus-mt-ru-en', s.local.tts[s.their_lang]]
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
     assert needed_models(s) == ['silero-vad', 'gigaam-v3-e2e-ctc', 'opus-mt-ru-en', 'xtts-v2',
                                 s.local.tts[s.their_lang]]  # the stock voice: the clone's fallback
 
@@ -386,12 +390,27 @@ def test_wizard_models_page_downloads_with_consent(tmp_path, monkeypatch, server
     assert ('/a.bin', None) in httpd.ranges and any(p == '/a.bin' and r for p, r in httpd.ranges)  # resumed with Range
 
 
+def test_models_page_counts_past_2_gb():
+    """M-13: byte counts above 2**31 (a pair with the clone, most local pairs) reach the page whole from the download
+    thread: '3000 of 3390 MB', not '-905' (a Qt int overflowed)."""
+    from peresmeshnik.ui import wizard
+    page = wizard.ModelsPage(type('W', (), {'s': config.Settings()})())
+    t = threading.Thread(target=lambda: page.progress.emit(3_000_000_000, 3_390_000_000, 'xtts-v2'))
+    t.start()
+    t.join()
+    settle(0.1)
+    assert page.state.text() == 'xtts-v2: 3000 of 3390 MB', page.state.text()
+    assert (page.bar.value(), page.bar.maximum()) == (3_000_000_000 // 1024, 3_390_000_000 // 1024)
+
+
 def test_tray_menu_and_settings_window(tmp_path, monkeypatch):
     """The menu reflects the settings; choosing an engine saves it; the settings window saves its fields
     (the Gemini key into its own file, never into settings.toml) and asks the app to rebind the hotkey."""
+    from peresmeshnik import models
     from peresmeshnik.ui import tray as tray_mod
     monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
     monkeypatch.setattr(config, 'config_dir', lambda: tmp_path)
+    monkeypatch.setattr(models, 'is_fetched', lambda m, base=None: True)  # a side made local: its models are here
     calls = []
 
     class Ctl:
@@ -399,12 +418,19 @@ def test_tray_menu_and_settings_window(tmp_path, monkeypatch):
 
         def set_translation(self, on):
             calls.append(('translation', on))
+
+        def set_languages(self):
+            calls.append(('languages',))
     t = tray_mod.Tray(Ctl())
     texts = [a.text() for a in t.menu.actions()]
     assert {'Translation', 'Live voice', 'Settings…', 'Setup wizard…', 'Quit'} <= set(texts)
+    t.message = lambda text: calls.append(('said', text))
     cloud = next(a for a in t.engines['them_to_me'].actions() if a.data()[1] == 'cloud')
+    cloud.trigger()  # no Gemini key: not changed, said
+    assert config.load().them_to_me == 'local' and 'no Gemini key' in calls.pop()[1]
+    (tmp_path / 'gemini-key').write_text('a-key')
     cloud.trigger()
-    assert config.load().them_to_me == 'cloud'
+    assert config.load().them_to_me == 'cloud' and calls.pop() == ('languages',)  # the sides are made again for it
     t.set_state('translating (them: local)')
     assert t.translation.isChecked() and calls == []  # the state shows, it does not switch anything
     t.reload_hotkey = lambda combo: calls.append(('hotkey', combo)) or ''

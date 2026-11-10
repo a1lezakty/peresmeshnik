@@ -63,9 +63,10 @@ def has_key(s: config.Settings) -> bool:
 MIN_VRAM_GB = 5.5  # the clone (XTTS-v2 ~2 GB) next to them -> me on CUDA (~0.6 GB): a 6 GB card (6144 MiB, some report less)
 
 
-PACK_CONSENT = ('I accept the licenses of the voice pack: PyTorch (BSD-3-Clause), coqui-tts (MPL-2.0), and of the XTTS-v2 '
-                'voice model it runs, the Coqui Public Model License (huggingface.co/coqui/XTTS-v2): noncommercial use '
-                'only, it binds me as the user')
+PACK_CONSENT = ('I accept the licenses of the voice pack: PyTorch (BSD-3-Clause) with the NVIDIA CUDA and cuDNN libraries '
+                'inside it (NVIDIA\'s license terms: docs.nvidia.com/cuda/eula, most of the download), coqui-tts '
+                '(MPL-2.0), and of the XTTS-v2 voice model it runs, the Coqui Public Model License '
+                '(huggingface.co/coqui/XTTS-v2): noncommercial use only, it binds me as the user')
 
 
 MIN_DRIVER = (570, 65)  # Windows: CUDA 12.8 GA's driver (the pack's torch 2.8.0+cu128; NVIDIA's CUDA 12.8.0 notes)
@@ -245,6 +246,11 @@ class LanguagesPage(QWizardPage):
                 text = '✔ Both on this computer and in the cloud.' + ''.join(f' ⚠ {n}.' for n in d.notes if c.currentText() == 'local')
             if c.currentText() == 'cloud' and languages.cloud_subtitles(s, key) and not s.cloud.subtitles:
                 text += ' Its subtitles come from the cloud too.'
+            if c.currentText() == 'cloud':  # the fallback: local subtitles and a stock voice (needed_models), else nothing
+                text += (' If the cloud fails, it goes on on this computer until the cloud is back.'
+                         if d.local and not languages.cloud_subtitles(s, key) else
+                         ' If the cloud fails, it stops until the cloud is back' + (
+                             ' (subtitles from the cloud: nothing on this computer to go on with).' if d.local else '.'))
             if d.src == 'ar' and c.currentText() == 'cloud' and languages.cloud_subtitles(s, key):
                 text += ' Arabic subtitles from the cloud are Egyptian Arabic (Gemini has no other): other dialects come out ' \
                         'worse.'
@@ -517,7 +523,7 @@ class CallSoundPage(QWizardPage):
 
 
 class ModelsPage(QWizardPage):
-    progress = Signal(int, int, str)  # done bytes, total bytes, current model
+    progress = Signal(float, float, str)  # done bytes, total bytes, current model: past 2 GB a Qt int overflows
     finished = Signal(str)  # '' or the error
 
     def __init__(self, w: SetupWizard):
@@ -585,9 +591,9 @@ class ModelsPage(QWizardPage):
                 self.finished.emit(str(e))
         threading.Thread(target=run, name='models-fetch', daemon=True).start()
 
-    def _progress(self, done: int, total: int, mid: str) -> None:
-        self.bar.setMaximum(max(total // 1024, 1))
-        self.bar.setValue(done // 1024)
+    def _progress(self, done: float, total: float, mid: str) -> None:
+        self.bar.setMaximum(max(int(total) // 1024, 1))
+        self.bar.setValue(int(done) // 1024)
         self.state.setText(f'{mid}: {done / 1e6:.0f} of {total / 1e6:.0f} MB')
 
     def _finished(self, err: str) -> None:
@@ -686,6 +692,8 @@ class VoicePage(QWizardPage):
         self.record_button.clicked.connect(self.record)
         self.import_button = QPushButton('Import a recording…')
         self.import_button.clicked.connect(lambda: self.import_file())
+        self.own = QCheckBox('This is my own voice: I record or import only myself, nobody else')  # README's promise
+        self.own.toggled.connect(self._buttons)
         self.stock = QCheckBox('Speak with a stock voice (Piper), not mine: it keeps up on this computer')
         self.stock.toggled.connect(self._stock)
         self.check_button = QPushButton('Check the clone')
@@ -715,6 +723,7 @@ class VoicePage(QWizardPage):
         lay.addLayout(prow)
         lay.addWidget(self.pack_bar)
         lay.addWidget(self.prompt)
+        lay.addWidget(self.own)
         lay.addLayout(row)
         for x in (self.bar, self.out, self.clone_out):
             lay.addWidget(x)
@@ -749,11 +758,9 @@ class VoicePage(QWizardPage):
                          'voice. The recording stays on this computer.' if self.local() else
                          'Optional: "me → them" runs in the cloud, in Gemini\'s voice. Your recording is only needed for the '
                          'local clone.')
-        if self.local() and MACOS:  # no Apple GPU for torch in CI: the clone ran on the CPU there (BENCH)
-            self.setSubTitle(self.subTitle() + ' On this Mac the clone of your voice runs on the CPU and falls behind the '
-                             'conversation: choose cloud for "me → them", or a stock voice.')
         self.prompt.setText(voice.PROMPTS.get(s.my_lang, 'Read any text in your language aloud, at your normal pace.'))
-        self.stock.setVisible(self.local())
+        self.stock.setVisible(self.local() and bool(languages.pick(s.local.tts, s.their_lang)))  # none for zh, ar
+        self.own.setVisible(True)
         self.stock.setChecked(s.local.clone == voice.STOCK)
         self.check_button.setVisible(self.local() and not self.stock.isChecked())
         if not WINDOWS:
@@ -763,7 +770,7 @@ class VoicePage(QWizardPage):
             threading.Thread(target=lambda: self.gpu_found.emit(gpu()), name='gpu', daemon=True).start()
         if why := self.clone_off():  # nothing to record for it: said, and the page can be left
             self.setSubTitle(f'"Me → them" speaks in a stock voice for this pair: {why}. No recording is needed.')
-            for x in (self.stock, self.prompt, self.record_button, self.import_button, self.check_button):
+            for x in (self.stock, self.prompt, self.own, self.record_button, self.import_button, self.check_button):
                 x.setVisible(False)
         if self.voice is None and s.local.voice and (voice.voices_dir() / s.local.voice / 'voice.json').exists():
             self.voice = voice.load(s.local.voice)
@@ -774,8 +781,8 @@ class VoicePage(QWizardPage):
         self._buttons()
 
     def isComplete(self) -> bool:  # noqa: N802
-        return not self.running and not self.packing and (not self.local() or self.stock.isChecked() or self.voice is not None
-                                                          or bool(self.clone_off()))
+        return not self.running and not self.packing and (not self.local() or self.stock.isChecked() or bool(self.clone_off())
+                                                          or self.voice is not None and self.pack() != 'gpu')
 
     def pack(self) -> str:
         """The clone's voice pack here: '' where it is not this page's business (not Windows, cloud, the stock voice, a
@@ -883,7 +890,7 @@ class VoicePage(QWizardPage):
 
     def _buttons(self) -> None:
         for b in (self.record_button, self.import_button):
-            b.setEnabled(not self.running)
+            b.setEnabled(not self.running and self.own.isChecked())
         why = ('Turn translation off first: the check loads a second clone (~3 GB)' if self.translating() else
                self.no_check())
         self.check_button.setEnabled(not self.running and self.voice is not None and not why and self.pack() in ('', 'ready'))

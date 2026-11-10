@@ -42,11 +42,15 @@ def page(tmp_path, monkeypatch):
     from peresmeshnik.ui import wizard
     from peresmeshnik.ui.wizard import VoicePage
     monkeypatch.setattr(wizard, 'WINDOWS', False)  # the page without the voice pack (the Windows runner too): see windows()
+    from peresmeshnik import languages
+    real = languages.clone_why  # an NVIDIA GPU for the clone: it is offered (the rest of the GPU checks as they are)
+    monkeypatch.setattr(languages, 'clone_why', lambda model, lang='', has_gpu=None: real(model, lang, True))
     monkeypatch.setattr(voice, 'voices_dir', lambda: tmp_path / 'voices')
     s = config.Settings()
     s.me_to_them = 'local'
     p = VoicePage(type('W', (), {'s': s})())
     p.initializePage()
+    p.own.setChecked(True)  # "this is my own voice" (M-20)
     return p
 
 
@@ -364,6 +368,7 @@ def test_install_the_pack_from_the_page(windows, monkeypatch, tmp_path):
     assert page.pack() == 'none' and not page.pack_button.isHidden() and page.pack_button.text() == 'Install the voice pack'
     assert 'GB to download' in page.pack_out.text() and 'GB on disk' in page.pack_out.text()
     assert 'noncommercial' in page.pack_consent.text() and not page.pack_consent.isHidden()
+    assert 'NVIDIA CUDA' in page.pack_consent.text()  # 3.5 GB of the pack are NVIDIA's libraries (L-12)
     assert not page.pack_button.isEnabled()  # the licenses (CPML) first: nothing is downloaded before
     monkeypatch.setattr(wizard.voicepack, 'install', lambda *a: pytest.fail('installed without the consent'))
     page.install_pack()
@@ -422,3 +427,32 @@ def test_an_error_and_an_outdated_pack(windows, monkeypatch, tmp_path):
     page._show_pack()
     assert page.pack() == 'outdated' and 'installed for another version' in page.pack_out.text()
     assert page.pack_button.text() == 'Install the voice pack'
+
+
+def test_the_voice_is_yours_before_it_is_recorded_or_imported(page):
+    """M-20: "your own voice only" holds in the wizard: recording and importing wait for the box that says the voice is
+    the user's own."""
+    page.own.setChecked(False)  # the fixture ticked it
+    assert not page.own.isHidden()
+    assert not page.record_button.isEnabled() and not page.import_button.isEnabled()
+    page.own.setChecked(True)
+    assert page.record_button.isEnabled() and page.import_button.isEnabled()
+
+
+def test_where_the_pack_cannot_run_the_clone_the_page_wants_the_stock_voice(windows):
+    """S3-01 (b): a GPU the voice pack refuses (4 GB): a recording alone does not finish the page, the stock voice does."""
+    page = windows(4.0)
+    page.voice = types.SimpleNamespace(name='me.new')  # a good take
+    assert page.pack() == 'gpu' and not page.isComplete()
+    page.stock.setChecked(True)
+    assert page.isComplete()
+
+
+def test_no_stock_voice_box_where_there_is_none(page):
+    """M-24: Chinese has no stock voice: the box offering one is not shown."""
+    page.w.s.their_lang = 'zh'
+    page.initializePage()
+    assert page.stock.isHidden()
+    page.w.s.their_lang = 'en'
+    page.initializePage()
+    assert not page.stock.isHidden()

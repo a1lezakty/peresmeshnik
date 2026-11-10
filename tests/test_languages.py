@@ -29,7 +29,7 @@ def test_ru_en_is_local_both_ways():
     assert (them.src, them.tgt, me.src, me.tgt) == ('en', 'ru', 'ru', 'en')
     assert them.local and me.local and them.subtitles
     assert them.models == (s.local.asr['en'], s.local.mt['en-ru'], s.local.tts['ru'])
-    assert (me.tts, me.voice, me.notes) == ('qwen3-tts', 'clone', ())  # an NVIDIA GPU: its clone engine
+    assert (me.tts, me.voice, me.notes) == ('xtts-v2', 'clone', ())  # an NVIDIA GPU: its clone engine
     me = languages.direction(s, 'me_to_them', has_gpu=False)  # none: Pocket TTS on the CPU (stage 8)
     assert (me.tts, me.voice, me.notes) == ('pocket-tts-en', 'clone', ())
     s.local.clone = 'piper'
@@ -326,20 +326,22 @@ def test_clone_engine_on_this_computer_asks_the_card_once(monkeypatch):
     """platform=None: this computer — sys.platform and its card (nvidia-smi once per run, as clone_why)."""
     monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
     monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(8.0, (572, 83), 8.6))
-    assert languages.clone_engine('en') == ('qwen3-tts', '') and languages.clone_engine('pl') == ('xtts-v2', '')
+    assert languages.clone_engine('en') == ('xtts-v2', '')  # Qwen3-TTS after it until the voice pack has its packages
     monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(4.0, (572, 83), 8.6))
     assert languages.clone_engine('en') == ('pocket-tts-en', '')  # too small a card: Pocket TTS on the CPU
     assert 'at least 6 GB' in languages.clone_engine('pl')[1]
 
 
 def test_qwen3_brings_its_fallback_engine():
-    """Qwen3-TTS on an NVIDIA GPU: Chatterbox Multilingual (its `fallback`) is downloaded with it, it takes over a voice
-    whose clause breaks down (voice pack, local/qwen3.py); XTTS-v2 stays for Polish, Turkish, Arabic."""
+    """Qwen3-TTS on an NVIDIA GPU (once it is the first clone engine): Chatterbox Multilingual (its `fallback`) is
+    downloaded with it, it takes over a voice whose clause breaks down (voice pack, local/qwen3.py); XTTS-v2 stays for
+    Polish, Turkish, Arabic."""
     s = config.Settings(me_to_them='local')
     assert models.get('qwen3-tts').fallback == 'chatterbox-mtl'
     import unittest.mock as um
     with um.patch.object(languages, 'gpu', lambda engine='': True), \
-            um.patch.object(languages, 'nvidia_once', lambda: languages.Gpu(8.0, (572, 83), 8.6)):
+            um.patch.object(languages, 'nvidia_once', lambda: languages.Gpu(8.0, (572, 83), 8.6)), \
+            um.patch.object(languages, 'clone_engines', lambda: ['qwen3-tts', 'xtts-v2']):
         ids = languages.needed_models(s)
         assert {'qwen3-tts', 'chatterbox-mtl'} <= set(ids) and 'xtts-v2' not in ids
         s.their_lang = 'pl'

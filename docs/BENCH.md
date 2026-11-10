@@ -2426,3 +2426,8 @@ v02, female). "Voice" is from a clause's end to its translated voice starting.
 - The first clause's 1 s of first audio in a cold run is the voice state made at the first call; the app makes it at its
   warm-up (`clone_rtf`) and caches it next to the recording.
 - Before freeing the numpy weights each voice took 1.1–1.2 GB and both sides peaked at 5.2 GB.
+
+**Russian with stress marks** (`local/stress_ru.py`, silero-stress's accentor on numpy): Pocket-ru int8 saying 12 FLEURS
+dev sentences in FLEURS v02's voice (English, female), Whisper small: WER 15.4 % with the marks, 17.8 % without (the
+same sentences, numbers and Latin as words in both). The marks are what the model was trained on; the accent they
+remove is for the ears (USER-CHECKS), not for this judge.

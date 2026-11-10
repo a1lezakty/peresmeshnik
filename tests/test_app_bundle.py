@@ -11,6 +11,7 @@
 """
 import json
 import os
+import platform
 import re
 import signal
 import subprocess
@@ -77,6 +78,16 @@ def test_bundle_contents(app):
     runner_src = (lic / 'piper-runner-SOURCE.txt').read_text()
     assert re.search(r'onnxruntime \d', runner_src) and 'CPython 3.' in runner_src and 'Written offer' in runner_src
     assert 'sources.tar' in runner_src  # attached to the release (packaging/sources.sh)
+    # the build's CPython by name (FIXES C r2 10): built from this interpreter (release.yml tests in the build's env), so
+    # uv's python-build-standalone with its release (uv's BUILD file), else python.org's; its source tarball either way
+    py, pbs = platform.python_version(), Path(sys.base_prefix) / 'BUILD'
+    if pbs.is_file():
+        tag = pbs.read_text().strip()
+        assert f'python-build-standalone, release {tag}' in runner_src, runner_src
+        assert f'https://github.com/astral-sh/python-build-standalone/releases/tag/{tag}' in runner_src
+    else:
+        assert 'python-build-standalone' not in runner_src, runner_src
+    assert f'https://www.python.org/ftp/python/{py}/Python-{py}.tar.xz' in runner_src, runner_src
     if [f for f in app.rglob('_rust*.so') if f.parent.name == 'bindings']:  # cryptography's own OpenSSL, built in
         ossl = (lic / 'OpenSSL-LICENSE.txt').read_text()
         assert re.search(r'OpenSSL \d+\.\d+\.\d+ .*, built statically into the _rust module of cryptography \d', ossl), ossl[:300]

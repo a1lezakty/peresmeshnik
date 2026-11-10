@@ -52,6 +52,8 @@ piper-runner/ - the Corresponding Source of the GPL-3.0 program piper-runner in 
 mpg123/ - mpg123 1.32.9 (LGPL-2.1), built into libsndfile of the Windows build (licenses/LGPL-SOURCE.txt there):
   mpg123-1.32.9.tar.bz2 as released, and vcpkg-port-b7601ed/, the portfile and patches it was built with
   (https://github.com/microsoft/vcpkg/tree/b7601ed37e1e1ce11a4f61b4b94a23e39d465f1d/ports/mpg123).
+CPython, in both builds, is not in here: licenses/piper-runner-SOURCE.txt there names its source on python.org and
+  whose build it is (python.org's, or a python-build-standalone release, with its build recipe and patches).
 
 SHA-256:
 $(cd "$src" && find . -type f ! -name README.txt | sort | xargs sha256sum)

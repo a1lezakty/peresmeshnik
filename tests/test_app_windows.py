@@ -11,8 +11,10 @@
 
     PERESMESHNIK_SETUP=dist\\Peresmeshnik-0.2.0-windows-x64-setup.exe PERESMESHNIK_ZIP=dist\\...zip pytest -s tests/test_app_windows.py
 """
+import fnmatch
 import json
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -110,9 +112,20 @@ def test_installed_files_shortcut_and_uninstall_entry(installed):
     runner_src = (installed / 'licenses' / 'piper-runner-SOURCE.txt').read_text()  # FIXES 16: the runner's Corresponding Source
     assert re.search(r'onnxruntime \d', runner_src) and 'CPython 3.' in runner_src and 'Written offer' in runner_src
     assert 'sources.tar' in runner_src and 'sources.tar' in lgpl  # attached to the release (packaging/sources.sh)
+    # the build's CPython by name (FIXES C r2 10): built from this interpreter (release.yml tests in the build's env), so
+    # uv's python-build-standalone with its release (uv's BUILD file), else python.org's; its source tarball either way
+    py, pbs = platform.python_version(), Path(sys.base_prefix) / 'BUILD'
+    if pbs.is_file():
+        tag = pbs.read_text().strip()
+        assert f'python-build-standalone, release {tag}' in runner_src, runner_src
+        assert f'https://github.com/astral-sh/python-build-standalone/releases/tag/{tag}' in runner_src
+    else:
+        assert 'python-build-standalone' not in runner_src, runner_src
+    assert f'https://www.python.org/ftp/python/{py}/Python-{py}.tar.xz' in runner_src, runner_src
     # no MinGW runtime DLLs (Git's, from the runner's PATH): no notice of theirs is shipped
-    mingw = ('zlib1.dll', 'libwinpthread-1.dll', 'libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libiconv-2.dll', 'libintl-8.dll')
-    assert not [f for f in installed.rglob('*.dll') if f.name.lower() in mingw]
+    mingw = ('libgcc*', 'libstdc++*', 'libwinpthread*', 'libgfortran*', 'libquadmath*', 'libgomp*', 'libiconv*', 'libintl*',
+             'zlib1.dll')  # by pattern: libgcc_s_seh-1, libgcc_s_dw2-1, libgfortran-5... whatever the GCC
+    assert not [f for f in installed.rglob('*.dll') if any(fnmatch.fnmatch(f.name.lower(), m) for m in mingw)]
     assert 'Required Notice: Copyright' in (installed / 'licenses' / 'Peresmeshnik-LICENSE.txt').read_text()
     ossl = (installed / 'licenses' / 'OpenSSL-LICENSE.txt').read_text()
     assert 'Apache License' in ossl

@@ -118,6 +118,21 @@ at the exact versions in this build, by download at no charge or on a physical m
 making and sending it. Ask at https://github.com/a1lezakty/peresmeshnik/issues.
 '''
 ort, np = metadata.version('onnxruntime'), metadata.version('numpy')
+py = platform.python_version()
+tarball = f'https://www.python.org/ftp/python/{py}/Python-{py}.tar.xz'
+# which build of CPython this is: a uv-managed one is python-build-standalone, whose release (its date tag) uv writes
+# to BUILD in the installation's root; any other is python.org's (the runner's hosted tool cache, macOS and Windows)
+pbs = Path(sys.base_prefix) / 'BUILD'
+if pbs.is_file():
+    tag = pbs.read_text().strip()
+    if not re.fullmatch(r'\d{8}', tag):
+        sys.exit(f'licenses: {pbs} names no python-build-standalone release: {tag!r}')
+    cpython = (f'built by python-build-standalone, release {tag}\n  (https://github.com/astral-sh/python-build-standalone/'
+               f'releases/tag/{tag}: its build recipe and patches),\n  from {tarball}')
+elif Path(sys.base_prefix).name.startswith('cpython-'):  # uv's, installed before uv wrote BUILD: the release is unknown
+    sys.exit(f'licenses: {sys.base_prefix} (uv\'s Python) has no BUILD: uv python install --reinstall {py}')
+else:
+    cpython = f'https://www.python.org/downloads/source/\n  ({tarball})'
 shutil.copyfile(ROOT / 'LICENSE', out / 'Peresmeshnik-LICENSE.txt')
 shutil.copyfile(ROOT / 'piper-runner' / 'LICENSE', out / 'piper-runner-LICENSE.txt')
 (out / 'piper-runner-SOURCE.txt').write_text(f'''\
@@ -134,8 +149,7 @@ shutil.copyfile(ROOT / 'piper-runner' / 'LICENSE', out / 'piper-runner-LICENSE.t
   https://github.com/syoyo/hts_engine_API at 2821c7a) and sudachipy 0.7.0;
 - onnxruntime {ort}: https://github.com/microsoft/onnxruntime, tag v{ort};
 - numpy {np}: https://github.com/numpy/numpy, tag v{np} (with its submodules), or its sdist on PyPI;
-- CPython {platform.python_version()} (this build: {sys.version}): https://www.python.org/downloads/source/
-  (https://www.python.org/ftp/python/{platform.python_version()}/Python-{platform.python_version()}.tar.xz);
+- CPython {py} (this build: {sys.version}): {cpython};
 the licenses of all of these are in this folder.
 Peresmeshnik itself never imports it; it talks to it over stdin/stdout. The runner's source with its build scripts,
 piper1-gpl and espeak-ng are attached to the GitHub release of this version, Peresmeshnik-{version}-sources.tar

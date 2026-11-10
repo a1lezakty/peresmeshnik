@@ -9,7 +9,9 @@
 #
 # The port is published on 127.0.0.1 only: reach it from the laptop through `ssh -tt -L 47000:127.0.0.1:47000 <box>
 # sleep infinity` (with a terminal: `ssh -N` keeps Nagle on and adds up to a round trip to small messages, BENCH
-# "Remote") or Tailscale. Everything that lasts is in the volume /data: the certificate and the paired devices (a new
+# "Remote") and pair with `https://127.0.0.1:47000/#<code>` (the line `serve` prints names the container's own
+# address); with Tailscale on the box publish on its tailnet address instead (`-p 100.x.y.z:47000:47000`) and pair with
+# that. Everything that lasts is in the volume /data: the certificate and the paired devices (a new
 # certificate would unpair every laptop), the models, the settings.
 #
 # Them -> me's MT runs on the GPU (CTranslate2 with the CUDA libraries of the base image), its ASR on the CPU (the
@@ -37,6 +39,7 @@ RUN uv python install 3.12 \
 VOLUME /data
 EXPOSE 47000
 # any `peresmeshnik` command: `serve --fetch en-ru` once (it shows the models' licenses: -it), then `serve`, which
-# listens on the container's private address (the port published above) and prints the pairing code
-ENTRYPOINT ["uv", "run", "--no-sync", "peresmeshnik"]
+# listens on the container's private address (the port published above) and prints the pairing code. The program
+# itself is PID 1 (no `uv run` between): `docker stop`'s SIGTERM reaches it and the session's voices are removed
+ENTRYPOINT ["/app/.venv/bin/peresmeshnik"]
 CMD ["serve"]

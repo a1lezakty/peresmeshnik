@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
+import errno
 import hashlib
 import json
 import logging
@@ -165,8 +166,15 @@ class ServerSide(Side):
         d = super()._local(s)
         return d if isinstance(d, _Unswitched) else _Unswitched(d)
 
+    stock = False  # the clone could not speak: a stock voice does
+
     def _fallback(self, s, why):  # the clone cannot speak (also mid-call, Side._clone_died): the stock voice
-        return _Unswitched(super()._fallback(s, why))
+        try:
+            d = _Unswitched(super()._fallback(s, why))
+        except RuntimeError as e:  # zh, ar: no stock voice either; trying again does not cure that
+            raise ProtocolError('lang', str(e)) from None
+        self.stock = True
+        return d
 
 
 class Slot:
@@ -179,7 +187,7 @@ class Slot:
         self.task: asyncio.Future | None = None  # -> the ServerSide, built on a thread
         self.folder: Path | None = None
         self.expire: asyncio.TimerHandle | None = None
-        self.notes: tuple[str, ...] = ()
+        self.notes: tuple[str, ...] = ()  # state lines for the client after `ready`
         self.voice = ''  # 'clone' | 'stock': what it speaks with
         self.dead = self.failed = False
 
@@ -203,6 +211,7 @@ class Server:
         self.voices = folder / 'voices'
         self.slots: dict[str, Slot] = {}
         self.started = threading.Event()
+        self.on_start = None  # called once it listens (serve: the pairing line, never for a port another server holds)
         self.ports: list[int] = []
         self.device = ''
         self._stops: list[threading.Thread] = []
@@ -224,7 +233,6 @@ class Server:
 
         from websockets.asyncio.server import serve
         self._loop, self._stop, self.lock = asyncio.get_running_loop(), asyncio.Event(), asyncio.Lock()
-        self.clean()
         if not self.log_text:
             logging.getLogger('peresmeshnik.latency').addFilter(self._filter)
         try:
@@ -241,7 +249,10 @@ class Server:
             async with serve(self._handler, self.host, self.port, ssl=ctx, compression=None, max_size=protocol.CHUNK,
                              ping_interval=PING_S, ping_timeout=PING_S, close_timeout=1, server_header=None) as srv:
                 self.ports = sorted({s.getsockname()[1] for s in srv.sockets})
+                self.clean()  # once the port is ours (not another server's voices), before any session (on the loop)
                 self.started.set()
+                if self.on_start:
+                    self.on_start()
                 await self._stop.wait()
         finally:
             for slot in list(self.slots.values()):
@@ -325,7 +336,11 @@ class Server:
         try:
             if not warm:
                 if v:
-                    await self._voice(conn, slot, v)
+                    try:
+                        await self._voice(conn, slot, v)
+                    finally:  # dropped meanwhile (another hello of this side): its _drop ran before this folder was
+                        if slot.dead and slot.folder is not None:  # made or while it was unpacked: it goes here
+                            await asyncio.to_thread(shutil.rmtree, slot.folder, True)
                 if slot.conn is not conn:
                     return None
                 slot.task = asyncio.ensure_future(asyncio.to_thread(self._build, slot, h))
@@ -342,7 +357,7 @@ class Server:
             return None
         conn.put(protocol.message('ready', warm=warm, device=self.device, voice=slot.voice, app=__version__))
         for n in slot.notes:
-            conn.put(protocol.message('state', text=f'note: {n}'))
+            conn.put(protocol.message('state', text=n))
         slot.net.conn = conn
         return slot
 
@@ -358,10 +373,20 @@ class Server:
                     data += m
         except TimeoutError:
             raise ProtocolError('internal', f'the voice profile did not come in {VOICE_S:g} s') from None
-        if len(data) != v['bytes'] or hashlib.sha256(data).hexdigest() != v['sha256']:
+        if len(data) != v['bytes'] or (await asyncio.to_thread(hashlib.sha256, data)).hexdigest() != v['sha256']:
             raise ProtocolError('voice', 'the voice profile arrived damaged (its size or sha256 is not the one in hello)')
         slot.folder = Path(tempfile.mkdtemp(prefix=f'{slot.side}-', dir=self.voices))  # 0700
-        await asyncio.to_thread(protocol.unpack_voice, bytes(data), slot.folder)
+        await asyncio.to_thread(self._unpack, data, slot.folder)
+
+    @staticmethod
+    def _unpack(data: bytearray, folder: Path) -> None:
+        """protocol.unpack_voice, and a voice.json the app can read: a broken one is refused once, not retried forever."""
+        from peresmeshnik import voice
+        protocol.unpack_voice(bytes(data), folder)
+        try:
+            voice.load(folder.name, folder.parent)
+        except (OSError, ValueError) as e:
+            raise ProtocolError('voice', f'the voice profile does not read: {e}') from None
 
     def _build(self, slot: Slot, h: dict) -> ServerSide:
         """The side's engines, on a thread (seconds; a clone ~30 s). Raises ProtocolError('lang') when this server cannot
@@ -383,11 +408,14 @@ class Server:
         pair = languages.direction(s, KEY[slot.side])
         if not pair.local:
             raise ProtocolError('lang', f'this server cannot translate {h["src"]} -> {h["tgt"]}: {"; ".join(pair.why)}')
-        slot.notes, slot.voice = pair.notes, pair.voice
+        said = []  # what the side says while it starts (the clone fell back to a stock voice): after `ready`
         try:
-            side = ServerSide(slot.side, s, slot.net, slot.net, slot.net, on_error=slot.net.state)
+            side = ServerSide(slot.side, s, slot.net, slot.net, slot.net, on_error=said.append)
         except ModelMissing as e:
             raise ProtocolError('lang', f'the server is missing a model for {h["src"]} -> {h["tgt"]}: {e}') from None
+        side.on_error = slot.net.state
+        slot.notes = (*(f'note: {n}' for n in pair.notes), *said)
+        slot.voice = 'stock' if side.stock else pair.voice
         side.on_failure = lambda why, e: self._loop.call_soon_threadsafe(self._failed, slot, why)
         side.start()
         return side
@@ -431,7 +459,9 @@ class Server:
             self._drop(slot)
 
     def _failed(self, slot: Slot, why: str) -> None:
-        """The side's engines died (app.Side.on_failure): the client hears it and connects again to new ones."""
+        """The side's engines died (app.Side.on_failure): the client hears `internal` and connects again; the engines are
+        built anew (seconds, a clone ~30 s), so its quick reconnect may time out and its side goes local or down until
+        its next try (cloud/fallback.py retry_s)."""
         slot.failed = True
         if slot.conn is not None:
             slot.conn.put(protocol.error('internal', why))
@@ -539,13 +569,22 @@ def cli(argv=None) -> int:
     logging.getLogger('websockets').setLevel(logging.WARNING)
     srv = Server(folder, s, hosts(a.host), a.port, a.log)
     print(f'Peresmeshnik server {__version__}, certificate SHA-256 {srv.fp}', flush=True)
-    if a.code or not srv.pairing.devices():
+
+    def pair_line():  # once it listens: a server already on the port keeps its own code
         code = srv.pairing.new_code()
         print('Pair a computer (its tray menu, Server…) with this line, in 10 minutes, once:', flush=True)
-        for h in [h for h in hosts(a.host) if h != '127.0.0.1'] or hosts(a.host):
+        shown = [x for h in hosts(a.host) for x in (pairing.addresses() if h in ('0.0.0.0', '::') else [h])]
+        for h in [h for h in shown if h != '127.0.0.1'] or shown:
             print(f'  {url(h, a.port, code)}', flush=True)
+    if a.code or not srv.pairing.devices():
+        srv.on_start = pair_line
     try:
         asyncio.run(srv.serve())
     except KeyboardInterrupt:
         pass
+    except OSError as e:  # the port is taken, or the address is not this computer's
+        busy = e.errno in (errno.EADDRINUSE, getattr(errno, 'WSAEADDRINUSE', -1))
+        print(f'cannot serve: {e}' + ('\nA server already runs here: stop it first (a new pairing code: start it again '
+                                      'with --code)' if busy else ''), file=sys.stderr)
+        return 1
     return 0

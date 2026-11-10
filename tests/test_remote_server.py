@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import queue
+import socket
 import ssl
 import subprocess
 import sys
@@ -150,6 +151,8 @@ def test_pair_then_a_side_end_to_end(srv, made, tmp_path):
     assert (f.side, f.src, f.tgt) == ('them', 'en', 'ru')
     side = srv.slots['them'].engines
     assert isinstance(side, server.ServerSide) and side.echo is None
+    sock = srv.slots['them'].conn.ws.transport.get_extra_info('socket')  # small messages not held back (BENCH remote-0)
+    assert sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)
 
     for i in range(10):  # up: int16 frames, as they come
         d.feed(frame(i / 100))
@@ -266,17 +269,75 @@ def test_a_damaged_voice_and_leftovers(tmp_path, made):
                     ws.send(b'\1')  # its last byte is 0
                 a = answer(ws)
                 assert (a['type'], a['code']) == ('error', 'voice'), a
-        not_zip = b'not a zip'
-        with raw(srv, 'me') as ws:
-            ws.send(hello(token, 'me', 'ru', 'en', voice=protocol.voice_ref(not_zip)))
-            answer(ws)
-            ws.send(not_zip)
-            assert answer(ws)['code'] == 'voice'
+        bad = tmp_path / 'bad'  # a zip, but its voice.json does not read: refused once (not 'internal', retried forever)
+        bad.mkdir()
+        (bad / 'voice.json').write_text('{not json')
+        for sent in [b'not a zip', protocol.pack_voice(bad)]:
+            with raw(srv, 'me') as ws:
+                ws.send(hello(token, 'me', 'ru', 'en', voice=protocol.voice_ref(sent)))
+                answer(ws)
+                ws.send(sent)
+                assert answer(ws)['code'] == 'voice'
         until(lambda: not any(srv.voices.iterdir()))
         assert not made and not srv.slots
     finally:
         srv.stop()
         srv.thread.join(10)
+
+
+def test_a_new_hello_while_the_voice_unpacks(srv, made, tmp_path, monkeypatch):
+    """The side's new connection comes while the old one's voice is unpacked: the old session goes, its folder too."""
+    gate, inside, done, unpack = threading.Event(), threading.Event(), threading.Event(), server.Server._unpack
+
+    def slow(data, folder):
+        inside.set()
+        gate.wait(5)
+        unpack(data, folder)  # into the folder its _drop removed: made again
+        done.set()
+    monkeypatch.setattr(server.Server, '_unpack', staticmethod(slow))
+    token = srv.pairing.add('laptop')
+    data = profile(tmp_path / 'v', 1000)
+    with raw(srv, 'me') as old, raw(srv, 'me') as new:
+        old.send(hello(token, 'me', 'ru', 'en', voice=protocol.voice_ref(data)))
+        assert answer(old)['type'] == 'send_voice'
+        old.send(data)
+        assert inside.wait(5)
+        new.send(hello(token, 'me', 'ru', 'en'))
+        assert answer(new)['type'] == 'ready'
+        gate.set()
+        assert done.wait(5)
+        until(lambda: not any(srv.voices.iterdir()))
+        assert srv.slots['me'].folder is None and len(made) == 1
+
+
+def test_the_clone_falls_back_at_the_start(srv, monkeypatch):
+    """The clone cannot speak as the side starts (no voice pack, out of VRAM, too slow): a stock voice speaks, `ready`
+    says so and the side's note comes after it; with no stock voice either (zh, ar): 'lang', not tried again."""
+    made, nostock = [], []
+    note = 'note: me → them: a stock voice speaks instead of your cloned voice (no voice pack)'
+
+    def fallback(side, s, why):
+        if nostock:
+            raise RuntimeError(f'your cloned voice cannot speak ({why}) and there is no stock voice')
+        side.on_error(note)
+        made.append(Fake(side, s))
+        return made[-1]
+    monkeypatch.setattr(app.Side, '_local', lambda side, s: side._fallback(s, 'no voice pack'))
+    monkeypatch.setattr(app.Side, '_fallback', fallback)
+    token = srv.pairing.add('laptop')
+    with raw(srv, 'me') as ws:
+        ws.send(hello(token, 'me', 'ru', 'en'))
+        a = answer(ws)
+        assert (a['type'], a['voice']) == ('ready', 'stock') and srv.slots['me'].engines.stock
+        notes = srv.slots['me'].notes
+        assert notes[-1] == note and [answer(ws)['text'] for _ in notes] == list(notes)
+    until(lambda: not srv.slots)
+    nostock.append(1)
+    with raw(srv, 'me') as ws:
+        ws.send(hello(token, 'me', 'ru', 'de'))
+        a = answer(ws)
+        assert (a['type'], a['code']) == ('error', 'lang') and 'no stock voice' in a['text']
+    assert len(made) == 1
 
 
 def test_warm_session(tmp_path, made):
@@ -383,6 +444,19 @@ def test_the_command(tmp_path, monkeypatch, capsys):
     assert main(['serve', '--revoke', 'laptop']) == 0 and main(['serve', '--revoke', 'laptop']) == 1
     assert main(['serve', '--host', '8.8.8.8']) == 2 and 'not a private address' in capsys.readouterr().err
     assert server.url('fd00::5', 47000, 'K7QM') == 'https://[fd00::5]:47000/#K7QM'
+
+
+def test_a_second_server_on_the_port(srv, monkeypatch, capsys):
+    """`serve --code` while a server runs here: refused with why, no pairing line (that code would never work), and
+    the running server's voices stay."""
+    from peresmeshnik.__main__ import main
+    monkeypatch.setattr(config, 'data_dir', lambda: srv.folder.parent)
+    monkeypatch.setattr(config, 'load', lambda: config.Settings())
+    live = srv.voices / 'me-live'
+    live.mkdir()
+    assert main(['serve', '--host', '127.0.0.1', '--port', str(srv.ports[0]), '--code']) == 1
+    out = capsys.readouterr()
+    assert 'already runs here' in out.err and 'Pair a computer' not in out.out and live.exists()
 
 
 def test_fetch_a_pair_then_serve(tmp_path, monkeypatch):

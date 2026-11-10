@@ -206,14 +206,14 @@ computer, from source as above (Linux or Windows, Python 3.11+, `uv`):
     uv run peresmeshnik serve --fetch en-ru     # the first time: the models of your pair, after their licenses
     uv run peresmeshnik serve
 
-Its first start (and `serve --code` later) prints a line like `https://192.168.1.20:47000/#K7QM-2XPA-9DFE` and the
+Its first start (and a start with `--code` later) prints a line like `https://192.168.1.20:47000/#K7QM-2XPA-4DFE` and the
 certificate's fingerprint. On the laptop: tray → **Server…** → paste that line: the two computers prove to each other
 that they know the code (one use, 10 minutes), the laptop keeps the server's certificate and a token of its own. Then
 choose the server for *Them → me* and *Me → them* in Settings; when it is down or too slow, a side goes local if the
 laptop has its models, else the original is heard meanwhile (the call app's sound for you, your own voice for the call),
-and the tray says so. `serve --list` shows the paired laptops, `serve --revoke NAME` unpairs one, `serve --code` makes a
-new code. One laptop at a time; its sides stay warm on the server for 10 minutes after it leaves (`[server] warm_s`), so
-a reconnect does not load the models again.
+and the tray says so. `serve --list` shows the paired laptops, `serve --revoke NAME` unpairs one; for a new code stop the
+server and start it with `--code`. One laptop at a time; its sides stay warm on the server for 10 minutes after it
+leaves (`[server] warm_s`), so a reconnect does not load the models again.
 
 - **Where it listens.** Only on this computer's private addresses (home network, Tailscale), never on a public one
   unless you start it with `--public`. Through the internet: Tailscale on both computers, or an ssh tunnel with a

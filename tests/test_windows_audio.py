@@ -146,7 +146,10 @@ def test_loopback_captures_only_the_target_process():
     cap.start(frames)
     try:
         assert until(lambda: rms(frames.audio()) > 0.05, 6), 'the loopback heard no tone'
+        # a second of it from the tone on: a first block alone (96 ms, the tone starting in it) puts the peak a 10 Hz bin off
+        assert until(lambda: len(frames.audio()) - int(np.argmax(np.abs(frames.audio()) > 0.05)) >= SR, 6)
         audio = frames.audio()
+        audio = audio[int(np.argmax(np.abs(audio) > 0.05)):]
         assert abs(peak_hz(audio, SR) - 440) < 10, peak_hz(audio, SR)
         assert mag_at(audio, 880, SR) < 0.25 * mag_at(audio, 440, SR), 'the other process leaked into the loopback'
     finally:

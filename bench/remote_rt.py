@@ -172,13 +172,10 @@ def encode(e):
 
 def serve(a):
     from websockets.asyncio.server import serve as ws_serve
-    busy = asyncio.Lock()  # ponytail: one session at a time (the clause log handler is process-wide)
+    busy = asyncio.Lock()  # ponytail: one session at a time (the clause log handler is process-wide); a next one waits
 
     async def handler(ws):
-        if busy.locked():
-            await ws.send(json.dumps({'type': 'busy'}))
-            return
-        async with busy:
+        async with busy:  # the last session may still be closing its engines
             hello = json.loads(await ws.recv())
             loop = asyncio.get_running_loop()
             t = time.perf_counter()

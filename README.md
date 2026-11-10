@@ -51,6 +51,13 @@ move a direction you keep on this computer to the cloud, the app asks first (its
 that runs here brings it back. Where your cloned voice does not speak the language here (without an NVIDIA GPU:
 Polish, Turkish, Chinese, Japanese, Korean, Arabic), a stock voice speaks instead, and the wizard says so.
 
+**The other person's voice.** "Them → me" speaks in the voice of the person talking, where a cloned voice speaks your
+language on this computer: from their first 3 seconds of clear speech, closer after 5, 10 and 20 s; until then a stock
+voice. Only you hear it, in your headphones: it never goes into the call (only your own confirmed voice does), and it is
+forgotten when translation goes off unless you keep it (tray: Keep the voice of the person in this call…, with their
+agreement). With two people or more on their side, each phrase is said in the voice of whoever said it. Off:
+`their_voice = false` under `[local]` in the settings.
+
 Speech recognition of Turkish, Chinese and Korean on this computer is Whisper on an NVIDIA GPU, through a CUDA build of
 onnxruntime: the macOS and Windows apps have none, so there these three are recognized in the cloud. From source on
 Linux with an NVIDIA GPU they can run here ([below](#trying-it-from-source-linux)).

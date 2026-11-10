@@ -1,5 +1,6 @@
 """Enrollment checks and the clone engine's text/length guards (no torch, no model needed)."""
 import json
+import os
 import pickle
 import sys
 import types
@@ -151,11 +152,12 @@ def test_save_normalises_and_loads(tmp_path):
 
 
 def test_real_reference_passes():
-    """A real reader, not noise: close to the thresholds (speech 14 dB above the floor, here the recording's DC offset;
-    20 s of speech of 42 s), where a stricter threshold would turn away a usable voice."""
+    """A real reader, not noise: passes, speech 24 dB above the floor and 32 s of speech of 42 s once the recording's DC
+    offset is taken out (with it, 14 dB and 20 s: the offset was counted as noise). The thresholds themselves are pinned
+    by test_recordings_at_the_thresholds."""
     r = voice.check(*voice.read_audio(READER))
     assert r.ok, r.errors
-    assert r.snr_db == pytest.approx(14.4, abs=1) and r.speech_s == pytest.approx(20, abs=1.5), r
+    assert r.snr_db == pytest.approx(24.1, abs=1) and r.speech_s == pytest.approx(32.3, abs=1.5), r
 
 
 @pytest.mark.parametrize('kw, problem', [

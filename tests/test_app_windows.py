@@ -114,7 +114,10 @@ def test_installed_files_shortcut_and_uninstall_entry(installed):
     mingw = ('zlib1.dll', 'libwinpthread-1.dll', 'libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libiconv-2.dll', 'libintl-8.dll')
     assert not [f for f in installed.rglob('*.dll') if f.name.lower() in mingw]
     assert 'Required Notice: Copyright' in (installed / 'licenses' / 'Peresmeshnik-LICENSE.txt').read_text()
-    assert 'Apache License' in (installed / 'licenses' / 'OpenSSL-LICENSE.txt').read_text()
+    ossl = (installed / 'licenses' / 'OpenSSL-LICENSE.txt').read_text()
+    assert 'Apache License' in ossl
+    if [f for f in installed.rglob('_rust*.pyd') if f.parent.name == 'bindings']:  # cryptography's own OpenSSL, built in
+        assert re.search(r'OpenSSL \d+\.\d+\.\d+ .*, built statically into the _rust module of cryptography \d', ossl), ossl[:300]
     left_out = ('qjpeg.dll', 'qtiff.dll', 'qwebp.dll', 'nakdimon.onnx',  # unused (Peresmeshnik.spec drops them)
                 'qopensslbackend.dll', 'libssl-3-x64.dll', 'libcrypto-3-x64.dll')
     assert not [f for f in installed.rglob('*') if f.name in left_out]

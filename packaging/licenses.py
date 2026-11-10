@@ -99,9 +99,15 @@ if not python_license:
     sys.exit(f"licenses: no LICENSE.txt of Python in {sysconfig.get_paths()['stdlib']} or {sys.base_prefix}")
 shutil.copyfile(python_license, out / 'Python-LICENSE.txt')
 # Python's ssl module ships OpenSSL (libssl / libcrypto): Apache-2.0 since 3.0, and the LICENSE.txt of a uv Python does
-# not name it, so its own text goes along
+# not name it, so its own text goes along. cryptography's wheels build another OpenSSL into its _rust module (statically)
+try:
+    from cryptography.hazmat.bindings._rust import openssl as rust_openssl
+    also = (f'; so is {rust_openssl.openssl_version_text()}, built statically into the _rust module of cryptography '
+            f'{metadata.version("cryptography")}')
+except ModuleNotFoundError:  # not in this build
+    also = ''
 (out / 'OpenSSL-LICENSE.txt').write_text(f'{ssl.OPENSSL_VERSION} (libssl and libcrypto of Python\'s ssl module, '
-                                         'https://www.openssl.org) is under the Apache License 2.0:\n\n'
+                                         f'https://www.openssl.org) is under the Apache License 2.0{also}:\n\n'
                                          + (TEXTS / 'Apache-2.0.txt').read_text())
 if missing:
     sys.exit('licenses: no license text for ' + '; '.join(missing))

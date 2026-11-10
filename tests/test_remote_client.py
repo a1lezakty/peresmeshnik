@@ -205,25 +205,57 @@ def test_a_dead_link_without_a_reset(server, monkeypatch):
     assert ev.end() is None
 
 
-def test_a_server_that_stops_translating(server, monkeypatch):
-    """A phrase goes up (>= 1 s of speech by this side's own gate) and no voice comes down in stall_s: CloudDown, whether
-    the server says nothing or only subtitles (ASR alive, the voice hung). A phrase answered with a voice is fine."""
+def test_a_server_whose_asr_hangs(server, monkeypatch):
+    """A phrase goes up (>= 1 s of speech by this side's own gate) and nothing at all comes down in stall_s: CloudDown.
+    Silence asks nothing; a phrase answered in time is fine."""
     monkeypatch.setattr(protocol, 'PING_S', 0.1)
     d = direction(server, stall_s=2.0)
     ev = Events(d)
     assert d.ready.wait(5)
     say(d, np.zeros(16_000, np.float32))  # silence: no phrase, nothing to wait for
-    assert ev.q.empty()
     say(d, tone(1.2))
-    server.send(*protocol.speech(Speech(np.full(2400, 0.2, np.float32), 24_000)))  # answered in time
-    say(d, np.zeros(int(1.5 * 16_000), np.float32))
-    assert ev.error is None and isinstance(ev.get(), Speech)
-    say(d, tone(1.2))  # the next phrase: subtitles only
+    server.send(protocol.event(Caption('hel')), *protocol.speech(Speech(np.full(2400, 0.2, np.float32), 24_000)))
+    say(d, np.zeros(int(2.5 * 16_000), np.float32))
+    assert ev.error is None and ev.get() == Caption('hel')
+    say(d, tone(1.2))  # the next phrase: nothing at all
+    t = time.monotonic()
+    e = ev.end()
+    assert isinstance(e, CloudDown) and 'nothing from it 2 s after a phrase began' in str(e) and time.monotonic() - t < 2
+    d.close()
+
+
+def test_a_server_whose_voice_hangs(server, monkeypatch):
+    """Subtitles come, its final too, and no voice stall_s after the final: CloudDown."""
+    monkeypatch.setattr(protocol, 'PING_S', 0.1)
+    d = direction(server, stall_s=1.5)
+    ev = Events(d)
+    assert d.ready.wait(5)
+    say(d, tone(1.2))
     server.send(protocol.event(Caption('hel')), protocol.event(Caption('hello', 'привет', True, 1)))
     t = time.monotonic()
     e = ev.end()
-    assert isinstance(e, CloudDown) and 'no voice 2 s after a phrase began' in str(e) and time.monotonic() - t < 2
+    assert isinstance(e, CloudDown) and 'no voice 1.5 s after a subtitle' in str(e) and 1.4 < time.monotonic() - t < 3
     d.close()
+
+
+def test_a_long_clause_voiced_after_it_ends_is_not_too_slow(server, monkeypatch):
+    """The server cuts a clause without a pause at 5 s and voices it ~1.3-1.9 s after (BENCH): its voice comes more than
+    stall_s after the phrase began (here: 2.5 s of speech, voice at 3.5 s, stall_s 2), yet nothing hung."""
+    monkeypatch.setattr(protocol, 'PING_S', 0.1)
+    d = direction(server, stall_s=2.0)
+    ev = Events(d)
+    assert d.ready.wait(5)
+    threading.Timer(0.6, lambda: server.send(protocol.event(Caption('a long')))).start()  # partials while it is said
+    threading.Timer(1.6, lambda: server.send(protocol.event(Caption('a long phrase')))).start()
+    say(d, tone(2.5))
+    server.send(protocol.event(Caption('a long phrase', 'длинная фраза', True, 0)))
+    time.sleep(1.0)
+    server.send(*protocol.speech(Speech(np.full(2400, 0.2, np.float32), 24_000)))
+    say(d, np.zeros(int(1.5 * 16_000), np.float32))
+    assert ev.error is None and ev.t.is_alive()
+    assert [type(ev.get()).__name__ for _ in range(4)] == ['Caption', 'Caption', 'Caption', 'Speech']
+    d.close()
+    assert ev.end() is None
 
 
 def test_a_server_that_crashes_on_each_connection(server):
@@ -233,6 +265,22 @@ def test_a_server_that_crashes_on_each_connection(server):
     e = Events(d).end()
     assert isinstance(e, CloudDown) and f'lost {client.SHORT_MAX} times right after it opened' in str(e)
     assert len(server.hellos) == client.SHORT_MAX
+    d.close()
+
+
+def test_a_long_connection_lost_does_not_count_as_short(server, monkeypatch):
+    """Two short ones, one that lives past SHORT_S, two short ones again: never SHORT_MAX in a row, no CloudDown."""
+    monkeypatch.setattr(client, 'SHORT_S', 0.5)
+    crash = [protocol.error('internal', 'crashed')]
+    server.after_ready = lambda n: None if n in (3, 6) else crash  # connections 3 and 6 live
+    d = direction(server)
+    ev = Events(d)
+    until(lambda: len(server.conns) == 3)
+    time.sleep(0.8)
+    server.drop()  # lost past SHORT_S: the count starts again
+    until(lambda: len(server.conns) == 4)  # connections 4 and 5 crash, the 6th lives
+    time.sleep(0.3)
+    assert len(server.hellos) == 6 and ev.error is None and ev.t.is_alive()
     d.close()
 
 

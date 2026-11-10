@@ -44,7 +44,8 @@ class Conn:
 
 class FakeServer:
     """`refuse`: (code, text) answers every hello with that error; `ready_delay`: seconds before `ready`, None: never;
-    `after_ready`: messages sent right after each `ready`, then the connection closes (a server that crashes at once)."""
+    `after_ready`: messages sent right after each `ready`, then the connection closes (a server that crashes at once);
+    or a function of the connection's number (1, 2, ...) giving them, None: it lives."""
 
     def __init__(self):
         self.refuse: tuple[str, str] | None = None
@@ -97,8 +98,9 @@ class FakeServer:
         c = Conn(ws, h)
         self.conns.append(c)
         await ws.send(protocol.message('ready', warm=False, device='cpu'))
-        if self.after_ready is not None:
-            for m in self.after_ready:
+        after = self.after_ready(len(self.hellos)) if callable(self.after_ready) else self.after_ready
+        if after is not None:
+            for m in after:
                 await ws.send(m)
             return
         async for m in ws:

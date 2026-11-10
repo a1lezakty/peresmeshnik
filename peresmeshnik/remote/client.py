@@ -13,8 +13,10 @@ the server cannot serve now, and the side goes local (or says why it cannot) unt
   the drop is translated whole. A new one that fails, or SHORT_MAX connections in a row lost within SHORT_S of their
   `ready` (a server that crashes on each, a Wi-Fi that cannot hold one) -> CloudDown;
 - too slow -> CloudDown: a frame of the call would reach the server `stall_s / 2` after it was said (an uplink too slow
-  for the call), or a phrase went up (this side's own gate, as GeminiDirection's: Silero VAD, >= 1 s of speech) and no
-  voice came down `stall_s` after it began (a server whose ASR or voice hung, subtitles without a voice);
+  for the call), or the server hung: a phrase went up (this side's own gate, as GeminiDirection's: Silero VAD, >= 1 s
+  of speech) and nothing at all came down `stall_s` after it began (its ASR), or a final subtitle came and no voice
+  `stall_s` after it (its voice). Not from the phrase's start to its voice: a long clause is voiced after it ends (cut
+  at 5 s, then ~1.3-1.9 s of synthesis: BENCH);
 - the server refuses (`error`) -> ServerError, a CloudDown with the protocol's `code`; `permanent` ones (an unknown
   token, another protocol version, languages the server has no models for) are not cured by trying again;
 - voice: the server sends it in pieces of protocol.SPEECH_MS; a piece that comes when the playback has run dry gets
@@ -104,7 +106,8 @@ class RemoteDirection:
         self._done_until = 0.0  # the end of the last clause whose subtitle came, this side's clock (its `caption` latency)
         self._heard_at = 0.0  # when the server's pipeline last said anything
         self._voice_at = 0.0  # when the last piece of voice came
-        self._phrase_at, self._voiced = None, 0  # the oldest phrase sent up with no voice since, its 100 ms blocks of speech
+        self._phrase_at, self._voiced = None, 0  # the oldest phrase sent up with nothing down since, its 100 ms of speech
+        self._final_wait = None  # the oldest final subtitle with no voice since
         self._buf = np.zeros(0, np.int16)  # the gate's input, in BLOCKs
         self._lost, self._fatal, self._ws = '', None, None
         self._unanswered = 0  # interrupts sent on this connection, not answered yet
@@ -181,7 +184,7 @@ class RemoteDirection:
             keep, short = await self._open(READY_S), 0
             while True:
                 lost = await self._serve(keep)
-                short = short + 1 if time.monotonic() - self.ready_at < SHORT_S else 1
+                short = short + 1 if time.monotonic() - self.ready_at < SHORT_S else 0  # a long one lost: not a short one
                 if short >= SHORT_MAX:
                     raise CloudDown(f'the connection to the server was lost {short} times right after it opened ({lost})')
                 log.info('%s: the connection to the server was lost (%s): connecting again', self.side, lost)
@@ -251,7 +254,7 @@ class RemoteDirection:
             keep.cancel()
             raise
         self.server = m
-        self._heard_at, self._phrase_at = time.monotonic(), None  # a phrase cut by a drop goes up again from its start
+        self._heard_at, self._phrase_at, self._final_wait = time.monotonic(), None, None  # a cut phrase goes up again
         for _ in range(self._unanswered):  # the old connection's: this one has no voice queued
             self._put(_RESUMED)
         self._unanswered = 0
@@ -332,6 +335,8 @@ class RemoteDirection:
                 self._voice_at = self._heard_at
             elif isinstance(e, Caption) and e.final:
                 self._final_at = self._heard_at
+                if self._final_wait is None or self._voice_at >= self._final_wait:
+                    self._final_wait = self._heard_at
             elif isinstance(e, Latency) and e.what in ('caption', 'voice', 'tts_first'):
                 end = self._heard_at - e.s - self.rtt  # its clause ended (as fed here) then: the way up, the server, the way down
                 if e.what == 'tts_first':  # its voice begins (`voice` holds the server's play queue too)
@@ -355,21 +360,26 @@ class RemoteDirection:
                 return
             except ConnectionClosed:
                 return
-            if (at := self._phrase_at) is not None and self._voiced >= SLOW_MIN_BLOCKS and self._voice_at < at \
-                    and time.monotonic() - at > self.stall_s:
-                self._fatal = CloudDown(f'the server stopped translating: no voice {self.stall_s:g} s after a phrase began')
+            now = time.monotonic()
+            if (at := self._phrase_at) is not None and self._voiced >= SLOW_MIN_BLOCKS and self._heard_at < at \
+                    and now - at > self.stall_s:
+                self._fatal = CloudDown(f'the server stopped translating: nothing from it {self.stall_s:g} s after a phrase '
+                                        'began')
+                return
+            if (at := self._final_wait) is not None and self._voice_at < at and now - at > self.stall_s:
+                self._fatal = CloudDown(f'the server stopped speaking: no voice {self.stall_s:g} s after a subtitle')
                 return
             await asyncio.sleep(protocol.PING_S)
 
     def _phrase(self, t: float, pcm) -> None:
-        """This side's gate on what goes up: the oldest phrase with no voice down since it began, and its speech."""
+        """This side's gate on what goes up: the oldest phrase with nothing down since it began, and its speech."""
         x = pcm if pcm.dtype == np.int16 else (np.clip(pcm, -1, 1) * 32767).astype(np.int16)
         self._buf = np.concatenate([self._buf, x.ravel()])
         n = 0
         while len(self._buf) - n >= BLOCK:
             ev = self.gate.update(self._buf[n:n + BLOCK], t)
             n += BLOCK
-            if ev == 'start' and (self._phrase_at is None or self._voice_at >= self._phrase_at):
+            if ev == 'start' and (self._phrase_at is None or self._heard_at >= self._phrase_at):
                 self._phrase_at, self._voiced = t, 0
             if self._phrase_at is not None and self.gate.on and self.gate.quiet == 0:
                 self._voiced += 1

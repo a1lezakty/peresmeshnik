@@ -55,7 +55,8 @@ class Muted:
     def __init__(self, make):
         self.make, self.want, self.on_error = make, lambda text: False, lambda e: None
         self.lock = threading.Lock()  # one synthesis at a time: the speak worker's, a fallback's re-say of muted clauses
-        self._tts, self.error = None, None
+        self._guard = threading.Lock()  # `_tts` against close(), which does not wait for a synthesis or a load
+        self._tts, self.error, self.closed = None, None, False
 
     def load(self) -> None:
         with self.lock:
@@ -66,14 +67,20 @@ class Muted:
                     pass
 
     def _get(self):  # under the lock
-        if self._tts is None and self.error is None:
+        if self._tts is None and self.error is None and not self.closed:
             try:
-                self._tts = self.make()
+                tts = self.make()
             except Exception as e:  # a missing model or voice pack: the reason goes to the tray
                 log.warning('local voice: %s', e)
                 self.error = e
+            else:
+                with self._guard:  # closed while it started (off right after on, L-19): not kept
+                    if not self.closed:
+                        self._tts, tts = tts, None
+                if tts is not None and hasattr(tts, 'close'):
+                    tts.close()
         if self._tts is None:
-            raise RuntimeError(f'no local voice: {self.error}')
+            raise RuntimeError(f'no local voice: {self.error or "closed"}')
         return self._tts
 
     def synth(self, text, lang, voice=None, speed=1.0):
@@ -92,7 +99,9 @@ class Muted:
             yield rs(chunk)
 
     def close(self) -> None:
-        tts, self._tts = self._tts, None
+        with self._guard:
+            self.closed = True
+            tts, self._tts = self._tts, None
         if tts is not None and hasattr(tts, 'close'):
             tts.close()
 
@@ -184,6 +193,8 @@ class Fallback:
     def events(self):
         while (item := self._q.get()) is not None:
             src, e = item
+            if self._closing:  # turned off: what is still queued opens nothing new (M-12) and is not said
+                continue
             if src is self:  # from feed() (no local path to wait for a phrase with) or from Muted
                 if isinstance(e, BaseException) and self.mode == 'local':
                     self._down(str(e), 'its voice failed to start')
@@ -231,10 +242,11 @@ class Fallback:
             self.local.interrupt()
 
     def close(self) -> None:
-        self._closing = True
-        with self._lock:
+        with self._lock:  # a probe or a local path being made now sees `_closing` and closes itself (_try, _cloud_failed)
+            self._closing = True
             leaving, self._to_close = list(self._to_close), set()
-        for d in (self.probe, self.cloud, self.local, *leaving):
+            ds = (self.probe, self.cloud, self.local, *leaving)
+        for d in ds:
             if d:
                 d.close()
         self.muted.close()
@@ -303,21 +315,28 @@ class Fallback:
         self.muted.lock.acquire()  # before a clause is marked to be said: the muted ones the cloud had not said go first
         try:
             with self._lock:
-                self.mode = 'local'
-                if local:  # it hears the input the cloud had not said yet, then the live input
-                    self.local = local
-                    for t, pcm in self._input:
-                        if t >= cut:
-                            local.feed(pcm)
-                for r in self._made:  # not spoken yet: say the ones the cloud had not said
-                    r[2] = r[1] - SETTLE_S > cut
-                again = [t for t, at in self._muted if at - SETTLE_S > cut]
-                self._muted.clear()
-            if local:
+                late = self._closing  # turned off while the local path was made (M-12): it is closed, not kept
+                if not late:
+                    self.mode = 'local'
+                    if local:  # it hears the input the cloud had not said yet, then the live input
+                        self.local = local
+                        for t, pcm in self._input:
+                            if t >= cut:
+                                local.feed(pcm)
+                    for r in self._made:  # not spoken yet: say the ones the cloud had not said
+                        r[2] = r[1] - SETTLE_S > cut
+                    again = [t for t, at in self._muted if at - SETTLE_S > cut]
+                    self._muted.clear()
+            if local and not late:
                 self._pump(local)
         except BaseException:
             self.muted.lock.release()
             raise
+        if late:
+            self.muted.lock.release()
+            if local:
+                local.close()
+            return
         self._say(again)  # releases the lock
         self.on_state(f'note: {ARROW[self.name]}: the cloud failed ({why}); translating locally until it answers again')
 
@@ -355,9 +374,15 @@ class Fallback:
 
     def _try(self) -> None:
         try:
-            self.probe = self.make_cloud()
+            probe = self.make_cloud()  # up to CONNECT_S: close() may come meanwhile
         except Exception as e:
             self._probe_failed(e)
+            return
+        with self._lock:
+            if not self._closing:
+                self.probe, probe = probe, None
+        if probe is not None:  # turned off meanwhile (M-12): nobody else would close it
+            probe.close()
             return
         self._pump(self.probe)
 

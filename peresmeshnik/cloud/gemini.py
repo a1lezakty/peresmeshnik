@@ -14,7 +14,11 @@
   'voice_end', s)` event: its translated voice ended s after the phrase did;
 - `fail_fast` (a side with a local fallback, cloud/fallback.py): one connect try (5 s at most), and the direction ends
   with `CloudDown` when the cloud cannot serve now: the connection was lost and one new one failed (network, an API
-  error, the quota), or a phrase with >= 1 s of speech got no translated voice `cloud.fallback_after_s` after it began.
+  error, the quota), the server closed SHORT_MAX sessions in a row right after they opened, a block of the call would
+  reach the cloud `cloud.fallback_after_s / 2` after it was said (an uplink too slow for the call, or the network gone
+  without a reset: Wi-Fi lost), or a phrase with >= 1 s of speech got no translated voice `cloud.fallback_after_s` after
+  it began. Without fail_fast (the CLI) a send that takes SEND_S loses the connection and a new one is made;
+- a lost connection's socket is dropped, not closed politely: nothing waits for the TCP timeout (~15 min).
 
 Threads: one asyncio thread per direction; `feed()` only enqueues; `close()` ends the thread.
 """
@@ -38,6 +42,8 @@ BLOCK = SAMPLE_RATE // 10  # 100 ms, as the Live API recommends
 BACKLOG = 300  # blocks (30 s) kept while a dropped connection is replaced
 CONNECT_S = 5.0  # fail_fast: a connect (socket, TLS, setup) that takes longer counts as failed (measured 0.3-1 s, BENCH)
 SLOW_MIN_BLOCKS = 10  # fail_fast: a phrase is judged "too slow" only after 1 s of speech (not a cough)
+SEND_S = 2.0  # not fail_fast: a 100 ms block not taken by the socket in this long: the network is gone (no reset)
+SHORT_S, SHORT_MAX = 5.0, 3  # a connection lost this soon after it opened, this many times in a row: the server refuses
 log = logging.getLogger('peresmeshnik.latency')
 warn = logging.getLogger(__name__).warning
 
@@ -129,6 +135,13 @@ class _Utt:
     voiced: int = 0  # 100 ms blocks of speech so far
 
 
+def _abort(c: _Conn) -> None:
+    """Drop the connection's socket now: closing a stalled one politely waits for the TCP timeout."""
+    ws = getattr(c.session, '_ws', None)  # google-genai's websockets connection: no public way to reach it
+    if getattr(ws, 'transport', None) is not None:
+        ws.transport.abort()
+
+
 class _Conn:
     def __init__(self, gen, cm, session):
         self.gen, self.cm, self.session, self.started = gen, cm, session, time.monotonic()
@@ -136,7 +149,7 @@ class _Conn:
         self.last_voiced = 0.0  # end of the last output: voiced audio chunk (arrival + length) or subtitle text
         self.waiting = 0.0  # first speech block sent since the last server message
         self.unanswered = 0  # speech blocks sent since the last server message
-        self.failed = False  # a send failed: treat as dropped
+        self.failed = ''  # a send failed (why): treat as dropped
 
 
 class _Link:
@@ -151,7 +164,7 @@ class _Link:
         self.conn: _Conn | None = None
         self.next: asyncio.Task | None = None
         self.retiring: list[tuple[asyncio.Task, _Conn]] = []
-        self.backlog: list[bytes] = []
+        self.backlog: list[tuple[float, bytes]] = []  # (when it was said, the block)
         self.gen = 0  # connections are numbered 1, 2, ...
         self.out_gen = 1  # events of this connection go out now; newer ones wait in `held`
         self.held: dict[int, list] = {}
@@ -161,7 +174,8 @@ class _Link:
         self.stalls = 0  # reconnects for silence in a row; the wait doubles with each
         self.dropped = 0  # blocks dropped from a full backlog since the last connection
         self.src_text = ''  # translate: source transcript since the last translated piece
-        self.retry_at = 0.0  # fail_fast: a planned reconnect failed while the old connection works: try again then
+        self.retry_at = 0.0  # no reconnect before this: a planned one failed (fail_fast), or sessions end at once
+        self.short = 0  # connections in a row lost within SHORT_S of opening
 
     def config(self):
         from google.genai import types
@@ -222,7 +236,7 @@ class _Link:
         from google.genai import types
         await self.conn.session.send_realtime_input(audio=types.Blob(data=blk, mime_type=f'audio/pcm;rate={SAMPLE_RATE}'))
 
-    async def send(self, blk: bytes, quiet: bool, voiced: bool):
+    async def send(self, blk: bytes, quiet: bool, voiced: bool, t: float):
         if self.due(quiet):
             self.go_away = False
             self.next = asyncio.create_task(self.connect())
@@ -237,9 +251,15 @@ class _Link:
             else:
                 old, self.conn, self.next = self.conn, self.next.result(), None  # switch between two blocks
                 self.d.mark(f'cloud.{self.kind}.reconnect_after', time.monotonic() - old.started)
+                if old.task.done() or old.failed:  # lost, not a planned switch: right after it opened?
+                    self.short = self.short + 1 if time.monotonic() - old.started < SHORT_S else 0
+                    if self.short >= SHORT_MAX:  # accepted, then closed at once (the quota told after the setup)
+                        if self.d.fail_fast:
+                            raise CloudDown(f'{self.kind}: {self.lost(old)}, {self.short} times right after it opened')
+                        self.retry_at = time.monotonic() + min(30, 2 ** self.short)  # not 5 new sessions a second
                 self.retiring.append((asyncio.create_task(self.retire(old)), old))
         c = self.conn
-        self.backlog.append(blk)
+        self.backlog.append((t, blk))
         if c.task.done() or c.failed:  # dropped: keep the audio (up to 30 s) for the next connection
             if len(self.backlog) > BACKLOG:
                 if not self.dropped:
@@ -249,11 +269,24 @@ class _Link:
             await asyncio.sleep(0)  # let the new connection finish even when blocks come in a burst
             return
         while self.backlog:  # what waited for this connection goes first, in order
+            said, b = self.backlog[0]
+            # fail_fast: the block reaches the cloud this late at most (said while disconnected: from the connection).
+            # One rule for an uplink that carries less than the call needs (H-05) and a network gone silently (H-04)
+            due_in = max(said, c.started) + self.d.cfg.fallback_after_s / 2 - time.monotonic() if self.d.fail_fast \
+                else SEND_S
             try:
-                await self._send(self.backlog[0])
+                if due_in <= 0:
+                    raise TimeoutError
+                await asyncio.wait_for(self._send(b), due_in)
             except Exception as e:
-                warn('%s: send failed (%s)', self.kind, str(e)[:200])
-                c.failed = True
+                c.failed = f'a send failed ({_short(e)})'
+                _abort(c)  # its receive task ends; closing it does not wait for the socket
+                if isinstance(e, TimeoutError):
+                    late = time.monotonic() - max(said, c.started)
+                    c.failed = f'the uplink is too slow or gone: the call reaches the cloud {late:.0f} s late'
+                    if self.d.fail_fast:
+                        raise CloudDown(f'{self.kind}: {c.failed}') from None
+                warn('%s: %s', self.kind, c.failed)
                 return
             self.backlog.pop(0)
         if self.dropped:
@@ -265,16 +298,18 @@ class _Link:
 
     @staticmethod
     def lost(c: _Conn) -> str:
+        if c.failed:
+            return c.failed
         if c.task.done() and not c.task.cancelled() and (e := c.task.exception()) is not None:
             return f'the connection closed ({_short(e)})'
-        return 'a send failed' if c.failed else 'the connection closed'
+        return 'the connection closed'
 
     async def stream_end(self):
         if self.kind == 'transcribe' and not (self.conn.task.done() or self.conn.failed):  # never to the translator
-            try:
-                await self.conn.session.send_realtime_input(audio_stream_end=True)
+            try:  # bounded like a block: a stalled socket would hold the loop here
+                await asyncio.wait_for(self.conn.session.send_realtime_input(audio_stream_end=True), SEND_S)
             except Exception as e:
-                warn('%s: audio_stream_end failed (%s)', self.kind, str(e)[:200])
+                warn('%s: audio_stream_end failed (%s)', self.kind, _short(e))
 
     async def retire(self, c: _Conn, drain_max: float = 8.0):
         """Keep listening to a replaced connection until its output is quiet, then close it."""
@@ -291,9 +326,9 @@ class _Link:
     async def close_conn(self, c: _Conn):
         c.task.cancel()
         try:
-            await c.cm.__aexit__(None, None, None)
-        except Exception:
-            pass
+            await asyncio.wait_for(c.cm.__aexit__(None, None, None), 1.0)
+        except Exception:  # a stalled socket's closing handshake: dropped instead
+            _abort(c)
         await asyncio.gather(c.task, return_exceptions=True)
         self.closed.add(c.gen)
         while self.out_gen in self.closed:  # the next connection's events may go out now
@@ -491,7 +526,7 @@ class GeminiDirection:
                         self._utts = [u for u in self._utts[-8:] if not {'audio', 'done'} <= u.marks]
                         self._utts.append(_Utt(t - 0.1, fresh=t - self._voiced_until > 1.0))
                     for lk in links:
-                        await lk.send(blk.tobytes(), not gate.on, gate.on and gate.quiet == 0)
+                        await lk.send(blk.tobytes(), not gate.on, gate.on and gate.quiet == 0, t)
                     if ev == 'pause':
                         self._utts[-1].pause = gate.last_voiced
                         for lk in links:

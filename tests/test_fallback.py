@@ -281,3 +281,194 @@ def test_a_cloud_me_side_passes_latency_through_the_live_switch(monkeypatch):
     assert isinstance(sw, LiveSwitch)
     got = list(sw.events())  # the side's consumer reads these
     assert [type(e).__name__ for e in got] == ['Caption', 'Latency', 'Speech'], got
+
+
+def test_a_stalled_network_goes_local_in_seconds(fake, monkeypatch):
+    """H-04: the network is gone without a reset (Wi-Fi lost): a send never returns. The side goes local in seconds,
+    not after the TCP timeout (~15 min), and turning translation off does not wait for the socket."""
+    import asyncio
+
+    from peresmeshnik.cloud import gemini
+    r = Run(fake)
+    try:
+        r.say(np.concatenate([tone(1.2), silence(1.0)]))
+        real = gemini._Link._send
+
+        async def stalled(self, blk):
+            if fake.down:
+                await asyncio.Event().wait()  # the socket's buffer is full and nothing drains it
+            await real(self, blk)
+        monkeypatch.setattr(gemini._Link, '_send', stalled)
+        fake.down = True  # no new connection either
+        t_stall = time.monotonic()
+        r.say(np.concatenate([tone(2.0), silence(2.5)]))
+        print(f'stall -> local: decided {r.fb.switched[0][1] - t_stall:.2f} s' if r.fb.switched else 'stall: still cloud')
+        assert r.fb.mode == 'local' and r.fb.switched[0][1] - t_stall < 4.5, r.states
+        t = time.monotonic()
+        r.fb.close()
+        assert time.monotonic() - t < 2.0
+    finally:
+        r.close()
+
+
+def test_a_slow_uplink_goes_local(fake, monkeypatch):
+    """H-05: the uplink carries less than the call needs (a phone in a bad spot): the input would lag behind the call
+    without bound. The side goes local once the cloud gets it fallback_after_s / 2 late."""
+    import asyncio
+
+    from peresmeshnik.cloud import gemini
+    real = gemini._Link._send
+
+    async def slow(self, blk):
+        await asyncio.sleep(0.2)  # 100 ms of audio takes 200 ms to send
+        await real(self, blk)
+    r = Run(fake, after_s=2.0)
+    try:
+        monkeypatch.setattr(gemini._Link, '_send', slow)
+        t0 = time.monotonic()
+        r.say(np.concatenate([tone(1.0), silence(1.0)] * 3))
+        notes = [s for s in r.states if s.startswith('note')]
+        assert len(notes) == 1 and 'uplink' in notes[0] and r.fb.switched[0][1] - t0 < 3.5, r.states
+    finally:
+        r.close()
+
+
+def test_a_cloud_that_closes_each_session_at_once_goes_local(monkeypatch):
+    """M-11: the server accepts a session and closes it right away (the quota told after the setup): a few tries, then
+    the side goes local, not 5 new sessions a second for ever."""
+    import asyncio
+    import json
+
+    class ClosesAfterSetup(FakeGemini):
+        closing = False
+
+        async def _serve(self, ws):
+            if not self.closing:
+                return await super()._serve(ws)
+            json.loads(await ws.recv())
+            self.connections += 1
+            await ws.send(json.dumps({'setupComplete': {}}))
+            await asyncio.sleep(0.05)
+            await ws.close(1011, 'You exceeded your current quota')
+    f = ClosesAfterSetup(lag=0.3)
+    r = Run(f)
+    try:
+        r.say(silence(0.5))
+        f.closing = True
+        f.drop()
+        n0, t0 = f.connections, time.monotonic()
+        r.say(silence(3.0))
+        assert r.fb.mode == 'local' and f.connections - n0 <= 4, (f.connections - n0, r.states)
+        assert 'quota' in r.states[-1] and r.fb.switched[0][1] - t0 < 2.0, r.states
+    finally:
+        r.close()
+
+
+class _Cloud:
+    """A fail_fast cloud direction's stand-in: up at once; `made` / `closed` list them."""
+    made: list = []
+    closed: list = []
+
+    def __init__(self):
+        import queue
+        self.ready, self.q, self.latency = threading.Event(), queue.Queue(), []
+        _Cloud.made.append(self)
+        self.ready.set()
+
+    def feed(self, pcm):
+        pass
+
+    def events(self):
+        while (e := self.q.get()) is not None:
+            if isinstance(e, BaseException):
+                raise e
+            yield e
+
+    def close(self):
+        _Cloud.closed.append(self)
+        self.q.put(None)
+
+
+def test_turning_off_while_local_leaves_no_cloud_probe():
+    """M-12: translation off while the side speaks locally after a cloud fault: the local path's last partial subtitle
+    (a new clause, queued as it closes) must not open a new cloud session that nobody closes."""
+    import queue
+
+    from peresmeshnik.cloud.gemini import CloudDown
+
+    class Local:
+        def __init__(self, tts):
+            self.mt, self.q = None, queue.Queue()
+
+        def warm_up(self):
+            pass
+
+        def feed(self, pcm):
+            pass
+
+        def events(self):
+            while (e := self.q.get()) is not None:
+                yield e
+
+        def close(self):  # the listen worker's last partial is still on its way
+            self.q.put(Caption('and then', clause=7))
+            time.sleep(0.3)
+            self.q.put(None)
+    _Cloud.made, _Cloud.closed = [], []
+    fb = Fallback('them', 'ru', False, make_cloud=_Cloud, make_local=Local, make_tts=TextTts)
+    t = threading.Thread(target=lambda: list(fb.events()), daemon=True)
+    t.start()
+    _Cloud.made[0].q.put(CloudDown('network'))
+    for _ in range(50):
+        if fb.mode == 'local':
+            break
+        time.sleep(0.02)
+    fb.retry_at = 0.0  # the 30 s since the fault have passed
+    fb.close()
+    t.join(2)
+    time.sleep(0.5)
+    assert fb.mode == 'local' and not [c for c in _Cloud.made if c not in _Cloud.closed]
+
+
+def test_turning_off_while_the_local_path_loads_closes_it(fake):
+    """M-12: cloud subtitles, the cloud fails and the local path is being made (models load) when translation is turned
+    off: the new path is closed, its workers end."""
+    made = []
+
+    def slow_local(tts):
+        time.sleep(1.0)  # ASR and MT load
+        d = LocalDirection(EnergyVad(), WordAsr(), UpperMt(), tts, 'en', 'ru')
+        made.append(d)
+        return d
+    fb = Fallback('them', 'ru', True, make_cloud=lambda: GeminiDirection(
+        'en', 'ru', cfg=Cloud(), client=fake.client(), gate=_Gate(), fail_fast=True), make_local=slow_local, make_tts=TextTts)
+    assert fb.cloud.ready.wait(10)
+    t = threading.Thread(target=lambda: list(fb.events()), daemon=True)
+    t.start()
+    fake.down = True
+    fake.drop()
+    for _ in range(50):  # the next block finds the connection lost; _cloud_failed makes the local path
+        fb.feed(tone(0.1))
+        time.sleep(0.02)
+    fb.close()
+    t.join(5)
+    time.sleep(1.5)
+    assert len(made) == 1 and not [w.name for w in made[0]._threads if w.is_alive()]
+
+
+def test_turning_off_while_the_voice_preloads_leaves_no_runner():
+    """L-19: off right after on: the stock voice being preloaded (a piper-runner process) is closed when it is up."""
+    class SlowTts:
+        sample_rate, live = 22050, []
+
+        def __init__(self):
+            time.sleep(0.5)  # the runner starts
+            SlowTts.live.append(self)
+
+        def close(self):
+            SlowTts.live.remove(self)
+    _Cloud.made, _Cloud.closed = [], []
+    fb = Fallback('me', 'en', True, make_cloud=_Cloud, make_local=None, make_tts=SlowTts, preload=True)
+    fb.close()
+    time.sleep(1.0)
+    assert SlowTts.live == [] and fb.muted._tts is None

@@ -208,6 +208,7 @@ def test_wizard_asks_for_the_right_models(monkeypatch):
     s.me_to_them = 'local'  # no NVIDIA GPU: Pocket TTS on the CPU (stage 8), the stock voice its fallback
     from peresmeshnik import models
     monkeypatch.setattr(models, 'hf_token', lambda: 'hf_test')  # Kyutai's gated weights: with the user's token
+    monkeypatch.setattr(languages, 'pack_here', lambda: True)  # with an NVIDIA GPU below: its voice pack is here too
     assert needed_models(s) == ['silero-vad', 'gigaam-v3-e2e-ctc', 'opus-mt-ru-en', 'pocket-tts-en',
                                 s.local.tts[s.their_lang]]
     monkeypatch.setattr(languages, 'gpu', lambda engine='': True)

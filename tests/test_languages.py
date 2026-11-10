@@ -25,6 +25,7 @@ def test_fourteen_languages_with_names_and_cloud_codes():
 
 def test_ru_en_is_local_both_ways(monkeypatch):
     monkeypatch.setattr(models, 'hf_token', lambda: 'hf_test')  # Kyutai's gated weights: the user gave a token
+    monkeypatch.setattr(languages, 'pack_here', lambda: True)  # and the voice pack (or torch) for an NVIDIA engine
     s = config.Settings()
     them, me = (languages.direction(s, side, has_gpu=True) for side in languages.SIDES)
     assert (them.src, them.tgt, me.src, me.tgt) == ('en', 'ru', 'ru', 'en')

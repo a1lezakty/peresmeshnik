@@ -50,6 +50,15 @@ MACOS = sys.platform == 'darwin'
 WINDOWS = sys.platform == 'win32'
 VMIC = 'BlackHole 2ch' if MACOS else 'CABLE Output' if WINDOWS else 'Peresmeshnik Mic'  # the call app's microphone
 SAMPLES = Path(__file__).parent / 'samples'
+# "loudspeakers" in a device's name in the app's 14 languages (Windows names its endpoints in the display language;
+# macOS "MacBook Pro Speakers", PipeWire "Built-in Audio"); lowercase
+SPEAKERS = ('speaker', 'built-in', 'встроен', 'динамик', 'динамік', 'lautsprecher', 'haut-parleur', 'altavo', 'altoparlant',
+            'alto-falant', 'altifalant', 'głośnik', 'hoparlör', '扬声器', '揚聲器', 'スピーカー', '스피커', 'مكبر', 'سماع')
+
+
+def loudspeakers(name: str) -> bool:
+    """The device's name says loudspeakers (the microphone would hear the translation)."""
+    return any(k in name.lower() for k in SPEAKERS)
 
 
 def has_key(s: config.Settings) -> bool:
@@ -399,10 +408,9 @@ class DevicesPage(QWizardPage):
         return ok
 
     def _echo(self) -> None:
-        name = self.headphones.currentText().lower()
-        speakers = any(k in name for k in ('speaker', 'built-in', 'встроен', 'динамик'))
         self.warn.setText('⚠ This looks like loudspeakers: the microphone would hear the translation and translate it back. '
-                          'Use headphones.' if speakers else 'Use headphones, not loudspeakers (echo).')
+                          'Use headphones.' if loudspeakers(self.headphones.currentText()) else
+                          'Use headphones, not loudspeakers (echo).')
 
     def validatePage(self) -> bool:  # noqa: N802
         self.w.s.ui.headphones, self.w.s.ui.mic = self.headphones.currentData(), self.mic.currentData()
@@ -747,8 +755,9 @@ class VoicePage(QWizardPage):
         speak their language, or needs an NVIDIA GPU here (languages.direction)."""
         from peresmeshnik.voice import STOCK
         s = self.w.s
-        d = languages.direction(s, 'me_to_them')
-        return '; '.join(d.notes) if self.local() and s.local.clone != STOCK and d.voice == 'stock' else ''
+        if not self.local() or s.local.clone == STOCK or languages.direction(s, 'me_to_them').voice != 'stock':
+            return ''
+        return languages.clone_why(s.local.clone, s.their_lang)
 
     def initializePage(self) -> None:  # noqa: N802
         from peresmeshnik import voice
@@ -1037,6 +1046,10 @@ class HotkeyPage(QWizardPage):
 
     def test(self, side: str) -> None:
         from peresmeshnik.app import Controller
+        if self.w.tray.ctl.on:  # its own engines would load beside the running ones: a second set of models (GBs)
+            self.out.setText('Turn translation off first: the test loads its own engines, a second set of models beside '
+                             'the ones translating now.')
+            return
         s = self.w.s
         lang = s.their_lang if side == 'them' else s.my_lang
         sample = str(SAMPLES / f'{lang}.ogg')
@@ -1118,10 +1131,23 @@ DONE_LINUX = ('In your call app (Meet, Zoom, Telegram) choose the microphone <b>
               'Settings and this wizard are in the tray menu.')
 
 
+def changed(base, mine, now):
+    """`now` (the settings saved by now) with what differs between `base` and `mine`, field by field."""
+    from dataclasses import fields, is_dataclass
+    for f in fields(mine):
+        a, b = getattr(base, f.name), getattr(mine, f.name)
+        if is_dataclass(b):
+            changed(a, b, getattr(now, f.name))
+        elif a != b:
+            setattr(now, f.name, b)
+    return now
+
+
 class SetupWizard(QWizard):
     def __init__(self, tray):
         super().__init__()
         self.tray, self.s, self.key = tray, config.load(), ''
+        self.base = copy.deepcopy(self.s)  # as it opened: finish() writes only what its pages changed since
         self.setWindowTitle('Peresmeshnik setup')
         routed = LINUX or MACOS or WINDOWS
         self.pages = [LanguagesPage(self)] + ([DevicesPage(self)] if routed else []) + ([CallSoundPage(self)] if MACOS or WINDOWS else []) \
@@ -1158,6 +1184,6 @@ class SetupWizard(QWizard):
 
     def finish(self) -> None:
         self.voice_page.commit()  # before saving: the settings name the profile, not the draft
-        config.save(self.s)
+        config.save(changed(self.base, self.s, config.load()))  # a change in the tray meanwhile stays
         self.tray.sync()
         self.tray.restart()

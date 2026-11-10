@@ -643,3 +643,105 @@ def test_settings_forget_the_key(tmp_path, monkeypatch):
     assert d.key.placeholderText() == 'saved' and d.forget.isEnabled()
     d.forget.click()
     assert not (tmp_path / 'gemini-key').exists() and not d.forget.isEnabled() and 'Gemini API key' in d.key.placeholderText()
+
+
+@pytest.mark.parametrize('name', ['Speakers (Realtek(R) Audio)', 'Динамики (Realtek(R) Audio)', 'Динаміки (Realtek(R) Audio)',
+                                  'Lautsprecher (Realtek(R) Audio)', 'Haut-parleurs (Realtek(R) Audio)',
+                                  'Altavoces (Realtek(R) Audio)', 'Altoparlanti (Realtek(R) Audio)',
+                                  'Alto-falantes (Realtek(R) Audio)', 'Głośniki (Realtek(R) Audio)',
+                                  'Hoparlörler (Realtek(R) Audio)', '扬声器 (Realtek(R) Audio)', '揚聲器 (Realtek(R) Audio)',
+                                  'スピーカー (Realtek(R) Audio)', '스피커 (Realtek(R) Audio)', 'مكبرات الصوت (Realtek(R) Audio)',
+                                  'MacBook Pro Speakers', 'Built-in Audio Analog Stereo'])
+def test_loudspeakers_are_told_in_the_14_languages(name):
+    """L-27: the devices page warns about loudspeakers by the device's name in the 14 languages of the app (Windows
+    names its endpoints in the display language), not only in English and Russian; headphones are no loudspeakers."""
+    from peresmeshnik.ui import wizard
+    assert wizard.loudspeakers(name)
+    assert not wizard.loudspeakers('Kopfhörer (WH-1000XM4)') and not wizard.loudspeakers('Headphones (USB Audio)')
+
+
+def test_no_reason_is_said_twice(monkeypatch):
+    """L-30: "No global hotkey now: no global hotkey: …" and "… for this pair: … cannot speak X: a stock voice speaks
+    instead" said a part twice."""
+    from peresmeshnik.ui import hotkey, wizard
+    from peresmeshnik.ui.hotkey import HotkeyError
+
+    def broken():
+        raise HotkeyError('libX11 not found')
+    monkeypatch.setattr(hotkey, 'X11Hotkey', broken)
+    monkeypatch.setattr(hotkey, 'wayland', lambda: False)
+    monkeypatch.setattr(hotkey.sys, 'platform', 'linux')
+    monkeypatch.setenv('DISPLAY', ':0')
+    _, why = hotkey.make()
+    monkeypatch.undo()
+    assert 'no global hotkey' not in why.lower()  # the wizard and the tray put it before
+    s = config.Settings(my_lang='ru', their_lang='uk', me_to_them='local')  # the clone has no Ukrainian
+    page = wizard.VoicePage(type('W', (), {'s': s})())
+    page.initializePage()
+    assert page.subTitle().count('stock voice') == 1, page.subTitle()
+
+
+def test_overlay_rows_go_after_the_last_phrase():
+    """L-46: the subtitles go a while after the last final caption, not when translation goes off; a phrase still being
+    said keeps them. One single-shot timer per final caption: nothing polls."""
+    o = SubtitleOverlay()
+    o.fade.setInterval(150)
+    them = o.side('them')
+    them.show(Caption('Hello.', 'Привет.', final=True, clause=0))
+    settle(0.05)
+    assert o.isVisible()
+    them.show(Caption('and', clause=1))  # someone speaks: they stay
+    settle(0.3)
+    assert o.isVisible()
+    them.show(Caption('And more.', 'И ещё.', final=True, clause=1))
+    settle(0.4)
+    assert not o.isVisible() and not o._rows
+
+
+def _fake_tray(on=False):
+    class Overlay:
+        clear = type('S', (), {'emit': lambda self: None})()
+    ctl = type('Ctl', (), {'on': on, 'live': False, 'overlay': Overlay()})()
+    return type('Tray', (), {'ctl': ctl, 'hotkey_why': '', 'sync': lambda self: None, 'restart': lambda self: None,
+                             'reload_hotkey': lambda self, combo: ''})()
+
+
+def test_wizard_keeps_what_changed_elsewhere_meanwhile(tmp_path, monkeypatch):
+    """L-39: the wizard writes what its pages changed, onto the settings as they are when it finishes: a change made in
+    the tray or the settings window while it was open stays."""
+    from peresmeshnik.ui import wizard
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    config.save(config.Settings())
+    w = wizard.SetupWizard(_fake_tray())
+    saved = config.load()
+    saved.local.threads, saved.ui.show_latency = 5, True  # the tray, meanwhile
+    config.save(saved)
+    w.s.their_lang = 'de'  # a page's change
+    w.finish()
+    got = config.load()
+    assert (got.their_lang, got.local.threads, got.ui.show_latency) == ('de', 5, True)
+
+
+def test_wizard_test_phrase_waits_for_translation_off(monkeypatch):
+    """L-40: "Test" while translating would load a second set of models beside the running ones: it says so instead."""
+    from peresmeshnik import app as app_mod
+    from peresmeshnik.ui import wizard
+    monkeypatch.setattr(app_mod, 'Controller', lambda *a, **k: pytest.fail('a second controller'))
+    page = wizard.HotkeyPage(type('W', (), {'s': config.Settings(), 'tray': _fake_tray(on=True)})())
+    page.test('them')
+    assert page.out.text().startswith('Turn translation off first') and not page.running
+
+
+def test_settings_window_chooses_the_devices_on_every_os(tmp_path, monkeypatch):
+    """L-41: macOS and Windows have the microphone and headphones in the settings window too (the errors send people
+    there), from the same device list as the wizard."""
+    from peresmeshnik.ui import selftest
+    from peresmeshnik.ui import tray as tray_mod
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    monkeypatch.setattr(config, 'config_dir', lambda: tmp_path)
+    monkeypatch.setattr(selftest, 'devices', lambda kind: [('uid-1', 'My headset'), ('uid-2', 'Desk mic')])
+    t = tray_mod.Tray(type('Ctl', (), {'live': False, 'on': False})())
+    monkeypatch.setattr(tray_mod.sys, 'platform', 'darwin')
+    d = tray_mod.SettingsDialog(t)
+    monkeypatch.undo()
+    assert d.mic.count() == 3 and d.headphones.findData('uid-1') == 1

@@ -172,7 +172,7 @@ class Tray(QObject):
         self.live.setToolTip(why)
         self.hotkey_why = why
         if why and announce:
-            self.message(why)
+            self.message(f'No global hotkey: {why}')
 
     def message(self, text: str) -> None:
         if self.icon.isVisible():
@@ -553,11 +553,10 @@ class SettingsDialog(QDialog):
         f.addRow('My voice (local clone)', self.voice)
         self.hotkey = QKeySequenceEdit(QKeySequence(s.ui.hotkey))
         f.addRow('Hotkey: translation ⇄ live', self.hotkey)
-        if sys.platform.startswith('linux'):
-            self.headphones = device_combo('sinks', s.ui.headphones)
-            self.mic = device_combo('sources', s.ui.mic)
-            f.addRow('Headphones', self.headphones)
-            f.addRow(MIC_LABEL, self.mic)
+        self.headphones = device_combo('sinks', s.ui.headphones)  # every OS: the wizard's list (selftest.devices)
+        self.mic = device_combo('sources', s.ui.mic)
+        f.addRow('Headphones', self.headphones)
+        f.addRow(MIC_LABEL, self.mic)
         self.note = QLabel()
         self.note.setWordWrap(True)
         f.addRow(self.note)
@@ -591,8 +590,7 @@ class SettingsDialog(QDialog):
                 self.note.setText(f'Hotkey not changed: {why}')
                 return
             s.ui.hotkey = combo
-        if hasattr(self, 'headphones'):
-            s.ui.headphones, s.ui.mic = self.headphones.currentData(), self.mic.currentData()
+        s.ui.headphones, s.ui.mic = self.headphones.currentData(), self.mic.currentData()
         if new_key := bool(self.key.text().strip()):
             save_key(self.key.text(), s.cloud)
         if new_key or s != config.load():  # the pair and the engines as they were: switch_pair saves them, models first

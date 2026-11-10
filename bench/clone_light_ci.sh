@@ -16,7 +16,8 @@ git clone -q https://github.com/OpenMOSS/MOSS-TTS-Nano "$W/MOSS-TTS-Nano" && git
 git clone -q https://github.com/Zyphra/ZONOS3-Mini "$W/ZONOS3-Mini" && git -C "$W/ZONOS3-Mini" checkout -q b820f6d
 git -C "$W/ZONOS3-Mini" submodule update -q --init servers/ggml/ggml
 git clone -q https://github.com/gabriele-mastrapasqua/qwen3-tts "$W/qwen3-c" && git -C "$W/qwen3-c" checkout -q ef339be58a
-(cd "$W/qwen3-c" && make blas > "$W/logs/qwen3-c-build.log" 2>&1) || { tail -30 "$W/logs/qwen3-c-build.log"; echo "qwen3-tts C build failed"; }
+command -v gmake > /dev/null || brew install -q make >> "$W/logs/brew.log" 2>&1 || true  # its Makefile needs GNU make 4
+(cd "$W/qwen3-c" && gmake blas > "$W/logs/qwen3-c-build.log" 2>&1) || { tail -30 "$W/logs/qwen3-c-build.log"; echo "qwen3-tts C build failed"; }
 Z=$W/ZONOS3-Mini/servers/ggml
 (cd "$Z" && cmake -B build -DCMAKE_BUILD_TYPE=Release > "$W/logs/zonos-build.log" 2>&1 && cmake --build build -j3 >> "$W/logs/zonos-build.log" 2>&1) \
   || { tail -30 "$W/logs/zonos-build.log"; echo "ZONOS3 build failed"; }
@@ -40,6 +41,7 @@ export ZONOS_BIN=$Z/build ZONOS_GGUF=$Z/gguf QWENC_BIN=$W/qwen3-c/qwen_tts QWENC
 BENCH_THREADS=3 "$W/venv-eval/bin/python" bench/clone_light.py refs
 run() {  # label threads model args...
   local L=$1 T=$2 M=$3; shift 3
+  [[ $L =~ ${CLONE_ONLY:-.} ]] || return 0
   echo "== $L"
   if BENCH_THREADS=$T OMP_NUM_THREADS=$T "$W/venv-onnx/bin/python" bench/clone_light.py synth --model "$M" --label "$L" --n "$N" "$@" > "$W/logs/$L.log" 2>&1; then
     BENCH_THREADS=3 "$W/venv-eval/bin/python" bench/clone_light.py eval --label "$L" 2>&1 | grep '^{' || echo "eval failed: $L"

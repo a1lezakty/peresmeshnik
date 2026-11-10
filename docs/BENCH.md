@@ -2381,3 +2381,48 @@ another passes in 3 tries; 649 own and ~17 000 other pairs per row):
 | 5 s, white noise SNR 10 | 37.3 / 0 / 0 % | 38.5 / 0.01 / 0.01 % | 72.0 / 0.01 / 0.02 % (2.3 s of 5 s left) |
 | 8 s with silence and a pause, quiet | 4.5 / 0.07 / 0.20 % | 4.7 / 0.10 / 0.28 % | 4.4 / 0.07 / 0.20 % |
 | 8 s with silence and a pause, SNR 20 | 19.5 / 0.02 / 0.09 % | 15.9 / 0.03 / 0.10 % | 17.8 / 0.02 / 0.06 % |
+
+## Stage 8: Pocket TTS on onnxruntime, both sides cloned at once on 4 cores (S1)
+
+Measured 2026-11-10 on the C server's i7-13700 (Linux, onnxruntime 1.31.1, CUDA hidden), the app's own engine
+(`local/pocket.py`: our weight-free graphs, the model's safetensors, int8 FlowLM unless said) and pipeline
+(`bench/me_them.py run --null-mic`, live pace, `--engine` / `--them-engine`). Judges as in RESEARCH-clone: SpeechBrain
+ECAPA, Whisper small. The English weights with voice cloning are gated (the user accepts Kyutai's conditions): the English
+rows ran on a bench-only copy, the open `kyutai/pocket-tts-without-voice-cloning` weights with the Mimi encoder of
+Shtorm-PocketTTS-RU (bit for bit Kyutai's, as its decoder); Russian on the registry's `pocket-tts-ru` as fetched.
+
+**The engine against `pocket_tts` (torch)**, 2 threads, 10 s voice sample, R's sentences:
+
+| | ours: similarity / WER | torch: similarity / WER |
+|---|---|---|
+| ru, English voice → Russian, 20 sentences | 0.413 / 12.3 % | 0.408 / 14.4 % |
+| ru, Russian voice → Russian, 20 sentences | 0.557 / 7.8 % | 0.557 / 8.7 % |
+| en, English voice → English, 6 sentences | 0.620 / 3.2 % | 0.628 / 3.2 % |
+| en, Russian voice → English, 6 sentences | 0.361 / 8.5 % | 0.361 / 6.4 % |
+
+| 2 threads | first audio | RTF | RSS of one voice |
+|---|---|---|---|
+| ours fp32 | 0.04–0.05 s | 0.22 | 0.53 (ru) – 0.65 (en) GB |
+| **ours int8 (the app's)** | **0.023–0.029 s** | **0.146** | **0.43 GB** |
+| torch fp32 / int8 (up to 4 cores: two Python threads) | 0.05–0.11 / ~0.05 s | 0.17–0.23 / 0.11 | — |
+
+int8 on 6 sentences: ru 0.408 / 8.6 % and 0.529 / 7.1 %, en 0.611 / 3.2 % and 0.362 / 5.3 % — within the noise of fp32.
+
+**Both sides at once**, one process on 4 physical cores (`taskset -c 0,2,4,6`), 2 threads per engine: me → them reads
+`ru_30s.wav` (33 s, dense) into English in my cloned voice, them → me `en_call.wav` into Russian in theirs (FLEURS
+v02, female). "Voice" is from a clause's end to its translated voice starting.
+
+| run | me → them voice: median (max) | tail after input | WER said | them → me voice: median (max) | RSS peak | CPU s per audio s |
+|---|---|---|---|---|---|---|
+| **both, my voice = the reader** | **2.1 s (4.1)** | 1.8 s | 1 % | **0.64 s (1.95)** | 2.56 GB | 2.49 |
+| me → them alone, the reader | 2.0 s (4.2) | 1.6 s | 0 % | — | 1.04 GB | 1.29 |
+| both, my voice = FLEURS v04 (slow) | 7.6 s (10.2) | 8.8 s | 1 % | 0.87 s (1.6) | 2.77 GB | 2.28 |
+| me → them alone, FLEURS v04 | 6.6 s (8.8) | 9.1 s | 0 % | — | 0.89 GB | 1.38 |
+
+- Both sides cloned keep up on 4 cores: the second side adds 0.1–0.5 s to the first one's voice.
+- **The clone speaks at the pace of its voice sample.** A slow speaker's sample made 36 s of English out of 33 s of
+  dense Russian (the reader's: 27 s), and the voice fell 8–10 s behind in a monologue; it catches up at pauses. The
+  engine's speed is not the cause (RTF 0.15–0.21 in both).
+- The first clause's 1 s of first audio in a cold run is the voice state made at the first call; the app makes it at its
+  warm-up (`clone_rtf`) and caches it next to the recording.
+- Before freeing the numpy weights each voice took 1.1–1.2 GB and both sides peaked at 5.2 GB.

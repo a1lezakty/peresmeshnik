@@ -95,12 +95,12 @@ def test_wrong_codes_burn_the_code(tls, tmp_path):
 def test_expired_code_and_bad_messages(tmp_path):
     now = [100.0]
     p = pairing.Pairing(tmp_path, 'f' * 64, clock=lambda: now[0])
-    assert json.loads(p.handle(protocol.pair('A' * 12, p.fp, 'n', 'x')))['code'] == 'code'  # no code yet
+    assert json.loads(p.handle(protocol.pair('A' * 12, p.fp, '0a', 'x')))['code'] == 'code'  # no code yet
     code = p.new_code()
     now[0] += pairing.CODE_S + 1
-    assert json.loads(p.handle(protocol.pair(code, p.fp, 'n', 'x')))['code'] == 'code'
+    assert json.loads(p.handle(protocol.pair(code, p.fp, '0a', 'x')))['code'] == 'code'
     code = p.new_code()
-    msg = json.loads(protocol.pair(code, p.fp, 'n', 'x'))
+    msg = json.loads(protocol.pair(code, p.fp, '0a', 'x'))
     for bad, why in (('not json', 'hello'), (json.dumps(msg | {'type': 'hello'}), 'hello'),
                      (json.dumps(msg | {'version': protocol.VERSION + 1}), 'version'), (json.dumps(msg | {'name': ' '}), 'hello'),
                      (json.dumps(msg | {'mac': None}), 'hello')):
@@ -114,7 +114,7 @@ def test_man_in_the_middle(tls, tmp_path):
     p = pairing.Pairing(tmp_path / 'srv', fp)
     code = p.new_code()
     # the client talked TLS to a man in the middle with his own certificate: its proof is bound to his fingerprint
-    assert json.loads(p.handle(protocol.pair(code, 'e' * 64, 'n', 'x')))['code'] == 'code'
+    assert json.loads(p.handle(protocol.pair(code, 'e' * 64, '0a', 'x')))['code'] == 'code'
     # a server (or a man in the middle) that answers with a token but not the proof for this certificate and code
     remote = tmp_path / 'remote'
     with server(ctx, lambda m: protocol.paired(code, 'e' * 64, json.loads(m)['nonce'], 'ab' * 32)) as url:
@@ -166,3 +166,110 @@ def test_parse():
         with pytest.raises(ValueError):
             pairing.parse(bad)
     assert pairing.parse('192.168.1.20#K7QM-XPAZ-DFE0')[2] == 'K7QMXPAZDFEO'  # 0 reads as O
+
+
+def test_revoke_from_another_process_is_not_undone(tmp_path):
+    srv = pairing.Pairing(tmp_path)  # the running server
+    token, other = srv.add('laptop'), srv.add('desk')
+    paired = tmp_path / 'paired.json'
+    before = paired.stat().st_mtime_ns, paired.read_bytes()
+    for _ in range(50):
+        assert srv.check(other) == 'desk'
+    assert (paired.stat().st_mtime_ns, paired.read_bytes()) == before  # check() writes nothing
+    assert [d['last'] for d in srv.devices() if d['name'] == 'desk'] == [srv.seen[next(iter(srv.seen))]]  # from memory
+    stop, checks, after = threading.Event(), [0], []
+
+    def hellos():
+        while not stop.is_set():
+            got = srv.check(token)
+            checks[0] += 1
+            if got is None:
+                after.append(checks[0])
+    t = threading.Thread(target=hellos)
+    t.start()
+    try:
+        while checks[0] < 20 and t.is_alive():
+            pass
+        assert pairing.Pairing(tmp_path).revoke('laptop')  # serve --revoke: another process, its own Pairing
+        n = checks[0]
+        while checks[0] < n + 50 and t.is_alive():
+            pass
+    finally:
+        stop.set()
+        t.join(5)
+    assert after  # the server saw the revoke
+    assert [d['name'] for d in json.loads(paired.read_text())] == ['desk']  # and no check brought it back
+    assert srv.check(token) is None and srv.check(other) == 'desk'
+
+
+def test_adds_from_two_processes_lose_nothing(tmp_path):
+    def adds(who):
+        p = pairing.Pairing(tmp_path)  # each its own object: only the file lock keeps them apart
+        for i in range(20):
+            p.add(f'{who}{i}')
+    ts = [threading.Thread(target=adds, args=(w,)) for w in 'ab']
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join(10)
+    assert sorted(d['name'] for d in pairing.Pairing(tmp_path).devices()) == sorted(f'{w}{i}' for w in 'ab'
+                                                                                    for i in range(20))
+
+
+def test_same_name_gets_a_suffix(tmp_path):
+    p = pairing.Pairing(tmp_path)
+    tokens = [p.add('laptop') for _ in range(3)]
+    assert [d['name'] for d in p.devices()] == ['laptop', 'laptop (2)', 'laptop (3)']
+    assert [p.check(t) for t in tokens] == ['laptop', 'laptop (2)', 'laptop (3)']
+    assert p.revoke('laptop (2)') and not p.revoke('laptop (2)')  # exactly that one
+    assert [p.check(t) for t in tokens] == ['laptop', None, 'laptop (3)']
+    p.add('laptop')
+    assert [d['name'] for d in p.devices()] == ['laptop', 'laptop (3)', 'laptop (2)']
+
+
+def test_garbage_does_not_raise(tmp_path):
+    p = pairing.Pairing(tmp_path, 'f' * 64)
+    code = p.new_code()
+    msg = json.loads(protocol.pair(code, p.fp, '0a', 'x'))
+    good_mac = msg['mac']
+    bad = [{'nonce': n} for n in ('é' * 4, '\ud800', 'AB', '', 'a' * 129, 'g', 7)]
+    bad += [{'mac': m} for m in ('é' * 64, '\ud800' * 64, good_mac.upper(), good_mac[:-1], good_mac + 'a', 7)]
+    bad += [{'name': n} for n in ('\ud800', 'a\nb')]
+    for b in bad:
+        assert json.loads(p.handle(json.dumps(msg | b)))['code'] == 'hello', b  # json.dumps escapes the surrogate
+    assert json.loads(p.handle(b'\xff\xfe'))['code'] == 'hello'
+    assert json.loads(p.handle(json.dumps(msg | {'version': '\ud800'})))['code'] == 'version'
+    assert p.tries == 0 and not p.used
+    reply = json.loads(p.handle(json.dumps(msg)))
+    token = reply['token']
+    assert reply['type'] == 'paired' and p.check(token) == 'x'
+    for t in ('é' * 64, '\ud800', '\ud800' * 64, token.upper(), token[:-1], token + 'a', '', None, 7):
+        assert p.check(t) is None, t
+
+
+def test_client_refuses_a_garbage_answer(tls, tmp_path):
+    ctx, fp = tls
+    code = 'K7QMXPAZDFEB'
+    good = 'ab' * 32
+
+    def answers(token, mac=None):
+        def respond(m):
+            nonce = json.loads(m)['nonce']
+            if mac:
+                return json.dumps({'type': 'paired', 'token': token, 'mac': mac(nonce)})
+            try:  # the right proof for this token, where it can be made at all
+                right = protocol.pair_mac(code, fp, nonce, token)
+            except (AttributeError, UnicodeEncodeError):
+                right = 'ab' * 32
+            return json.dumps({'type': 'paired', 'token': token, 'mac': right})
+        return respond
+    remote = tmp_path / 'remote'
+    for respond in (answers(good.upper()), answers('é' * 64), answers('\ud800'), answers(good[:-2]), answers(7),
+                    answers(good, lambda n: protocol.pair_mac(code, fp, n, good).upper()),
+                    answers(good, lambda n: 'é' * 64), answers(good, lambda n: '\ud800' * 64),
+                    answers(good, lambda n: protocol.pair_mac(code, fp, n, good)[:-1]), answers(good, lambda n: None)):
+        with server(ctx, respond) as url:
+            assert refused(lambda: pairing.pair(f'{url}/#{code}', 'x', remote)) == 'auth'
+        assert not remote.exists()
+    with server(ctx, answers(good)) as url:  # the same server, a proper answer
+        assert pairing.pair(f'{url}/#{code}', 'x', remote)['token'] == good

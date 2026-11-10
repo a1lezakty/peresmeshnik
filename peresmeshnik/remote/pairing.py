@@ -3,10 +3,11 @@
 The server: `cert` makes a self-signed certificate once and keeps it (a new one would unpair every client); `Pairing`
 shows a one-time code (12 base32 characters, 10 minutes, one use, burnt after 5 wrong tries), answers /v1/pair
 (`handle`: the client's message -> the answer) and keeps the paired devices in `paired.json` (0600): the sha256 of each
-token, never the token, so the file alone lets nobody in. Every call reads the file again, so `serve --revoke` in another
-process takes effect on the running server's next `check`. `check_bind` refuses a public address without `public=True`
-(an open port on the internet with a 60-bit code in front of it); `addresses` finds this machine's private ones for the
-line `https://<ip>:47000/#<code>`.
+token, never the token, so the file alone lets nobody in. Only `add` and `revoke` write it, under a file lock
+(`paired.json.lock`), and every call reads it again: `serve --revoke` in another process takes effect on the running
+server's next `check` and is never undone (`check` keeps the last-seen time in memory, not in the file).
+`check_bind` refuses a public address without `public=True` (an open port on the internet with a 60-bit code in front
+of it); `addresses` finds this machine's private ones for the line `https://<ip>:47000/#<code>`.
 
 The client: `pair` connects without checking the certificate's chain (it is self-signed), takes its fingerprint from the
 TLS session, proves it knows the code for that fingerprint and checks the server's proof back (a man in the middle with
@@ -17,6 +18,7 @@ server) or 'internal' (no connection).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime
 import hashlib
 import hmac
@@ -24,13 +26,14 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import secrets
 import socket
 import ssl
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -42,6 +45,8 @@ CODE_LEN = 12
 CODE_S = 600  # a pairing code lives this long
 CODE_TRIES = 5  # wrong codes before it burns
 B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
+HEX64 = re.compile('[0-9a-f]{64}')  # a token, a mac, a sha256: lowercase hex only (the wire carries nothing else)
+NONCE = re.compile('[0-9a-f]{1,128}')
 NAME_MAX = 64
 PRIVATE = [ipaddress.ip_network(n) for n in (
     '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16',  # RFC 1918
@@ -64,6 +69,33 @@ def _write(path: Path, data: bytes) -> None:
     except BaseException:
         os.unlink(tmp)
         raise
+
+
+def _hex(pattern: re.Pattern, s: object) -> bool:
+    """`s` is a str of exactly that hex: garbage, non-ASCII or a lone surrogate is just False (hmac would raise)."""
+    return isinstance(s, str) and pattern.fullmatch(s) is not None
+
+
+@contextlib.contextmanager
+def _locked(path: Path) -> Iterator[None]:
+    """An exclusive lock on `path` (made 0600 if missing) across processes: flock on POSIX, msvcrt on Windows."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if os.name == 'nt':
+            import msvcrt
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)  # retries for ~10 s, then OSError
+            try:
+                yield
+            finally:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)  # Windows wants it unlocked before the close
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield  # the lock goes with the descriptor
+    finally:
+        os.close(fd)
 
 
 def _now() -> str:
@@ -100,6 +132,7 @@ class Pairing:
 
     def __init__(self, folder: Path, fp: str = '', clock: Callable[[], float] = time.monotonic):
         self.path, self.fp, self.clock = folder / 'paired.json', fp, clock
+        self.seen: dict[str, str] = {}  # sha256 -> when `check` last let it in (UTC ISO): this process only
         self.code, self.until, self.tries, self.used = '', 0.0, 0, False
         self.lock = threading.Lock()  # handle() and check() may come from different threads of the server
 
@@ -109,48 +142,63 @@ class Pairing:
         self.until, self.tries, self.used = self.clock() + CODE_S, 0, False
         return '-'.join(self.code[i:i + 4] for i in range(0, CODE_LEN, 4))
 
-    # devices: {'name', 'sha256', 'paired', 'last'}, the times in UTC ISO
+    # devices: {'name', 'sha256', 'paired', 'last'}, the times in UTC ISO; 'last' in the file is the pairing time, the
+    # running server's own `check`s are in `seen`
 
-    def devices(self) -> list[dict]:
+    def _read(self) -> list[dict]:
         try:
             return json.loads(self.path.read_text('utf-8'))
         except FileNotFoundError:
             return []
 
+    def devices(self) -> list[dict]:
+        with self.lock:
+            return [d | {'last': self.seen[d['sha256']]} if d['sha256'] in self.seen else d for d in self._read()]
+
     def _save(self, devices: list[dict]) -> None:
         _write(self.path, json.dumps(devices, ensure_ascii=False, indent=1).encode('utf-8'))
 
     def add(self, name: str) -> str:
-        """A new device token (32 random bytes, hex); a device of the same name is replaced (this computer paired again)."""
+        """A new device token (32 random bytes, hex). A device already paired under `name` stays: the new one is
+        'name (2)', 'name (3)'... so `revoke` always names one device."""
         token = secrets.token_hex(32)
-        with self.lock:
-            devices = [d for d in self.devices() if d['name'] != name]
+        with self.lock, _locked(self.path.with_name(self.path.name + '.lock')):
+            devices = self._read()
+            names, n, unique = {d['name'] for d in devices}, 1, name
+            while unique in names:
+                n += 1
+                unique = f'{name} ({n})'
             now = _now()
-            self._save(devices + [{'name': name, 'sha256': hashlib.sha256(token.encode()).hexdigest(), 'paired': now,
+            self._save(devices + [{'name': unique, 'sha256': hashlib.sha256(token.encode()).hexdigest(), 'paired': now,
                                    'last': now}])
         return token
 
-    def check(self, token: str) -> str | None:
-        """The device's name for a token from hello, or None; marks when it was last seen."""
+    def check(self, token: object) -> str | None:
+        """The device's name for a token from hello, or None (not a token, or not paired). Writes nothing: the
+        last-seen time stays in memory, so a `revoke` from another process cannot be undone by a `check` here."""
+        if not _hex(HEX64, token):
+            return None
         h = hashlib.sha256(token.encode()).hexdigest()
         with self.lock:
-            devices = self.devices()
             found = None
-            for d in devices:  # every one compared, in constant time each
+            for d in self._read():  # every one compared, in constant time each
                 if hmac.compare_digest(d['sha256'], h):
                     found = d
             if found is None:
                 return None
-            found['last'] = _now()
-            self._save(devices)  # ponytail: read-modify-write; a `serve --revoke` from another process in the same
-            return found['name']  # millisecond can be undone, a file lock if that ever matters
+            self.seen[h] = _now()
+            return found['name']
 
     def revoke(self, name: str) -> bool:
-        with self.lock:
-            devices = self.devices()
+        """Unpairs the device of exactly this name (as `serve --list` shows it); False if there is none."""
+        with self.lock, _locked(self.path.with_name(self.path.name + '.lock')):
+            devices = self._read()
             left = [d for d in devices if d['name'] != name]
             if len(left) < len(devices):
                 self._save(left)
+            for d in devices:
+                if d['name'] == name:
+                    self.seen.pop(d['sha256'], None)
             return len(left) < len(devices)
 
     def handle(self, text: str | bytes) -> str:
@@ -162,11 +210,12 @@ class Pairing:
         if not isinstance(m, dict) or m.get('type') != 'pair':
             return protocol.error('hello', 'the first message on /v1/pair is not a pair')
         if m.get('version') != protocol.VERSION:
-            return protocol.error('version', f'protocol {m.get("version")} here, the server speaks {protocol.VERSION}: '
+            return protocol.error('version', f'protocol {m.get("version")!r} here, the server speaks {protocol.VERSION}: '
                                              'update the app on both computers to the same version')
         name, nonce, mac = m.get('name'), m.get('nonce'), m.get('mac')
-        if not (isinstance(name, str) and name.strip() and isinstance(nonce, str) and 0 < len(nonce) <= 128
-                and isinstance(mac, str)):
+        # hex only: a non-ASCII mac would make hmac raise; a printable name (no lone surrogate: paired.json is UTF-8)
+        if not (isinstance(name, str) and name.strip() and name.isprintable() and _hex(NONCE, nonce)
+                and _hex(HEX64, mac)):
             return protocol.error('hello', 'a bad pair message')
         with self.lock:
             if self.tries >= CODE_TRIES:
@@ -258,9 +307,9 @@ def pair(url: str, name: str, path: Path | None = None) -> dict:
         raise ProtocolError('internal', f'cannot pair with {address}: {e}') from None
     if answer.get('type') == 'error':
         raise ProtocolError(answer.get('code', 'internal'), answer.get('text', 'the server refused'))
-    token = answer.get('token')
-    if (answer.get('type') != 'paired' or not isinstance(token, str) or not token
-            or not hmac.compare_digest(protocol.pair_mac(code, fp, nonce, token), str(answer.get('mac')))):
+    token, mac = answer.get('token'), answer.get('mac')
+    if (answer.get('type') != 'paired' or not _hex(HEX64, token) or not _hex(HEX64, mac)
+            or not hmac.compare_digest(protocol.pair_mac(code, fp, nonce, token), mac)):
         raise ProtocolError('auth', f'{address} does not prove it knows the code: it is not that server, or something '
                                     'between the two computers is. Nothing was saved')
     remote = {'address': address, 'fp': fp, 'token': token, 'name': name}

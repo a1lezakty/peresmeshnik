@@ -386,7 +386,7 @@ def upgrade(meta: dict, folder: str) -> dict:
     counts as recorded live (wer not measured); an imported file has no consent until checked at the microphone."""
     if meta.get('version', 1) >= VERSION:
         return meta
-    live = bool(meta.get('transcript')) and meta.get('transcript') == PROMPTS.get(meta.get('lang', ''))
+    live = how_to_confirm(meta) == 'mic-live'
     at = meta.get('created', '')
     return meta | {'version': VERSION, 'id': folder, 'name': meta.get('name', folder), 'kind': 'me',
                    'consent': {'how': 'mic-live', 'at': at, 'wer': None, 'similarity': None} if live else None,
@@ -576,6 +576,12 @@ def confirm_live(ref: Voice, pcm: np.ndarray, sr: int, said: list[str], asr, spe
         return None, 'Not confirmed: ' + '; '.join(why) + '.'
     return {'how': how, 'at': _now(), 'wer': round(err, 3), 'similarity': round(sim, 3)}, ''
 
+
+def how_to_confirm(meta: dict) -> str:
+    """My profile's consent once confirmed: read from the screen text at the microphone (the wizard's Record,
+    `--record`): 'mic-live'; else a file: 'import+mic-match'."""
+    return 'mic-live' if meta.get('transcript') and meta['transcript'] == PROMPTS.get(meta.get('lang', '')) \
+        else 'import+mic-match'
 
 def set_consent(name: str, consent: dict | None, root: Path | None = None) -> Voice:
     """Write how my profile `name` was confirmed (confirm_live) into its voice.json."""

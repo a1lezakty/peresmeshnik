@@ -66,6 +66,7 @@ class ConfirmBox(QWidget):
     """Read two phrases at the microphone: my profile `name` is confirmed (its voice.json gets the consent, `confirmed`
     is emitted) or not, and why. `how`: 'mic-live' (recorded just now) or 'import+mic-match' (a file)."""
     confirmed = Signal(dict)
+    busy = Signal(bool)  # reading or checking: True, then False
 
     def __init__(self, s: config.Settings, name: str, how: str, root=None, parent=None):
         super().__init__(parent)
@@ -98,6 +99,7 @@ class ConfirmBox(QWidget):
 
     def start(self) -> None:
         self.running = True
+        self.busy.emit(True)
         self.button.setEnabled(False)
         self.bar.setValue(0)
         self.bar.setVisible(True)
@@ -120,6 +122,7 @@ class ConfirmBox(QWidget):
     def _finished(self, r) -> None:
         consent, why = r
         self.running = False
+        self.busy.emit(False)
         self.bar.setVisible(False)
         self.button.setEnabled(True)
         if consent:
@@ -209,8 +212,7 @@ class VoicesDialog(QDialog):
         v = self.selected()
         if v is None or self.confirm is not None:
             return
-        how = 'import+mic-match' if v.meta.get('transcript') != voice.PROMPTS.get(v.meta['lang']) else 'mic-live'
-        self.confirm = ConfirmBox(self.s, v.name, how, self.root, self)
+        self.confirm = ConfirmBox(self.s, v.name, voice.how_to_confirm(v.meta), self.root, self)
         self.confirm.confirmed.connect(lambda c: (self.refresh(), self.on_change()))
         self.lay.insertWidget(self.lay.count() - 1, self.confirm)
 

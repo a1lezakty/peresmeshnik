@@ -75,3 +75,36 @@ def test_keep_a_contacts_voice_only_as_agreed(tmp_path):
     assert d.save.isEnabled()
     v = d.keep({'pocket-tts-en': (np.zeros(3, np.float32), 'sha')}, 'en', 5.0, tmp_path)
     assert v.meta['kind'] == 'them' and v.meta['name'] == 'Анна' and voice.why_not_mine(v.meta)
+
+
+def test_wizard_voice_page_confirms_the_take(tmp_path, monkeypatch):
+    """The wizard's voice page: an imported take is not mine until two phrases are read at the microphone (the box under
+    it); no Next while that records; Finish keeps the consent with the profile."""
+    import soundfile as sf
+    from test_clone_wizard import speech_like
+
+    from peresmeshnik import languages
+    from peresmeshnik.ui import wizard
+    monkeypatch.setattr(wizard, 'WINDOWS', False)
+    real = languages.clone_why
+    monkeypatch.setattr(languages, 'clone_why', lambda model, lang='', has_gpu=None: real(model, lang, True))
+    monkeypatch.setattr(voice, 'voices_dir', lambda: tmp_path / 'voices')
+    s = config.Settings()
+    s.me_to_them = 'local'
+    page = wizard.VoicePage(type('W', (), {'s': s})())
+    page.initializePage()
+    page.own.setChecked(True)
+    assert page.confirm is None
+    sf.write(tmp_path / 'me.wav', speech_like(45), 24_000)
+    page.import_file(str(tmp_path / 'me.wav'))
+    pump(lambda: not page.running)
+    assert page.confirm is not None and page.confirm.how == 'import+mic-match' and page.isComplete()
+    monkeypatch.setattr('peresmeshnik.audio.mic.record', lambda sec, dev, sr, progress: speech(sec, sr)[0])
+    said = page.confirm.said
+    monkeypatch.setattr(voices, 'check_models', lambda s, lang, say: (Asr(' '.join(said)), Speaker(0.9)))
+    page.confirm.start()
+    assert not page.isComplete()  # it records into the take
+    pump(lambda: not page.confirm.running)
+    assert page.isComplete() and voice.mine('me.new')
+    page.commit()
+    assert voice.mine('me').meta['consent']['how'] == 'import+mic-match' and s.local.voice == 'me'

@@ -690,6 +690,7 @@ class VoicePage(QWizardPage):
         self.gpu_found.connect(self._gpu_found)
         self._cancel_pack = threading.Event()
         self.draft = f'{self.name}.new'
+        self.confirm = None  # ui.voices.ConfirmBox of the voice shown while it is not confirmed as mine (M-20)
 
     def local(self) -> bool:
         return self.w.s.me_to_them == 'local'
@@ -734,10 +735,13 @@ class VoicePage(QWizardPage):
             q = self.voice.meta.get('quality', {})
             self.out.setText(f'Saved voice "{self.voice.name}": {q.get("seconds", 0):.0f} s, '
                              f'recorded {self.voice.meta.get("created", "")}.')
+        self._confirm_box()
         self._show_pack()
         self._buttons()
 
     def isComplete(self) -> bool:  # noqa: N802
+        if getattr(self.confirm, 'running', False):  # it records into the take: no Next meanwhile
+            return False
         return not self.running and not self.packing and (not self.local() or self.stock.isChecked() or bool(self.clone_off())
                                                           or self.voice is not None and self.pack() != 'gpu')
 
@@ -900,6 +904,28 @@ class VoicePage(QWizardPage):
             self.out.setText(f'<b>{voice.verdict(r)}</b>{saved}<br>{voice.summary(r)}')
             if v:
                 self.voice, self.w.s.local.voice = v, v.name
+                self._confirm_box()
+        self._buttons()
+
+    def _confirm_box(self) -> None:
+        """The voice shown speaks into the call only once confirmed at the microphone (voice.mine): until then the box
+        to read two phrases, and the page says so; Next is not held (a stock voice speaks meanwhile, the tray says why)."""
+        from peresmeshnik import voice
+        from peresmeshnik.ui.voices import ConfirmBox
+        if self.confirm is not None:
+            self.confirm.setParent(None)
+            self.confirm.deleteLater()
+            self.confirm = None
+        if self.voice is None or not voice.why_not_mine(self.voice.meta):
+            return
+        self.confirm = ConfirmBox(self.w.s, self.voice.name, voice.how_to_confirm(self.voice.meta), parent=self)
+        self.confirm.confirmed.connect(self._confirmed)
+        self.confirm.busy.connect(lambda _: self._buttons())  # no Next while it records into the take
+        self.layout().addWidget(self.confirm)
+
+    def _confirmed(self, consent: dict) -> None:
+        from peresmeshnik import voice
+        self.voice = voice.load(self.voice.name)
         self._buttons()
 
     def no_check(self) -> str:

@@ -460,7 +460,7 @@ ASIDE = ('.new', '.old', '.tmp')  # the wizard's take in progress, its last one,
 def profiles(root: Path | None = None) -> list[Voice]:
     """The saved voices: mine and the contacts' (not the folders set aside, ASIDE; not the damaged ones)."""
     out = []
-    for p in sorted((root or voices_dir()).glob('*/voice.json')):
+    for p in sorted((root or voices_dir()).glob('*/voice.json'), key=lambda p: p.parent.name):  # one order on every OS
         if not p.parent.name.endswith(ASIDE):
             try:
                 out.append(load(p.parent.name, root))

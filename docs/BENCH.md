@@ -2454,3 +2454,24 @@ reference unless said; en → ru is an English voice speaking Russian ("them →
   Qwen3 0.51 / 0.31, XTTS 0.40 / 0.33. Four voices are too few to say whether it is female voices, phone-grade
   recordings or chance.
 - Not heard by anyone: the accent of Russian from an English reference, the stress marks' mistakes.
+
+**Eight FLEURS voices** (rows in `bench/results/voices.jsonl`; dev speakers, one 9–12 s utterance each, the engine
+gets its first 5 s, similarity against the whole utterance, the same 6 sentences; Pocket en: int8 ONNX, Pocket ru: the
+Shtorm weights, int8; Qwen3 on the A4000 beside them):
+
+| voice | Pocket → en | Qwen3 → en | Pocket ru → ru | Qwen3 → ru | WER ru: Pocket / Qwen3 |
+|---|---|---|---|---|---|
+| English, male | 0.42 | 0.70 | 0.18 | 0.42 | 4 % / 4 % |
+| English, female | 0.19 | 0.54 | 0.19 | 0.32 | 11 % / 74 % |
+| English, female | 0.12 | 0.53 | 0.15 | 0.29 | 4 % / 129 % |
+| Spanish, male | 0.36 | 0.54 | 0.23 | 0.39 | 7 % / 3 % |
+| Russian, male | 0.22 | 0.38 | 0.44 | 0.62 | 7 % / 3 % |
+| Russian, male | 0.29 | 0.52 | 0.34 | 0.66 | 7 % / 7 % |
+| Russian, female | 0.34 | 0.61 | 0.45 | 0.75 | 3 % / 13 % |
+| Russian, female | 0.40 | 0.56 | 0.46 | 0.69 | 7 % / 4 % |
+
+- It is not the speaker's sex: Russian female voices clone as well as male ones. **The Russian Pocket weights carry a
+  voice across languages badly:** an English or Spanish voice in Russian is at 0.15–0.23, next to another speaker
+  (0.09–0.19), a Russian voice at 0.34–0.46. The words stay (WER 3–11 %). The studio English reader above had 0.36–0.39.
+- Qwen3 loses similarity across languages too (0.29–0.42 against 0.62–0.75) and, in the speaker-vector mode, runs away
+  on Russian with the two English female voices (WER 74 % and 129 %).

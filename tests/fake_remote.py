@@ -43,11 +43,13 @@ class Conn:
 
 
 class FakeServer:
-    """`refuse`: (code, text) answers every hello with that error; `ready_delay`: seconds before `ready`, None: never."""
+    """`refuse`: (code, text) answers every hello with that error; `ready_delay`: seconds before `ready`, None: never;
+    `after_ready`: messages sent right after each `ready`, then the connection closes (a server that crashes at once)."""
 
     def __init__(self):
         self.refuse: tuple[str, str] | None = None
         self.ready_delay: float | None = 0.0
+        self.after_ready: list | None = None
         self.voices: list[bytes] = []
         self.have: set[str] = set()  # voice sha256s it keeps (a warm session)
         self.conns: list[Conn] = []
@@ -95,6 +97,10 @@ class FakeServer:
         c = Conn(ws, h)
         self.conns.append(c)
         await ws.send(protocol.message('ready', warm=False, device='cpu'))
+        if self.after_ready is not None:
+            for m in self.after_ready:
+                await ws.send(m)
+            return
         async for m in ws:
             if isinstance(m, bytes):
                 c.audio += m

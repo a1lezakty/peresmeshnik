@@ -34,6 +34,7 @@ import hashlib
 import hmac
 import io
 import json
+import re
 import struct
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -50,6 +51,8 @@ SPEECH_MS = 100  # the server's voice goes down in pieces this long
 CHUNK = 1 << 20  # a voice upload's binary message at most; the server's max message size (the audio is ~1 KB a frame)
 VOICE_MAX = 64 << 20  # a voice profile, zipped
 PING_S, PONG_S = 1.0, 3.0
+RATES = (8000, 48000)  # a speech message's sample rate, Hz
+HEX64 = re.compile(r'[0-9a-f]{64}')  # a token, a sha256, a mac: lowercase hex
 # error codes: the client does not try again by itself after these (a new pairing, an update, other languages);
 # after 'busy' (another session is on), 'internal' or a lost connection it does
 PERMANENT = frozenset({'version', 'auth', 'hello', 'lang', 'voice'})
@@ -97,14 +100,14 @@ def parse_hello(text: str | bytes, side: str) -> dict:
     if h.get('version') != VERSION:
         raise ProtocolError('version', f'protocol {h.get("version")} here, the server speaks {VERSION}: update the app on '
                                        'both computers to the same version')
-    if not isinstance(h.get('token'), str) or not h['token']:
+    if not isinstance(h.get('token'), str) or not HEX64.fullmatch(h['token']):
         raise ProtocolError('auth', 'no device token: pair this computer with the server')
     if h.get('side') != side:
         raise ProtocolError('hello', f'hello for side {h.get("side")!r} on /v1/side/{side}')
     if h.get('src') not in LANGS or h.get('tgt') not in LANGS or h['src'] == h['tgt']:
         raise ProtocolError('lang', f'languages {h.get("src")!r} -> {h.get("tgt")!r}')
     v = h.get('voice')
-    if v is not None and not (isinstance(v, dict) and isinstance(v.get('sha256'), str) and len(v['sha256']) == 64
+    if v is not None and not (isinstance(v, dict) and isinstance(v.get('sha256'), str) and HEX64.fullmatch(v['sha256'])
                               and type(v.get('bytes')) is int and 0 < v['bytes'] <= VOICE_MAX):
         raise ProtocolError('hello', 'a bad voice in hello')
     return h
@@ -140,9 +143,9 @@ def speech(e: Speech) -> list[bytes]:
 def decode(m: str | bytes) -> Caption | Latency | Speech | dict:
     """A message from the server: an engines event, or a control message as a dict ('ready', 'state', 'error', ...)."""
     if isinstance(m, bytes):
-        if len(m) < 4 or len(m) % 2:
-            raise ProtocolError('internal', f'a speech message of {len(m)} bytes')
-        return Speech(pcm_from(m, 4), struct.unpack_from('<I', m)[0])
+        if len(m) < 4 or len(m) % 2 or not RATES[0] <= (sr := struct.unpack_from('<I', m)[0]) <= RATES[1]:
+            raise ProtocolError('internal', f'a speech message of {len(m)} bytes at {m[:4].hex()}')
+        return Speech(pcm_from(m, 4), sr)
     d = json.loads(m)
     if d.get('type') == 'caption':
         return Caption(d['original'], d['translation'], d['final'], d['clause'])

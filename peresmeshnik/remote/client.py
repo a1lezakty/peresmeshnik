@@ -9,20 +9,25 @@ the server cannot serve now, and the side goes local (or says why it cannot) unt
   GeminiDirection's: a fallback's probe is used when it is set;
 - liveness: a WebSocket ping every PING_S; no pong in PONG_S -> the connection is lost (a Wi-Fi without a reset is not
   noticed otherwise). A lost connection gets one new one (its `ready` in RECONNECT_READY_S: the server's warm session),
-  which hears again the input since the last clause the server finished (KEEP_S at most): a clause cut by the drop is
-  translated whole. A new one that fails -> CloudDown;
+  which hears again the input since the end of the last clause the server finished (KEEP_S at most): a clause cut by
+  the drop is translated whole. A new one that fails, or SHORT_MAX connections in a row lost within SHORT_S of their
+  `ready` (a server that crashes on each, a Wi-Fi that cannot hold one) -> CloudDown;
 - too slow -> CloudDown: a frame of the call would reach the server `stall_s / 2` after it was said (an uplink too slow
-  for the call), or a phrase is open (a partial subtitle came) and the server has sent nothing for `stall_s`;
+  for the call), or a phrase went up (this side's own gate, as GeminiDirection's: Silero VAD, >= 1 s of speech) and no
+  voice came down `stall_s` after it began (a server whose ASR or voice hung, subtitles without a voice);
 - the server refuses (`error`) -> ServerError, a CloudDown with the protocol's `code`; `permanent` ones (an unknown
   token, another protocol version, languages the server has no models for) are not cured by trying again;
 - voice: the server sends it in pieces of protocol.SPEECH_MS; a piece that comes when the playback has run dry gets
   `jitter_ms` of silence before it, a cushion against the next piece being late (BENCH remote-0: no underruns at any
   hold; 40 ms by default);
 - latency: the server's `caption` / `voice` are measured on its clock from the clause end it heard; here they get the
-  last ping's RTT on top (the way up and the way down). `latency` keeps ('remote.voice', s) and ('remote.caption', s)
-  for the fallback; `rtt` is the last one, `server` the server's `ready` (what it runs);
+  last ping's RTT on top (the way up and the way down). `latency` keeps ('remote.voice', s) and ('remote.caption', s);
+  `said_until` (for the fallback) is the end of the last clause whose voice began, from its `tts_first` (the server's
+  `voice` also holds its own play queue); `rtt` is the last ping's, `server` the server's `ready` (what it runs);
 - barge-in: `interrupt()` -> the server drops the voice it has not sent; what was on its way is dropped here until the
-  server says `interrupted`.
+  server says `interrupted` (HUSH_S at most);
+- a server that floods: messages up to protocol.CHUNK, a speech rate of 8-48 kHz, at most EVENTS_MAX events not taken
+  yet (else CloudDown: the app does not keep up).
 
 Threads: one asyncio thread; `feed()` and `interrupt()` only hand on; `events()` blocks on a queue; `close()` cancels.
 """
@@ -30,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextlib
 import logging
 import queue
 import ssl
@@ -39,7 +45,7 @@ import time
 import numpy as np
 
 from peresmeshnik import __version__
-from peresmeshnik.cloud.gemini import CloudDown
+from peresmeshnik.cloud.gemini import BLOCK, SLOW_MIN_BLOCKS, CloudDown, make_gate
 from peresmeshnik.engines import Caption, Latency, Speech
 from peresmeshnik.remote import protocol
 
@@ -49,6 +55,9 @@ READY_S = 120.0  # a new session: the server loads ASR, MT and the voice (a clon
 RECONNECT_READY_S = 5.0  # after a drop: the server's warm session answers at once
 KEEP_S = 3.0  # input kept for a new connection: the clause the drop cut, or the start of a phrase while connecting
 SETTLE_S = 0.45  # a clause's final subtitle comes this long after its speech ended (fallback.SETTLE_S)
+SHORT_S, SHORT_MAX = 5.0, 3  # as GeminiDirection's: a connection lost this soon after `ready`, this many times in a row
+HUSH_S = 2.0  # an interrupt the server does not answer: the voice comes through again after this
+EVENTS_MAX = 4096  # events not taken yet (~7 min of voice in 100 ms pieces)
 JITTER_MS = 40
 _RESUMED = object()  # an interrupt is over: the server answered it, or the connection it was for is gone
 
@@ -57,6 +66,8 @@ class ServerError(CloudDown):
     """The server refused: `code` is protocol's (`permanent`: trying again does not help)."""
 
     def __init__(self, code: str, text: str):
+        if code == 'auth' and 'pair' not in text:
+            text += ': pair this computer again (tray menu, Server…)'
         super().__init__(text)
         self.code = code
 
@@ -67,29 +78,34 @@ class ServerError(CloudDown):
 
 class RemoteDirection:
     """`address`: 'host:port' (IPv6 in brackets); `fp`: the server certificate's SHA-256 pinned at pairing; `voice`: the
-    voice profile the server speaks with (protocol.pack_voice), None for its stock voice."""
+    voice profile the server speaks with (protocol.pack_voice), None for its stock voice; `gate`: what tells a phrase
+    began (gemini.make_gate(): Silero VAD, an energy gate without its model)."""
     supports_live = False
 
     def __init__(self, address: str, side: str, src: str, tgt: str, token: str, fp: str, voice: bytes | None = None,
-                 jitter_ms: int = JITTER_MS, stall_s: float = 6.0, on_state=lambda text: None):
+                 jitter_ms: int = JITTER_MS, stall_s: float = 6.0, on_state=lambda text: None, gate=None):
         assert side in protocol.SIDES, side
         self.address, self.side, self.src, self.tgt, self.token, self.fp = address, side, src, tgt, token, fp
         self.voice, self.jitter_ms, self.stall_s, self.on_state = voice, jitter_ms, stall_s, on_state
+        self.gate = gate or make_gate()  # before the thread: a model error comes out here
         self.ready = threading.Event()
         self.ready_at = 0.0
         self.server: dict = {}
         self.rtt = 0.0
         self.said_until = 0.0  # monotonic, this side's clock: the end of the last clause whose voice began
         self.latency: collections.deque = collections.deque(maxlen=256)
-        self._events: queue.Queue = queue.Queue()
-        self._hush, self._hush_lock = 0, threading.Lock()  # interrupts the server has not answered yet
+        self._events: queue.Queue = queue.Queue(EVENTS_MAX)
+        self._hush, self._hush_lock, self._hush_at = 0, threading.Lock(), 0.0  # interrupts not answered yet, the last's time
         self._play_end = 0.0  # events thread: when the speech handed out so far has played
         # loop thread:
         self._in: asyncio.Queue = asyncio.Queue()  # (time, pcm) of feed(); pcm None: an interrupt
         self._kept: collections.deque = collections.deque()  # (time, pcm) of the last KEEP_S
         self._final_at = 0.0  # when the last final subtitle came
+        self._done_until = 0.0  # the end of the last clause whose subtitle came, this side's clock (its `caption` latency)
         self._heard_at = 0.0  # when the server's pipeline last said anything
-        self._open_clause = False  # a partial subtitle came and its final not yet
+        self._voice_at = 0.0  # when the last piece of voice came
+        self._phrase_at, self._voiced = None, 0  # the oldest phrase sent up with no voice since, its 100 ms blocks of speech
+        self._buf = np.zeros(0, np.int16)  # the gate's input, in BLOCKs
         self._lost, self._fatal, self._ws = '', None, None
         self._unanswered = 0  # interrupts sent on this connection, not answered yet
         self._ssl = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -107,7 +123,7 @@ class RemoteDirection:
             pass
         finally:
             self._loop.close()
-            self._events.put(None)
+            self._end(None)
 
     # Direction ------------------------------------------------------------------------------------
     def feed(self, pcm: np.ndarray) -> None:
@@ -122,10 +138,14 @@ class RemoteDirection:
                 raise e
             if e is _RESUMED:
                 with self._hush_lock:
-                    self._hush -= 1
+                    self._hush = max(0, self._hush - 1)
                 continue
             if isinstance(e, Speech):
-                if self._hush:  # on its way before the interrupt
+                with self._hush_lock:
+                    if self._hush and time.monotonic() - self._hush_at > HUSH_S:  # the server never answered
+                        self._hush = 0
+                    hushed = self._hush
+                if hushed:  # on its way before the interrupt
                     continue
                 e = self._jitter(e)
             yield e
@@ -133,6 +153,7 @@ class RemoteDirection:
     def interrupt(self) -> None:
         with self._hush_lock:
             self._hush += 1
+            self._hush_at = time.monotonic()
         self._play_end = 0.0
         try:
             self._loop.call_soon_threadsafe(self._in.put_nowait, (time.monotonic(), None))
@@ -157,9 +178,12 @@ class RemoteDirection:
     # loop thread ----------------------------------------------------------------------------------
     async def _main(self):
         try:
-            keep = await self._open(READY_S)
+            keep, short = await self._open(READY_S), 0
             while True:
                 lost = await self._serve(keep)
+                short = short + 1 if time.monotonic() - self.ready_at < SHORT_S else 1
+                if short >= SHORT_MAX:
+                    raise CloudDown(f'the connection to the server was lost {short} times right after it opened ({lost})')
                 log.info('%s: the connection to the server was lost (%s): connecting again', self.side, lost)
                 try:
                     keep = await self._open(RECONNECT_READY_S)
@@ -170,7 +194,7 @@ class RemoteDirection:
         except asyncio.CancelledError:  # close()
             pass
         except Exception as e:  # CloudDown, or a bug: the side hears it
-            self._events.put(e)
+            self._end(e)
         finally:
             if self._ws is not None:
                 try:
@@ -227,9 +251,9 @@ class RemoteDirection:
             keep.cancel()
             raise
         self.server = m
-        self._open_clause, self._heard_at = False, time.monotonic()
+        self._heard_at, self._phrase_at = time.monotonic(), None  # a phrase cut by a drop goes up again from its start
         for _ in range(self._unanswered):  # the old connection's: this one has no voice queued
-            self._events.put(_RESUMED)
+            self._put(_RESUMED)
         self._unanswered = 0
         self.ready_at = time.monotonic()
         self.ready.set()
@@ -240,7 +264,7 @@ class RemoteDirection:
         """Until the connection is lost (-> why); CloudDown when it is too slow or the server refuses."""
         from websockets.exceptions import ConnectionClosed
         ws = self._ws
-        since = max(self._final_at - SETTLE_S, time.monotonic() - KEEP_S)
+        since = max(self._done_until or self._final_at - SETTLE_S, time.monotonic() - KEEP_S)
         while not self._in.empty():  # what came while connecting
             self._keep(*self._in.get_nowait())
         again = [pcm for t, pcm in self._kept if t >= since]
@@ -260,7 +284,7 @@ class RemoteDirection:
 
     def _keep(self, t: float, pcm) -> None:
         if pcm is None:  # an interrupt while connecting: nothing to stop on the new connection
-            self._events.put(_RESUMED)
+            self._put(_RESUMED)
             return
         self._kept.append((t, pcm))
         while t - self._kept[0][0] > KEEP_S:
@@ -276,6 +300,7 @@ class RemoteDirection:
                 await ws.send(protocol.message('interrupt'))
                 continue
             self._keep(t, pcm)
+            self._phrase(t, pcm)
             late = self.stall_s / 2 - (time.monotonic() - t)
             try:
                 if late <= 0:
@@ -292,7 +317,7 @@ class RemoteDirection:
             if isinstance(e, dict):
                 if e.get('type') == 'interrupted' and self._unanswered:
                     self._unanswered -= 1
-                    self._events.put(_RESUMED)
+                    self._put(_RESUMED)
                 elif e.get('type') == 'state':
                     self._state(e)
                 elif e.get('type') == 'error':
@@ -303,16 +328,21 @@ class RemoteDirection:
                     return
                 continue
             self._heard_at = time.monotonic()
-            if isinstance(e, Caption):
-                self._open_clause = not e.final
-                if e.final:
-                    self._final_at = self._heard_at
-            elif isinstance(e, Latency) and e.what in ('caption', 'voice'):
-                e = Latency(e.clause, e.what, round(e.s + self.rtt, 3))
-                self.latency.append((f'remote.{e.what}', e.s))
-                if e.what == 'voice':  # its clause ended (as fed here) this long before now: the way up, the server, the way down
-                    self.said_until = self._heard_at - e.s
-            self._events.put(e)
+            if isinstance(e, Speech):
+                self._voice_at = self._heard_at
+            elif isinstance(e, Caption) and e.final:
+                self._final_at = self._heard_at
+            elif isinstance(e, Latency) and e.what in ('caption', 'voice', 'tts_first'):
+                end = self._heard_at - e.s - self.rtt  # its clause ended (as fed here) then: the way up, the server, the way down
+                if e.what == 'tts_first':  # its voice begins (`voice` holds the server's play queue too)
+                    self.said_until = end
+                else:
+                    e = Latency(e.clause, e.what, round(e.s + self.rtt, 3))
+                    self.latency.append((f'remote.{e.what}', e.s))
+                    if e.what == 'caption':
+                        self._done_until = end
+            if not self._put(e):
+                return
 
     async def _keepalive(self, ws) -> None:
         from websockets.exceptions import ConnectionClosed
@@ -325,10 +355,46 @@ class RemoteDirection:
                 return
             except ConnectionClosed:
                 return
-            if self._open_clause and time.monotonic() - self._heard_at > self.stall_s:
-                self._fatal = CloudDown(f'the server stopped translating: nothing from it {self.stall_s:g} s into a phrase')
+            if (at := self._phrase_at) is not None and self._voiced >= SLOW_MIN_BLOCKS and self._voice_at < at \
+                    and time.monotonic() - at > self.stall_s:
+                self._fatal = CloudDown(f'the server stopped translating: no voice {self.stall_s:g} s after a phrase began')
                 return
             await asyncio.sleep(protocol.PING_S)
+
+    def _phrase(self, t: float, pcm) -> None:
+        """This side's gate on what goes up: the oldest phrase with no voice down since it began, and its speech."""
+        x = pcm if pcm.dtype == np.int16 else (np.clip(pcm, -1, 1) * 32767).astype(np.int16)
+        self._buf = np.concatenate([self._buf, x.ravel()])
+        n = 0
+        while len(self._buf) - n >= BLOCK:
+            ev = self.gate.update(self._buf[n:n + BLOCK], t)
+            n += BLOCK
+            if ev == 'start' and (self._phrase_at is None or self._voice_at >= self._phrase_at):
+                self._phrase_at, self._voiced = t, 0
+            if self._phrase_at is not None and self.gate.on and self.gate.quiet == 0:
+                self._voiced += 1
+        self._buf = self._buf[n:]
+
+    def _put(self, e) -> bool:
+        """An event for the side (loop thread); False: the side does not take them (EVENTS_MAX), the connection goes."""
+        try:
+            self._events.put_nowait(e)
+            return True
+        except queue.Full:
+            self._fatal = CloudDown(f'the app does not keep up with the server: {EVENTS_MAX} events not taken')
+            if self._ws is not None:
+                self._ws.transport.abort()
+            return False
+
+    def _end(self, e) -> None:
+        """The last event (an error, or None): it gets in even past EVENTS_MAX (the oldest one goes)."""
+        while True:
+            try:
+                self._events.put_nowait(e)
+                return
+            except queue.Full:
+                with contextlib.suppress(queue.Empty):
+                    self._events.get_nowait()
 
     def _state(self, m: dict) -> None:
         kind, _, text = str(m.get('text', '')).partition(': ')

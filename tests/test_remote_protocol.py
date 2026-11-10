@@ -30,8 +30,11 @@ def test_hello_round_trip_and_rejections():
     assert code(p.hello(TOKEN, 'me', 'ru', 'en'), 'them') == 'hello'
     assert code(p.hello(TOKEN, 'me', 'ru', 'xx')) == 'lang'
     assert code(p.hello(TOKEN, 'me', 'ru', 'ru')) == 'lang'
-    for bad in ({'sha256': 'c' * 64, 'bytes': p.VOICE_MAX + 1}, {'sha256': 'c', 'bytes': 1}, {'bytes': 1}, 'x'):
+    for bad in ({'sha256': 'c' * 64, 'bytes': p.VOICE_MAX + 1}, {'sha256': 'c', 'bytes': 1}, {'bytes': 1}, 'x',
+                {'sha256': 'C' * 64, 'bytes': 1}, {'sha256': 'я' * 64, 'bytes': 1}):
         assert code(p.hello(TOKEN, 'me', 'ru', 'en', bad)) == 'hello'
+    for token in ('AB' * 32, 'ab' * 31, '\ud800' * 64, 'я' * 64, 'gg' * 32):  # strictly lowercase hex, no exception
+        assert code(p.hello(token, 'me', 'ru', 'en')) == 'auth'
 
 
 def test_events_and_speech_round_trip():
@@ -44,8 +47,10 @@ def test_events_and_speech_round_trip():
     assert all(s.sample_rate == 24_000 and len(s.pcm) <= 2400 for s in out)
     assert np.abs(np.concatenate([s.pcm for s in out]) - pcm).max() < 1e-4
     assert p.decode(p.message('ready', warm=True)) == {'type': 'ready', 'warm': True}
-    with pytest.raises(p.ProtocolError):
-        p.decode(b'\x01\x02\x03')
+    for bad in (b'\x01\x02\x03', p.speech(Speech(pcm, 96_000))[0], p.speech(Speech(pcm, 4000))[0]):  # 8-48 kHz only
+        with pytest.raises(p.ProtocolError):
+            p.decode(bad)
+    assert p.decode(p.speech(Speech(pcm, 8000))[0]).sample_rate == 8000
     up = np.array([0.0, 0.5, -1.0, 2.0], np.float32)  # clipped
     assert np.allclose(p.pcm_from(p.pcm_bytes(up)), [0, 0.5, -1, 1], atol=1e-4)
 

@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from fake_remote import FakeServer
 
-from peresmeshnik.cloud.gemini import CloudDown
+from peresmeshnik.cloud.gemini import CloudDown, _Gate
 from peresmeshnik.engines import Caption, Latency, Speech
 from peresmeshnik.remote import client, protocol
 from peresmeshnik.remote.client import RemoteDirection, ServerError
@@ -69,7 +69,19 @@ def values(audio: bytes):
 
 
 def direction(server, side='them', **kw):
-    return RemoteDirection(server.address, side, 'en', 'ru', TOKEN, server.fp, **kw)
+    return RemoteDirection(server.address, side, 'en', 'ru', TOKEN, server.fp, gate=_Gate(), **kw)  # no Silero model here
+
+
+def tone(s, sr=16_000):
+    return (0.5 * np.sin(np.arange(int(s * sr)) * 0.1)).astype(np.float32)
+
+
+def say(d, pcm, frame=FRAME):
+    """At the live pace, as a capture does."""
+    t0 = time.perf_counter()
+    for i in range(0, len(pcm), frame):
+        time.sleep(max(0.0, t0 + i / 16_000 - time.perf_counter()))
+        d.feed(pcm[i:i + frame])
 
 
 def test_a_session_with_the_voice_then_a_warm_one(server, tmp_path):
@@ -94,7 +106,7 @@ def test_a_session_with_the_voice_then_a_warm_one(server, tmp_path):
     assert ev.get() == Caption('hello', 'привет', True, 0)
     lat = ev.get()
     assert lat.what == 'voice' and 0.3 <= lat.s < 0.35  # + the RTT (on loopback it may round to nothing)
-    assert ('remote.voice', lat.s) in d.latency and d.said_until > 0
+    assert ('remote.voice', lat.s) in d.latency
     pieces = [ev.get() for _ in range(3)]
     hold = 24_000 * client.JITTER_MS // 1000
     assert [len(p.pcm) for p in pieces] == [hold + 2400, 2400, 1200]  # only the first waits: the playback had run dry
@@ -110,7 +122,7 @@ def test_a_session_with_the_voice_then_a_warm_one(server, tmp_path):
 
 
 def test_not_the_paired_certificate_gets_nothing(server):
-    d = RemoteDirection(server.address, 'them', 'en', 'ru', TOKEN, '0' * 64)
+    d = RemoteDirection(server.address, 'them', 'en', 'ru', TOKEN, '0' * 64, gate=_Gate())
     e = Events(d).end()
     assert isinstance(e, ServerError) and e.code == 'auth' and e.permanent and 'pair again' in str(e)
     assert server.hellos == []  # not even the token went out
@@ -123,6 +135,7 @@ def test_refused(server, code, permanent):
     d = direction(server)
     e = Events(d).end()
     assert isinstance(e, ServerError) and isinstance(e, CloudDown) and e.code == code and e.permanent == permanent
+    assert ('pair this computer again (tray menu, Server…)' in str(e)) == (code == 'auth')
     assert not d.ready.is_set()
     d.close()
 
@@ -131,7 +144,7 @@ def test_unreachable_is_down_fast(server):
     port = server.port
     server.close()
     t = time.monotonic()
-    d = RemoteDirection(f'127.0.0.1:{port}', 'them', 'en', 'ru', TOKEN, 'f' * 64)
+    d = RemoteDirection(f'127.0.0.1:{port}', 'them', 'en', 'ru', TOKEN, 'f' * 64, gate=_Gate())
     e = Events(d).end()
     assert isinstance(e, CloudDown) and 'cannot reach the server' in str(e)
     assert time.monotonic() - t < client.CONNECT_S + 1
@@ -191,18 +204,74 @@ def test_a_dead_link_without_a_reset(server, monkeypatch):
     assert ev.end() is None
 
 
-def test_a_server_that_stops_translating_mid_phrase(server, monkeypatch):
+def test_a_server_that_stops_translating(server, monkeypatch):
+    """A phrase goes up (>= 1 s of speech by this side's own gate) and no voice comes down in stall_s: CloudDown, whether
+    the server says nothing or only subtitles (ASR alive, the voice hung). A phrase answered with a voice is fine."""
     monkeypatch.setattr(protocol, 'PING_S', 0.1)
-    d = direction(server, stall_s=0.5)
+    d = direction(server, stall_s=2.0)
     ev = Events(d)
     assert d.ready.wait(5)
-    time.sleep(0.7)  # quiet with no phrase open: fine
+    say(d, np.zeros(16_000, np.float32))  # silence: no phrase, nothing to wait for
     assert ev.q.empty()
-    server.send(protocol.event(Caption('hel')))
-    assert ev.get() == Caption('hel')
+    say(d, tone(1.2))
+    server.send(*protocol.speech(Speech(np.full(2400, 0.2, np.float32), 24_000)))  # answered in time
+    say(d, np.zeros(int(1.5 * 16_000), np.float32))
+    assert ev.error is None and isinstance(ev.get(), Speech)
+    say(d, tone(1.2))  # the next phrase: subtitles only
+    server.send(protocol.event(Caption('hel')), protocol.event(Caption('hello', 'привет', True, 1)))
     t = time.monotonic()
     e = ev.end()
-    assert isinstance(e, CloudDown) and 'stopped translating' in str(e) and time.monotonic() - t < 1.5
+    assert isinstance(e, CloudDown) and 'no voice 2 s after a phrase began' in str(e) and time.monotonic() - t < 2
+    d.close()
+
+
+def test_a_server_that_crashes_on_each_connection(server):
+    """ready, then an internal error, on every connection: not reconnecting forever, CloudDown after SHORT_MAX."""
+    server.after_ready = [protocol.error('internal', 'crashed')]
+    d = direction(server)
+    e = Events(d).end()
+    assert isinstance(e, CloudDown) and f'lost {client.SHORT_MAX} times right after it opened' in str(e)
+    assert len(server.hellos) == client.SHORT_MAX
+    d.close()
+
+
+def test_said_until_from_tts_first(server):
+    """The end of the last clause whose voice began: from its tts_first (`voice` holds the server's play queue too)."""
+    d = direction(server)
+    ev = Events(d)
+    assert d.ready.wait(5)
+    server.send(protocol.event(Latency(0, 'tts_first', 0.4)), protocol.event(Latency(0, 'voice', 2.5)))
+    t = time.monotonic()
+    assert ev.get().what == 'tts_first' and ev.get().what == 'voice'
+    assert abs(d.said_until - (t - 0.4)) < 0.1  # not t - 2.5
+    d.close()
+
+
+def test_a_flood_the_app_does_not_take(server, monkeypatch):
+    monkeypatch.setattr(client, 'EVENTS_MAX', 20)
+    d = direction(server)  # nobody reads its events
+    assert d.ready.wait(5)
+    server.send(*[protocol.event(Caption(str(i))) for i in range(50)])
+    until(lambda: d._events.full())
+    got = []
+    with pytest.raises(CloudDown, match='does not keep up'):
+        for e in d.events():
+            got.append(e)
+    assert 0 < len(got) <= 20
+    d.close()
+
+
+def test_an_interrupt_the_server_never_answers(server, monkeypatch):
+    monkeypatch.setattr(client, 'HUSH_S', 0.3)
+    d = direction(server, jitter_ms=0)
+    ev = Events(d)
+    assert d.ready.wait(5)
+    d.interrupt()
+    until(lambda: {'type': 'interrupt'} in server.conns[0].texts)
+    server.send(*protocol.speech(Speech(np.full(2400, 0.1, np.float32), 24_000)))  # on its way: dropped
+    time.sleep(0.4)
+    server.send(*protocol.speech(Speech(np.full(2400, 0.2, np.float32), 24_000)))  # no answer in HUSH_S: through
+    assert np.allclose(ev.get().pcm, 0.2, atol=1e-4)
     d.close()
 
 

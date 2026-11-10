@@ -276,11 +276,12 @@ def test_a_long_connection_lost_does_not_count_as_short(server, monkeypatch):
     d = direction(server)
     ev = Events(d)
     until(lambda: len(server.conns) == 3)
-    time.sleep(0.8)
+    d.feed(frame(0.0))
+    until(lambda: server.conns[2].audio)  # the client serves connection 3: its ready_at is set
+    until(lambda: time.monotonic() - d.ready_at > client.SHORT_S + 0.2)
     server.drop()  # lost past SHORT_S: the count starts again
-    until(lambda: len(server.conns) == 4)  # connections 4 and 5 crash, the 6th lives
-    time.sleep(0.3)
-    assert len(server.hellos) == 6 and ev.error is None and ev.t.is_alive()
+    until(lambda: len(server.hellos) == 6, 10.0, lambda: ev.error)  # connections 4 and 5 crash, the 6th lives
+    assert ev.error is None and ev.t.is_alive()
     d.close()
 
 

@@ -17,8 +17,8 @@ import time
 from pathlib import Path
 
 import psutil
-from PySide6.QtCore import Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QKeySequence
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -31,7 +31,6 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QVBoxLayout,
-    QWidget,
     QWizard,
     QWizardPage,
 )
@@ -48,6 +47,7 @@ from peresmeshnik.languages import (
 from peresmeshnik.languages import nvidia as gpu  # tests patch it here
 from peresmeshnik.local import voicepack
 from peresmeshnik.remote import pairing
+from peresmeshnik.ui.components import ComponentsBox
 from peresmeshnik.ui.overlay import font_note
 from peresmeshnik.ui.tray import LANGS, MIC_LABEL, SIDES, device_combo, save_key
 
@@ -480,154 +480,30 @@ class CallSoundPage(QWizardPage):
         return not self.running
 
 
-HF_TEXT = ('Your cloned voice without an NVIDIA GPU speaks through Kyutai\'s Pocket TTS. Its weights are behind a '
-           'button on Hugging Face: open the page, sign in, accept the conditions, then make a read token (Settings → '
-           'Access Tokens) and paste it here. It is kept in the settings folder, readable only by you, and sent only to '
-           'huggingface.co.')
-
-
-def gated(ms: list) -> list:
-    """The models of `ms` behind Hugging Face's "accept the conditions" (`token = "hf"`, stream S1), not here yet."""
-    base = models.root()  # ponytail: getattr until S1's Model.token is merged, then m.token
-    return [m for m in ms if getattr(m, 'token', '') == 'hf' and not models.is_fetched(m, base)]
-
-
-class HfTokenBox(QWidget):
-    """The models page's box for gated models: their page (accept the conditions there) and the user's token."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.text = QLabel(HF_TEXT)
-        self.text.setWordWrap(True)
-        self.open = QPushButton('Open the page')
-        self.token = QLineEdit()
-        self.token.setEchoMode(QLineEdit.EchoMode.Password)
-        self.save = QPushButton('Save the token')
-        self.save.clicked.connect(self._save)
-        self.token.returnPressed.connect(self._save)
-        self.open.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self.page)))
-        row = QHBoxLayout()
-        for w in (self.open, self.token, self.save):
-            row.addWidget(w)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(self.text)
-        lay.addLayout(row)
-        self.page = ''
-
-    def show_for(self, ms: list) -> None:
-        """Shown while a gated model is missing; the page of the first (all of them are Kyutai's one card)."""
-        self.setVisible(bool(ms))
-        if ms:
-            self.page = ms[0].url.split('/resolve/')[0]
-            self.token.setPlaceholderText('a token is saved' if models.hf_token() else 'hf_…')
-
-    def _save(self) -> None:
-        if t := self.token.text().strip():
-            models.save_hf_token(t)
-            self.token.clear()
-            self.token.setPlaceholderText('a token is saved')
-
-
 class ModelsPage(QWizardPage):
-    progress = Signal(float, float, str)  # done bytes, total bytes, current model: past 2 GB a Qt int overflows
-    finished = Signal(str)  # '' or the error
+    """Components: what the chosen pair and this computer need, ticked; only the app came with the installer."""
 
     def __init__(self, w: SetupWizard):
         super().__init__()
         self.w = w
-        self.setTitle('Models')
-        self.setSubTitle('Downloaded once from pinned addresses and checked by SHA-256; then everything local works offline.')
-        lay = QVBoxLayout(self)
-        self.list = QLabel()
-        self.list.setWordWrap(True)
-        self.list.setOpenExternalLinks(True)
-        self.consent = QCheckBox()
-        self.consent.toggled.connect(lambda: self.busy or self._finished(''))  # an optional voice to download, or not
-        self.button = QPushButton('Download')
-        self.button.clicked.connect(self.download)
-        self.bar = QProgressBar()
-        self.state = QLabel()
-        self.state.setWordWrap(True)
-        self.hf = HfTokenBox()
-        self.hf.setVisible(False)
-        for x in (self.list, self.consent, self.hf, self.button, self.bar, self.state):
-            lay.addWidget(x)
-        self.progress.connect(self._progress)
-        self.finished.connect(self._finished)
-        self.busy = False
+        self.setTitle('Components')
+        self.setSubTitle('Only the app was installed. Tick what to download: from pinned addresses, checked by SHA-256, '
+                         'then everything local works offline. Anything installed can be removed here or later '
+                         '(Components… in the tray menu).')
+        tray = getattr(w, 'tray', None)
+        self.box = ComponentsBox(w.s, lambda: bool(getattr(getattr(tray, 'ctl', None), 'on', False)))
+        self.box.changed.connect(self.completeChanged)
+        QVBoxLayout(self).addWidget(self.box)
+
+    @property
+    def busy(self) -> bool:  # SetupWizard.busy: the tray keeps the wizard alive while it downloads
+        return self.box.busy
 
     def initializePage(self) -> None:  # noqa: N802
-        self.ms = [models.get(i) for i in needed_models(self.w.s)]
-        self.optional = [models.get(i) for i in languages.optional_models(self.w.s)]  # with its license only
-        base = models.root()
-        lic = {m.id: ' + '.join(f'<a href="{p.license_url}">{p.license}</a>' for p in models.parts(m))
-               for m in self.ms + self.optional}
-        rows = [f'<tr><td>{"✔" if models.is_fetched(m, base) else "·"}</td><td>{m.id}'
-                f'{" (optional: a cloud direction falls back on it)" if m in self.optional else ""}</td>'
-                f'<td align=right>{models.size(m) / 1e6:.0f} MB</td><td>{lic[m.id]}</td></tr>' for m in self.ms + self.optional]
-        self.list.setText(f'<table cellspacing=6>{"".join(rows)}</table><p>Folder: {base}</p>')
-        restricted = [m for m in self.ms + self.optional if m.consent and not models.is_fetched(m, base)]
-        self.consent.setVisible(bool(restricted))
-        self.consent.setText('I accept the restricted licenses (noncommercial use only, they bind me as the user): '
-                             + ', '.join(f'{m.id} ({m.license}{", optional" if m in self.optional else ""})' for m in restricted))
-        self._finished('')
-
-    def missing(self) -> list:
-        base = models.root()
-        return [m for m in self.ms if not models.is_fetched(m, base)]
-
-    def extra(self) -> list:
-        """The optional voices not here yet: downloaded with the rest when their license is accepted."""
-        base = models.root()
-        return [m for m in getattr(self, 'optional', []) if not models.is_fetched(m, base)]
+        self.box.refresh()
 
     def isComplete(self) -> bool:  # noqa: N802
-        return not self.busy and not self.missing()
-
-    def download(self) -> None:
-        todo = self.missing() + (self.extra() if self.consent.isChecked() else [])
-        if any(m.consent for m in self.missing()) and not self.consent.isChecked():
-            self.state.setText('Accept the restricted licenses first, or choose cloud for that direction.')
-            return
-        self.busy = True
-        self.button.setEnabled(False)
-        self.completeChanged.emit()
-        total = sum(map(models.size, todo))
-
-        def run():
-            done, refused = [0], []
-            try:
-                for m in todo:
-                    def tick(n, m=m):
-                        done[0] += n
-                        self.progress.emit(done[0], total, m.id)
-                    try:
-                        models.fetch(m.id, progress=tick)
-                    except models.Gated as e:  # its token refused: the others still download, the reason is said
-                        refused.append(str(e))
-                self.finished.emit('; '.join(refused))
-            except Exception as e:
-                self.finished.emit(str(e))
-        threading.Thread(target=run, name='models-fetch', daemon=True).start()
-
-    def _progress(self, done: float, total: float, mid: str) -> None:
-        self.bar.setMaximum(max(int(total) // 1024, 1))
-        self.bar.setValue(int(done) // 1024)
-        self.state.setText(f'{mid}: {done / 1e6:.0f} of {total / 1e6:.0f} MB')
-
-    def _finished(self, err: str) -> None:
-        self.busy = False
-        todo, extra = self.missing(), self.extra()
-        self.hf.show_for(gated(todo + extra))  # Hugging Face refused (models.Gated: no token, conditions not accepted)
-        self.button.setEnabled(bool(todo) or bool(extra) and self.consent.isChecked())
-        self.bar.setVisible(bool(todo) or bool(err))
-        self.state.setText(f'Download failed: {err}. Press Download again to resume.' if err else
-                           f'{len(todo)} to download, {sum(map(models.size, todo)) / 1e6:.0f} MB.' if todo else 'All models are here.')
-        if extra and not err and not self.consent.isChecked():  # nobody chose it: without it that side has nothing to go local with
-            self.state.setText(self.state.text() + f' Without {", ".join(m.id for m in extra)} (its license unticked) '
-                               'that cloud direction stops until the cloud is back when the cloud fails.')
-        self.completeChanged.emit()
+        return not self.box.busy and not self.box.missing()
 
 
 class SelfTestPage(QWizardPage):

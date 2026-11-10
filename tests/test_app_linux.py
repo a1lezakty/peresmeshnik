@@ -547,16 +547,16 @@ def test_wizard_linux_pages(tmp_path, devices, monkeypatch):
         w.next()
         page = w.currentPage()
         assert isinstance(page, ModelsPage)
-        print('models:', [m.id for m in page.ms])
+        print('components ticked:', [c.id for c in page.box.todo()])
         t = time.monotonic()
         for _ in range(3):  # a failed download keeps its .part: "Download" again resumes, as a user would
-            page.button.click()
+            page.box.button.click()
             pump(lambda: not page.busy, 900, 'the downloads')
             if page.isComplete():
                 break
-            print('retry:', page.state.text())
-        print(f'models ready in {time.monotonic() - t:.0f} s: {page.state.text()}')
-        assert all(models.is_fetched(m) for m in page.ms)
+            print('retry:', page.box.state.text())
+        print(f'models ready in {time.monotonic() - t:.0f} s: {page.box.state.text()}')
+        assert all(models.is_fetched(models.get(c.id)) for c in page.box.rows if c.recommended)
         w.next()
         page = w.currentPage()
         assert isinstance(page, SelfTestPage)
@@ -614,7 +614,7 @@ def test_a_new_pair_through_the_wizard_and_the_app(tmp_path, devices, monkeypatc
     (Silero VAD, ASR, MT, Piper, the headphones) and shows translated subtitles; the pair is saved at the end."""
     from PySide6.QtWidgets import QApplication
     QApplication.instance() or QApplication([])
-    from peresmeshnik import config, languages
+    from peresmeshnik import config, languages, models
     from peresmeshnik.app import Controller
     from peresmeshnik.ui.overlay import SubtitleOverlay
     from peresmeshnik.ui.tray import Tray
@@ -644,15 +644,16 @@ def test_a_new_pair_through_the_wizard_and_the_app(tmp_path, devices, monkeypatc
         w.next()
         page = w.currentPage()
         assert isinstance(page, ModelsPage)
-        ids = [m.id for m in page.ms]
-        print('models:', ids, 'to download:', [m.id for m in page.missing()])
-        assert ids == languages.needed_models(w.s) and not {'gigaam-v3-e2e-ctc', 'xtts-v2', 't-one'} & set(ids)
+        ids = [c.id for c in page.box.rows if c.recommended]
+        print('models:', ids, 'to download:', [c.id for c in page.box.missing()])
+        parts = {p.id for i in languages.needed_models(w.s) for p in models.parts(models.get(i))}
+        assert set(ids) == parts and not {'gigaam-v3-e2e-ctc', 'xtts-v2', 't-one'} & set(ids)
         for _ in range(3):  # a cut download resumes on the next click, as a user would
             if page.isComplete():
                 break
-            page.button.click()
+            page.box.button.click()
             pump(lambda: not page.busy, 900, 'the downloads')
-        assert page.isComplete(), page.state.text()
+        assert page.isComplete(), page.box.state.text()
         w.next()
         page = w.currentPage()
         assert isinstance(page, SelfTestPage)

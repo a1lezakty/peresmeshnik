@@ -126,6 +126,7 @@ class Tray(QObject):
         m.addAction('Server…', self.open_server)  # translation on another computer: pairing
         m.addAction('Setup wizard…', self.open_wizard)
         m.addAction('Voices…', self.open_voices)
+        m.addAction('Components…', self.open_components)
         self.remember = m.addAction('Keep the voice of the person in this call…', self.remember_voice)
         self.show_latency = m.addAction('Show latency')  # per clause in the subtitles: end of speech -> subtitle, -> voice
         self.show_latency.setCheckable(True)
@@ -482,6 +483,11 @@ class Tray(QObject):
                 config.save(saved)
                 self.restart()
         self._show(VoicesDialog(s, changed, translating=lambda: bool(getattr(self.ctl, 'on', False))))
+
+    def open_components(self) -> None:
+        """What is downloaded and what can be: the wizard's Components page for the pair in the settings now."""
+        from peresmeshnik.ui.components import ComponentsDialog
+        self._show(ComponentsDialog(config.load(), translating=lambda: bool(getattr(self.ctl, 'on', False))))
 
     def remember_voice(self) -> None:
         """Keep the voice of the person in this call (S2: Controller.them_voice() -> ({model id: (state, sha256 of the

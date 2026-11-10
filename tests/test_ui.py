@@ -363,10 +363,10 @@ def test_portal_hotkey_against_a_fake_portal():
 
 
 def test_wizard_models_page_downloads_with_consent(tmp_path, monkeypatch, server):
-    """The models page: restricted licenses need the box ticked; a download cut mid-file resumes; then complete."""
+    """The Components page: restricted licenses need the box ticked; a download cut mid-file resumes; then complete."""
     import hashlib
 
-    from peresmeshnik import models
+    from peresmeshnik import languages, models
     from peresmeshnik.ui import wizard
     httpd, url = server
     files = {'a.bin': b'a' * 300_000, 'b.bin': b'b' * 200_000}
@@ -377,20 +377,22 @@ def test_wizard_models_page_downloads_with_consent(tmp_path, monkeypatch, server
     reg = {'free': models.Model('free', 'mt', ('en-ru',), 'MIT', 'https://x', url, {'b.bin': pins['b.bin']}),
            'nc': models.Model('nc', 'clone', ('en',), 'CPML', 'https://x', url, {'a.bin': pins['a.bin']}, consent=True)}
     monkeypatch.setattr(models, 'registry', lambda: reg)
-    monkeypatch.setattr(wizard, 'needed_models', lambda s: ['free', 'nc'])
+    monkeypatch.setattr(languages, 'needed_models', lambda s: ['free', 'nc'])
+    monkeypatch.setattr(languages, 'optional_models', lambda s: [])
     monkeypatch.setenv('PERESMESHNIK_MODELS', str(tmp_path / 'models'))
     page = wizard.ModelsPage(type('W', (), {'s': config.Settings()})())
     page.initializePage()
-    assert not page.isComplete() and not page.consent.isHidden() and 'nc (CPML)' in page.consent.text()
-    page.download()
-    assert 'Accept' in page.state.text() and not page.busy  # nothing starts without consent
-    page.consent.setChecked(True)
-    page.download()
+    box = page.box
+    assert not page.isComplete() and not box.consent.isHidden() and 'nc (CPML)' in box.consent.text()
+    box.download()
+    assert 'Accept' in box.state.text() and not page.busy  # nothing starts without consent
+    box.consent.setChecked(True)
+    box.download()
     end = time.monotonic() + 30
     while page.busy and time.monotonic() < end:
         settle(0.05)
-    assert page.isComplete(), page.state.text()
-    assert page.state.text() == 'All models are here.'
+    assert page.isComplete(), box.state.text()
+    assert box.state.text().startswith('Everything ticked is here.'), box.state.text()
     assert ('/a.bin', None) in httpd.ranges and any(p == '/a.bin' and r for p, r in httpd.ranges)  # resumed with Range
 
 
@@ -425,13 +427,14 @@ def test_models_page_counts_past_2_gb():
     """M-13: byte counts above 2**31 (a pair with the clone, most local pairs) reach the page whole from the download
     thread: '3000 of 3390 MB', not '-905' (a Qt int overflowed)."""
     from peresmeshnik.ui import wizard
-    page = wizard.ModelsPage(type('W', (), {'s': config.Settings()})())
-    t = threading.Thread(target=lambda: page.progress.emit(3_000_000_000, 3_390_000_000, 'xtts-v2'))
+    page = wizard.ModelsPage(type('W', (), {'s': config.Settings()})())  # kept: the box is its child
+    box = page.box
+    t = threading.Thread(target=lambda: box.progress.emit(3_000_000_000, 3_390_000_000, 'xtts-v2'))
     t.start()
     t.join()
     settle(0.1)
-    assert page.state.text() == 'xtts-v2: 3000 of 3390 MB', page.state.text()
-    assert (page.bar.value(), page.bar.maximum()) == (3_000_000_000 // 1024, 3_390_000_000 // 1024)
+    assert box.state.text() == 'xtts-v2: 3000 of 3390 MB', box.state.text()
+    assert (box.bar.value(), box.bar.maximum()) == (3_000_000_000 // 1024, 3_390_000_000 // 1024)
 
 
 def test_tray_menu_and_settings_window(tmp_path, monkeypatch):

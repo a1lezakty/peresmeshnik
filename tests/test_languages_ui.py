@@ -16,7 +16,7 @@ import pytest
 if sys.platform.startswith('linux') and not os.environ.get('DISPLAY'):
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 pytest.importorskip('PySide6')
-from PySide6.QtCore import QCoreApplication  # noqa: E402
+from PySide6.QtCore import QCoreApplication, Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from peresmeshnik import config, languages, models  # noqa: E402
@@ -848,12 +848,16 @@ def test_an_optional_fallback_voice_does_not_hold_the_wizard_or_the_tray(tmp_pat
     assert languages.optional_models(s) == ['tts-ja'] and 'tts-ja' not in languages.needed_models(s)
     page = wizard.ModelsPage(type('W', (), {'s': s})())
     page.initializePage()
-    assert page.isComplete() and not page.consent.isHidden() and 'tts-ja' in page.consent.text()
-    assert 'optional' in page.list.text() and 'stops until the cloud is back' in page.state.text()
-    page.consent.setChecked(True)
-    assert 'Without' not in page.state.text(), page.state.text()  # FIXES-b r2 3: ticked, it is downloaded
-    page.download()
-    assert wait_for(lambda: not page.busy, 30) and models.is_fetched(models.get('tts-ja')), page.state.text()
+    box = page.box
+    (row,) = [c for c in box.rows if c.id == 'tts-ja']
+    assert page.isComplete() and box.consent.isHidden() and not row.recommended  # optional: unticked, nothing waits for it
+    assert 'when the cloud fails' in row.why and 'stops while the cloud is down' in row.instead
+    (it,) = [box.tree.topLevelItem(i) for i in range(box.tree.topLevelItemCount()) if box.tree.topLevelItem(i).text(0) == row.title]
+    it.setCheckState(0, Qt.CheckState.Checked)  # FIXES-b r2 3: ticked, it is downloaded, under its license
+    assert not box.consent.isHidden() and 'tts-ja' in box.consent.text()
+    box.consent.setChecked(True)
+    box.download()
+    assert wait_for(lambda: not page.busy, 30) and models.is_fetched(models.get('tts-ja')), box.state.text()
 
 
 def test_a_fallback_voice_that_fails_to_download_does_not_hold_the_pair(tmp_path, monkeypatch, server):

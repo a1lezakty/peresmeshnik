@@ -94,8 +94,9 @@ def test_onnxruntime_sends_no_telemetry(monkeypatch):
 HUNG = '''import struct, sys, time
 sys.stdout.buffer.write(struct.pack("<I", 22050)); sys.stdout.buffer.flush()
 sys.stdin.readline()
-time.sleep(999)  # hung on the phrase: nothing more comes
+time.sleep(20)  # hung on the phrase: nothing more comes
 '''
+LAUNCHER = 'import subprocess, sys; sys.exit(subprocess.call(sys.argv[1:]))'  # what `uv run` does: Python is its child
 
 
 def test_a_runner_that_stops_answering_is_killed(tmp_path, monkeypatch):
@@ -111,13 +112,15 @@ def test_a_runner_that_stops_answering_is_killed(tmp_path, monkeypatch):
     monkeypatch.setattr(tts, 'voice_path', lambda voice_id: tmp_path / 'voice.onnx')
     monkeypatch.setattr(tts, 'REPLY_S', 1.0)
     monkeypatch.setattr(tts, 'START_S', 1.0)
-    monkeypatch.setattr(tts, 'runner_cmd', lambda: [sys.executable, str(tmp_path / 'hung.py')])
-    t = tts.PiperTts()
-    t0 = time.monotonic()
-    with pytest.raises(RuntimeError, match='did not answer'):
-        list(t.synth('Привет.', 'ru'))
-    assert time.monotonic() - t0 < 5 and t._p.poll() is not None
-    t.close()
+    for cmd in ([sys.executable, str(tmp_path / 'hung.py')], [sys.executable, '-c', LAUNCHER, sys.executable,
+                                                               str(tmp_path / 'hung.py')]):
+        monkeypatch.setattr(tts, 'runner_cmd', lambda cmd=cmd: cmd)
+        t = tts.PiperTts()
+        t0 = time.monotonic()
+        with pytest.raises(RuntimeError, match='did not answer'):
+            list(t.synth('Привет.', 'ru'))
+        assert time.monotonic() - t0 < 5 and t._p.wait(2) is not None, cmd  # the child holding the pipe killed too
+        t.close()
     monkeypatch.setattr(tts, 'runner_cmd', lambda: [sys.executable, '-c', 'import time; time.sleep(999)'])
     t0 = time.monotonic()
     with pytest.raises(RuntimeError, match='did not answer'):
@@ -140,10 +143,16 @@ def test_the_runner_starts_offline_and_goes_online_only_the_first_time(tmp_path,
     starts = []
     real = subprocess.Popen
 
+    uv = 'import sys; sys.stderr.write("hint: Packages were unavailable because the network was disabled."); sys.exit(2)'
+
     def popen(cmd, **kw):  # "uv": offline fails (nothing cached), online works
         starts.append(cmd)
-        return real([sys.executable, '-c', 'raise SystemExit(2)'] if '--offline' in cmd else [sys.executable, str(ok)], **kw)
+        return real([sys.executable, '-c', uv] if '--offline' in cmd else [sys.executable, str(ok)], **kw)
     monkeypatch.setattr(tts.subprocess, 'Popen', popen)
     t = tts.PiperTts()
     t.close()
     assert t.sample_rate == 22050 and ['--offline' in c for c in starts] == [True, False]
+    uv, starts[:] = 'raise SystemExit(2)', []  # offline fails for another reason (a broken voice): no 10 min online
+    with pytest.raises(RuntimeError, match='exited'):
+        tts.PiperTts()
+    assert ['--offline' in c for c in starts] == [True]

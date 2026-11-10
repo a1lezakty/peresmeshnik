@@ -271,8 +271,9 @@ def test_app_moves_the_call_on_and_back_off_and_on_exit(speakers, procs, monkeyp
         wait_sinks('telegram-desktop', [call, call])
         ctl.set_translation(False).result()
         wait_sinks('telegram-desktop', [spk, spk])
-        assert ctl._router is None and not [p for p in psutil.Process().children(recursive=True)
-                                            if p.cmdline()[:2] == ['pactl', 'subscribe']]  # idle: no event reader left
+        assert ctl._router is None and not [p for p in psutil.Process().children(recursive=True)  # idle: no event
+                                            if p.cmdline()[:2] == ['pactl', 'subscribe']  # reader but the app's (M-01)
+                                            and p.pid != ctl._events.p.pid]
         ctl.set_call_app('firefox').result()  # chosen by hand in the tray while off: nothing moves yet
         assert sinks_of('firefox') == [spk]
         ctl.set_translation(True).result()

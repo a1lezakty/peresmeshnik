@@ -440,6 +440,7 @@ def test_barge_in_on_my_words_not_on_a_backchannel():
     from peresmeshnik.app import Side
     me = object.__new__(Side)
     me.name, me.live, me.overlay, me.on_error = 'me', False, type('O', (), {'show': lambda self, c: None})(), print
+    me.engine = 'cloud'
     talks = []
     me.on_talk = lambda: talks.append(1)
     events = [Caption('ага', clause=0), Caption('ага', 'yeah', True, 0), Caption('да, но я', clause=1), Caption('да, но я думаю', clause=1)]

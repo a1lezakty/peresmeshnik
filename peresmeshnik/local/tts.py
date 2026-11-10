@@ -5,6 +5,7 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import struct
 import subprocess
 import threading
@@ -23,6 +24,7 @@ LOG_MAX = 1 << 20  # the runner's stderr log starts over past this
 # a runner that sends nothing this long is killed (hung on a phrase, held by an antivirus): the read ends, crash.Respawn
 # starts it again (M-08). A clause takes 0.1-3 s to synthesize; a start (a voice loads, an exe is scanned) longer
 START_S, REPLY_S, INSTALL_S = 60.0, 10.0, 600.0  # INSTALL_S: from source, uv fetching Piper's packages the first time
+UNCACHED = 'network was disabled'  # uv run --offline without Piper's packages in its cache: "... because the network was disabled"
 
 
 def log_file() -> Path:
@@ -67,20 +69,38 @@ class PiperTts:
         try:
             self._start(cmd, START_S)
         except RuntimeError:
-            if '--offline' not in cmd or self._hung:
+            if '--offline' not in cmd or self._hung or not self._uncached():  # a broken voice: no 10 min online
                 raise
-            self._p.wait()  # nothing cached yet (its log says so): uv fetches Piper's packages once
-            self._start([c for c in cmd if c != '--offline'], INSTALL_S)
+            self._start([c for c in cmd if c != '--offline'], INSTALL_S)  # uv fetches Piper's packages once
 
     def _start(self, cmd: list[str], wait_s: float) -> None:
         self._hung = False
         self._p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._log,
-                                   creationflags=CREATE_NO_WINDOW)
+                                   creationflags=CREATE_NO_WINDOW, start_new_session=os.name != 'nt')
         self.sample_rate = self._u32(wait_s)
+
+    def _uncached(self) -> bool:
+        """The offline start failed for want of Piper's packages in uv's cache (its log says so)."""
+        self._p.wait()
+        with open(self._log.name, 'rb') as f:
+            f.seek(self._log_at)
+            return UNCACHED in f.read().decode('utf-8', 'replace')
+
+    def _kill(self) -> None:
+        """The runner and what it started: from source `uv run` starts the Python that holds the pipe (M-08)."""
+        if os.name == 'nt':
+            subprocess.run(['taskkill', '/T', '/F', '/PID', str(self._p.pid)], capture_output=True,
+                           creationflags=CREATE_NO_WINDOW)
+        else:
+            try:
+                os.killpg(self._p.pid, signal.SIGKILL)  # its own session (start_new_session): its group is its pid
+            except ProcessLookupError:
+                pass
+        self._p.kill()
 
     def _kill_hung(self) -> None:
         self._hung = True
-        self._p.kill()
+        self._kill()
 
     def _read(self, n: int, wait_s: float | None = None) -> bytes:
         t = threading.Timer(REPLY_S if wait_s is None else wait_s, self._kill_hung)
@@ -115,5 +135,5 @@ class PiperTts:
         try:
             self._p.wait(5)
         except subprocess.TimeoutExpired:
-            self._p.kill()
+            self._kill()
         self._log.close()

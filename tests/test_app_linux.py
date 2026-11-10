@@ -245,6 +245,80 @@ def test_our_devices_come_back_when_the_sound_server_does(devices):
     assert not ours()
 
 
+class FakeSide:
+    """A side as _on makes it, without models: where it plays (me -> them: Peresmeshnik Mic)."""
+    engine = 'fake'
+
+    def __init__(self, name: str, vmic):
+        self.name, self.vmic = name, vmic
+
+    def set_live(self, on: bool) -> None:
+        pass
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+
+def test_every_side_moves_to_the_new_devices_when_one_ends_first(devices, monkeypatch):
+    """M-01, the review: the sound server is back before its event ends and a side's input ended first (_restart before
+    _sound_back): every side plays into the devices made again, not only that one (me -> them would play into the old
+    Peresmeshnik Mic: no sound for the call, its queue growing)."""
+    from peresmeshnik import app, config
+    from peresmeshnik.ui.selftest import pactl
+    monkeypatch.setattr(app.crash, 'report', lambda *a, **k: None)
+    s = config.Settings()
+    s.ui.mic = devices['mic']
+    overlay_side = type('S', (), {'hide': lambda self: None})()
+    ctl = app.Controller(type('O', (), {'side': lambda self, name: overlay_side})(), lambda state: None, settings=s)
+    ctl.startup()
+    ctl._route = lambda s: ''
+    ctl._side = lambda name, s: FakeSide(name, ctl._vmic)
+    try:
+        ctl._on()
+        old = ctl._vmic
+        assert ctl.on and [x.vmic for x in ctl.sides] == [old, old]
+        for m in reversed(pactl('list', 'short', 'modules').splitlines()):  # a restart: none of ours, the events go on
+            if 'peresmeshnik_' in m:
+                pactl('unload-module', m.split('\t')[0])
+        ctl._restart(ctl.sides[0], 'the call sound ended', None)
+        assert ctl.on and ctl._vmic is not old and [x.vmic for x in ctl.sides] == [ctl._vmic, ctl._vmic]
+    finally:
+        ctl.quit()
+    assert not ours()
+
+
+def test_the_loop_follows_a_recording_moved_onto_peresmeshnik_mic(devices):
+    """M-16, the review: the call app records another microphone, then the user picks Peresmeshnik Mic for it
+    (pavucontrol, the default changed): the stream moves (a 'change' event only) and the loop comes."""
+    from peresmeshnik import app, config
+    from peresmeshnik.ui.selftest import pactl
+    s = config.Settings()
+    s.ui.mic = devices['mic']
+    side = type('S', (), {'hide': lambda self: None})()
+    ctl = app.Controller(type('O', (), {'side': lambda self, name: side})(), lambda state: None, settings=s)
+    ctl.startup()
+    call_app = subprocess.Popen(['parec', '--device=test_mic_feed.monitor', '--raw', '--format=float32le',
+                                 '--rate=16000', '--channels=1'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        loops = lambda: [m for m in ours() if m.startswith('module-loopback') and 'source=test_mic' in m]  # noqa: E731
+        feed = next(ln.split('\t')[0] for ln in pactl('list', 'short', 'sources').splitlines()
+                    if ln.split('\t')[1] == 'test_mic_feed.monitor')
+        mine = lambda: [ln.split('\t')[0] for ln in pactl('list', 'short', 'source-outputs').splitlines()  # noqa: E731
+                        if ln.split('\t')[1] == feed]  # the call app's stream, by the source it records
+        assert wait_for(lambda: mine(), 3) and not loops(), ours()
+        time.sleep(0.5)  # its 'new' event handled: what follows is the move only
+        pactl('move-source-output', mine()[0], 'peresmeshnik_mic')
+        assert wait_for(lambda: loops(), 3), ours()
+    finally:
+        call_app.kill()
+        call_app.wait()
+        ctl.quit()
+    assert not ours()
+
+
 def test_one_device_failing_leaves_the_others(devices, monkeypatch):
     from peresmeshnik import app, config
 

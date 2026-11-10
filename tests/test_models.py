@@ -125,15 +125,17 @@ def test_settings_round_trip(tmp_path):
 
 
 def test_a_broken_settings_file_does_not_stop_the_app(tmp_path):
-    """H-01: a value the app cannot use keeps its default and is said; a file that does not parse is kept aside as
-    settings.toml.bad (not overwritten) and the defaults are used; nothing raises."""
+    """H-01: a value the app cannot use keeps its default and is said (an engine: local, never the cloud by a typo:
+    the voice would go to Google unasked); a file that does not parse is kept aside as settings.toml.bad (not
+    overwritten) and the defaults are used; nothing raises."""
     p = tmp_path / 'settings.toml'
-    p.write_text('their_lang = "de"\nforced_cloud = ["mine"]\nthem_to_me = "both"\n[local]\nthreads = "two"\nfuture_key = 1\n'
-                 '[ui]\nmic = "USB"\n[cloud]\nsubtitles = 1\n')
+    p.write_text('their_lang = "de"\nforced_cloud = ["mine"]\nthem_to_me = "both"\nme_to_them = "lokal"\n[local]\n'
+                 'threads = "two"\nfuture_key = 1\n[ui]\nmic = "USB"\n[cloud]\nsubtitles = 1\n')
     s = config.load(p)
-    assert (s.their_lang, s.ui.mic, s.forced_cloud, s.them_to_me, s.local.threads, s.cloud.subtitles) == \
-        ('de', 'USB', [], 'local', 2, False)
-    assert all(k in config.problem for k in ('forced_cloud', 'them_to_me', 'local.threads', 'cloud.subtitles'))
+    assert (s.their_lang, s.ui.mic, s.forced_cloud, s.them_to_me, s.me_to_them, s.local.threads, s.cloud.subtitles) == \
+        ('de', 'USB', [], 'local', 'local', 2, False)
+    assert all(k in config.problem for k in ('forced_cloud', 'them_to_me', 'me_to_them', 'local.threads',
+                                             'cloud.subtitles'))
     assert p.exists() and config.load(tmp_path / 'none.toml') == config.Settings() and not config.problem
     for broken in ('[local\nthreads = 3\n', 'my_lang = "ru\n', b'my_lang = "\xff"\n'):
         p.write_bytes(broken if isinstance(broken, bytes) else broken.encode())
@@ -152,6 +154,16 @@ def test_settings_are_written_whole_or_not_at_all(tmp_path, monkeypatch):
         assert config.load(config.save(s, p)).ui.call_app == name and not config.problem, repr(name)
     s.ui.call_app = 'x\udc80y'  # a lone surrogate (a device name not in UTF-16 norm): TOML cannot hold it
     assert config.load(config.save(s, p)).ui.call_app == 'x\ufffdy'
+    before = p.read_bytes()
+    real, held = config.os.replace, [PermissionError(13, 'in use'), PermissionError(13, 'in use')]
+
+    def replace(*a):  # Windows: an antivirus or a backup tool holds settings.toml a moment
+        if held:
+            raise held.pop()
+        real(*a)
+    monkeypatch.setattr(config.os, 'replace', replace)
+    s.their_lang = 'fr'
+    assert config.load(config.save(s, p)).their_lang == 'fr' and not held
     before = p.read_bytes()
     monkeypatch.setattr(config.os, 'replace', lambda *a: 1 / 0)  # killed between the write and the rename
     s.their_lang = 'de'

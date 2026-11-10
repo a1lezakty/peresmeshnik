@@ -97,6 +97,15 @@ def test_an_error_is_a_reply(pack, me):
         pack._reply()
 
 
+def test_a_runner_dying_after_an_error_is_the_clones_death(pack, me):
+    """L-43, the review: the runner died (or was killed by the timeout) right after it said a clause failed: that is the
+    clone gone, said now (the side falls back), not one clause lost and the death seen only at the next one."""
+    wait = pack._wait
+    pack._wait = lambda read: (pack._p.kill(), b'')[1] if read == pack._p.stdout.readline else wait(read)  # died then
+    with pytest.raises(RuntimeError, match='exited'):
+        list(pack.synth('boom', 'en', me))
+
+
 def test_a_dead_runner_raises_instead_of_hanging(pack, me):
     with pytest.raises(RuntimeError, match=r'the voice pack exited \(3\)'):
         say(pack, 'die', me)

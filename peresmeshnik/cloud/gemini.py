@@ -251,13 +251,13 @@ class _Link:
             else:
                 old, self.conn, self.next = self.conn, self.next.result(), None  # switch between two blocks
                 self.d.mark(f'cloud.{self.kind}.reconnect_after', time.monotonic() - old.started)
+                self.retiring.append((asyncio.create_task(self.retire(old)), old))  # closed even if we give up now
                 if old.task.done() or old.failed:  # lost, not a planned switch: right after it opened?
                     self.short = self.short + 1 if time.monotonic() - old.started < SHORT_S else 0
                     if self.short >= SHORT_MAX:  # accepted, then closed at once (the quota told after the setup)
                         if self.d.fail_fast:
                             raise CloudDown(f'{self.kind}: {self.lost(old)}, {self.short} times right after it opened')
                         self.retry_at = time.monotonic() + min(30, 2 ** self.short)  # not 5 new sessions a second
-                self.retiring.append((asyncio.create_task(self.retire(old)), old))
         c = self.conn
         self.backlog.append((t, blk))
         if c.task.done() or c.failed:  # dropped: keep the audio (up to 30 s) for the next connection
@@ -271,9 +271,10 @@ class _Link:
         while self.backlog:  # what waited for this connection goes first, in order
             said, b = self.backlog[0]
             # fail_fast: the block reaches the cloud this late at most (said while disconnected: from the connection).
-            # One rule for an uplink that carries less than the call needs (H-05) and a network gone silently (H-04)
-            due_in = max(said, c.started) + self.d.cfg.fallback_after_s / 2 - time.monotonic() if self.d.fail_fast \
-                else SEND_S
+            # One rule for an uplink that carries less than the call needs (H-05) and a network gone silently (H-04);
+            # from ready_at: the audio said before the other link was up waited for it, not for the network
+            since = max(said, c.started, self.d.ready_at)
+            due_in = since + self.d.cfg.fallback_after_s / 2 - time.monotonic() if self.d.fail_fast else SEND_S
             try:
                 if due_in <= 0:
                     raise TimeoutError
@@ -282,7 +283,7 @@ class _Link:
                 c.failed = f'a send failed ({_short(e)})'
                 _abort(c)  # its receive task ends; closing it does not wait for the socket
                 if isinstance(e, TimeoutError):
-                    late = time.monotonic() - max(said, c.started)
+                    late = time.monotonic() - since
                     c.failed = f'the uplink is too slow or gone: the call reaches the cloud {late:.0f} s late'
                     if self.d.fail_fast:
                         raise CloudDown(f'{self.kind}: {c.failed}') from None
@@ -428,6 +429,7 @@ class GeminiDirection:
         self._heard_at = 0.0  # when the last voiced translated chunk came
         self.fail_fast = fail_fast
         self.ready = threading.Event()  # every connection is up (a fallback's probe waits for it)
+        self.ready_at = 0.0  # since then (monotonic)
         self._thread = threading.Thread(target=self._run, name=f'gemini-{src}-{tgt}', daemon=True)
         self._thread.start()
 
@@ -511,6 +513,7 @@ class GeminiDirection:
                     t.cancel()
                 await asyncio.gather(*starts, return_exceptions=True)
                 raise
+            self.ready_at = time.monotonic()
             self.ready.set()
             gate, buf = self.gate, np.zeros(0, np.int16)
             while (item := await self._in.get()) is not None:

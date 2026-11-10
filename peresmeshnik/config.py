@@ -15,6 +15,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 
@@ -176,9 +177,9 @@ def load(path: Path | None = None) -> Settings:
             bad.append(f'{path.name} could not be read ({e}): it is kept as {keep.name}, the defaults are used')
         _fill(s, data, bad)
     for k in ('them_to_me', 'me_to_them'):
-        if getattr(s, k) not in ENGINES:
-            bad.append(f'{k} must be one of {ENGINES}, got {getattr(s, k)!r}')
-            setattr(s, k, getattr(Settings(), k))
+        if getattr(s, k) not in ENGINES:  # local, not the default: a typo must not send the voice to Google unasked
+            bad.append(f'{k} must be one of {ENGINES}, got {getattr(s, k)!r}: local is used')
+            setattr(s, k, 'local')
     if wrong := set(s.forced_cloud) - {'them_to_me', 'me_to_them'}:
         bad.append(f'forced_cloud may hold only them_to_me, me_to_them, got {sorted(wrong)}')
         s.forced_cloud = []
@@ -229,7 +230,14 @@ def save(s: Settings, path: Path | None = None) -> Path:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        for wait in (0.05, 0.2, 0.5, None):  # Windows: an antivirus or a backup tool holds the file a moment
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if wait is None:
+                    raise
+                time.sleep(wait)
     except BaseException:
         os.unlink(tmp)
         raise

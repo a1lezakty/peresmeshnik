@@ -424,10 +424,13 @@ def _direction(name: str, s):
     return languages.direction(s, 'them_to_me' if name == 'them' else 'me_to_them')
 
 
-def _clone_not_ready(s) -> str:
-    """Why the clone `languages.direction` chose (it can speak the language live here: `languages.clone_why`) cannot
-    start now ('' = it can)."""
-    from peresmeshnik import models
+def _clone_not_ready(s, lang: str) -> str:
+    """Why the clone `languages.direction` chose cannot speak `lang` now ('' = it can): here at all (the app's one
+    answer, `languages.clone_why`: the language, the GPU), then enrolled, its voice pack, its model."""
+    from peresmeshnik import languages, models
+    clone_why = getattr(languages, 'clone_why', None)  # stream B's (stage 7), merged after A: till then `direction`'s
+    if clone_why and (why := clone_why(s.local.clone, lang)):
+        return why
     if not s.local.voice:
         return 'no voice enrolled (setup wizard, "Your voice")'
     from peresmeshnik.local.clone import voice_cmd
@@ -447,7 +450,7 @@ def local_voice(name: str, s) -> tuple[str, str]:
     d = _direction(name, s)
     if not d.local:
         return '', '; '.join(d.why)
-    why = _clone_not_ready(s) if d.voice == 'clone' else ''
+    why = _clone_not_ready(s, d.tgt) if d.voice == 'clone' else ''
     if d.voice == 'clone' and not why:
         return d.tts, ''
     i = d.tts if d.voice == 'stock' else languages.pick(s.local.tts, d.tgt)

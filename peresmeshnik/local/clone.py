@@ -178,14 +178,14 @@ class VoicePackClone:
         try:
             while n := self._u32():
                 if n == ERR:
-                    try:
-                        self._reply()
-                    except RuntimeError as e:  # the runner lives on: this clause is lost, not the clone (L-43)
-                        self._errors += 1
-                        if self._errors >= self.MAX_ERRORS:
-                            raise
-                        log.warning('the voice pack could not say a clause, it is left out: %s', e)
-                        return
+                    r = json.loads(self._wait(self._p.stdout.readline) or b'{}')
+                    if not r:  # it died or was killed (hung) right then: the clone's death, said now
+                        raise self._exited()
+                    self._errors += 1  # it lives on: this clause is lost, not the clone (L-43)
+                    if self._errors >= self.MAX_ERRORS:
+                        raise RuntimeError(f'the voice pack: {r.get("error")}')
+                    log.warning('the voice pack could not say a clause, it is left out: %s', r.get('error'))
+                    return
                 yield np.frombuffer(self._read(n), '<f4')
             self._errors = 0
         except GeneratorExit:  # the caller stopped (barge-in): the runner stops at its next chunk; the rest is read away

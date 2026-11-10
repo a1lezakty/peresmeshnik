@@ -32,6 +32,14 @@ def test_good_recording_passes():
     assert r.level_db == pytest.approx(-20, abs=1.5) and r.snr_db > 35
 
 
+def test_a_dc_offset_is_not_noise():
+    """Stage 7 (C's finding): a microphone with a DC offset (here -40 dBFS) is not "noisy" nor louder: the offset is
+    no sound, the check measures without it."""
+    x = speech_like(45)
+    r, dc = voice.check(x, 16_000), voice.check(x + np.float32(0.01), 16_000)
+    assert dc.ok and dc.snr_db == pytest.approx(r.snr_db, abs=1) and dc.level_db == pytest.approx(r.level_db, abs=0.5), dc
+
+
 @pytest.mark.parametrize('pcm, sr, problem', [
     (speech_like(20), 16_000, 'need 30-60 s'),
     (speech_like(45, talk=0.2), 16_000, 'of speech'),

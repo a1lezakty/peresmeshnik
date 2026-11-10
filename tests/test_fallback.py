@@ -332,6 +332,42 @@ def test_a_slow_uplink_goes_local(fake, monkeypatch):
         r.close()
 
 
+def test_a_link_that_connects_later_does_not_make_the_call_late(fake, monkeypatch):
+    """H-05, the review: with cloud subtitles the translator connects 1.5 s after the transcriber (a lost SYN, a slow
+    TLS handshake): the audio said meanwhile waited for both, it is not "fallback_after_s / 2 late" on a healthy link."""
+    import asyncio
+
+    from peresmeshnik.cloud import gemini
+    real = gemini._Link.connect
+
+    async def connect(self):
+        if self.kind == 'translate':
+            await asyncio.sleep(1.5)
+        return await real(self)
+    monkeypatch.setattr(gemini._Link, 'connect', connect)
+    d = GeminiDirection('en', 'ru', cfg=Cloud(fallback_after_s=2.0, subtitles=True), client=fake.client(), gate=_Gate(),
+                        fail_fast=True)
+    got = []
+    t = threading.Thread(target=lambda: got.extend(_catch(d.events)), daemon=True)
+    t.start()
+    try:
+        pcm = np.concatenate([tone(1.0), silence(1.5)])
+        t0 = time.perf_counter()
+        for i in range(0, len(pcm), FRAME):  # from the start, as a capture does: before both links are up
+            time.sleep(max(0.0, t0 + i / SAMPLE_RATE - time.perf_counter()))
+            d.feed(pcm[i:i + FRAME])
+        assert d.ready.is_set() and not [e for e in got if isinstance(e, BaseException)], got
+    finally:
+        d.close()
+
+
+def _catch(events):
+    try:
+        yield from events()
+    except BaseException as e:
+        yield e
+
+
 def test_a_cloud_that_closes_each_session_at_once_goes_local(monkeypatch):
     """M-11: the server accepts a session and closes it right away (the quota told after the setup): a few tries, then
     the side goes local, not 5 new sessions a second for ever."""
@@ -490,3 +526,10 @@ def test_a_clone_not_ready_falls_back_to_the_stock_voice(monkeypatch):
     assert fallback.voice_why('me', s) == '' and not fallback.stock('me', s)  # the clone
     s.local.voice, s.their_lang = '', 'zh'  # no stock voice for Chinese: nothing to fall back to
     assert 'enrolled' in fallback.voice_why('me', s)
+    s.local.voice, s.their_lang, asked = 'mine', 'en', []  # the app's one answer "the clone can speak here" is asked
+
+    def clone_why(model_id, lang='', has_gpu=None):
+        asked.append((model_id, lang))
+        return 'your cloned voice needs an NVIDIA GPU'
+    monkeypatch.setattr(languages, 'clone_why', clone_why, raising=False)  # stream B's, merged after this one
+    assert fallback.voice_why('me', s) == '' and fallback.stock('me', s) and asked[-1] == (s.local.clone, 'en')

@@ -5,8 +5,11 @@
 # no weights; you build it, and the models download at the first start, after their licenses are shown.
 #
 #   docker build -f packaging/server/Dockerfile -t peresmeshnik-server .
-#   docker run --gpus all -v peresmeshnik:/data -p 127.0.0.1:47000:47000 -it peresmeshnik-server serve --fetch en-ru
+#   docker run --gpus all -v peresmeshnik:/data --tmpfs /data/data/Peresmeshnik/server/voices:uid=1000,mode=0700 \
+#     --stop-timeout 60 -p 127.0.0.1:47000:47000 -it peresmeshnik-server serve --fetch en-ru
 #
+# The voices of a session live in memory only (--tmpfs): a kill, an out-of-memory or a reboot leaves none in the volume;
+# the server removes them itself on stop, which may wait for a side still loading its models (--stop-timeout 60).
 # The port is published on 127.0.0.1 only: reach it from the laptop through `ssh -tt -L 47000:127.0.0.1:47000 <box>
 # sleep infinity` (with a terminal: `ssh -N` keeps Nagle on and adds up to a round trip to small messages, BENCH
 # "Remote") and pair with `https://127.0.0.1:47000/#<code>` (the line `serve` prints names the container's own
@@ -36,6 +39,10 @@ RUN uv python install 3.12 \
       --build-constraints voice-runner/requirements-linux-cuda.txt \
  && uv cache clean
 
+# not root: the GPU works for any user of the container (NVIDIA Container Toolkit); a named volume takes /data's owner, a
+# folder of the host mounted at /data must belong to uid 1000
+RUN useradd --uid 1000 --create-home peresmeshnik && mkdir -p /data && chown peresmeshnik /data
+USER peresmeshnik
 VOLUME /data
 EXPOSE 47000
 # any `peresmeshnik` command: `serve --fetch en-ru` once (it shows the models' licenses: -it), then `serve`, which

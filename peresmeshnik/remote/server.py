@@ -50,19 +50,23 @@ import numpy as np
 
 from peresmeshnik import __version__
 from peresmeshnik.app import Side
-from peresmeshnik.engines import SAMPLE_RATE, Speech
+from peresmeshnik.engines import SAMPLE_RATE, Caption, Speech
 from peresmeshnik.remote import pairing, protocol
 from peresmeshnik.remote.protocol import ProtocolError
 
 log = logging.getLogger('peresmeshnik.server')
-HELLO_S = 10.0  # the first message comes this soon after the connection, else it is closed
+HELLO_S = 3.0  # the first message comes this soon after the connection, else it is closed (the app sends it at once)
 VOICE_S = 120.0  # a voice upload (at most protocol.VOICE_MAX) takes at most this long
 PING_S = 5.0  # a client gone without a reset (Wi-Fi) is noticed in twice this: its side goes warm, another computer may come
 KEY = {'them': 'them_to_me', 'me': 'me_to_them'}
-MAX_UNAUTH = 8  # connections at once that have not shown a device token yet (each may hold a message of protocol.CHUNK)
+MAX_UNAUTH, PER_IP = 32, 2  # connections without a checked token yet: in all, and from one address (anyone on the LAN
+# holding silent ones does not lock the paired laptop out); each holds at most MAX_QUEUE messages of protocol.CHUNK
+MAX_QUEUE = 4
+QUEUE_MAX = 1000  # messages waiting for a client that reads too slowly (~100 s of voice): then it is cut off
+STOP_S = 60.0  # stopping waits this long for a side still loading its models (then its engines are stopped)
 REVOKE_S = 5.0  # a device unpaired from another process (`serve --revoke`) loses its session within this
-SAFE = {'.json', '.wav', '.flac', '.ogg', '.npy', '.npz'}  # what is kept of an uploaded profile: no pickle (xtts.pt,
-# qwen3.pt are torch.load'ed: the engines compute them here again)
+SAFE = {'.json', '.wav'}  # what is kept of an uploaded profile (voice.json, reference.wav): nothing else is read here,
+# and no cache from the laptop is trusted (xtts.pt, qwen3.pt are pickles: the engines compute them here again)
 TEXT = ('text', 'translation')  # what pipeline.py logs that was said
 
 
@@ -96,16 +100,23 @@ class Conn:
     """One client connection: what goes down is queued here (from any thread) and sent in order by `run`. Speech is
     tagged with the barge-in count it was made under: after an interrupt the speech queued before it is not sent."""
 
-    def __init__(self, ws, loop: asyncio.AbstractEventLoop):
-        self.ws, self.loop, self.epoch = ws, loop, 0
+    def __init__(self, ws, loop: asyncio.AbstractEventLoop, ip: str = ''):
+        self.ws, self.loop, self.epoch, self.ip = ws, loop, 0, ip
         self.authed = False  # its hello's token was checked (Server.unauth)
         self.q: asyncio.Queue = asyncio.Queue()
 
     def put(self, data, speech: bool = False) -> None:
         try:
-            self.loop.call_soon_threadsafe(self.q.put_nowait, (data, self.epoch if speech else None))
+            self.loop.call_soon_threadsafe(self._put, (data, self.epoch if speech else None))
         except RuntimeError:  # the server's loop is gone
             pass
+
+    def _put(self, item) -> None:
+        if self.q.qsize() < QUEUE_MAX:
+            self.q.put_nowait(item)
+        elif not self.ws.transport.is_closing():  # the client reads too slowly (a stalled network): cut off, it reconnects
+            log.info('a client reads too slowly: %d messages wait; cut off', self.q.qsize())
+            self.ws.transport.abort()
 
     def end(self) -> None:
         """What is queued goes, then the connection closes."""
@@ -133,6 +144,9 @@ class Net:
     def __init__(self):
         self.conn: Conn | None = None
         self._frames = None
+        self.open: int | None = None  # the clause a partial subtitle came for, not final yet
+        self.cut: int | None = None  # the clause a drop cut: its final subtitle and latencies go to no connection (the
+        # client sends that clause again and hears it whole)
 
     # inp
     def start(self, on_frames) -> None:
@@ -157,6 +171,10 @@ class Net:
 
     # overlay
     def show(self, e) -> None:
+        if self.cut is not None and e.clause == self.cut:
+            return
+        if isinstance(e, Caption):
+            self.open = None if e.final else e.clause
         if (c := self.conn) is not None:
             c.put(protocol.event(e))
 
@@ -242,7 +260,7 @@ class Server:
         self.ports: list[int] = []
         self.device = ''
         self._stops: list[threading.Thread] = []
-        self.unauth = 0  # connections without a checked token now (MAX_UNAUTH)
+        self.unauth: dict[str, int] = {}  # address -> its connections without a checked token now (PER_IP, MAX_UNAUTH)
         self._filter = NoText()
         self._stop: asyncio.Event | None = None
         self.lock: asyncio.Lock | None = None
@@ -265,11 +283,12 @@ class Server:
             logging.getLogger('peresmeshnik.latency').addFilter(self._filter)
         if (wl := logging.getLogger('websockets')).getEffectiveLevel() < logging.INFO:
             wl.setLevel(logging.INFO)  # its DEBUG logs every frame: hello's token, pair's nonce and mac
-        try:
-            import signal
-            self._loop.add_signal_handler(signal.SIGTERM, self._stop.set)  # docker stop: the voices go too
-        except (NotImplementedError, AttributeError, RuntimeError, ValueError):  # Windows; not the main thread
-            pass
+        import signal
+        for sig in (signal.SIGTERM, getattr(signal, 'SIGHUP', None)):  # docker stop, a closed terminal: the voices go too
+            try:
+                self._loop.add_signal_handler(sig, self._stop.set)
+            except (NotImplementedError, AttributeError, RuntimeError, ValueError, TypeError):  # Windows; not the main thread
+                pass
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ctx.load_cert_chain(self.crt, self.key)
@@ -278,6 +297,7 @@ class Server:
             self.device = 'cuda' if await asyncio.to_thread(gpu) else 'cpu'
             async with serve(self._handler, self.host, self.port, ssl=ctx, compression=None, max_size=protocol.CHUNK,
                              ping_interval=PING_S, ping_timeout=PING_S, close_timeout=1, server_header=None,
+                             max_queue=MAX_QUEUE,  # what a silent client can make the server hold before its hello
                              origins=[None]) as srv:  # no Origin: not a browser (a web page could burn the code)
                 self.ports = sorted({s.getsockname()[1] for s in srv.sockets})
                 self.clean()  # once the port is ours (not another server's voices), before any session (on the loop)
@@ -285,13 +305,21 @@ class Server:
                 if self.on_start:
                     self.on_start()
                 watch = asyncio.create_task(self._revoked())
-                await self._stop.wait()
-                watch.cancel()
+                try:
+                    await self._stop.wait()
+                finally:  # stop, Ctrl+C: the voices go first, before the sessions are waited for (a side loading its
+                    watch.cancel()  # models: up to ~30 s; docker stop kills in 10 s) and the engines stopped
+                    self.clean()
         finally:
+            loading = [s.task for s in self.slots.values() if s.task is not None and not s.task.done()]
             for slot in list(self.slots.values()):
                 self._drop(slot)
+            if loading:  # their engines are stopped once up (_drop), while this loop still runs
+                await asyncio.wait(loading, timeout=STOP_S)
             for t in self._stops:
                 t.join(20)
+            if self.started.is_set():  # the port was ours (not another server's voices): what an engine wrote into a
+                self.clean()  # voice's folder while it stopped
             logging.getLogger('peresmeshnik.latency').removeFilter(self._filter)
 
     def stop(self) -> None:
@@ -310,41 +338,52 @@ class Server:
         if side is None and path != protocol.PAIR_PATH:
             await ws.close(1008, 'not found')
             return
-        if self.unauth >= MAX_UNAUTH:  # many connections that showed no token yet: not one more
+        ip = ws.remote_address[0]
+        if self.unauth.get(ip, 0) >= PER_IP or sum(self.unauth.values()) >= MAX_UNAUTH:  # silent ones: not one more
             await ws.close(1013, 'too many connections')
             return
+        self.unauth[ip] = self.unauth.get(ip, 0) + 1
         if side is None:
-            self.unauth += 1
             try:
                 await self._pair(ws)
             except (TimeoutError, ConnectionClosed):
                 pass
             finally:
-                self.unauth -= 1
+                self._authed(ip)
             return
-        self.unauth += 1
-        conn = Conn(ws, self._loop)
+        conn = Conn(ws, self._loop, ip)
         sender = asyncio.create_task(conn.run())
         try:
             if (slot := await self._open(conn, side)) is not None:
                 await self._stream(conn, slot)
         except ProtocolError as e:
-            log.info('%s: refused: %s (%s)', side, e.code, e)
+            log.info('%s: refused: %s (%s)', side, e.code, str(e)[:200])
             conn.put(protocol.error(e.code, str(e)))
         except (TimeoutError, ConnectionClosed):
             pass
-        except Exception as e:  # a bug: the client hears it, the server goes on
-            log.exception('%s: the session failed', side)
-            conn.put(protocol.error('internal', f'{type(e).__name__}: {e}'))
+        except Exception as e:
+            if not conn.authed:  # garbage before the token (a nesting bomb): a one-line refusal, no trace, no detail
+                log.info('%s: refused before the token: %s', side, type(e).__name__)
+                conn.put(protocol.error('hello', 'the first message is not a hello'))
+            else:  # a bug: the client hears it, the server goes on
+                log.exception('%s: the session failed', side)
+                conn.put(protocol.error('internal', f'{type(e).__name__}: {e}'))
         finally:
             if not conn.authed:
-                self.unauth -= 1
+                self._authed(ip)
             self._left(conn)
             conn.end()
             try:
                 await asyncio.wait_for(sender, 5)
             except (TimeoutError, ConnectionClosed):
                 ws.transport.abort()
+
+    def _authed(self, ip: str) -> None:
+        """A connection from `ip` showed its token (or ended): no longer counted."""
+        if (n := self.unauth.get(ip, 0) - 1) > 0:
+            self.unauth[ip] = n
+        else:
+            self.unauth.pop(ip, None)
 
     async def _pair(self, ws) -> None:
         """/v1/pair: only while a code is open (one use, pairing.CODE_S); the device paired is said on the terminal."""
@@ -353,7 +392,11 @@ class Server:
             await ws.send(protocol.error('code', 'no pairing code is open on the server: start it with --code for one'))
             return
         m = await asyncio.wait_for(ws.recv(), HELLO_S)
-        a = await asyncio.to_thread(p.handle, m)  # paired.json is written with an fsync
+        try:
+            a = await asyncio.to_thread(p.handle, m)  # paired.json is written with an fsync
+        except Exception as e:  # garbage (a nesting bomb): a one-line refusal, no trace in the log
+            log.info('pair: refused: %s', type(e).__name__)
+            a = protocol.error('hello', 'the first message on /v1/pair is not a pair')
         await ws.send(a)
         if (d := json.loads(a))['type'] == 'paired':  # the name as kept (another device of that name: a suffix)
             name = ''.join(c for c in await asyncio.to_thread(p.check, d['token']) or '' if c.isprintable())
@@ -385,14 +428,14 @@ class Server:
             raise ProtocolError('auth', 'this computer is not paired with the server, or it was removed from it: pair it '
                                         'again (tray menu, Server…)')
         conn.authed = True
-        self.unauth -= 1
+        self._authed(conn.ip)
         sha = hashlib.sha256(h['token'].encode()).hexdigest()
         v = h['voice']
         key = (h['src'], h['tgt'], v and v['sha256'])
         async with self.lock:  # who has the server, and this side's slot: one hello at a time
-            if any(s.conn is not None and s.device != device for s in self.slots.values()):
+            if any(s.conn is not None and s.sha != sha for s in self.slots.values()):  # a device is its token
                 raise ProtocolError('busy', 'the server is translating for another computer now')
-            for s in [s for s in self.slots.values() if s.device != device]:  # all off: the last one's engines go
+            for s in [s for s in self.slots.values() if s.sha != sha]:  # all off: the last one's engines go
                 self._drop(s)
             slot = self.slots.get(side)
             if slot is not None and (slot.key != key or slot.failed or slot.task is None):  # other languages or voice
@@ -407,11 +450,21 @@ class Server:
                     self._cut(slot)
             else:
                 slot = self.slots[side] = Slot(side, device, key)
-            slot.conn, slot.sha = conn, sha
+                slot.sha = sha
+            slot.conn = conn
         log.info('%s: %s -> %s for %s, %s, %s', side, h['src'], h['tgt'], device, 'its voice' if v else 'a stock voice',
                  'warm' if warm else 'loading')
         try:
             if not warm:
+                from peresmeshnik import languages
+                pair = await asyncio.to_thread(lambda: languages.direction(self._settings(side, h, ''), KEY[side]))
+                if not pair.local:  # said before any upload
+                    raise ProtocolError('lang', f'this server cannot translate {h["src"]} -> {h["tgt"]}: '
+                                                f'{"; ".join(pair.why)}')
+                if v and (side != 'me' or pair.voice != 'clone'):  # it would not speak with it: not asked for
+                    if side == 'me':
+                        slot.refused = f'note: me → them: {"; ".join(pair.notes) or "the server speaks with a stock voice"}'
+                    v = None
                 if v:
                     try:
                         why = await self._voice(conn, slot, v)
@@ -431,9 +484,9 @@ class Server:
             mine = slot.conn is conn
             if mine:
                 slot.conn = None  # not ended by _drop: the error goes first (_handler)
-            if mine or slot.task is None or (slot.task.done() and slot.engines is None):
-                self._drop(slot)  # its voice did not come, or the engines did not start: nothing to keep warm
-            raise
+            if slot.conn is None and (mine or slot.task is None or (slot.task.done() and slot.engines is None)):
+                self._drop(slot)  # its voice did not come, or the engines did not start: nothing to keep warm (a
+            raise  # connection that took the slot over meanwhile hears the error itself, then drops it)
         if slot.conn is not conn:
             return None
         conn.put(protocol.message('ready', warm=warm, device=self.device, voice=slot.voice, app=__version__))
@@ -472,27 +525,19 @@ class Server:
         for f in [f for f in folder.rglob('*') if f.is_file() and f.suffix.lower() not in SAFE]:
             f.unlink()
         try:
-            return voice.load(folder.name, folder.parent).meta
+            meta = voice.load(folder.name, folder.parent).meta
         except (OSError, ValueError) as e:
             raise ProtocolError('voice', f'the voice profile does not read: {e}') from None
+        if not isinstance(meta, dict):
+            raise ProtocolError('voice', 'the voice profile does not read: its voice.json is not an object')
+        return meta
 
     def _build(self, slot: Slot, h: dict) -> ServerSide:
         """The side's engines, on a thread (seconds; a clone ~30 s). Raises ProtocolError('lang') when this server cannot
         run the pair (no model for it, or not downloaded)."""
         from peresmeshnik import languages
         from peresmeshnik.models import ModelMissing
-        from peresmeshnik.voice import STOCK
-        s = copy.deepcopy(self.settings)
-        s.them_to_me = s.me_to_them = 'local'
-        s.forced_cloud = []
-        if slot.side == 'them':
-            s.their_lang, s.my_lang = h['src'], h['tgt']
-        else:
-            s.my_lang, s.their_lang = h['src'], h['tgt']
-            if slot.folder is not None:  # voice.load(name) joins the voices' folder with it: an absolute path stays
-                s.local.voice = str(slot.folder)
-            else:  # no voice in hello: the stock one, not a profile of this computer's
-                s.local.voice, s.local.clone = '', STOCK
+        s = self._settings(slot.side, h, None if slot.folder is None else str(slot.folder))
         pair = languages.direction(s, KEY[slot.side])
         if not pair.local:
             raise ProtocolError('lang', f'this server cannot translate {h["src"]} -> {h["tgt"]}: {"; ".join(pair.why)}')
@@ -507,6 +552,23 @@ class Server:
         side.on_failure = lambda why, e: self._loop.call_soon_threadsafe(self._failed, slot, why)
         side.start()
         return side
+
+    def _settings(self, side: str, h: dict, voice: str | None):
+        """The server's settings for this side, local: `voice` the profile folder ('' only to ask whether the clone could
+        speak here; None: the stock voice, never a profile of this computer's)."""
+        from peresmeshnik.voice import STOCK
+        s = copy.deepcopy(self.settings)
+        s.them_to_me = s.me_to_them = 'local'
+        s.forced_cloud = []
+        if side == 'them':
+            s.their_lang, s.my_lang = h['src'], h['tgt']
+        else:
+            s.my_lang, s.their_lang = h['src'], h['tgt']
+            if voice is None:
+                s.local.voice, s.local.clone = '', STOCK
+            else:  # voice.load(name) joins the voices' folder with it: an absolute path stays
+                s.local.voice = voice
+        return s
 
     async def _stream(self, conn: Conn, slot: Slot) -> None:
         async for m in conn.ws:
@@ -537,8 +599,9 @@ class Server:
         """The side's connection is gone: a pause closes the clause it cut, and that clause's voice is not said; the
         client sends the clause again on its next connection (client.KEEP_S), so it is heard whole, once."""
         slot.conn = slot.net.conn = None
+        slot.net.cut = slot.net.open
         if (side := slot.engines) is not None:
-            side.inp.feed(np.zeros(SAMPLE_RATE // 2, np.float32))
+            side.inp.feed(pause(side.directions[0][0]))
             side.interrupt()
 
     def _expire(self, slot: Slot) -> None:
@@ -568,7 +631,9 @@ class Server:
             slot.conn.end()
         slot.conn = slot.net.conn = None
 
-        def stop():
+        def stop():  # the voice first (stopping engines takes seconds), and again after (a cache written meanwhile)
+            if slot.folder is not None:
+                shutil.rmtree(slot.folder, ignore_errors=True)
             if (side := slot.engines) is not None:
                 try:
                     side.stop()
@@ -587,11 +652,29 @@ class Server:
             slot.task.add_done_callback(go)
 
 
+def pause(direction) -> np.ndarray:
+    """Silence that closes the clause a drop cut: the side's VAD's own minimum and two frames more (0.5 s without one)."""
+    if (vad := getattr(direction, 'vad', None)) is None:
+        return np.zeros(SAMPLE_RATE // 2, np.float32)
+    from peresmeshnik.local.vad import FRAME
+    return np.zeros((vad.min_silence_frames + 2) * FRAME, np.float32)
+
+
 # --- the command ---------------------------------------------------------------------------------------------------
 
 def hosts(host: str) -> list[str]:
     """'' = this computer's private addresses (pairing.addresses) and loopback (ssh -L)."""
     return [host] if host else [*pairing.addresses(), '127.0.0.1']
+
+
+def outward() -> str:
+    """The address this computer sends from towards the internet (a UDP connect sends nothing), or ''."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(('192.0.2.1', 9))  # TEST-NET-1: never answered, only the route is looked up
+            return s.getsockname()[0]
+    except OSError:
+        return ''
 
 
 def url(host: str, port: int, code: str) -> str:
@@ -617,7 +700,14 @@ def fetch(s, pairs: list[str], accept: bool = False) -> int:
 
 
 def cli(argv=None) -> int:
+    import ipaddress
+
     from peresmeshnik import config
+    for out in (sys.stdout, sys.stderr):  # a device name in Cyrillic on a Windows console (cp1252) does not crash it
+        try:
+            out.reconfigure(errors='replace')
+        except (AttributeError, ValueError):
+            pass
     s = config.load()
     d = s.server
     ap = argparse.ArgumentParser(prog='peresmeshnik serve', description='Translate for a weaker computer: it pairs with '
@@ -645,6 +735,15 @@ def cli(argv=None) -> int:
         for dev in p.devices():
             print(f'{dev["name"]}\tpaired {dev["paired"]}\tlast seen {dev["last"]}')
         return 0
+    if a.host and a.host != 'localhost':
+        try:
+            ipaddress.ip_address(a.host.strip('[]').split('%')[0])
+        except ValueError:
+            print(f'--host {a.host}: give an IP address of this computer (ip addr / ipconfig), not a name', file=sys.stderr)
+            return 2
+    if not a.host and not pairing.addresses():
+        print('No home network or Tailscale address found here: listening on 127.0.0.1 only (reach it through '
+              'ssh -L, or start with --host <address>)', file=sys.stderr)
     try:
         for h in hosts(a.host):
             pairing.check_bind(h, a.public)
@@ -661,9 +760,15 @@ def cli(argv=None) -> int:
     def pair_line():  # once it listens: a server already on the port keeps its own code
         code = srv.pairing.new_code()
         print('Pair a computer (its tray menu, Server…) with this line, in 10 minutes, once:', flush=True)
-        shown = [x for h in hosts(a.host) for x in (pairing.addresses() if h in ('0.0.0.0', '::') else [h])]
-        for h in [h for h in shown if h != '127.0.0.1'] or shown:
-            print(f'  {url(h, a.port, code)}', flush=True)
+        shown = [x for h in hosts(a.host) for x in ((pairing.addresses() or [outward()]) if h in ('0.0.0.0', '::')
+                                                     else [h])]
+        for h in shown:
+            if not h:
+                print('  ' + url('<the address of this server>', a.port, code), flush=True)
+            elif h in ('127.0.0.1', '::1', 'localhost'):  # Docker: the container's address above, this one through ssh
+                print(f'  {url(h, a.port, code)}   (on this computer, or from the laptop through ssh -tt -L)', flush=True)
+            else:
+                print(f'  {url(h, a.port, code)}', flush=True)
     if a.code or not srv.pairing.devices():
         srv.on_start = pair_line
     try:

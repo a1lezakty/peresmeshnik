@@ -215,19 +215,31 @@ and the tray says so. `serve --list` shows the paired laptops, `serve --revoke N
 server and start it with `--code`. One laptop at a time; its sides stay warm on the server for 10 minutes after it
 leaves (`[server] warm_s`), so a reconnect does not load the models again.
 
-- **Where it listens.** Only on this computer's private addresses (home network, Tailscale), never on a public one
-  unless you start it with `--public`. Through the internet: Tailscale on both computers, or an ssh tunnel with a
-  terminal, `ssh -tt -L 47000:127.0.0.1:47000 <server> sleep infinity`, and pair with `https://127.0.0.1:47000/#<code>`
-  (`ssh -N` delays small messages; the network adds one round trip to the voice either way, BENCH "Remote").
+- **Where it listens.** Only on this computer's private addresses (home network, Tailscale) and 127.0.0.1. `--public`
+  only *allows* a public `--host`, it does not pick one: `--host 0.0.0.0 --public` listens on every address. `--host`
+  takes an IP address, not a name. Give the server a fixed address in your router (a DHCP reservation), or the line you
+  paired with stops working when it changes; allow the port in the server's own firewall (ufw, firewalld; on Windows the
+  network must be "Private", not "Public").
+- **Through the internet, or a rented server:** Tailscale on both computers, or an ssh tunnel with a terminal,
+  `ssh -tt -L 47000:127.0.0.1:47000 <server> sleep infinity`, and pair with `https://127.0.0.1:47000/#<code>` (`ssh -N`
+  delays small messages; the network adds one round trip to the voice either way, BENCH "Remote"). Keep port 47000
+  closed in the provider's firewall: a cloud VM's "private" address is often reachable from the internet through its
+  provider's 1:1 NAT, and Docker's `-p 47000:47000` (without `127.0.0.1:`) opens the port to everyone.
 - **A rented NVIDIA server:** `packaging/server/Dockerfile` (build it yourself: no image is published, it would ship
-  the models' and Piper's licenses with it). Your cloned voice runs on its GPU.
+  the models' and Piper's licenses with it). Your cloned voice runs on its GPU. Run it as the file's head shows: the
+  port on 127.0.0.1 only, `--stop-timeout 60`, and the voices in memory (`--tmpfs`); its pairing line names the
+  container's own address, pair with the `127.0.0.1` one through the ssh tunnel.
+- **Pairing.** While a code is open (10 minutes, or until it is used), anyone on the same network can burn it with five
+  wrong tries: then start the server again with `--code`. A paired laptop is trusted: the server checks that a voice
+  for *Me → them* is marked as your own confirmed voice, which stops an honest laptop's mistake, not a paired laptop
+  that lies (`serve --revoke` it).
 - **What goes there:** the call's sound and your microphone while a side is on the server, and your own voice
-  profile for the session, only once it is confirmed as yours at the microphone (any other voice sent for *Me → them*:
-  the server speaks with a stock voice). It is kept in a folder only the server's user can read while the laptop's
-  session is warm, up to 10 minutes after it leaves (`[server] warm_s`, 0: at once), and deleted then, when the server
-  stops, or at its next start after a crash. The server's log keeps times only, no words (`--log` for debugging). Your
-  Gemini key never goes there. The provider of a
-  rented server can technically see its memory and disk.
+  profile for the session, only once it is confirmed as yours at the microphone and only when the server speaks with
+  it (no NVIDIA GPU there: a stock voice, nothing is sent; any other voice sent for *Me → them*: a stock voice). It is
+  kept in a folder only the server's user can read while the laptop's session is warm, up to 10 minutes after it
+  leaves (`[server] warm_s`, 0: at once), and deleted then, first thing when the server stops, or at its next start
+  after a crash. The server's log keeps times only, no words (`--log` for debugging). Your Gemini key never goes there.
+  The provider of a rented server can technically see its memory and disk.
 - **For yourself only:** a server for your own laptops is fine; running it as a service for others is not (the voice
   models' licenses are non-commercial).
 

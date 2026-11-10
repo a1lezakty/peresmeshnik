@@ -5,8 +5,9 @@
 //   peresmeshnik-loopback console          one line "console=0|1": does this process own a console window
 //   peresmeshnik-loopback list             the audio sessions, one JSON object per line: pid, name, playing, exe
 //   peresmeshnik-loopback tap --pid N [--tree]   process loopback of pid (and, with --tree, its process tree)
-//   peresmeshnik-loopback volume --pid N [--set L] [--tree]   get or set the sessions' volume (one-shot); a JSON
-//                                          line per session: pid, device (endpoint id), volume
+//   peresmeshnik-loopback volume --pid N [--set L [--below B]] [--tree]   get or set the sessions' volume (one-shot;
+//                                          with --below, only those below B: a restore leaves one raised since); a
+//                                          JSON line per session: pid, device (endpoint id), volume
 //   peresmeshnik-loopback mute --pid N [--tree] [--level L]   hold pid's (tree's) sessions at L (0), new ones too, on
 //                                          every device
 //                                          (mute-only; the app restores): {"event":"muted","pid","level","device"}
@@ -439,7 +440,7 @@ static bool in_exe_tree(DWORD pid, const std::wstring& exe) {
     return false;
 }
 
-static int run_volume(DWORD pid, bool tree, bool set, float level) {
+static int run_volume(DWORD pid, bool tree, bool set, float level, float below) {
     bool any = false;
     bool ok = each_session([&](DWORD spid, AudioSessionState, ComPtr<IAudioSessionControl2>& ctl2,
                                const std::wstring& device) {
@@ -447,8 +448,11 @@ static int run_volume(DWORD pid, bool tree, bool set, float level) {
         if (!(spid == pid || (tree && in_tree(spid, pid)))) return;
         ComPtr<ISimpleAudioVolume> vol;
         if (FAILED(ctl2.As(&vol))) return;
-        if (set && FAILED(vol->SetMasterVolume(level, nullptr))) return;
         float v = 1.0f; vol->GetMasterVolume(&v);
+        if (set && (below <= 0.0f || v < below)) {
+            if (FAILED(vol->SetMasterVolume(level, nullptr))) return;
+            vol->GetMasterVolume(&v);
+        }
         printf("{\"pid\": %lu, \"device\": \"%s\", \"volume\": %.4f}\n", (unsigned long)spid,
                json_escape(wide_to_utf8(device.c_str())).c_str(), v);
         any = true;
@@ -612,7 +616,8 @@ static int run_mute(DWORD pid, bool tree, float level) {
 // so its next session there starts silent. `keep` waits for it: a session of a process named --exe (or of one of
 // its children) on one of the --device endpoints (any without) that is at 0 gets --level; one found not at 0 (the
 // user raised it, or Windows did not keep the 0) is left as it is. Either way a "restored" line says that device is
-// done; the Python side stops the helper when every device is.
+// done, and the helper ends by itself when every device is (or after --for). It reads no stdin: it outlives the app,
+// whose next run ends a leftover one before it ducks anything.
 
 static std::wstring g_keep_exe;
 static float g_keep_level = 1.0f;
@@ -725,8 +730,12 @@ int wmain(int argc, wchar_t** argv) {
         if (!pid) quit(USAGE, "volume needs --pid N");
         bool set = has_flag(argc, argv, L"--set");
         float level = 0.0f;
-        for (int i = 0; i < argc; i++) if (!wcscmp(argv[i], L"--set") && i + 1 < argc) level = (float)wcstod(argv[i + 1], nullptr);
-        code = run_volume(pid, has_flag(argc, argv, L"--tree"), set, level);
+        float below = 0.0f;  // 0: every session
+        for (int i = 0; i + 1 < argc; i++) {
+            if (!wcscmp(argv[i], L"--set")) level = (float)wcstod(argv[i + 1], nullptr);
+            else if (!wcscmp(argv[i], L"--below")) below = (float)wcstod(argv[i + 1], nullptr);
+        }
+        code = run_volume(pid, has_flag(argc, argv, L"--tree"), set, level, below);
     } else if (cmd == L"mute") {
         DWORD pid = arg_dword(argc, argv, L"--pid", 0);
         if (!pid) quit(USAGE, "mute needs --pid N");

@@ -116,8 +116,9 @@ Windows 10 version 2004 or later, or Windows 11 (x64).
 5. While translation is on, the app records the call app's own sound and turns it almost all the way down on your
    speakers (you hear the translation instead), and gives it back when translation is off. If the call app closes
    first, or its headset is off, it gets its volume back the next time it plays there, also after you quit
-   Peresmeshnik (a small helper, `peresmeshnik-loopback.exe`, waits for that and then ends); after a sign-out, start
-   Peresmeshnik once or raise the app in the Windows Volume mixer. Telegram, Zoom, Discord and the like are found
+   Peresmeshnik (a small helper, `peresmeshnik-loopback.exe`, waits for that and then ends; the tray says which app).
+   A sign-out or an update of Peresmeshnik ends that helper: start Peresmeshnik once. After a removal (a silent one
+   does not say which app it was), raise the app in the Windows Volume mixer. Telegram, Zoom, Discord and the like are found
    by themselves; otherwise choose the app in the tray menu **Call app** while the call plays. A browser (Meet) is
    taken with all of its sound, other tabs too.
 6. Without an NVIDIA GPU, what you say is translated and spoken to the other side by the cloud (Gemini); a local

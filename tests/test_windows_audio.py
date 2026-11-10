@@ -250,12 +250,16 @@ def test_ducked_session_brought_back_up_matches_full_volume(source):
 
 
 @pytest.mark.usefixtures('helper_ok', 'cable')
-def test_mute_helper_ducks_and_the_loopback_keeps_the_sound(monkeypatch):
+@pytest.mark.parametrize('source, raise_to', [('tone', 1.0), ('speech', 0.2)])
+def test_mute_helper_ducks_and_the_loopback_keeps_the_sound(monkeypatch, source, raise_to):
     """The stage-4 spike, measured after the buffer from before the change is gone (it measured that buffer, so it
     passed though a session at 0 gives the loopback silence): the mute helper ducks the session to DUCK, and the
-    ProcessLoopback brought back up (_gain, as mute_call sets it) has the tone at its full-volume level."""
+    ProcessLoopback brought back up (_gain, as mute_call sets it) has the sound at its full-volume level. Then the
+    session is raised meanwhile (by hand, by the call app): it comes as it is, not 200 times into a clip, its pauses
+    too (circle 2, 1: HOLD_S). The speech loop is raised to 0.2, where 11 of its 93 blocks are below 2*DUCK (at 1,
+    none is). Windows of 3 s: one period of the speech loop, so its level does not depend on where they start."""
     from peresmeshnik.audio import capture_windows as cw
-    player = play_tone(CABLE_IN, 440.0)
+    player = play_tone(CABLE_IN, 440.0 if source == 'tone' else SPEECH)
     frames, muter = Frames(), None
     cap = cw.ProcessLoopback(pid=player.pid)
     cap.start(frames)
@@ -263,9 +267,9 @@ def test_mute_helper_ducks_and_the_loopback_keeps_the_sound(monkeypatch):
         assert until(lambda: player_sessions(cw.helper(), player), 8), 'the player has no session'
         set_volume(player.pid, 1.0)
         frames.got.clear()
-        time.sleep(1.5)
+        time.sleep(3.0)
         full = rms(frames.audio())
-        assert full > 0.1, 'the loopback heard no tone'
+        assert full > 0.02, 'the loopback heard nothing'
         muter = subprocess.Popen([cw.helper(), 'mute', '--pid', str(player.pid), '--tree', '--level', f'{cw.DUCK:.4f}'],
                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                  creationflags=cw.CREATE_NO_WINDOW)
@@ -275,16 +279,18 @@ def test_mute_helper_ducks_and_the_loopback_keeps_the_sound(monkeypatch):
         assert vols and all(abs(v - cw.DUCK) < 1e-3 for v in vols), vols  # what the speakers get: -46 dB
         time.sleep(0.6)
         frames.got.clear()
-        time.sleep(1.5)
+        time.sleep(3.0)
         ducked = rms(frames.audio())
-        set_volume(player.pid, 1.0)  # FIXES 1: raised by hand (or by the app) while translating: not 200 times into a clip
+        set_volume(player.pid, raise_to)  # raised while translating
         frames.got.clear()
-        time.sleep(1.5)
-        raised = rms(frames.audio())
-        print(f'\nloopback rms at volume 1 {full:.4f}, ducked to {cw.DUCK} and brought back up {ducked:.4f}, '
-              f'raised to 1 meanwhile {raised:.4f}')
+        time.sleep(3.0)
+        x = frames.audio()
+        raised, peak = rms(x) / raise_to, float(np.abs(x).max(initial=0.0))
+        print(f'\n{source}: loopback rms at volume 1 {full:.4f}, ducked to {cw.DUCK} and brought back up {ducked:.4f}, '
+              f'raised to {raise_to} meanwhile {raised:.4f} (per volume 1), peak {peak:.3f}')
         assert abs(20 * np.log10(ducked / full)) < 0.5, (full, ducked)
-        assert abs(20 * np.log10(raised / full)) < 0.5, ('a session raised to 1 was brought up into a clip', full, raised)
+        assert peak < 0.99, f'a raised session was brought up into a clip (peak {peak})'
+        assert abs(20 * np.log10(raised / full)) < 1.0, ('a raised session (or its pauses) was brought up', full, raised)
     finally:
         if muter:
             muter.stdin.close()
@@ -446,6 +452,44 @@ def test_keep_gives_a_session_at_0_its_level_back():
     finally:
         if proc:
             end(proc)
+        subprocess.run([helper(), 'volume', '--pid', str(player.pid), '--tree', '--set', '1'], capture_output=True)
+        player.kill()
+        player.wait()
+
+
+@pytest.mark.usefixtures('helper_ok', 'cable')
+def test_keep_ends_after_its_time_with_nothing_to_do():
+    """Circle 2, 7: a keep helper whose app never plays again ends after --for (KEEP_S in the app), code 0."""
+    from peresmeshnik.audio.capture_windows import helper
+    t = time.monotonic()
+    proc, events = keeper(helper(), 'no-such-call-app.exe', 0.7, seconds=1)
+    try:
+        proc.wait(10)
+    finally:
+        end(proc)
+    took = time.monotonic() - t
+    assert proc.returncode == 0 and 0.8 < took < 5, (proc.returncode, round(took, 2))
+    assert events == []
+
+
+@pytest.mark.usefixtures('helper_ok', 'cable')
+def test_a_restore_leaves_a_session_raised_since():
+    """Circle 2, 5: restore_call's `volume --set L --below 0.01` gives a session still down its level and leaves one
+    the user (or a keep helper) has raised since as it is."""
+    from peresmeshnik.audio.capture_windows import helper
+    player = play_tone(CABLE_IN, 440.0)
+    give_back = [helper(), 'volume', '--pid', str(player.pid), '--tree', '--set', '0.6', '--below', '0.01']
+    try:
+        assert until(lambda: player_sessions(helper(), player), 8), 'the player has no session'
+        set_volume(player.pid, 0.3)
+        subprocess.run(give_back, capture_output=True, check=True)
+        vols = [x['volume'] for x in player_sessions(helper(), player)]
+        assert vols and all(abs(v - 0.3) < 0.02 for v in vols), vols
+        set_volume(player.pid, 0.0)
+        subprocess.run(give_back, capture_output=True, check=True)
+        vols = [x['volume'] for x in player_sessions(helper(), player)]
+        assert vols and all(abs(v - 0.6) < 0.02 for v in vols), vols
+    finally:
         subprocess.run([helper(), 'volume', '--pid', str(player.pid), '--tree', '--set', '1'], capture_output=True)
         player.kill()
         player.wait()

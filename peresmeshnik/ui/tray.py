@@ -179,6 +179,9 @@ class Tray(QObject):
             self.fallback_status.setText(text)
 
     def set_state(self, state: str) -> None:
+        if state.startswith('notice: '):  # about something else than translating (the call app's volume): said, no more
+            self.message(state.removeprefix('notice: '))
+            return
         self.status.setText(state[:120])
         self.icon.setToolTip(f'Peresmeshnik: {state}')
         if self.fallback:

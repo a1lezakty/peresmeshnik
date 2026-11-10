@@ -44,7 +44,10 @@ EXIT = {2: 'bad arguments to the loopback helper', 3: 'the call app is not runni
 RESTART = 7
 RESTART_S, RESTARTS = 1.0, 5
 DUCK = 0.005  # the call app's session volume while translating; below 0.01, so a saved level never takes it for one
-_gain = 1.0  # 1/DUCK once the mute helper said a session is ducked, until restore_call or the helper's end
+_gain = 1.0  # 1/DUCK once the mute helper said a session is ducked, until restore_call (a dead helper leaves it ducked)
+HOLD_S = 2.0  # after a block too loud to be ducked (the session raised by hand or by the app), this long as it is before
+# quiet blocks are brought up again: a raised session's pauses, breath and call noise are as quiet as a ducked one's
+# speech and would come out 200 times up, a noise for speech recognition that never lets its VAD close
 KEEP_S = 14 * 24 * 3600  # how long a keep helper waits for the call app's next sound, the app quit or not
 
 
@@ -213,11 +216,21 @@ class ProcessLoopback:
         if m := re.match(r'peresmeshnik-loopback 1 rate=(\d+) channels=1 format=f32le', head):
             self.rate = int(m[1])
             rs, n = Resampler(self.rate, SAMPLE_RATE), self.rate * 32 // 1000 * 4  # 32 ms, as the Linux capture
+            hold_n = round(HOLD_S * 1000 / 32)
+            hold, armed = 0, False  # blocks left as they are after a loud one; a ducked block seen since the gain came
             while len(b := proc.stdout.read(n)) == n:
                 x = np.frombuffer(b, '<f4')
-                # ducked: brought back up. A block louder than a ducked one can be (before the duck took, a session
-                # raised by hand or by the app, a helper gone) is not ducked: as it is, not 200 times into a clip
-                if _gain != 1.0 and float(np.abs(x).max(initial=0.0)) <= 2 * DUCK:
+                # ducked: brought back up. A block louder than a ducked one can be is not ducked: as it is, not 200
+                # times into a clip. Once the duck had taken (armed), that is a raised session: HOLD_S as it is; the
+                # sound from before the duck (the first ~0.1-0.4 s) holds nothing
+                if _gain == 1.0:
+                    hold, armed = 0, False
+                elif float(np.abs(x).max(initial=0.0)) > 2 * DUCK:
+                    hold = hold_n if armed else 0
+                elif hold:
+                    hold -= 1
+                else:
+                    armed = True
                     x = np.clip(x * _gain, -1.0, 1.0)
                 on_frames(rs(x))
         proc.wait()
@@ -268,7 +281,8 @@ class ProcessLoopback:
 # file also has the devices it was ducked on; an entry goes only when every one of them got its level back. What
 # cannot be given back now (the call app closed before translation was turned off, a headset unplugged) is watched
 # for by a `keep` helper: on the app's next session there (opened at the persisted level, below 0.01) it sets the
-# level and says so. The keep helper lives while the app runs (it is a tray app), event-driven.
+# level and says so. The keep helper reads no stdin: it outlives the app (up to KEEP_S), event-driven, and ends when
+# every device is done; the next run ends a leftover one first (its pid is in the file).
 # ponytail: one level per app restored to the whole tree, so a second window's tab volumes are flattened on restore.
 # ponytail: one _gain for the module: one call app is translated at a time.
 
@@ -359,12 +373,13 @@ def session_volume(app: str) -> float | None:
 
 
 def set_session_volume(app: str, level: float) -> list[str]:
-    """Set the call app's sessions (its tree, every device there now) to `level`: the endpoint ids where one was set,
-    [] when none was (the app is not running, or has no session)."""
+    """Give the call app's sessions (its tree, every device there now) that are still down (below 0.01, as `keep`)
+    their `level`; one already up (given back by a keep helper, set by the user since) is left as it is. The endpoint
+    ids of every session found, [] when there is none (the app is not running, or has no session)."""
     pid = tree_root(app)
     if pid is None:
         return []
-    r = _run(['volume', '--pid', str(pid), '--tree', '--set', f'{level:.4f}'])
+    r = _run(['volume', '--pid', str(pid), '--tree', '--set', f'{level:.4f}', '--below', '0.01'])
     if r.returncode:
         return []
     return [json.loads(line).get('device', '') for line in r.stdout.splitlines() if line.startswith('{')]
@@ -388,11 +403,12 @@ def _kill(proc: subprocess.Popen) -> None:
 
 
 def _kill_orphan(pid: int) -> None:
-    """The keep helper a previous run left (the app quit or crashed while it waited): it would undo the next duck."""
+    """The keep helper a previous run left (the app quit or crashed while it waited): it would undo the next duck.
+    The pid may have been reused since it ended: by another program, or by a helper of this run (watch, tap)."""
     import psutil
     try:
         p = psutil.Process(pid)
-        if p.name().lower().startswith('peresmeshnik-loopback'):  # the pid may have been reused by another program
+        if p.name().lower().startswith('peresmeshnik-loopback') and 'keep' in p.cmdline()[1:2]:
             p.kill()
     except psutil.Error:
         pass
@@ -421,27 +437,32 @@ def mute_call(app: str) -> None:
                 continue
             if ev.get('event') == 'muted':
                 _remember(app, float(ev['level']), ev.get('device', ''))
-                _gain = 1 / DUCK  # a session is ducked now: its sound is brought back up
+                with _muter_lock:  # a session is ducked now: its sound is brought back up (not after restore_call)
+                    if _muter is proc:
+                        _gain = 1 / DUCK
                 log.info('mute: %s session %s volume %.2f -> %g', app, ev.get('pid'), ev['level'], DUCK)
             elif ev.get('event') == 'failed':
                 log.warning('mute: %s session %s could not be ducked (0x%x)', app, ev.get('pid'), ev.get('hr', 0))
-        with _muter_lock:  # the helper ended (stopped, or died): nothing ducks any more
-            if _muter is proc or _muter is None:
-                _gain = 1.0
+        with _muter_lock:
+            died = _muter is proc  # not stopped by restore_call
+        if died:  # its sessions stay ducked (it gives nothing back), so the gain stays too, or the call is heard
+            # nowhere; restore_call gives the levels back as usual
+            log.warning('mute: the helper for %s ended (%s): new sessions are not ducked; translation off gives '
+                        'the volume back', app, proc.poll())
 
     with _muter_lock:
         _muter = proc
     threading.Thread(target=pump, name='mute-pump', daemon=True).start()
 
 
-def restore_call(muting: str = '') -> None:
+def restore_call(muting: str = '') -> list[str]:
     """Stop the mute helper (mute-only; Python owns restore) and put each saved app's level back, clearing an entry
     only where it was actually applied: on every device it was muted on. What cannot be applied yet (the app is not
     running, its device is unplugged) is kept and watched for by a keep helper (but not for `muting`, the app about
-    to be muted), so nothing is lost if the helper died or the app is gone."""
+    to be muted), so nothing is lost if the helper died or the app is gone. Returns those apps: still quiet somewhere."""
     global _muter, _gain
-    _gain = 1.0
     with _muter_lock:
+        _gain = 1.0
         proc, _muter = _muter, None
         keepers = list(_keepers.values())
         _keepers.clear()
@@ -463,9 +484,20 @@ def restore_call(muting: str = '') -> None:
                 d.pop(app)
                 log.info('mute: %s sessions restored to %.2f', app, e['level'])
         _write_state(d)
-    for app, e in d.items():
-        if app != muting:
-            _keep(app, e)
+    waiting = [app for app in d if app != muting]
+    for app in waiting:
+        _keep(app, d[app])
+    return waiting
+
+
+def quiet_note(apps: list[str]) -> str:
+    """The tray's word for restore_call's apps still quiet somewhere ('' for none)."""
+    if not apps:
+        return ''
+    names = ', '.join(a[:-4] if a.lower().endswith('.exe') else a for a in apps)
+    return (f'{names} stays quiet where it played during translation (it closed first, or a headset was off): its '
+            f'volume comes back when it plays sound there again (within {KEEP_S // 86400} days), even without '
+            'Peresmeshnik, or raise it in the Windows Volume mixer.')
 
 
 def _keep(app: str, e: dict) -> None:

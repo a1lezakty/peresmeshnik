@@ -211,7 +211,10 @@ def test_the_keep_helper_outlives_the_app_and_the_next_run_ends_it(state, keeper
             self.p = p
 
         def name(self):
-            return 'peresmeshnik-loopback.exe' if self.p == pid else 'notepad.exe'
+            return 'peresmeshnik-loopback.exe' if self.p in (pid, 78) else 'notepad.exe'
+
+        def cmdline(self):  # 78: our helper of the new run (watch), on a pid the keep helper had
+            return ['peresmeshnik-loopback.exe', 'keep' if self.p == pid else 'watch']
 
         def kill(self):
             killed.append(self.p)
@@ -225,6 +228,10 @@ def test_the_keep_helper_outlives_the_app_and_the_next_run_ends_it(state, keeper
         state.write_text(json.dumps({'Zoom.exe': {'level': 0.8, 'devices': ['HEADSET'], 'keeper': 77}}))
     cw.restore_call()
     assert killed == [pid], 'killed a reused pid that is not our helper'
+    with cw._state_lock:  # circle 2, 4: the pid is now another helper of ours (watch, tap): not a keep helper
+        state.write_text(json.dumps({'Zoom.exe': {'level': 0.8, 'devices': ['HEADSET'], 'keeper': 78}}))
+    cw.restore_call()
+    assert killed == [pid], 'killed our own watch helper on a reused pid'
 
 
 class FakeMuter:
@@ -268,8 +275,11 @@ def test_the_loopback_is_brought_back_up_only_once_a_session_is_ducked(state, mo
     assert cw._gain == 1.0
 
 
-def test_a_mute_helper_that_dies_takes_the_gain_back(state, monkeypatch):
+def test_a_mute_helper_that_dies_leaves_the_gain_until_translation_off(state, monkeypatch):
+    """Circle 2, 2: the helper died after ducking: it gives nothing back, the sessions stay at DUCK, so the sound is
+    still brought up (else the call is heard nowhere); translation off takes the gain back and restores the levels."""
     muter = FakeMuter([{'event': 'muted', 'pid': 1, 'level': 0.8, 'device': 'A'}])
+    muter.poll = lambda: 1
     monkeypatch.setattr(cw, 'helper', lambda: 'helper.exe')
     monkeypatch.setattr(cw, 'tree_root', lambda app: 123)
     monkeypatch.setattr(cw, 'set_session_volume', lambda app, level: [])
@@ -277,8 +287,12 @@ def test_a_mute_helper_that_dies_takes_the_gain_back(state, monkeypatch):
     cw.mute_call('Zoom.exe')
     assert until(lambda: cw._gain != 1.0)
     muter.closed.set()  # its stdout ends: it died
-    assert until(lambda: cw._gain == 1.0), 'a dead helper ducks nothing, the sound must not be brought up'
-    monkeypatch.setattr(cw, '_muter', None)
+    time.sleep(0.2)
+    assert cw._gain == 1 / cw.DUCK, 'the sessions are still ducked: the sound must still be brought up'
+    restored = []
+    monkeypatch.setattr(cw, 'set_session_volume', lambda app, level: restored.append((app, level)) or ['A'])
+    cw.restore_call()
+    assert cw._gain == 1.0 and restored == [('Zoom.exe', 0.8)]
 
 
 def test_only_a_block_as_quiet_as_a_ducked_one_is_brought_up(monkeypatch):
@@ -302,3 +316,65 @@ def test_only_a_block_as_quiet_as_a_ducked_one_is_brought_up(monkeypatch):
     first, second = float(np.abs(x[n // 4:n - n // 4]).max()), float(np.abs(x[n + n // 4:-n // 4]).max())
     assert 0.7 < first < 0.9, first   # 0.004 brought up to ~0.8
     assert 0.25 < second < 0.35, second  # 0.3 left as it is, not 60 clipped to 1
+
+
+def blocks_out(blocks: list) -> list:
+    """ProcessLoopback._read over 48 kHz blocks of 32 ms (as the helper sends them): the peak of each block out."""
+    import numpy as np
+    head = b'peresmeshnik-loopback 1 rate=48000 channels=1 format=f32le\n'
+    proc = type('P', (), {'stdout': io.BytesIO(head + b''.join(np.asarray(b, '<f4').tobytes() for b in blocks)),
+                          'wait': lambda *a: 0, 'returncode': 0})()
+    got = []
+    cap = cw.ProcessLoopback(pid=1, on_end=lambda why: None)
+    cap._proc = proc
+    cap._read(proc, got.append)
+    return [float(np.abs(x).max(initial=0.0)) for x in got]
+
+
+def test_a_raised_session_is_not_brought_up_in_its_pauses(monkeypatch):
+    """Circle 2, 1: once the duck took, a block too loud to be ducked means the session was raised (by hand, by the
+    app): the quiet blocks after it (pauses, breath, call noise) stay as they are for HOLD_S, not 200 times up; after
+    HOLD_S of quiet the sound is taken for ducked again. The loud sound from before the duck (the first blocks after
+    the gain came on) holds nothing."""
+    import numpy as np
+    monkeypatch.setattr(cw, '_gain', 1 / cw.DUCK)
+    t = np.arange(1536) / 48000
+    quiet, loud = 0.003 * np.sin(2 * np.pi * 500 * t), 0.3 * np.sin(2 * np.pi * 500 * t)
+    hold = round(cw.HOLD_S * 1000 / 32)
+    seq = [loud] * 6 + [quiet] * 6 + [loud] * 6 + [quiet] * (hold + 10)
+    out = blocks_out(seq)
+    assert all(p < 0.31 for p in out[1:6]), out[:6]  # before the duck: as it is (not clipped), no hold after it
+    assert all(0.5 < p < 0.7 for p in out[8:12]), out[6:12]  # ducked: 0.003 brought up to 0.6
+    after = out[18:]
+    assert all(p < 0.004 for p in after[2:hold - 1]), after[:hold]  # a pause of a raised session: as it is
+    assert all(0.5 < p < 0.7 for p in after[hold + 2:]), after[hold:]  # HOLD_S of quiet: ducked again
+
+
+def test_a_restore_gives_back_only_sessions_still_down(monkeypatch):
+    """Circle 2, 5: a session already up (a keep helper gave it back after the app quit, the user set it since) keeps
+    its volume: the helper sets only those below 0.01."""
+    seen = []
+    monkeypatch.setattr(cw, 'tree_root', lambda app: 123)
+    monkeypatch.setattr(cw, '_run', lambda args: seen.append(args) or subprocess.CompletedProcess(args, 0, '', ''))
+    cw.set_session_volume('Telegram.exe', 0.6)
+    assert seen == [['volume', '--pid', '123', '--tree', '--set', '0.6000', '--below', '0.01']]
+
+
+def test_an_app_still_quiet_is_said_in_the_tray(state, monkeypatch):
+    """Circle 2, 3: translation off (or the next start) with a level not given back: restore_call names the app (not
+    the one about to be muted), and the tray says where its volume is and that it comes back."""
+    from types import SimpleNamespace
+
+    from peresmeshnik import app as appmod
+    cw._remember('Telegram.exe', 0.8, 'HEADSET')
+    cw._remember('Zoom.exe', 0.7, 'HEADSET')
+    monkeypatch.setattr(cw, 'set_session_volume', lambda app, level: [])
+    assert cw.restore_call(muting='Zoom.exe') == ['Telegram.exe']
+    note = cw.quiet_note(['Telegram.exe'])
+    assert note.startswith('Telegram stays quiet') and '14 days' in note and 'Volume mixer' in note
+    assert cw.quiet_note([]) == ''
+    states = []
+    for left in (['Telegram.exe'], []):
+        monkeypatch.setattr(cw, 'restore_call', lambda left=left: left)
+        appmod.Controller._call_volume_back(SimpleNamespace(on_state=states.append))
+    assert states == [f'notice: {note}']

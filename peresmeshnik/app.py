@@ -979,12 +979,18 @@ class Controller:
         first call."""
         from peresmeshnik.audio import capture_windows
         try:
-            capture_windows.restore_call()
+            self._call_volume_back()
             code, why = capture_windows.check()
         except Exception as e:
             code, why = 1, str(e)
         if code:
             self.startup_error = '; '.join(x for x in (self.startup_error, why) if x)
+
+    def _call_volume_back(self) -> None:
+        """Windows: the call app's volume back (capture_windows.restore_call); one still quiet somewhere is said."""
+        from peresmeshnik.audio import capture_windows
+        if note := capture_windows.quiet_note(capture_windows.restore_call()):
+            self.on_state(f'notice: {note}')
 
     def _mic_source(self) -> str:
         return mic_source((self.settings or config.load()).ui.mic, self._mic)
@@ -1340,7 +1346,7 @@ class Controller:
                 if mute:  # the translation is heard, the original is not; restored on off and after a crash
                     from peresmeshnik.audio import capture_windows
                     capture_windows.mute_call(app)
-                    self._router = SimpleNamespace(stop=lambda: (tap.retarget(''), capture_windows.restore_call()))
+                    self._router = SimpleNamespace(stop=lambda: (tap.retarget(''), self._call_volume_back()))
                 else:
                     self._router = SimpleNamespace(stop=lambda: tap.retarget(''))  # off: no tap, the call is heard as usual
                 return f'call sound: {app}; '

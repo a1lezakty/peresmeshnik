@@ -439,7 +439,8 @@ def test_barge_in_on_my_words_not_on_a_backchannel():
     """My side's partial captions cut their voice once I say a few words; "yeah" / "ага" while listening does not."""
     from peresmeshnik.app import Side
     me = object.__new__(Side)
-    me.name, me.live, me.overlay, me.on_error = 'me', False, type('O', (), {'show': lambda self, c: None})(), print
+    errors = []  # not print: a Windows console (cp1252) cannot print the arrow of "me → them"
+    me.name, me.live, me.overlay, me.on_error = 'me', False, type('O', (), {'show': lambda self, c: None})(), errors.append
     me.engine = 'cloud'
     talks = []
     me.on_talk = lambda: talks.append(1)

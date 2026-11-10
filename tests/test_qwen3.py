@@ -127,3 +127,22 @@ def test_the_runner_picks_the_model_code_by_kind(tmp_path):
     assert 'qwen3: runaway in ' in log.read_text()
     with pytest.raises(CloneUnavailable, match="No module named 'TTS'"):  # the default kind: xtts.py, no coqui-tts here
         VoicePackClone(tmp_path / 'xtts', cmd=[*STUB, '--device', 'cpu'], log=log)
+
+
+def test_the_xtts_cache_follows_the_recording(tmp_path):
+    """COMMON 19:53 / FIXES 14: xtts.pt carries the recording's SHA-256 (voice.json's ref_sha256): a new take, or a
+    0.3.0 cache without it, is conditioned again, never spoken from the old recording; the same take is read back."""
+    import types
+    v = profile(tmp_path, 'me')
+    made = []
+    eng = types.SimpleNamespace(_latents={}, device='cuda', _condition=lambda pcm, sr: made.append(len(pcm)) or {
+        'gpt': qwen3_stub.FakeTensor([len(made)]), 'spk': qwen3_stub.FakeTensor([0])})
+    gpt, _ = xtts.Engine.latents(eng, v)
+    assert made and gpt.x[0] == 1 and (v.path / 'xtts.pt').exists()
+    eng._latents.clear()
+    xtts.Engine.latents(eng, v)
+    assert len(made) == 1  # the same recording: from xtts.pt
+    sf.write(v.path / 'reference.wav', np.full(16_000 * 15, 0.3, np.float32), 16_000)  # a new take
+    eng._latents.clear()
+    gpt, _ = xtts.Engine.latents(eng, v)
+    assert len(made) == 2 and gpt.x[0] == 2

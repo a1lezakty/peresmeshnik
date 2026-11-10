@@ -7,6 +7,7 @@ Imports only numpy, soundfile, torch and coqui-tts (TTS), never `peresmeshnik`: 
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import re
 from collections.abc import Iterator
 from pathlib import Path
@@ -243,16 +244,18 @@ class Engine:
         self._latents: dict[str, tuple] = {}
 
     def latents(self, voice) -> tuple:
-        """XTTS conditioning of a profile: cached in memory and as `xtts.pt` next to the recording."""
+        """XTTS conditioning of a profile: cached in memory and as `xtts.pt` next to the recording, with the recording's
+        SHA-256 (voice.json's ref_sha256): another recording there is conditioned again, never spoken from the old one."""
         key = str(folder(voice))
         if key not in self._latents:
             import torch
-            f = folder(voice) / 'xtts.pt'
-            if f.exists():
-                lat = torch.load(f, map_location='cpu', weights_only=True)  # tensors only: no pickled code
-            else:
-                lat = self._condition(*read_audio(folder(voice) / 'reference.wav'))
-                torch.save(lat, f)
+            f, ref = folder(voice) / 'xtts.pt', folder(voice) / 'reference.wav'
+            digest = hashlib.sha256(ref.read_bytes()).hexdigest()
+            lat = torch.load(f, map_location='cpu', weights_only=True) if f.exists() else {}  # tensors only: no code
+            if lat.get('sha256') != digest:  # none yet, another recording, or a cache of 0.3.0 (without it)
+                lat = {**self._condition(*read_audio(ref)), 'sha256': digest}
+                torch.save(lat, f.with_suffix('.tmp'))  # a write cut short leaves no broken xtts.pt
+                f.with_suffix('.tmp').replace(f)
             self._latents[key] = (lat['gpt'].to(self.device), lat['spk'].to(self.device))
         return self._latents[key]
 

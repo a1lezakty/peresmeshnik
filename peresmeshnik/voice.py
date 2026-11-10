@@ -754,6 +754,8 @@ def load(name: str, root: Path | None = None) -> Voice:
     """A profile; a v1 voice.json is upgraded to v2 on disk once (an older app still reads it)."""
     path = (root or voices_dir()) / name
     meta = json.loads((path / 'voice.json').read_text(encoding='utf-8'))
+    if not isinstance(meta, dict):  # JSON, but not a profile: as broken JSON (callers catch ValueError)
+        raise ValueError('voice.json is not an object')
     if meta.get('version', 1) < VERSION:
         meta = upgrade(meta, name)
         try:

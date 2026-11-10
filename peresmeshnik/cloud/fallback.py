@@ -556,7 +556,7 @@ def my_voice(s) -> tuple[bytes | None, str]:
         v = profiles.mine(s.local.voice)
     except profiles.NotMine as e:
         return None, str(e)
-    except (OSError, ValueError, AttributeError):  # no folder, not JSON, or JSON but not an object (load's meta.get)
+    except (OSError, ValueError):  # no folder, not JSON, or JSON but not an object
         return None, 'your voice profile is not there or cannot be read: record it again (Voices…)'
     try:
         return protocol.pack_voice(v.path), ''

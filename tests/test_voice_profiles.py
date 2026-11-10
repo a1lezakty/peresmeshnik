@@ -37,6 +37,17 @@ def test_mine_only_confirmed_me(tmp_path):
         assert (voice.why_not_mine(v) == '') is ok, how
 
 
+@pytest.mark.parametrize('bad', ['[]', '"x"', 'null'])
+def test_load_refuses_json_that_is_not_an_object(tmp_path, bad):
+    """JSON, but not a profile: ValueError as for broken JSON (the callers catch it), not an AttributeError."""
+    (tmp_path / 'v').mkdir()
+    (tmp_path / 'v' / 'voice.json').write_text(bad)
+    with pytest.raises(ValueError, match='not an object'):
+        voice.load('v', tmp_path)
+    with pytest.raises(ValueError):
+        voice.mine('v', tmp_path)
+
+
 @pytest.mark.parametrize('read_prompt', [True, False])
 def test_v1_upgraded_once(tmp_path, monkeypatch, read_prompt):
     """FIXES-s3 2: 0.3.0 checked nothing (its Record put the screen text in `transcript` whatever was heard): every v1

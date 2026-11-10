@@ -122,16 +122,42 @@ def test_settings_round_trip(tmp_path):
     assert config.load(p) == s and config.load(p).forced_cloud == []
     s.them_to_me, s.forced_cloud = 'cloud', ['them_to_me']  # a side the tray moved to the cloud for a pair (H-02)
     assert config.load(config.save(s, p)) == s
-    p.write_text('forced_cloud = ["mine"]\n')
-    with pytest.raises(ValueError, match='forced_cloud'):
-        config.load(p)
-    p.write_text('them_to_me = "both"\n')
-    with pytest.raises(ValueError, match='them_to_me'):
-        config.load(p)
-    p.write_text('[local]\nthreads = "two"\nfuture_key = 1\n')
-    with pytest.raises(ValueError, match='local.threads'):
-        config.load(p)
 
+
+def test_a_broken_settings_file_does_not_stop_the_app(tmp_path):
+    """H-01: a value the app cannot use keeps its default and is said; a file that does not parse is kept aside as
+    settings.toml.bad (not overwritten) and the defaults are used; nothing raises."""
+    p = tmp_path / 'settings.toml'
+    p.write_text('their_lang = "de"\nforced_cloud = ["mine"]\nthem_to_me = "both"\n[local]\nthreads = "two"\nfuture_key = 1\n'
+                 '[ui]\nmic = "USB"\n[cloud]\nsubtitles = 1\n')
+    s = config.load(p)
+    assert (s.their_lang, s.ui.mic, s.forced_cloud, s.them_to_me, s.local.threads, s.cloud.subtitles) == \
+        ('de', 'USB', [], 'local', 2, False)
+    assert all(k in config.problem for k in ('forced_cloud', 'them_to_me', 'local.threads', 'cloud.subtitles'))
+    assert p.exists() and config.load(tmp_path / 'none.toml') == config.Settings() and not config.problem
+    for broken in ('[local\nthreads = 3\n', 'my_lang = "ru\n', b'my_lang = "\xff"\n'):
+        p.write_bytes(broken if isinstance(broken, bytes) else broken.encode())
+        assert config.load(p) == config.Settings() and 'settings.toml.bad' in config.problem
+        assert not p.exists() and (tmp_path / 'settings.toml.bad').read_bytes() == (
+            broken if isinstance(broken, bytes) else broken.encode())
+
+
+def test_settings_are_written_whole_or_not_at_all(tmp_path, monkeypatch):
+    """H-01: what the app saves by itself (device and app names from the OS) reads back; a save that fails half way
+    leaves the old file as it was."""
+    p = tmp_path / 'settings.toml'
+    for name in ('x\x7fy', 'x\x00y\x1b', 'x\x85y', 'My "USB" mic\\', 'микрофон 🎤', '\ufeffx'):
+        s = config.Settings()
+        s.ui.call_app = name
+        assert config.load(config.save(s, p)).ui.call_app == name and not config.problem, repr(name)
+    s.ui.call_app = 'x\udc80y'  # a lone surrogate (a device name not in UTF-16 norm): TOML cannot hold it
+    assert config.load(config.save(s, p)).ui.call_app == 'x\ufffdy'
+    before = p.read_bytes()
+    monkeypatch.setattr(config.os, 'replace', lambda *a: 1 / 0)  # killed between the write and the rename
+    s.their_lang = 'de'
+    with pytest.raises(ZeroDivisionError):
+        config.save(s, p)
+    assert p.read_bytes() == before and [f.name for f in tmp_path.iterdir()] == ['settings.toml']
 
 def test_saved_settings_take_a_new_default(tmp_path, monkeypatch):
     """Saved [local] tables keep only what the user changed: a default changed later (fr's ASR, a new MT) reaches them."""

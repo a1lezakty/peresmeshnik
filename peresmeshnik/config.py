@@ -5,13 +5,16 @@
     s.local.threads, s.cloud.translate_model, s.them_to_me ...
     config.save(s)
 
-Unknown keys (from a newer version) are ignored with a warning; a wrong type is an error.
+Unknown keys (from a newer version) are ignored with a warning; a value of the wrong type keeps its default, a file that
+does not parse is kept aside as settings.toml.bad and the defaults are used: `problem` says so (the app shows it at start).
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import sys
+import tempfile
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 
@@ -133,7 +136,10 @@ def settings_path() -> Path:
 OLD_DEFAULTS = {'local.mt': {'en-ru': 'opus-mt-en-ru'}}
 
 
-def _fill(obj, data: dict, where: str = ''):
+problem = ''  # what the last load() could not use, for the user ('' = nothing)
+
+
+def _fill(obj, data: dict, bad: list[str], where: str = ''):
     for k, v in data.items():
         if not hasattr(obj, k):
             print(f'settings: unknown key {where}{k} ignored', file=sys.stderr)
@@ -141,32 +147,47 @@ def _fill(obj, data: dict, where: str = ''):
         cur = getattr(obj, k)
         if is_dataclass(cur):
             if not isinstance(v, dict):
-                raise ValueError(f'settings: [{where}{k}] must be a table')
-            _fill(cur, v, f'{where}{k}.')
+                bad.append(f'[{where}{k}] must be a table')
+                continue
+            _fill(cur, v, bad, f'{where}{k}.')
             continue
         if isinstance(cur, float) and type(v) is int:
             v = float(v)
         if type(v) is not type(cur) or (isinstance(v, dict | list) and not all(isinstance(x, str) for x in
                                                                                (v.values() if isinstance(v, dict) else v))):
-            raise ValueError(f'settings: {where}{k} must be {type(cur).__name__}, got {v!r}')
+            bad.append(f'{where}{k} must be {type(cur).__name__}, got {v!r}')
+            continue
         if isinstance(cur, dict) and any(cur.get(x) == y for x, y in v.items()):  # a table saved whole
             v = {x: y for x, y in v.items() if OLD_DEFAULTS.get(f'{where}{k}', {}).get(x) != y}
         setattr(obj, k, {**cur, **v} if isinstance(cur, dict) else v)
 
 
 def load(path: Path | None = None) -> Settings:
+    """Never raises on what the file holds: a broken file must not stop the app (H-01); `problem` names what was not used."""
     import tomllib
-    s, path = Settings(), path or settings_path()
+    global problem
+    s, path, bad = Settings(), path or settings_path(), []
     if path.exists():
-        _fill(s, tomllib.loads(path.read_text('utf-8')))
+        try:
+            data = tomllib.loads(path.read_text('utf-8'))
+        except ValueError as e:  # TOML or UTF-8: kept aside, not overwritten by the next save
+            data, keep = {}, path.with_name(path.name + '.bad')
+            os.replace(path, keep)
+            bad.append(f'{path.name} could not be read ({e}): it is kept as {keep.name}, the defaults are used')
+        _fill(s, data, bad)
     for k in ('them_to_me', 'me_to_them'):
         if getattr(s, k) not in ENGINES:
-            raise ValueError(f'settings: {k} must be one of {ENGINES}, got {getattr(s, k)!r}')
-    if bad := set(s.forced_cloud) - {'them_to_me', 'me_to_them'}:
-        raise ValueError(f'settings: forced_cloud may hold only them_to_me, me_to_them, got {sorted(bad)}')
+            bad.append(f'{k} must be one of {ENGINES}, got {getattr(s, k)!r}')
+            setattr(s, k, getattr(Settings(), k))
+    if wrong := set(s.forced_cloud) - {'them_to_me', 'me_to_them'}:
+        bad.append(f'forced_cloud may hold only them_to_me, me_to_them, got {sorted(wrong)}')
+        s.forced_cloud = []
     if not 0.2 <= (r := s.local.mic_echo_rho_on) <= 0.8:  # near 0 it zeroes my speech, near 1 lets every echo through
         s.local.mic_echo_rho_on = min(max(r, 0.2), 0.8)
         print(f'settings: local.mic_echo_rho_on {r} is outside 0.2..0.8, {s.local.mic_echo_rho_on} used', file=sys.stderr)
+    for b in bad:
+        print(f'settings: {b}', file=sys.stderr)
+    problem = '; '.join(bad)
     return s
 
 
@@ -175,12 +196,13 @@ def _toml(v) -> str:
         return 'true' if v else 'false'
     if isinstance(v, int | float):
         return repr(v)
-    if isinstance(v, str):
-        return json.dumps(v, ensure_ascii=False)  # JSON string escapes are valid TOML basic strings
+    if isinstance(v, str):  # JSON string escapes are valid TOML basic strings; TOML also wants DEL escaped and cannot
+        # hold a lone surrogate (a device name from the OS not in UTF-16 norm): U+FFFD, and the file stays readable
+        return json.dumps(re.sub('[\ud800-\udfff]', '\ufffd', v), ensure_ascii=False).replace('\x7f', '\\u007f')
     if isinstance(v, list):
         return '[' + ', '.join(_toml(x) for x in v) + ']'
     if isinstance(v, dict):
-        return '{ ' + ', '.join(f'{json.dumps(k)} = {_toml(x)}' for k, x in v.items()) + ' }'
+        return '{ ' + ', '.join(f'{_toml(k)} = {_toml(x)}' for k, x in v.items()) + ' }'
     raise TypeError(f'cannot write {v!r} to TOML')
 
 
@@ -199,6 +221,16 @@ def save(s: Settings, path: Path | None = None) -> Path:
                                                      for g in fields(v)))
         else:
             top.append(f'{f.name} = {_toml(v)}\n')
+    data = ''.join(top + tables).encode('utf-8')
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(''.join(top + tables), 'utf-8')
+    fd, tmp = tempfile.mkstemp(prefix=path.name, suffix='.tmp', dir=path.parent)  # whole or not at all: a crash or
+    try:  # a full disk mid-write leaves the old file (H-01)
+        with os.fdopen(fd, 'wb') as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
     return path

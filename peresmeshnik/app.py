@@ -1381,11 +1381,8 @@ def cli(argv=None) -> int:
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO if a.verbose else logging.WARNING, stream=sys.stderr,
                         format='%(asctime)s %(name)s %(message)s')
-    try:
-        settings = config.load()
-    except Exception as e:  # the app still starts; the settings window says it again
-        log.warning('settings: %s', e)
-        settings = None
+    settings = config.load()  # a broken file: its defaults, and the tray says what was not used (H-01)
+    settings_problem = config.problem
     earlier = crash.install(settings, a.verbose)  # the log file, the hooks; hard crashes of the last run as reports
     sys.stdout.reconfigure(encoding='utf-8')
     if use_xwayland():
@@ -1472,6 +1469,8 @@ def cli(argv=None) -> int:
             bridge.state.emit(f'Peresmeshnik {__version__}: idle, translation off')
             if ctl.startup_error:
                 tray.message(ctl.startup_error)
+            if settings_problem:
+                tray.message(f'Settings: {settings_problem}. Set them again in Settings.')
             for p in earlier:  # the last run crashed
                 tray.report_ready(str(p), why='Peresmeshnik stopped unexpectedly last time')
     dispatcher.aboutToBlock.connect(announce)

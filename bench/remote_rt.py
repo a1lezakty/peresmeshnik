@@ -130,12 +130,13 @@ class StubTts:
                 time.sleep(dur * self.rtf)
 
 
-def make(src, tgt, stub, threads):
-    """The direction a server connection (or `local`) runs; max_lag_s None: every clause is said, so remote and
-    local runs have the same clauses to compare."""
+def make(src, tgt, stub, threads, max_lag=0.0):
+    """The direction a server connection (or `local`) runs. max_lag 0 (default): no queue policy, every clause is said
+    and none sped up, so remote and local runs have the same clauses; pipeline.MAX_LAG_S is them -> me in the app."""
     if stub:
-        return pipeline.LocalDirection(StubVad(), StubAsr(), StubMt(), StubTts(), src, tgt, partial_mt=False)
-    return pipeline.make_local(src, tgt, threads=threads)
+        return pipeline.LocalDirection(StubVad(), StubAsr(), StubMt(), StubTts(), src, tgt, partial_mt=False,
+                                       max_lag_s=max_lag or None)
+    return pipeline.make_local(src, tgt, threads=threads, max_lag_s=max_lag or None)
 
 
 def devices(d):
@@ -181,7 +182,7 @@ def serve(a):
             hello = json.loads(await ws.recv())
             loop = asyncio.get_running_loop()
             t = time.perf_counter()
-            d = await loop.run_in_executor(None, make, hello['src'], hello['tgt'], a.stub, a.threads)
+            d = await loop.run_in_executor(None, make, hello['src'], hello['tgt'], a.stub, a.threads, a.max_lag)
             await loop.run_in_executor(None, d.warm_up)
             d.realtime = True
             load_s = time.perf_counter() - t
@@ -205,7 +206,7 @@ def serve(a):
                     await ws.send(m)
             down = asyncio.create_task(sender())
             await ws.send(json.dumps({'type': 'ready', 'load_s': round(load_s, 2), 'stub': a.stub, 'threads': a.threads,
-                                      'nodelay': nodelay(ws.transport), **devices(d)}))
+                                      'max_lag': a.max_lag, 'nodelay': nodelay(ws.transport), **devices(d)}))
             arrived = []
             try:
                 async for m in ws:
@@ -240,11 +241,13 @@ class Trace:
     def __init__(self):
         self.cur = None  # the clause of the last 'voice' latency: its Speech follows (one speak thread, in order)
         self.chunks = defaultdict(list)  # clause -> [(arrival, seconds of audio)]
-        self.server_voice, self.clauses, self.captions = {}, {}, {}
+        self.server_voice, self.server_first, self.clauses, self.captions = {}, {}, {}, {}
         self.down = []  # (arrival, bytes)
 
     def text(self, t, m):
-        if m['type'] == 'latency' and m['what'] == 'voice':
+        if m['type'] == 'latency' and m['what'] == 'tts_first':
+            self.server_first[m['clause']] = m['s']
+        elif m['type'] == 'latency' and m['what'] == 'voice':
             self.cur = m['clause']
             self.server_voice[m['clause']] = m['s']
         elif m['type'] == 'caption' and m['final']:
@@ -303,14 +306,22 @@ def summarize(trace, sent, due, a, label, extra):
         c['caption_lag_s'] = round(trace.captions[k] - ends[k], 3) if k in trace.captions else None
         if c['server_voice_lag_s'] is not None and 'voice_lag_j0_s' in c:  # what the transport added on top
             c['net_extra_s'] = round(c['voice_lag_j0_s'] - c['server_voice_lag_s'], 3)
+        if trace.chunks.get(k):  # its first audio here, not waiting behind earlier speech: pipeline + network alone
+            c['first_audio_s'] = round(trace.chunks[k][0][0] - ends[k], 3)
+            if k in trace.server_first:  # minus the server's own clause end -> first chunk: the transport alone
+                c['net_first_s'] = round(c['first_audio_s'] - trace.server_first[k], 3)
     late = np.array(sent) - np.array(due)
     net = [c['net_extra_s'] for c in per_clause.values() if 'net_extra_s' in c]
+    first = [c['first_audio_s'] for c in per_clause.values() if 'first_audio_s' in c]
+    net_first = [c['net_first_s'] for c in per_clause.values() if 'net_first_s' in c]
     cap = [c['caption_lag_s'] for c in per_clause.values() if c['caption_lag_s'] is not None]
     audio_s, raw = len(sent) * FRAME / SAMPLE_RATE, extra.pop('_raw', {})
     row = record('remote_rt', 'stub' if a.stub else 'local-pipeline', mode=a.cmd, label=label, lang=a.lang,
                  audio_s=round(audio_s, 2), clauses=len(ends), spoken=len([k for k in ends if k in trace.chunks]),
                  voice_lag=by_jitter, caption_lag_p50_s=pct(cap, 50), caption_lag_p95_s=pct(cap, 95),
-                 net_extra_p50_s=pct(net, 50), net_extra_p95_s=pct(net, 95),
+                 net_extra_p50_s=pct(net, 50), net_extra_p95_s=pct(net, 95), max_lag=a.max_lag,
+                 first_audio_p50_s=pct(first, 50), first_audio_p95_s=pct(first, 95),
+                 net_first_p50_s=pct(net_first, 50), net_first_p95_s=pct(net_first, 95),
                  send_late_p99_ms=round(1000 * pct(late, 99), 1), send_late_max_ms=round(1000 * float(late.max()), 1),
                  **extra)
     out = Path(a.out_dir)
@@ -347,7 +358,7 @@ async def _run(a):
         if ready['type'] != 'ready':
             raise SystemExit(f'server: {ready}')
         print(f'server ready: {ready}', flush=True)
-        a.stub = ready['stub']
+        a.stub, a.max_lag = ready['stub'], ready['max_lag']
         done = {}
 
         async def receive():
@@ -406,7 +417,7 @@ def local(a):
     x = frames(a.lang)
     trace, sent, due = Trace(), [], []
     t = time.perf_counter()
-    d = make(a.lang, PAIRS[a.lang], a.stub, a.threads)
+    d = make(a.lang, PAIRS[a.lang], a.stub, a.threads, a.max_lag)
     d.warm_up()
     d.realtime = True
     load_s = time.perf_counter() - t
@@ -449,6 +460,9 @@ def main():
     for p in (s, sub.add_parser('local')):
         p.add_argument('--stub', action='store_true', help='no models: fixed delays, the transport alone')
         p.add_argument('--threads', type=int, default=2, help='threads per engine, as [local] threads')
+        p.add_argument('--max-lag', type=float, default=0.0,
+                       help=f'queue policy: drop voice later than this, speed up from 0.5 s (0 = off; the app\'s them -> me: '
+                            f'{pipeline.MAX_LAG_S:g})')
     r = sub.add_parser('run')
     r.add_argument('--url', default='ws://127.0.0.1:47000')
     for p in (r, sub.choices['local']):
@@ -457,7 +471,7 @@ def main():
         p.add_argument('--jitters', type=lambda v: [int(x) for x in v.split(',')], default=list(JITTERS_MS),
                        help='player hold of a clause\'s first chunk to replay, ms (comma list)')
         p.add_argument('--out-dir', default=str(ROOT.parent / 'out' / 'remote_rt'))
-    r.set_defaults(stub=None)
+    r.set_defaults(stub=None, max_lag=None)
     a = ap.parse_args()
     {'serve': serve, 'run': run, 'local': local}[a.cmd](a)
 

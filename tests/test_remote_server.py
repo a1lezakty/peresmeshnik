@@ -662,3 +662,21 @@ def test_must_only_my_confirmed_voice_speaks_as_me(srv, made, tmp_path, meta):
         states = [answer(ws)['text'] for _ in srv.slots['me'].notes]
         assert any('cannot speak for you' in s for s in states), states
         assert (made[0].voice_dir, made[0].clone) == ('', 'piper') and not any(srv.voices.iterdir())
+
+
+def test_must_pairing_files_off_the_loop(srv, made, monkeypatch):
+    """A slow paired.json (Windows: held by `serve --revoke` from another process, check up to 2 s, add ~10 s) never
+    stops the server's loop: Pairing.check and handle (-> add) run on threads; another connection is answered at once."""
+    check, handle = pairing.Pairing.check, pairing.Pairing.handle
+    monkeypatch.setattr(pairing.Pairing, 'check', lambda self, t: time.sleep(1.5) or check(self, t))
+    monkeypatch.setattr(pairing.Pairing, 'handle', lambda self, m: time.sleep(1.5) or handle(self, m))
+    token = srv.pairing.add('laptop')
+    code = srv.pairing.new_code()
+    for slow in (hello(token), protocol.pair(code, srv.fp, 'ab' * 32, 'other')):
+        with raw(srv, path=protocol.PAIR_PATH if 'pair' in slow else '') as ws, raw(srv, 'me') as other:
+            ws.send(slow)
+            time.sleep(0.2)  # it is in check / handle now
+            t = time.monotonic()
+            other.send(hello('not a token', 'me', 'ru', 'en'))  # refused by the loop itself (no file)
+            assert answer(other)['code'] == 'auth' and time.monotonic() - t < 0.8
+            assert answer(ws)['type'] in ('ready', 'paired')

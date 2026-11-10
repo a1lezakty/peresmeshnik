@@ -88,7 +88,7 @@ macOS 14 Sonoma or later on Apple Silicon (M1 and newer).
    **BlackHole 2ch** as the microphone. On macOS older than 14.4 also BlackHole 16ch (`blackhole-16ch`) as
    the call app's speaker: the app takes the call's sound from there.
 4. Start Peresmeshnik: its icon is in the menu bar (no Dock icon). The setup wizard downloads the models
-   (they are not in the app): 0.6–2.8 GB for a pair, about 1.5 GB for most; the wizard shows the exact size first.
+   (they are not in the app): 0.6–2.8 GB for a pair, typically 1.2–1.8 GB; the wizard shows the exact size first.
    A direction in the cloud needs your Gemini key ([above](#peresmeshnik)).
 5. macOS asks once for two permissions, both in System Settings → Privacy & Security: **Microphone**
    (what you say is translated) and, when translation is first turned on, **Screen & System Audio Recording →
@@ -135,7 +135,7 @@ Windows 10 version 2004 or later, or Windows 11 (x64).
    **CABLE Output** as the microphone.
 4. Start Peresmeshnik from the Start menu: its icon is in the notification area (Windows may put it behind the
    ^ arrow at first; drag it out to keep it in view). The setup wizard downloads the models (they are not in the
-   app): 0.6–2.8 GB for a pair, about 1.5 GB for most; the wizard shows the exact size first. A direction in the
+   app): 0.6–2.8 GB for a pair, typically 1.2–1.8 GB; the wizard shows the exact size first. A direction in the
    cloud needs your Gemini key ([above](#peresmeshnik)). Use headphones: through speakers the microphone hears the
    translation.
 5. While translation is on, the app records the call app's own sound and turns it almost all the way down on your

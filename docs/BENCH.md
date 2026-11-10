@@ -2397,7 +2397,8 @@ its sound; `tail`: how long the voice goes on after the speech ended):
   Chinese, Korean, not measured).
 - **A reference must be short for it:** 3 s already gives 0.30 / 0.52, 10 s 0.35 / 0.60; the whole 40 s recording
   breaks Pocket TTS (noise instead of speech, 14 GB), so the app would cut the reference to 10 s.
-- **No engine here speaks cloned Russian on a CPU.** MOSS-TTS-Nano is the only one with Russian that is faster than
+- **Cloned Russian on a CPU: see "Russian" below** (community weights for Pocket TTS, found after this table).
+  Of the engines above, MOSS-TTS-Nano is the only one with Russian that is faster than
   real time, and the judge cannot read 33–56 % of its Russian words (its English: 6–12 %); in the pipeline it falls
   behind as well (tail 17–34 s). Piper → MeanVC2 destroys Russian (WER 63–89 %: the converter was trained on
   Chinese), Piper → OpenVoice keeps the words (21–37 %) but its similarity (0.22–0.26) is next to the floor
@@ -2417,3 +2418,39 @@ its sound; `tail`: how long the voice goes on after the speech ended):
 - **Opus does not hurt:** a 5 s reference through Opus 24 kbit/s and back gives the same similarity within the noise
   of 6 sentences (Pocket 0.41 / 0.54, MOSS 0.37, ZONOS3 0.59 / 0.67).
 - Nobody has listened to any of this: the similarity and the words are the judges' numbers.
+
+**Russian on a CPU** (added the same day). Pocket TTS has community fine-tunes for Russian; measured:
+Shtorm-PocketTTS-RU (v2 "fast", CC-BY-4.0, 6 layers, 438 MB, the voice path kept; its training data is not named) and
+xVibePocketTTS (1885 h of Russian; no license on the weights), both on the stock `pocket_tts` package (torch, CPU;
+`--model pocketru`, `$POCKET_RU_CONFIG`). The text gets stress marks from `silero-stress` (the models were trained
+with them), numbers in words and Latin letters spelled out (the Shtorm vocabulary has neither). i7-13700, 5 s
+reference unless said; en → ru is an English voice speaking Russian ("them → me"):
+
+| engine | first audio s | RTF | RAM GB | sim en → ru | WER | sim ru → ru | WER |
+|---|---|---|---|---|---|---|---|
+| **Shtorm, 2 threads, int8** (torch dynamic quantization) | **0.10** | **0.20** | 1.2 | **0.38** | 6 % | 0.49 | 4 % |
+| Shtorm, 2 threads, fp32 | 0.15 | 0.33 | 1.3 | 0.36 | 6 % | 0.47 | 6 % |
+| Shtorm, 4 threads, fp32 | 0.13–0.15 | 0.31–0.32 | 1.3 | 0.39 | 14 % | 0.48 | 9 % |
+| Shtorm, 2 threads, fp32, 3 s reference | 0.15 | 0.32 | 1.2 | 0.36 | 7 % | 0.52 | 10 % |
+| Shtorm, 2 threads, fp32, 10 s reference | 0.15 | 0.33 | 1.5 | 0.39 | 4 % | 0.54 | 7 % |
+| xVibe, 2 threads, fp32 | 0.17 | 0.33 | 1.3 | 0.32 | 30 % | 0.49 | 11 % |
+| Piper → FreeVC24 (coqui-tts), 4 threads | 2.2–2.8 | 0.49–0.64 | 3.3 | 0.16 | 29 % | 0.40 | 34 % |
+
+| the whole pipeline, en → ru, live pace (fp32) | cores | engine first audio ms, median | voice s: median (max) | tail s | WER of what was said |
+|---|---|---|---|---|---|
+| **Pocket TTS, Shtorm weights** | 4 | 120 | **1.6** (5.6) | 5.4 | 9 % |
+| the same | 2 | 142 | 2.2 (6.2) | 5.5 | 4 % |
+| Piper, no clone (from the table above) | 4 | 65 | 1.5 (4.2) | 3.6 | 21 % |
+
+- **So there is a cloned Russian voice on a CPU:** an English voice speaking Russian at XTTS's similarity on a GPU
+  (0.36–0.39 against 0.35), with words the judge reads better than the stock Piper voice's in the pipeline (9 % against
+  21 %), first sound in 0.10–0.15 s, and it holds the live pace on 4 and on 2 cores. From 3 s of a voice: 0.36.
+- xVibe is worse from an English reference (0.32, WER 30 %); the text here was not fitted to its vocabulary.
+- No voice converter after Piper gives Russian a cloned voice: OpenVoice 0.22–0.24 next to the floor of 0.19, FreeVC24
+  below the floor, MeanVC2 and kNN-VC lose the words (56–63 %), Chatterbox VC is 3× slower than real time.
+- **Not every voice.** Two FLEURS dev speakers as voices (the listening set; 5 s references, the same 6 sentences,
+  similarity against the speaker's whole utterance): the male Russian one: Pocket en 0.30, Pocket ru 0.39, Qwen3 0.37 /
+  0.64, XTTS 0.34 / 0.59 (to English / to Russian); the female English one: **Pocket 0.16 in English and in Russian**,
+  Qwen3 0.51 / 0.31, XTTS 0.40 / 0.33. Four voices are too few to say whether it is female voices, phone-grade
+  recordings or chance.
+- Not heard by anyone: the accent of Russian from an English reference, the stress marks' mistakes.

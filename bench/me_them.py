@@ -471,7 +471,8 @@ def run(a):
     hyp_dir = transcribe(np.concatenate(direct), sr, tgt_lang) if direct else ''
     lags = [c['call_lag_s'] for c in clauses if c.get('call_lag_s') is not None]
     remote = tts.stats if a.remote else []  # RemoteTts: per-request rows (VoicePackClone.stats is a method)
-    row = record('e2e_me_them_mic' if a.mic else 'e2e_me_them', 'piper' if a.stock else os.environ.get('CLONE_NAME', 'xtts-remote') if a.remote else 'xtts',
+    row = record('e2e_me_them_mic' if a.mic else 'e2e_me_them',
+                 'piper' if a.stock else os.environ.get('CLONE_NAME', 'xtts-remote') if a.remote else 'xtts',
                  device=f'remote-{tts.device}' if a.remote else (a.device or 'auto'),
                  threads=a.threads, null_mic=a.null_mic, audio_s=round(len(pcm) / pipeline.SAMPLE_RATE, 2), clauses=len(clauses),
                  load_s=round(load_s, 1), wall_s=round(wall, 1), tail_after_input_s=round(done - feed_end, 1),

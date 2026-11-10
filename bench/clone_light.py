@@ -24,8 +24,8 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
-
 import tts_clone as tc
+
 from common import Timer, peak_rss_mb, record
 
 THREADS = tc.THREADS
@@ -82,6 +82,7 @@ def load_moss(device, a):
     $MOSS_MODELS = a folder with MOSS-TTS-Nano-100M-ONNX and MOSS-Audio-Tokenizer-Nano-ONNX. No torch: upstream imports it
     only to read the reference file, which is done here with soundfile + scipy."""
     import types
+
     from scipy.signal import resample_poly
     stubs = [n for n in ('torch', 'torchaudio') if sys.modules.setdefault(n, s := types.ModuleType(n)) is s]
     sys.path.insert(0, os.environ['MOSS_SRC'])
@@ -155,6 +156,39 @@ def load_pocket(device, a):
     def synth(text, lang, cond, ref_lang):
         yield from m.stream(text, cond)
     return clone, synth, m.sample_rate, {'en'}
+
+
+LATIN = dict(zip('abcdefghijklmnopqrstuvwxyz', 'а б ц д е ф г х и дж к л м н о п к р с т у в в кс й з'.split()))
+
+
+def ru_text(text, accent):
+    """Russian text as the community Pocket TTS fine-tunes were trained: stress marks (U+0301 after the vowel, from
+    silero-stress), numbers in words; their vocabulary has no digits or Latin letters (spelled here letter by letter)."""
+    from num2words import num2words
+    t = re.sub(r'\d+', lambda m: num2words(int(m[0]), lang='ru'), text)
+    t = re.sub(r'[A-Za-z]', lambda m: LATIN[m[0].lower()], t)
+    return re.sub(r'\+(.)', '\\1\u0301', accent(t))
+
+
+def load_pocketru(device, a):
+    """A community Russian fine-tune of Pocket TTS on the stock `pocket_tts` package (torch, CPU): $POCKET_RU_CONFIG =
+    its config (default: Shtorm-PocketTTS-RU v2 "fast", CC-BY-4.0; pin a commit with @<sha>). --precision int8 = torch's
+    dynamic quantization (`quantize=True`), fp32 = as published."""
+    import torch
+    from pocket_tts import TTSModel
+    from silero_stress import load_accentor
+    torch.set_num_threads(THREADS)
+    m = TTSModel.load_model(config=os.environ.get('POCKET_RU_CONFIG', 'hf://ArtShtorm/Shtorm-PocketTTS-RU/config.yaml'),
+                            quantize=a.precision == 'int8')
+    accent = load_accentor()
+
+    def clone(lang):
+        return m.get_state_for_audio_prompt(ref(lang, a.ref_s)[0])
+
+    def synth(text, lang, cond, ref_lang):
+        for c in m.generate_audio_stream(cond, ru_text(text, accent)):
+            yield c.numpy()
+    return clone, synth, m.sample_rate, {'ru'}
 
 
 def proc_stat(pid):
@@ -403,7 +437,8 @@ def load_qwenc(device, a):
     return clone, synth, 24000, set(names)
 
 
-MODELS = {'qwen': load_qwen, 'fqwen': load_fqwen, 'qwenc': load_qwenc, 'moss': load_moss, 'pocket': load_pocket, 'zonos': load_zonos, 'pipervc': load_pipervc}
+MODELS = {'qwen': load_qwen, 'fqwen': load_fqwen, 'qwenc': load_qwenc, 'moss': load_moss,
+          'pocket': load_pocket, 'pocketru': load_pocketru, 'zonos': load_zonos, 'pipervc': load_pipervc}
 
 
 def synth_main(a):

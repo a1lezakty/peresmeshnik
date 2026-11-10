@@ -793,6 +793,7 @@ name = "peresmeshnik"
 version = "0.3.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "ctranslate2" },
     { name = "google-genai" },
     { name = "jeepney", marker = "sys_platform == 'linux'" },
@@ -806,6 +807,7 @@ dependencies = [
     { name = "sentencepiece" },
     { name = "sounddevice" },
     { name = "soundfile" },
+    { name = "websockets" },
 ]
 
 [package.dev-dependencies]
@@ -820,6 +822,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", specifier = ">=43" },
     { name = "ctranslate2", specifier = ">=4.5" },
     { name = "google-genai", specifier = ">=3" },
     { name = "jeepney", marker = "sys_platform == 'linux'", specifier = ">=0.8" },
@@ -832,6 +835,7 @@ requires-dist = [
     { name = "sentencepiece", specifier = ">=0.2" },
     { name = "sounddevice", specifier = ">=0.5" },
     { name = "soundfile", specifier = ">=0.13" },
+    { name = "websockets", specifier = ">=15" },
 ]
 
 [package.metadata.requires-dev]

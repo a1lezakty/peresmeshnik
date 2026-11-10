@@ -96,8 +96,9 @@ jobs:
       - name: SHA-256
         run: cd dist && shasum -a 256 *.dmg | tee "$(ls *.dmg).sha256"
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
-        if: startsWith(github.ref, 'refs/tags/v')  # a signed record that this file was built here, from this tag
-        # (gh attestation verify ... --source-ref refs/tags/<tag>); not on a dry run, whose files are no release
+        if: startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run  # a signed record that this file was built here,
+        # from this tag (gh attestation verify ... --source-ref refs/tags/<tag>); not on a dry run, even one started on a
+        # tag (--ref v<version>): its files are no release
         with:
           subject-path: dist/*.dmg
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
@@ -175,7 +176,7 @@ jobs:
       - name: SHA-256
         run: cd dist && for f in *.zip *-setup.exe; do sha256sum "$f" | sed 's/ \*/  /' | tee "$f.sha256"; done  # as shasum on macOS
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
-        if: startsWith(github.ref, 'refs/tags/v')  # as on macOS
+        if: startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run  # as on macOS
         with:
           subject-path: |
             dist/*.zip

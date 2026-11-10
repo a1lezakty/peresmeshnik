@@ -78,7 +78,10 @@ jobs:
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
         with:
           path: models
-          key: models-${{ matrix.suite }}-${{ runner.os }}-${{ hashFiles('bench/*.py', 'bench/requirements*.txt') }}
+          # this file in the key: the GGUF revisions and sums live below, so a new one makes a new key, restore-keys
+          # brings the old cache, the step fetches the changed file once and the new key saves it (a key without it hits
+          # the old cache every run, never saves, and the step fetches ~5.8 GB each time)
+          key: models-${{ matrix.suite }}-${{ runner.os }}-${{ hashFiles('bench/*.py', 'bench/requirements*.txt', '.github/workflows/bench.yml') }}
           restore-keys: models-${{ matrix.suite }}-${{ runner.os }}-
       - name: Bench venv
         if: matrix.suite != 'clone'

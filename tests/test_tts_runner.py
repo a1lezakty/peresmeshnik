@@ -71,3 +71,21 @@ def test_an_error_says_its_type_not_its_message(tmp_path):
     last = r.stderr.strip().splitlines()[-1]
     assert r.returncode == 1 and last.startswith('piper-runner: ') and 'Error at ' in last, r.stderr
     assert 'missing.onnx' not in r.stderr and 'No module named' not in r.stderr and 'Traceback' not in r.stderr, r.stderr
+
+
+def test_onnxruntime_sends_no_telemetry(monkeypatch):
+    """H-03: the app and the Piper runner turn onnxruntime's telemetry off before its first session: the variable on
+    Linux and macOS (inherited by the runner), the call on Windows (TraceLogging does not read it)."""
+    env = {k: v for k, v in os.environ.items() if k != 'ORT_DISABLE_TELEMETRY'}
+    code = 'import os, peresmeshnik; print(os.environ.get("ORT_DISABLE_TELEMETRY"))'
+    assert subprocess.run([sys.executable, '-c', code], env=env, capture_output=True, text=True, cwd=ROOT,
+                          check=True).stdout.strip() == '1'
+    m = runner_module()
+    assert os.environ.get('ORT_DISABLE_TELEMETRY') == '1'  # set by the runner's own import, before onnxruntime's
+    import onnxruntime as rt
+    calls = []
+    monkeypatch.setattr(rt, 'disable_telemetry_events', lambda: calls.append(1))
+    from peresmeshnik.local import vad
+    vad.ort_options(1)
+    m.no_telemetry()
+    assert len(calls) == 2

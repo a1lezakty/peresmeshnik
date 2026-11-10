@@ -20,6 +20,14 @@ import struct
 import sys
 import traceback
 
+os.environ.setdefault('ORT_DISABLE_TELEMETRY', '1')  # onnxruntime's telemetry to Microsoft (Linux, macOS): off
+
+
+def no_telemetry() -> None:
+    """Windows: onnxruntime's TraceLogging telemetry does not read ORT_DISABLE_TELEMETRY; off by its call."""
+    import onnxruntime as rt
+    rt.disable_telemetry_events()
+
 
 def usable_stderr() -> None:
     """The app gives the runner a log file as stderr; started from a windowed program without one, stderr can be a pipe
@@ -64,6 +72,7 @@ def main():
 
 def serve():
     import onnxruntime as rt
+    no_telemetry()
     from piper import PiperVoice
     from piper.config import PiperConfig, SynthesisConfig
     ap = argparse.ArgumentParser()

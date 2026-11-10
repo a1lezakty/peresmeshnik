@@ -81,9 +81,6 @@ func die(_ code: Int32, _ s: String) -> Never {
     quit(code)
 }
 
-/// Why the last Capture / Render did not open (said by its owner: once, not on every retry).
-var openError = ""
-
 let signalSources: [DispatchSourceSignal] = [SIGTERM, SIGINT, SIGHUP].map { sig in
     signal(sig, SIG_IGN)
     let src = DispatchSource.makeSignalSource(signal: sig, queue: .global())
@@ -303,7 +300,8 @@ final class Capture {
     private let mono = UnsafeMutablePointer<Float>.allocate(capacity: maxFrames)
     private var proc: AudioDeviceIOProcID?
 
-    init?(_ dev: Device, wake: DispatchSemaphore, cycle: UInt32 = 0) {
+    /// nil when it cannot open; `why` says why (each caller its own: no shared state across threads).
+    init?(_ dev: Device, wake: DispatchSemaphore, cycle: UInt32 = 0, why: inout String) {
         self.dev = dev
         ring = Ring(Int(max(dev.rate, 8000) * 2))
         let mono = mono, ring = ring
@@ -324,14 +322,14 @@ final class Capture {
             }
         }
         guard st == noErr, let proc else {
-            openError = "cannot open \(dev.name) (\(st))"
+            why = "cannot open \(dev.name) (\(st))"
             return nil
         }
         started(dev.id, proc)  // before it runs: a quit() meanwhile stops it too
         let go = AudioDeviceStart(dev.id, proc)
         guard go == noErr else {
             stopIO(dev.id, proc)  // and destroys its IOProcID
-            openError = "cannot start \(dev.name) (\(go))"
+            why = "cannot start \(dev.name) (\(go))"
             return nil
         }
     }
@@ -361,7 +359,8 @@ final class Render {
     private let mono = UnsafeMutablePointer<Float>.allocate(capacity: maxFrames)
     private var proc: AudioDeviceIOProcID?
 
-    init?(_ dev: Device, from ring: Ring, prime: Int = 0, pulled: DispatchSemaphore? = nil, cycle: UInt32 = 0) {
+    init?(_ dev: Device, from ring: Ring, prime: Int = 0, pulled: DispatchSemaphore? = nil, cycle: UInt32 = 0,
+          why: inout String) {
         self.dev = dev
         let mono = mono, drain = drain
         var primed = prime == 0
@@ -385,14 +384,14 @@ final class Render {
             pulled?.signal()
         }
         guard st == noErr, let proc else {
-            openError = "cannot open \(dev.name) (\(st))"
+            why = "cannot open \(dev.name) (\(st))"
             return nil
         }
         started(dev.id, proc)  // before it runs: a quit() meanwhile stops it too
         let go = AudioDeviceStart(dev.id, proc)
         guard go == noErr else {
             stopIO(dev.id, proc)  // and destroys its IOProcID
-            openError = "cannot start \(dev.name) (\(go))"
+            why = "cannot start \(dev.name) (\(go))"
             return nil
         }
     }
@@ -418,6 +417,7 @@ final class Input {
     private let lock = NSLock()
     private var cap: Capture?
     private var said = "", failed = ""
+    private var retrying = false  // one retry waits at a time (device events meanwhile do not start more)
     private var listeners: [Listener] = [], rateListener: Listener?
     private(set) var stopped = false
 
@@ -484,11 +484,19 @@ final class Input {
             event("none")
             return
         }
-        guard let c = Capture(d, wake: wake, cycle: cycle) else {
-            if openError != failed { say(openError) }  // once, not every 2 s
-            failed = openError
+        var why = ""
+        guard let c = Capture(d, wake: wake, cycle: cycle, why: &why) else {
+            if why != failed { say(why) }  // once, not every 2 s
+            failed = why
             event("none")
-            q.asyncAfter(deadline: .now() + 2) { [weak self] in self?.update() }  // busy now, maybe free soon
+            if !retrying {  // busy now, maybe free soon
+                retrying = true
+                q.asyncAfter(deadline: .now() + 2) { [weak self] in
+                    guard let self else { return }
+                    self.retrying = false
+                    self.update()
+                }
+            }
             return
         }
         failed = ""
@@ -673,8 +681,9 @@ case "loop":
         target = device(target.id)  // its rate now: a call app or Audio MIDI Setup may have changed it meanwhile
         let ring = Ring(Int(target.rate / 2))
         let keep = Int(target.rate * 0.06)  // at most 60 ms queued: the mic and the target run on two clocks
-        guard let render = Render(target, from: ring, prime: Int(target.rate * 0.02), cycle: 1024) else {
-            die(5, "cannot play into \(target.name): \(openError)")  // silent all call else; the app starts the loop again
+        var why = ""
+        guard let render = Render(target, from: ring, prime: Int(target.rate * 0.02), cycle: 1024, why: &why) else {
+            die(5, "cannot play into \(target.name): \(why)")  // silent all call else; the app starts the loop again
         }
         let input = Input(saved: from, follow: true, exclude: target.uid, cycle: 1024)
         pump(input, rate: target.rate) { p, n in
@@ -739,8 +748,9 @@ case "play":
         // a device that pulls nothing for 2 s has stopped under us (a restart missed, a driver gone): not a hang
         if pulled.wait(timeout: .now() + 2) == .timedOut { die(4, "\(target.name) stopped playing") }
     }
-    guard let render = Render(target, from: ring, prime: Int(target.rate * ms / 1000), pulled: pulled) else {
-        die(5, "cannot play into \(target.name): \(openError)")
+    var why = ""
+    guard let render = Render(target, from: ring, prime: Int(target.rate * ms / 1000), pulled: pulled, why: &why) else {
+        die(5, "cannot play into \(target.name): \(why)")
     }
     let rs = Resample(from, target.rate)
     var bytes = [UInt8](repeating: 0, count: 16384)

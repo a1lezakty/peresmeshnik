@@ -249,7 +249,7 @@ class Engine:
             import torch
             f = folder(voice) / 'xtts.pt'
             if f.exists():
-                lat = torch.load(f, map_location='cpu')
+                lat = torch.load(f, map_location='cpu', weights_only=True)  # tensors only: no pickled code
             else:
                 lat = self._condition(*read_audio(folder(voice) / 'reference.wav'))
                 torch.save(lat, f)

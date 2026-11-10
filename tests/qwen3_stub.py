@@ -96,7 +96,10 @@ def fakes() -> dict:
     torch.__version__ = 'stub'
     torch.set_num_threads = torch.set_num_interop_threads = lambda n: None
     torch.save = lambda obj, f: Path(f).write_bytes(pickle.dumps(obj))
-    torch.load = lambda f, map_location=None: pickle.loads(Path(f).read_bytes())
+    def load(f, map_location=None, weights_only=False):
+        assert weights_only, 'a cache next to the recording loads tensors only'
+        return pickle.loads(Path(f).read_bytes())
+    torch.load = load
     torch.cuda = types.SimpleNamespace(is_available=lambda: False)
     fq = types.ModuleType('faster_qwen3_tts')
     fq.FasterQwen3TTS = FasterQwen3TTS

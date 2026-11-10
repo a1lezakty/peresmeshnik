@@ -75,7 +75,7 @@ class Engine:
             import torch
             ref, f = folder(voice) / 'reference.wav', folder(voice) / 'qwen3.pt'
             digest = sha256(ref)
-            cached = torch.load(f, map_location='cpu') if f.exists() else {}
+            cached = torch.load(f, map_location='cpu', weights_only=True) if f.exists() else {}
             if cached.get('sha256') != digest:
                 pcm, sr = xtts.read_audio(ref)
                 cached = {'sha256': digest, 'spk': self._vector(pcm[:REF_S * sr], sr).cpu()}

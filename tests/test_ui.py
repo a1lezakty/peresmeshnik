@@ -713,20 +713,32 @@ def test_no_reason_is_said_twice(monkeypatch):
 
 
 def test_overlay_rows_go_after_the_last_phrase():
-    """L-46: the subtitles go a while after the last final caption, not when translation goes off; a phrase still being
-    said keeps them. One single-shot timer per final caption: nothing polls."""
+    """L-46: the subtitles go a while after the last caption, not when translation goes off; a phrase still being said
+    keeps them, so does its voice (FIXES-b 10), and a partial that never gets its final goes too. One single-shot timer:
+    nothing polls."""
+    from peresmeshnik.engines import Latency
     o = SubtitleOverlay()
     o.fade.setInterval(150)
     them = o.side('them')
     them.show(Caption('Hello.', 'Привет.', final=True, clause=0))
     settle(0.05)
     assert o.isVisible()
-    them.show(Caption('and', clause=1))  # someone speaks: they stay
-    settle(0.3)
+    for _ in range(4):  # someone speaks: they stay
+        them.show(Caption('and', clause=1))
+        settle(0.1)
     assert o.isVisible()
     them.show(Caption('And more.', 'И ещё.', final=True, clause=1))
-    settle(0.4)
+    settle(0.1)
+    them.latency(Latency(1, 'voice', 1.2))  # FIXES-b 10: its voice starts: the rows stay while it plays
+    settle(0.1)
+    assert o.isVisible()
+    settle(0.3)
     assert not o.isVisible() and not o._rows
+    them.show(Caption('a partial that never gets its final', clause=2))  # FIXES-b 10: it does not hang
+    settle(0.05)
+    assert o.isVisible()
+    settle(0.3)
+    assert not o.isVisible()
 
 
 def _fake_tray(on=False):

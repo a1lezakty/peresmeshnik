@@ -521,6 +521,7 @@ class Side:
     auto = False  # the translation is down (cloud/fallback.py: on_mode): the call's own sound passes meanwhile
     _live_lock = threading.Lock()  # the hotkey (control thread) against on_mode (the side's events thread); one for all
     # sides (a switch is rare) and a class default, so a side made without __init__ (tests) has it
+    echo = None  # the side made without __init__ (tests) attaches the other person's voice without the echo check
 
     def __init__(self, name: str, s: config.Settings, inp, out, overlay, on_error=lambda text: None, echo=None):
         """`echo`: an audio.echo.EchoGate on the input (our own speech coming back from the other side is not translated)."""

@@ -282,7 +282,7 @@ def attach(d, s, echo=None):
     from peresmeshnik.local.clone import make_engine
     if not s.local.their_voice:
         return d
-    engine_id, why = languages.clone_engine(d.tgt, 'them_to_me')
+    engine_id, why = languages.clone_engine(s.my_lang, 'them_to_me')
     if why:
         log.info('their voice: the stock voice speaks (%s)', why)
         return d
@@ -294,7 +294,7 @@ def attach(d, s, echo=None):
         return d
     threads = s.local.threads
     live = LiveVoice(lambda: make_engine(engine_id, model_dir, threads), lambda: Speaker(spk_dir), engine_id,
-                     d.src, kept(engine_id), echo)
+                     s.their_lang, kept(engine_id), echo)
     d.tts, d.on_clause = TheirVoice(d.tts, live), live.offer
     return d
 

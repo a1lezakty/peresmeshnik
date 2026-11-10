@@ -719,8 +719,8 @@ def test_voice_page_without_an_nvidia_gpu_asks_for_no_recording(tmp_path, monkey
 
 
 def test_languages_page_says_what_a_cloud_side_falls_back_on(tmp_path, monkeypatch):
-    """H-09: a cloud side says whether it goes on locally when the cloud fails (its stock voice is downloaded) or stops
-    until the cloud is back (subtitles from the cloud: nothing local to fall back on)."""
+    """H-09: a cloud side with nothing local to fall back on (subtitles from the cloud, or no local models) says it stops
+    until the cloud is back; one that goes on locally (its stock voice is downloaded) says nothing more."""
     from peresmeshnik.ui import wizard
     monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
     monkeypatch.setenv('PERESMESHNIK_MODELS', str(tmp_path / 'models'))
@@ -730,6 +730,6 @@ def test_languages_page_says_what_a_cloud_side_falls_back_on(tmp_path, monkeypat
     s.local.clone = 'piper'
     config.save(s)
     page = wizard.LanguagesPage(type('W', (), {'s': s})())
-    assert 'If the cloud fails, it goes on on this computer' in page.why['them_to_me'].text()
+    assert 'If the cloud fails' not in page.why['them_to_me'].text()  # it goes on here: nothing to warn about
     page.subtitles.setChecked(True)
-    assert 'If the cloud fails, it stops until the cloud is back' in page.why['them_to_me'].text()
+    assert 'If the cloud fails, it stops until it is back' in page.why['them_to_me'].text()

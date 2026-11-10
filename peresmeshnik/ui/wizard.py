@@ -196,8 +196,8 @@ class LanguagesPage(QWizardPage):
             self.why[key].setWordWrap(True)
             f.addRow(title, c)
             f.addRow('', self.why[key])
-        self.subtitles = QCheckBox('Subtitles from the cloud (else from the local ASR: faster, and a cloud direction can go '
-                                   'on locally when the cloud fails; its models are in the download below)')
+        self.subtitles = QCheckBox('Subtitles from the cloud (else local: faster, and the cloud\'s fallback; their models '
+                                   'are below)')
         self.subtitles.setChecked(s.cloud.subtitles)
         f.addRow('Cloud', self.subtitles)
         self.download = QLabel()
@@ -255,11 +255,8 @@ class LanguagesPage(QWizardPage):
                 text = '✔ Both on this computer and in the cloud.' + ''.join(f' ⚠ {n}.' for n in d.notes if c.currentText() == 'local')
             if c.currentText() == 'cloud' and languages.cloud_subtitles(s, key) and not s.cloud.subtitles:
                 text += ' Its subtitles come from the cloud too.'
-            if c.currentText() == 'cloud':  # the fallback: local subtitles and a stock voice (needed_models), else nothing
-                text += (' If the cloud fails, it goes on on this computer until the cloud is back.'
-                         if d.local and not languages.cloud_subtitles(s, key) else
-                         ' If the cloud fails, it stops until the cloud is back' + (
-                             ' (subtitles from the cloud: nothing on this computer to go on with).' if d.local else '.'))
+            if c.currentText() == 'cloud' and not (d.local and not languages.cloud_subtitles(s, key)):
+                text += ' If the cloud fails, it stops until it is back.'  # else it goes on here (needed_models: its voice)
             if d.src == 'ar' and c.currentText() == 'cloud' and languages.cloud_subtitles(s, key):
                 text += ' Arabic subtitles from the cloud are Egyptian Arabic (Gemini has no other): other dialects come out ' \
                         'worse.'

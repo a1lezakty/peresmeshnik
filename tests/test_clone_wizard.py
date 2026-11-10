@@ -439,8 +439,10 @@ def test_the_voice_is_yours_before_it_is_recorded_or_imported(page):
     assert page.record_button.isEnabled() and page.import_button.isEnabled()
 
 
-def test_where_the_pack_cannot_run_the_clone_the_page_wants_the_stock_voice(windows):
+def test_where_the_pack_cannot_run_the_clone_the_page_wants_the_stock_voice(windows, monkeypatch):
     """S3-01 (b): a GPU the voice pack refuses (4 GB): a recording alone does not finish the page, the stock voice does."""
+    from peresmeshnik import models
+    monkeypatch.setattr(models, 'is_fetched', lambda m, base=None: True)  # the stock voice is here: nothing to download
     page = windows(4.0)
     page.voice = types.SimpleNamespace(name='me.new')  # a good take
     assert page.pack() == 'gpu' and not page.isComplete()

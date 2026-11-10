@@ -730,6 +730,8 @@ def test_wizard_test_phrase_waits_for_translation_off(monkeypatch):
     page = wizard.HotkeyPage(type('W', (), {'s': config.Settings(), 'tray': _fake_tray(on=True)})())
     page.test('them')
     assert page.out.text().startswith('Turn translation off first') and not page.running
+    page.deleteLater()  # its key editor must go before the application does (a crash at exit otherwise)
+    settle()
 
 
 def test_settings_window_chooses_the_devices_on_every_os(tmp_path, monkeypatch):

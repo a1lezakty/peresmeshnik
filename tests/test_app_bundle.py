@@ -70,8 +70,13 @@ def test_bundle_contents(app):
     assert 'Written offer' in (lic / 'LGPL-SOURCE.txt').read_text()  # and those of the LGPL libraries (Qt, libsndfile)
     assert 'Required Notice: Copyright' in (lic / 'Peresmeshnik-LICENSE.txt').read_text()
     for notice in ('PySide6_Essentials/Qt-third-party.txt', 'pyopenjtalk-plus/hts_engine-COPYING.txt',
-                   'piper-tts/espeak-ng-COPYING.UCD.txt'):
+                   'pyopenjtalk-plus/OpenJTalk-COPYING.txt', 'piper-tts/espeak-ng-COPYING.UCD.txt'):
         assert (lic / notice).is_file(), f'no {notice}'
+    # the GPL runner's Corresponding Source: the versions of what it is built on and the written offer of it (FIXES 16);
+    # the LGPL libraries may be changed and debugged whatever Peresmeshnik's own license says (FIXES 15)
+    runner_src = (lic / 'piper-runner-SOURCE.txt').read_text()
+    assert re.search(r'onnxruntime \d', runner_src) and 'CPython 3.' in runner_src and 'Written offer' in runner_src
+    assert 'reverse' in (lic / 'LGPL-SOURCE.txt').read_text() and 'reverse' in (lic / 'Peresmeshnik-LICENSE.txt').read_text()
     left_out = ('nakdimon.onnx', 'libqjpeg.dylib', 'libqtiff.dylib', 'libqwebp.dylib')  # the spec drops them
     assert not [p for p in app.rglob('*') if p.name in left_out or p.parts[-2:] == ('tashkeel', 'model.onnx')]
     # the hardened runtime on every program in Contents/MacOS, with the entitlements of packaging/macos/entitlements.plist

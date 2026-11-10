@@ -100,9 +100,18 @@ def test_installed_files_shortcut_and_uninstall_entry(installed):
     assert not list(installed.rglob('torch')), 'torch in the base app'
     # stage 7 (C3): the LGPL source offer, the notices inside Qt, hts_engine, the Unicode data, the Required Notice
     for f in ('licenses/LGPL-SOURCE.txt', 'licenses/PySide6_Essentials/Qt-third-party.txt',
-              'licenses/pyopenjtalk-plus/hts_engine-COPYING.txt', 'licenses/piper-tts/espeak-ng-COPYING.UCD.txt'):
+              'licenses/pyopenjtalk-plus/hts_engine-COPYING.txt', 'licenses/piper-tts/espeak-ng-COPYING.UCD.txt',
+              'licenses/pyopenjtalk-plus/OpenJTalk-COPYING.txt',  # FIXES 12: Open JTalk with its MeCab
+              'licenses/protobuf/mingw-w64-runtime-COPYING.txt', 'licenses/numpy/mingw-w64-runtime-COPYING.txt'):  # MinGW builds
         assert (installed / f).exists(), f
-    assert 'Written offer' in (installed / 'licenses' / 'LGPL-SOURCE.txt').read_text()
+    lgpl = (installed / 'licenses' / 'LGPL-SOURCE.txt').read_text()
+    assert 'Written offer' in lgpl and 'reverse' in lgpl  # FIXES 15: the LGPL libraries may be changed and debugged
+    assert re.search(r'libmpg123 \d+\.\d+\.\d+ ', lgpl) and 'libmp3lame 3.' in lgpl, lgpl  # the exact versions of vcpkg's
+    runner_src = (installed / 'licenses' / 'piper-runner-SOURCE.txt').read_text()  # FIXES 16: the runner's Corresponding Source
+    assert re.search(r'onnxruntime \d', runner_src) and 'CPython 3.' in runner_src and 'Written offer' in runner_src
+    # no MinGW runtime DLLs (Git's, from the runner's PATH): no notice of theirs is shipped
+    mingw = ('zlib1.dll', 'libwinpthread-1.dll', 'libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libiconv-2.dll', 'libintl-8.dll')
+    assert not [f for f in installed.rglob('*.dll') if f.name.lower() in mingw]
     assert 'Required Notice: Copyright' in (installed / 'licenses' / 'Peresmeshnik-LICENSE.txt').read_text()
     assert 'Apache License' in (installed / 'licenses' / 'OpenSSL-LICENSE.txt').read_text()
     left_out = ('qjpeg.dll', 'qtiff.dll', 'qwebp.dll', 'nakdimon.onnx',  # unused (Peresmeshnik.spec drops them)

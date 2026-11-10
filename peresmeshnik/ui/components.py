@@ -43,7 +43,9 @@ def mb(n: int) -> str:
 
 
 class HfTokenBox(QWidget):
-    """For a gated model (`token = "hf"`): its page (accept the conditions there) and the user's token."""
+    """For a gated model (`token = "hf"`): its page (accept the conditions there) and the user's token; saved empty, the
+    token is forgotten (its file goes)."""
+    saved = Signal()  # the token changed: the clone engine and the list are chosen again
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -66,17 +68,17 @@ class HfTokenBox(QWidget):
         self.page = ''
 
     def show_for(self, page: str) -> None:
-        """Shown while a gated model is to download: `page` is its model card ('' hides the box)."""
+        """Shown while a gated model waits for the token or was refused: `page` is its model card ('' hides the box)."""
         self.setVisible(bool(page))
         if page:
             self.page = page
-            self.token.setPlaceholderText('a token is saved' if getattr(models, 'hf_token', lambda: '')() else 'hf_…')
+            self.token.setPlaceholderText('a token is saved (save it empty to forget it)' if models.hf_token() else 'hf_…')
 
     def _save(self) -> None:
-        if t := self.token.text().strip():
-            models.save_hf_token(t)
-            self.token.clear()
-            self.token.setPlaceholderText('a token is saved')
+        models.save_hf_token(self.token.text().strip())  # '' forgets it
+        self.token.clear()
+        self.token.setPlaceholderText('a token is saved (save it empty to forget it)' if models.hf_token() else 'hf_…')
+        self.saved.emit()
 
 
 class ComponentsBox(QWidget):
@@ -87,6 +89,7 @@ class ComponentsBox(QWidget):
     def __init__(self, s, translating=lambda: False, parent=None):
         super().__init__(parent)
         self.s, self.translating, self.busy, self.rows, self.ticked = s, translating, False, [], {}
+        self.refused = {}  # id -> its model card: Hugging Face said no (models.Gated); Next does not wait for it
         self.cancel = threading.Event()
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(['Component', 'Size', 'License', 'What for', ''])
@@ -101,6 +104,7 @@ class ComponentsBox(QWidget):
         self.pack_consent.toggled.connect(lambda: self._update(''))
         self.hf = HfTokenBox()
         self.hf.setVisible(False)
+        self.hf.saved.connect(self._token_saved)
         self.button = QPushButton('Download')
         self.button.clicked.connect(self.download)
         self.stop = QPushButton('Cancel')
@@ -163,8 +167,15 @@ class ComponentsBox(QWidget):
         return sorted(out, key=lambda c: not c.recommended)
 
     def missing(self) -> list:
-        """What the pair runs on, ticked and not here yet: the wizard's Next waits for it."""
-        return [c for c in self.todo() if c.recommended]
+        """What the pair runs on, ticked and not here yet: the wizard's Next waits for it; not for a clone engine Hugging
+        Face refused (its conditions not accepted): a stock voice speaks, the reason is said."""
+        return [c for c in self.todo() if c.recommended and c.id not in self.refused]
+
+    def _token_saved(self) -> None:
+        """Another token, or none: the engine is chosen again (languages.clone_engine) and the list with it."""
+        self.refused.clear()
+        if not self.busy:
+            self.refresh()
 
     def download(self) -> None:
         if self.busy:  # one download at a time: a second install into the same voice pack breaks it
@@ -200,6 +211,8 @@ class ComponentsBox(QWidget):
                     done[0] = start + c.size
                 except Exception as e:  # the network, the disk, a token refused (models.Gated): the others still go
                     errors.append(f'{c.title}: {e}')
+                    if isinstance(e, getattr(models, 'Gated', ())):
+                        self.refused[c.id] = e.page
                     if isinstance(e, (components.Cancelled, voicepack.Cancelled)) or \
                             c.recommended and not isinstance(e, getattr(models, 'Gated', ())):
                         break  # cancelled, or the pair's own: stop here, Download resumes it
@@ -253,8 +266,10 @@ class ComponentsBox(QWidget):
         self.consent.setText('I accept the restricted licenses (noncommercial use only, they bind me as the user): '
                              + ', '.join(f'{c.title} ({c.license})' for c in need))
         self.pack_consent.setVisible(any(c.id in PACKS for c in todo))
-        self.hf.show_for(next((c.license_url for c in todo if c.token), ''))
-        off = [c for c in self.rows if not (c.installed or c.unavailable or self.wanted(c)) and c.instead]
+        self.hf.show_for(next(iter(self.refused.values()), '') or components.token_page(self.s.their_lang)
+                         or next((c.license_url for c in todo if c.token and not models.hf_token()), ''))
+        off = [c for c in self.rows if (c.id in self.refused or not (c.installed or c.unavailable or self.wanted(c)))
+               and c.instead]  # unticked, or refused by Hugging Face
         self.without.setText('<br>'.join(f'Without {c.title}: {c.instead}.' for c in off))
         self.without.setVisible(bool(off))
         self.state.setText(f'Download failed: {err}. Press Download again to resume.' if err else

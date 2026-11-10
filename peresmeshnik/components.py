@@ -192,6 +192,18 @@ def _pack(s, gpu: Gpu, needed: set[str]) -> list[Component]:
     return out
 
 
+def token_page(lang: str) -> str:
+    """The model card of the gated clone engine (`token = "hf"`: Kyutai's Pocket TTS) that would speak `lang` in my voice on
+    this computer but for the user's Hugging Face token ('' = the clone does not wait for one): where the token field
+    goes (Components, the wizard's voice page, Voices…). With a token, languages.clone_engine chooses it again."""
+    engine, _ = languages.clone_engine(lang)
+    if engine or models.hf_token():
+        return ''
+    gated = [m for m in map(models.get, languages.clone_engines()) if m.token == 'hf' and languages.covers(m.id, lang)
+             and not languages.clone_why(m.id, lang) and not models.is_fetched(m)]
+    return gated[0].license_url if gated else ''
+
+
 def listing(s, gpu: Gpu | None = None) -> list[Component]:
     """Every component for settings `s` on this computer (`gpu`: None looks once, nvidia-smi): the chosen pair's first,
     then the clone engines and the voice pack, then what other pairs left on disk."""

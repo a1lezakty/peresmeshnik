@@ -307,3 +307,66 @@ def test_the_wizard_goes_on_without_the_clone_not_without_the_pair(monkeypatch):
     page.initializePage()
     item(page.box, page.box.rows[0]).setCheckState(0, Qt.CheckState.Unchecked)  # locked: stays
     assert not page.isComplete() and [c.id for c in page.box.missing()] == ['vad']
+
+
+@pytest.fixture
+def no_token(tmp_path, monkeypatch):
+    """The user's real token file (models.hf_token, not a stand-in), in a folder of this test's own."""
+    from peresmeshnik import voice
+    monkeypatch.setattr(config, 'config_dir', lambda: tmp_path / 'config')
+    monkeypatch.setattr(voice, 'voices_dir', lambda: tmp_path / 'voices')
+    monkeypatch.delenv('HF_TOKEN', raising=False)
+    return models.hf_token_file()
+
+
+def test_the_hugging_face_token_where_the_clone_waits_for_it(no_token):
+    """COMMON 23:38: no NVIDIA GPU, English: Pocket TTS is the clone and waits for the token. The field is in Components,
+    on the wizard's voice page and in Voices…; saved, the engine is chosen again (the page records, Components ticks
+    Pocket); saved empty, the token is forgotten (its file goes) and the field is back."""
+    from peresmeshnik.ui import voices, wizard
+    from peresmeshnik.ui.components import ComponentsBox
+    s = config.Settings(my_lang='ru', their_lang='en', me_to_them='local')
+    assert components.token_page('en') == 'https://huggingface.co/kyutai/pocket-tts' and not models.hf_token()
+    box = ComponentsBox(s)
+    box.refresh()
+    dialog = voices.VoicesDialog(s)
+    page = wizard.VoicePage(type('W', (), {'s': s})())
+    page.initializePage()
+    assert not box.hf.isHidden() and not dialog.hf.isHidden() and not page.hf.isHidden()
+    assert page.record_button.isHidden() and 'Hugging Face token' in page.subTitle()  # a stock voice for now, said why
+    page.hf.token.setText(' hf_secret ')
+    page.hf.save.click()
+    assert models.hf_token() == 'hf_secret' and no_token.read_text().strip() == 'hf_secret'
+    if sys.platform != 'win32':
+        assert no_token.stat().st_mode & 0o777 == 0o600
+    assert page.hf.isHidden() and not page.record_button.isHidden() and 'Components page' in page.out.text()
+    box.hf.saved.emit()  # the token changed: the list again
+    (pocket,) = [c for c in box.rows if c.id == 'pocket-tts-en']
+    assert pocket.recommended and pocket.token and box.wanted(pocket) and box.hf.isHidden()
+    dialog.hf.token.setText('')
+    dialog.hf.save.click()  # empty: forgotten
+    assert not no_token.exists() and models.hf_token() == '' and 'forgotten' in dialog.token_note.text()
+    assert not dialog.hf.isHidden()
+
+
+def test_hugging_face_refusing_does_not_hold_the_wizard(no_token, monkeypatch):
+    """COMMON 23:38: a 403 (the conditions not accepted) on the clone: Next does not wait for it, the stock voice is said,
+    the field and the page to accept the conditions are shown."""
+    from peresmeshnik.ui.components import ComponentsBox
+    models.save_hf_token('hf_wrong')
+
+    def refused(progress, cancel):
+        raise models.Gated('Hugging Face refused pocket-tts-en (403): accept its conditions', 'https://hf.example/pocket')
+    rows = [components.Component('pocket-tts-en', 'Your cloned voice: pocket-tts-en', 9, 'CC-BY-4.0', 'https://x', '',
+                                 False, 0, True, 'a stock voice speaks instead', token=True, _fetch=refused)]
+    monkeypatch.setattr(components, 'listing', lambda s: rows)
+    box = ComponentsBox(config.Settings())
+    box.refresh()
+    assert box.missing() and box.hf.isHidden()  # a token is saved: nothing to ask yet
+    box.download()
+    end = time.monotonic() + 5
+    while box.busy and time.monotonic() < end:
+        settle()
+    assert box.missing() == [] and 'accept its conditions' in box.state.text()
+    assert not box.hf.isHidden() and box.hf.page == 'https://hf.example/pocket'
+    assert 'Without Your cloned voice: pocket-tts-en: a stock voice speaks instead.' in box.without.text()

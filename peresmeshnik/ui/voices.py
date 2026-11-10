@@ -180,8 +180,13 @@ class VoicesDialog(QDialog):
             row.addWidget(b)
         close = QPushButton('Close')
         close.clicked.connect(self.close)
+        from peresmeshnik.ui.components import HfTokenBox
+        self.hf = HfTokenBox()  # the clone of my language waits for the user's Hugging Face token (Pocket TTS)
+        self.hf.saved.connect(self._token_saved)
+        self.token_note = QLabel()
+        self.token_note.setWordWrap(True)
         self.lay = QVBoxLayout(self)
-        for w in (note, self.list):
+        for w in (note, self.list, self.hf, self.token_note):
             self.lay.addWidget(w)
         self.lay.addLayout(row)
         self.lay.addWidget(close)
@@ -201,7 +206,19 @@ class VoicesDialog(QDialog):
             self.list.addItem(QListWidgetItem(f'{name}: damaged (no readable voice.json) — delete'))
         if not self.voices and not self.broken:
             self.list.addItem('No voices yet: record yours in the setup wizard ("Your voice").')
+        from peresmeshnik import components
+        self.hf.show_for(components.token_page(self.s.their_lang))
         self._buttons()
+
+    def _token_saved(self) -> None:
+        """Another token: the clone engine is chosen again; my side takes it at its restart (its weights: Components…)."""
+        from peresmeshnik import languages, models
+        engine = languages.clone_engine(self.s.their_lang)[0]
+        self.token_note.setText(f'Saved. Your cloned voice ({engine}) is downloaded in Components… (tray menu).'
+                                if engine and not models.is_fetched(models.get(engine)) else
+                                'Saved.' if models.hf_token() else 'The token is forgotten.')
+        self.refresh()
+        self.on_change(True)
 
     def selected(self):
         """The voice of the selected row, or the damaged folder's name (str), or None."""

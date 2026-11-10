@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QWizardPage,
 )
 
-from peresmeshnik import config, languages, models
+from peresmeshnik import components, config, languages, models
 from peresmeshnik.languages import (
     MIN_DRIVER,
     MIN_DRIVER_COMPAT,
@@ -47,7 +47,7 @@ from peresmeshnik.languages import (
 from peresmeshnik.languages import nvidia as gpu  # tests patch it here
 from peresmeshnik.local import voicepack
 from peresmeshnik.remote import pairing
-from peresmeshnik.ui.components import PACK_CONSENT, ComponentsBox
+from peresmeshnik.ui.components import PACK_CONSENT, ComponentsBox, HfTokenBox
 from peresmeshnik.ui.overlay import font_note
 from peresmeshnik.ui.tray import LANGS, MIC_LABEL, SIDES, device_combo, save_key
 
@@ -604,6 +604,9 @@ class VoicePage(QWizardPage):
         self.pack_button, self.pack_cancel = QPushButton('Install the voice pack'), QPushButton('Cancel')
         self.pack_button.clicked.connect(self.install_pack)
         self.pack_consent = QCheckBox(PACK_CONSENT)  # before anything is downloaded
+        self.hf = HfTokenBox()  # the clone of their language waits for the user's Hugging Face token (Pocket TTS)
+        self.hf.setVisible(False)
+        self.hf.saved.connect(self._token_saved)
         self.pack_consent.toggled.connect(self._buttons)
         self.pack_cancel.clicked.connect(lambda: self._cancel_pack.set())
         self.pack_bar = QProgressBar()
@@ -614,6 +617,7 @@ class VoicePage(QWizardPage):
         prow.addWidget(self.pack_cancel)
         prow.addStretch()
         lay.addWidget(self.stock)
+        lay.addWidget(self.hf)
         lay.addWidget(self.pack_out)
         lay.addWidget(self.pack_consent)
         lay.addLayout(prow)
@@ -685,9 +689,18 @@ class VoicePage(QWizardPage):
                                  f'recorded {self.voice.meta.get("created", "")}.')
             except (OSError, ValueError) as e:  # a damaged voice.json: record again (Voices… deletes the folder)
                 self.out.setText(f'The saved voice cannot be read ({e}): record it again.')
+        self.hf.show_for(components.token_page(s.their_lang) if not remote and s.local.clone != voice.STOCK else '')
         self._confirm_box()
         self._show_pack()
         self._buttons()
+
+    def _token_saved(self) -> None:
+        """Another token: the clone engine is chosen again (the page anew); its weights come from the Components page."""
+        self.initializePage()
+        engine = languages.clone_engine(self.w.s.their_lang)[0]
+        if engine and not models.is_fetched(models.get(engine)):
+            self.out.setText(f'The token is saved: download your cloned voice ({engine}) on the Components page (Back), '
+                             'then record here.')
 
     def isComplete(self) -> bool:  # noqa: N802
         if getattr(self.confirm, 'running', False):  # it records into the take: no Next meanwhile

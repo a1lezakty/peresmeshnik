@@ -401,7 +401,7 @@ def test_a_gated_model_refused_does_not_stop_the_others(tmp_path, monkeypatch, s
     others are downloaded, the reason is said."""
     import hashlib
 
-    from peresmeshnik import models
+    from peresmeshnik import languages, models
     from peresmeshnik.ui import wizard
     httpd, url = server
     blob = b'b' * 20_000
@@ -411,16 +411,18 @@ def test_a_gated_model_refused_does_not_stop_the_others(tmp_path, monkeypatch, s
            'free': models.Model('free', 'mt', ('en-ru',), 'MIT', 'https://x', url, pin)}
     monkeypatch.setattr(models, 'registry', lambda: reg)
     monkeypatch.setattr(models, 'hf_token', lambda: '')
-    monkeypatch.setattr(wizard, 'needed_models', lambda s: ['gated', 'free'])
+    monkeypatch.setattr(languages, 'needed_models', lambda s: ['gated', 'free'])
+    monkeypatch.setattr(languages, 'optional_models', lambda s: [])
     monkeypatch.setenv('PERESMESHNIK_MODELS', str(tmp_path / 'models'))
     page = wizard.ModelsPage(type('W', (), {'s': config.Settings()})())
     page.initializePage()
-    page.download()
+    page.box.download()
     end = time.monotonic() + 30
     while page.busy and time.monotonic() < end:
         settle(0.05)
     assert models.is_fetched(reg['free']) and not models.is_fetched(reg['gated'])
-    assert 'gated is in a gated Hugging Face repo' in page.state.text(), page.state.text()
+    assert 'gated is in a gated Hugging Face repo' in page.box.state.text(), page.box.state.text()
+    assert page.isComplete()  # COMMON 23:38: the refused clone does not hold the page
 
 
 def test_models_page_counts_past_2_gb():

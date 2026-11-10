@@ -355,8 +355,8 @@ class Server:
         m = await asyncio.wait_for(ws.recv(), HELLO_S)
         a = await asyncio.to_thread(p.handle, m)  # paired.json is written with an fsync
         await ws.send(a)
-        if json.loads(a)['type'] == 'paired':
-            name = ''.join(c for c in json.loads(m)['name'].strip()[:pairing.NAME_MAX] if c.isprintable())
+        if (d := json.loads(a))['type'] == 'paired':  # the name as kept (another device of that name: a suffix)
+            name = ''.join(c for c in await asyncio.to_thread(p.check, d['token']) or '' if c.isprintable())
             print(f'paired: {name} from {ws.remote_address[0]}', flush=True)  # the terminal, not the log
 
     async def _revoked(self) -> None:

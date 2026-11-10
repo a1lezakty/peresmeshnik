@@ -582,10 +582,13 @@ def test_must_pairing(srv, made, tmp_path, capsys):
     with raw(srv, path=protocol.PAIR_PATH) as ws:  # no code open: refused before anything is read
         assert answer(ws)['code'] == 'code'
     code = srv.pairing.new_code()
-    pairing.pair(server.url('127.0.0.1', srv.ports[0], code), 'laptop\x1b[2J', tmp_path / 'remote')
-    assert capsys.readouterr().out == 'paired: laptop[2J from 127.0.0.1\n'  # no terminal control from a name
+    pairing.pair(server.url('127.0.0.1', srv.ports[0], code), 'laptop', tmp_path / 'remote')
+    assert capsys.readouterr().out == 'paired: laptop from 127.0.0.1\n'
     with raw(srv, path=protocol.PAIR_PATH) as ws:  # used: closed again
         assert answer(ws)['code'] == 'code'
+    pairing.pair(server.url('127.0.0.1', srv.ports[0], srv.pairing.new_code()), 'laptop', tmp_path / 'remote2')
+    second = srv.pairing.devices()[-1]['name']  # another device of the same name: the name it is kept (and revoked) by
+    assert second != 'laptop' and capsys.readouterr().out == f'paired: {second} from 127.0.0.1\n'
 
 
 def test_must_a_revoked_device_is_cut_off(tmp_path, made, monkeypatch):

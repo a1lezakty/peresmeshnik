@@ -3,6 +3,14 @@
 Versions are tagged and published by hand after a check by a person (no release is published by CI). The section of a
 version is the top of its GitHub release notes (`.github/workflows/release.yml`).
 
+## Next (not released yet)
+
+- Your cloned voice speaks into the call only once confirmed: read two random phrases at the microphone; the app hears
+  the words and matches the voice of every part of the recording. A voice recorded or imported in 0.3.0 speaks in a
+  stock voice until confirmed once (tray → Voices…). Tray → **Voices…** lists, confirms and deletes the voices.
+- Back to 0.3.0 after this version: its `python -m peresmeshnik.voice list` stops at a kept voice of someone you talk to
+  (`them-…`, it has no `quality`).
+
 ## 0.3.0
 
 The first published version: a real-time translator for calls on macOS 14+ (Apple Silicon) and Windows 10 2004+ / 11,

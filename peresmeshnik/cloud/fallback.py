@@ -439,7 +439,7 @@ def _clone_not_ready(s, lang: str) -> str:
         return 'no voice enrolled (setup wizard, "Your voice")'
     from peresmeshnik import voice
     with contextlib.suppress(OSError, ValueError):  # missing or broken: said where it is loaded, as before
-        if why := voice.why_not_mine(voice.load(s.local.voice).meta):  # M-20: a contact's voice never speaks as me
+        if why := voice.why_not_mine(voice.load(s.local.voice)):  # M-20: a contact's voice never speaks as me
             return why
     from peresmeshnik.local.clone import voice_cmd
     if voice_cmd() is None and importlib.util.find_spec('torch') is None:  # the pack's runner, or torch here

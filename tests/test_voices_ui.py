@@ -32,10 +32,18 @@ def root(tmp_path, monkeypatch):
 def test_list_and_delete(root):
     s, changed = config.Settings(), []
     s.local.voice = 'me'
+    voice.save(*speech(), 'me.new', 'ru', '', root)  # a take the wizard kept aside
+    voice.save(*speech(), 'me.old', 'ru', '', root)
+    (root / 'them-0a1b2c3d.tmp').mkdir()  # a contact's voice whose save stopped (FIXES-s3 6)
     d = voices.VoicesDialog(s, changed.append)
     rows = [d.list.item(i).text() for i in range(d.list.count())]
-    assert len(rows) == 3 and rows[0].startswith('Your voice: ru, 40 s, not confirmed yet'), rows
+    assert len(rows) == 4 and rows[0].startswith('Your voice: ru, 40 s, it is not confirmed as your own voice yet'), rows
     assert any(r.startswith('Анна: someone you talk to, en, 9 s') for r in rows)
+    assert rows[3] == 'them-0a1b2c3d.tmp: damaged (no readable voice.json) — delete'
+    d.list.setCurrentRow(3)
+    assert d.delete_button.isEnabled() and not d.confirm_button.isEnabled()
+    d.delete()
+    assert not (root / 'them-0a1b2c3d.tmp').exists() and changed == []
     d.list.setCurrentRow(0)
     assert d.confirm_button.isEnabled() and d.delete_theirs.isEnabled()
     d.delete_all_theirs()
@@ -43,6 +51,7 @@ def test_list_and_delete(root):
     d.list.setCurrentRow(0)
     d.delete()
     assert voice.profiles() == [] and s.local.voice == '' and changed == [False, True]
+    assert sorted(p.name for p in root.iterdir()) == []  # me.new and me.old went with it
     assert d.list.item(0).text().startswith('No voices yet')
 
 
@@ -50,7 +59,7 @@ def test_list_and_delete(root):
 def test_confirm_my_voice(root, monkeypatch, sim):
     s = config.Settings()
     monkeypatch.setattr('peresmeshnik.audio.mic.record', lambda sec, dev, sr, progress: speech(sec, sr)[0])
-    box = voices.ConfirmBox(s, 'me', 'import+mic-match')
+    box = voices.ConfirmBox(s, 'me')
     said = box.said
     monkeypatch.setattr(voices, 'check_models', lambda s, lang, say: (Asr(' '.join(said)), Speaker(sim)))
     got = []
@@ -74,7 +83,7 @@ def test_keep_a_contacts_voice_only_as_agreed(tmp_path):
     d.agreed.setChecked(True)
     assert d.save.isEnabled()
     v = d.keep({'pocket-tts-en': (np.zeros(3, np.float32), 'sha')}, 'en', 5.0, tmp_path)
-    assert v.meta['kind'] == 'them' and v.meta['name'] == 'Анна' and voice.why_not_mine(v.meta)
+    assert v.meta['kind'] == 'them' and v.meta['name'] == 'Анна' and voice.why_not_mine(v)
 
 
 def test_wizard_voice_page_confirms_the_take(tmp_path, monkeypatch):
@@ -98,12 +107,19 @@ def test_wizard_voice_page_confirms_the_take(tmp_path, monkeypatch):
     sf.write(tmp_path / 'me.wav', speech_like(45), 24_000)
     page.import_file(str(tmp_path / 'me.wav'))
     pump(lambda: not page.running)
-    assert page.confirm is not None and page.confirm.how == 'import+mic-match' and page.isComplete()
-    monkeypatch.setattr('peresmeshnik.audio.mic.record', lambda sec, dev, sr, progress: speech(sec, sr)[0])
+    assert page.confirm is not None and page.isComplete()
+    import threading
+    go = threading.Event()
+    monkeypatch.setattr('peresmeshnik.audio.mic.record', lambda sec, dev, sr, progress: (go.wait(10), speech(sec, sr)[0])[1])
     said = page.confirm.said
     monkeypatch.setattr(voices, 'check_models', lambda s, lang, say: (Asr(' '.join(said)), Speaker(0.9)))
     page.confirm.start()
-    assert not page.isComplete()  # it records into the take
+    assert not page.isComplete()  # it records into the take: no Next, no new take, no clone check (FIXES-s3 3)
+    assert not page.record_button.isEnabled() and not page.import_button.isEnabled() and not page.check_button.isEnabled()
+    box = page.confirm
+    page.import_file(str(tmp_path / 'me.wav'))
+    assert page.confirm is box and not page.running
+    go.set()
     pump(lambda: not page.confirm.running)
     assert page.isComplete() and voice.mine('me.new')
     page.commit()
@@ -181,3 +197,88 @@ def test_models_page_asks_for_the_hugging_face_token(monkeypatch):
     fetched[0] = True
     page._finished('')
     assert page.hf.isHidden()
+
+
+def wizard_page(tmp_path, monkeypatch):
+    from peresmeshnik import languages
+    from peresmeshnik.ui import wizard
+    monkeypatch.setattr(wizard, 'WINDOWS', False)
+    real = languages.clone_why
+    monkeypatch.setattr(languages, 'clone_why', lambda model, lang='', has_gpu=None: real(model, lang, True))
+    monkeypatch.setattr(voice, 'voices_dir', lambda: tmp_path / 'voices')
+    s = config.Settings()
+    s.me_to_them = 'local'
+    page = wizard.VoicePage(type('W', (), {'s': s})())
+    page.initializePage()
+    page.own.setChecked(True)
+    return page, s
+
+
+def test_wizard_recorded_take_confirmed_after_finish(tmp_path, monkeypatch):
+    """FIXES-s3 10: Record (the app's own recording: 'mic'), the box, Finish: the profile is mine, 'mic-live'."""
+    from test_clone_wizard import speech_like
+    page, s = wizard_page(tmp_path, monkeypatch)
+    monkeypatch.setattr('peresmeshnik.audio.mic.record', lambda sec, dev, sr, progress: speech_like(sec, sr))
+    page.record()
+    pump(lambda: not page.running)
+    assert page.voice.meta['source'] == 'mic' and page.confirm is not None
+    said = page.confirm.said
+    monkeypatch.setattr(voices, 'check_models', lambda s, lang, say: (Asr(' '.join(said)), Speaker(0.9)))
+    page.confirm.start()
+    pump(lambda: not page.confirm.running)
+    page.commit()
+    assert voice.mine('me').meta['consent']['how'] == 'mic-live' and s.local.voice == 'me'
+
+
+def test_wizard_no_box_where_the_clone_does_not_speak(tmp_path, monkeypatch):
+    """FIXES-s3 8: the stock voice speaks for this pair (clone_off): nothing to confirm."""
+    import soundfile as sf
+    from test_clone_wizard import speech_like
+    page, _ = wizard_page(tmp_path, monkeypatch)
+    monkeypatch.setattr(page, 'clone_off', lambda: 'the clone cannot speak Korean here')
+    sf.write(tmp_path / 'me.wav', speech_like(45), 24_000)
+    page.import_file(str(tmp_path / 'me.wav'))
+    pump(lambda: not page.running)
+    assert page.voice is not None and page.confirm is None
+
+
+def test_voices_window_a_box_per_profile(root, monkeypatch):
+    """FIXES-s3 8: a box per profile (a second one can be confirmed too); no Delete of the one being checked; not
+    while translating; a language without phrases says so."""
+    import threading
+    voice.save(*speech(), 'Petrov', 'ru', '', root)  # a v1-era profile named by the user
+    go = threading.Event()
+    monkeypatch.setattr('peresmeshnik.audio.mic.record', lambda sec, dev, sr, progress: (go.wait(10), speech(sec, sr)[0])[1])
+    monkeypatch.setattr(voices, 'check_models', lambda s, lang, say: (Asr('x'), Speaker(0.9)))
+    translating = [False]
+    d = voices.VoicesDialog(config.Settings(), translating=lambda: translating[0])
+    names = [v.name for v in d.voices]
+    d.list.setCurrentRow(names.index('me'))
+    d.start_confirm()
+    me = d.boxes['me']
+    translating[0] = True
+    me.start()
+    assert not me.running and me.out.text().startswith('Turn translation off first')
+    translating[0] = False
+    me.start()
+    assert me.running and not d.delete_button.isEnabled() and not d.confirm_button.isEnabled()
+    d.list.setCurrentRow(names.index('Petrov'))
+    assert d.delete_button.isEnabled() and d.confirm_button.isEnabled() and me.isHidden()
+    d.start_confirm()
+    assert set(d.boxes) == {'me', 'Petrov'} and not d.boxes['Petrov'].isHidden()
+    go.set()
+    pump(lambda: not me.running)
+    voice.save(*speech(), 'Xx', 'xx', '', root)  # a language without phrases (CLI --lang xx)
+    box = voices.ConfirmBox(config.Settings(), 'Xx')
+    assert not box.button.isEnabled() and box.phrases.text().startswith('No phrases to read in "xx"')
+
+
+def test_settings_lists_only_my_voices(root, tmp_path, monkeypatch):
+    """FIXES-s3 7: Settings → "My voice (local clone)": my profiles by their names, never a contact's."""
+    from peresmeshnik.ui import tray as tray_mod
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    monkeypatch.setattr(config, 'config_dir', lambda: tmp_path)
+    voice.save(*speech(), 'Petrov', 'ru', '', root)
+    d = tray_mod.SettingsDialog(tray_mod.Tray(type('Ctl', (), {'live': False, 'on': False})()))
+    items = [(d.voice.itemText(i), d.voice.itemData(i)) for i in range(d.voice.count())]
+    assert items == [('none', ''), ('Petrov', 'Petrov'), ('me', 'me')], items

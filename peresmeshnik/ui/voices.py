@@ -1,7 +1,7 @@
 """The voices (tray "Voices…"): my own voice and the voices of people I talk to that I chose to keep (voice.json v2),
 delete them. My voice speaks into the call only once confirmed: `ConfirmBox` (here and on the wizard's voice page) shows
 two random phrases, records them at the microphone and checks them (voice.confirm_live: the app's ASR heard them, the
-speaker vector is the recording's). `RememberDialog`: keep the voice of the person in this call (S2's live profile), only
+speaker vector is each window of the recording's). `RememberDialog`: keep the voice of the person in this call (S2's live profile), only
 with their agreement. Recording, downloads and checks take seconds: worker threads, answers come back as signals."""
 from __future__ import annotations
 
@@ -37,10 +37,10 @@ def described(v) -> str:
     when = (c.get('at') or m.get('created', ''))[:10]
     if m['kind'] == 'them':
         return f'{m["name"]}: someone you talk to, {m["lang"]}, {m["seconds"]:.0f} s of their speech, kept {when}'
-    how = {'mic-live': f'confirmed at the microphone {when}',
-           'import+mic-match': f'from a file, confirmed at the microphone {when}'}.get(
-        c.get('how'), 'not confirmed yet: it does not speak into the call until you read two phrases (Confirm)')
-    return f'Your voice: {m["lang"]}, {m["seconds"]:.0f} s, {how}'
+    if why := voice.why_not_mine(v):
+        return f'Your voice: {m["lang"]}, {m["seconds"]:.0f} s, {why}'
+    how = {'mic-live': 'recorded here', 'import+mic-match': 'from a file'}.get(c.get('how'), '')
+    return f'Your voice: {m["lang"]}, {m["seconds"]:.0f} s, {how}, confirmed at the microphone {when}'
 
 
 def check_models(s: config.Settings, lang: str, say=lambda text: None):
@@ -64,13 +64,15 @@ class _Sig(QObject):
 
 class ConfirmBox(QWidget):
     """Read two phrases at the microphone: my profile `name` is confirmed (its voice.json gets the consent, `confirmed`
-    is emitted) or not, and why. `how`: 'mic-live' (recorded just now) or 'import+mic-match' (a file)."""
+    is emitted) or not, and why. Not while translating (`translating()`: the microphone and a second ASR), not during a
+    pause after failed tries (voice.wait_s). `retire()`: its result, if one still comes, is ignored."""
     confirmed = Signal(dict)
     busy = Signal(bool)  # reading or checking: True, then False
 
-    def __init__(self, s: config.Settings, name: str, how: str, root=None, parent=None):
+    def __init__(self, s: config.Settings, name: str, root=None, parent=None, translating=lambda: False):
         super().__init__(parent)
-        self.s, self.name, self.how, self.root, self.running = s, name, how, root, False
+        self.s, self.name, self.root, self.translating = s, name, root, translating
+        self.running = self.dead = False
         self.lang = voice.load(name, root).meta['lang']
         self.phrases = QLabel()
         self.phrases.setWordWrap(True)
@@ -94,10 +96,24 @@ class ConfirmBox(QWidget):
         self._new_phrases()
 
     def _new_phrases(self) -> None:
+        if self.lang not in voice.LIVE_PHRASES:  # a profile in a language the app has no phrases for (CLI --lang)
+            self.said = []
+            self.phrases.setText(f'No phrases to read in "{self.lang}": this voice cannot be confirmed. Record it again '
+                                 'in the setup wizard, in your language.')
+            self.button.setEnabled(False)
+            return
         self.said = voice.live_phrases(self.lang)
         self.phrases.setText('<br>'.join(f'<b>{p}</b>' for p in self.said))
 
     def start(self) -> None:
+        if not self.said or self.running:
+            return
+        if self.translating():
+            self.out.setText('Turn translation off first: the check records from the microphone.')
+            return
+        if w := voice.wait_s(self.root):
+            self.out.setText(f'Too many tries: wait {max(w / 60, 1):.0f} min before the next one.')
+            return
         self.running = True
         self.busy.emit(True)
         self.button.setEnabled(False)
@@ -112,14 +128,21 @@ class ConfirmBox(QWidget):
             sr = 24_000
             pcm = record(READ_S, self.s.ui.mic or None, sr, self._sig.progress.emit)
             asr, spk = check_models(self.s, self.lang, self._sig.say.emit)
-            consent, why = voice.confirm_live(voice.load(self.name, self.root), pcm, sr, self.said, asr, spk, self.how)
-            if consent:
+            consent, why = voice.confirm_live(voice.load(self.name, self.root), pcm, sr, self.said, asr, spk)
+            if consent:  # only onto the recording it checked (voice.set_consent: ValueError if another one is there)
                 voice.set_consent(self.name, consent, self.root)
             self._sig.done.emit((consent, why))
-        except Exception as e:  # no microphone, no network for the download
-            self._sig.done.emit((None, f'The check did not run: {e}'))
+        except Exception as e:  # no microphone, no network for the download, a new take meanwhile
+            self._sig.done.emit((None, f'The check did not run: {e}.'))
+
+    def retire(self) -> None:
+        self.dead = True
+        self.setParent(None)
+        self.hide()
 
     def _finished(self, r) -> None:
+        if self.dead:  # a new take replaced it: its result is not about the voice shown
+            return
         consent, why = r
         self.running = False
         self.busy.emit(False)
@@ -135,19 +158,19 @@ class ConfirmBox(QWidget):
 
 
 class VoicesDialog(QDialog):
-    """The tray's "Voices…": the list, Delete, Delete all voices of people you talk to, Confirm my voice.
-    `on_change(mine)`: after a delete or a confirmation, `mine` when it was my voice (the tray saves the settings'
-    voice and restarts translation)."""
+    """The tray's "Voices…": the list (damaged folders too), Delete, Delete all voices of people you talk to, Confirm
+    my voice (a box per profile). `on_change(mine)`: after a delete or a confirmation, `mine` when it was my voice (the
+    tray saves the settings' voice and restarts translation)."""
 
-    def __init__(self, s: config.Settings, on_change=lambda mine: None, root=None):
+    def __init__(self, s: config.Settings, on_change=lambda mine: None, root=None, translating=lambda: False):
         super().__init__()
-        self.s, self.on_change, self.root = s, on_change, root
+        self.s, self.on_change, self.root, self.translating = s, on_change, root, translating
         self.setWindowTitle('Peresmeshnik: voices')
         self.list = QListWidget()
         self.delete_button = QPushButton('Delete')
         self.delete_theirs = QPushButton('Delete all voices of people you talk to')
         self.confirm_button = QPushButton('Confirm it is my voice…')
-        self.confirm: ConfirmBox | None = None
+        self.boxes: dict[str, ConfirmBox] = {}
         note = QLabel('Your voice speaks for you in the call once confirmed. The voices of people you talk to are heard '
                       'only by you, in your headphones; a call forgets them unless you keep one. All stay on this '
                       'computer.')
@@ -170,36 +193,58 @@ class VoicesDialog(QDialog):
 
     def refresh(self) -> None:
         self.voices = voice.profiles(self.root)
+        self.broken = voice.damaged(self.root)
         self.list.clear()
         for v in self.voices:
             self.list.addItem(QListWidgetItem(described(v)))
-        if not self.voices:
+        for name in self.broken:
+            self.list.addItem(QListWidgetItem(f'{name}: damaged (no readable voice.json) — delete'))
+        if not self.voices and not self.broken:
             self.list.addItem('No voices yet: record yours in the setup wizard ("Your voice").')
         self._buttons()
 
     def selected(self):
+        """The voice of the selected row, or the damaged folder's name (str), or None."""
         i = self.list.currentRow()
-        return self.voices[i] if 0 <= i < len(self.voices) else None
+        rows = [*self.voices, *self.broken]
+        return rows[i] if 0 <= i < len(rows) else None
 
     def _buttons(self, *_) -> None:
         v = self.selected()
-        self.delete_button.setEnabled(v is not None)
+        name = v if isinstance(v, str) else getattr(v, 'name', None)
+        checking = name in self.boxes and self.boxes[name].running
+        for n, b in self.boxes.items():  # the box of the selected profile only
+            b.setVisible(n == name)
+        self.delete_button.setEnabled(v is not None and not checking)
         self.delete_theirs.setEnabled(any(x.meta['kind'] == 'them' for x in self.voices))
-        self.confirm_button.setEnabled(v is not None and v.meta['kind'] == 'me' and bool(voice.why_not_mine(v.meta)))
+        self.confirm_button.setEnabled(not isinstance(v, (str, type(None))) and v.meta['kind'] == 'me'
+                                       and bool(voice.why_not_mine(v)) and name not in self.boxes)
 
     def _ask(self, text: str) -> bool:
         return QMessageBox.question(self, 'Peresmeshnik', text) == QMessageBox.StandardButton.Yes
 
+    def _forget_box(self, name: str) -> None:
+        if b := self.boxes.pop(name, None):
+            b.retire()
+
     def delete(self) -> None:
         v = self.selected()
+        if isinstance(v, str):  # a damaged folder
+            if self._ask(f'Delete the damaged folder "{v}"?'):
+                voice.discard(v, self.root)
+                self.refresh()
+            return
         if v is None or not self._ask(f'Delete "{v.meta["name"]}"? ' + (
                 'Your cloned voice will need a new recording (setup wizard).' if v.meta['kind'] == 'me' else '')):
             return
-        voice.discard(v.name, self.root)
-        if v.meta['kind'] == 'me' and self.s.local.voice == v.name:
+        mine = v.meta['kind'] == 'me'
+        for n in (v.name, f'{v.name}.new', f'{v.name}.old') if mine else (v.name,):  # a take kept aside goes too
+            voice.discard(n, self.root)
+        self._forget_box(v.name)
+        if mine and self.s.local.voice == v.name:
             self.s.local.voice = ''  # the me side says "record your voice" instead of failing on a missing folder
         self.refresh()
-        self.on_change(v.meta['kind'] == 'me')
+        self.on_change(mine)
 
     def delete_all_theirs(self) -> None:
         theirs = [v for v in self.voices if v.meta['kind'] == 'them']
@@ -211,12 +256,13 @@ class VoicesDialog(QDialog):
 
     def start_confirm(self) -> None:
         v = self.selected()
-        if v is None or self.confirm is not None:
+        if isinstance(v, (str, type(None))) or v.name in self.boxes:
             return
-        self.confirm = ConfirmBox(self.s, v.name, voice.how_to_confirm(v.meta), self.root, self)
-        self.confirm.confirmed.connect(lambda c: (self.refresh(), self.on_change(True)))
-        self.lay.insertWidget(self.lay.count() - 1, self.confirm)
-
+        box = self.boxes[v.name] = ConfirmBox(self.s, v.name, self.root, self, self.translating)
+        box.confirmed.connect(lambda c, n=v.name: (self._forget_box(n), self.refresh(), self.on_change(True)))
+        box.busy.connect(self._buttons)
+        self.lay.insertWidget(self.lay.count() - 1, box)
+        self._buttons()
 
 
 class RememberDialog(QDialog):

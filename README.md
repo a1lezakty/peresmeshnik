@@ -16,9 +16,10 @@ runs from source. Not yet tried in a real call (see below).
 - macOS, Windows and Linux. Local models (CPU, Apple Silicon, optional NVIDIA GPU) or cloud
   (Gemini Live), switchable in settings.
 - Voice cloning of **your own voice only**: a recording (or an imported file) speaks for you once you read two random
-  phrases at the microphone and the app hears those words in the recording's voice. This stops a downloaded recording
-  of someone else from speaking for you in a few clicks; it cannot stop someone who edits the app's files. Tray →
-  **Voices…** lists and deletes the voices. Cloned from a 30–60 s recording, on an NVIDIA GPU with 6 GB or more
+  phrases at the microphone and the app hears those words in the voice of every part of the recording; after three
+  failed tries it waits a while. This stops a downloaded recording of someone else from speaking for you in a few
+  clicks; it cannot stop someone who edits the app's files. A voice recorded in 0.3.0 is confirmed once the same way.
+  Tray → **Voices…** lists and deletes the voices. Cloned from a 30–60 s recording, on an NVIDIA GPU with 6 GB or more
   (Windows, Linux; on Windows also a recent driver, see below). On a Mac and without such a GPU no clone keeps up live:
   a stock voice or the cloud speaks for you.
 - A hotkey switches between translation and your live voice.

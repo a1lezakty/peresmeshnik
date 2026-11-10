@@ -40,7 +40,7 @@ from peresmeshnik import __version__, config
 
 LINES = 200  # of the log in a report
 KEEP = 10  # reports kept
-KEY = re.compile(r'AIza[0-9A-Za-z_\-]{20,}')
+KEY = re.compile(r'AIza[0-9A-Za-z_\-]{20,}|hf_[A-Za-z0-9]{30,}')  # Gemini, Hugging Face (Pocket TTS)
 # a fault file's crash: a signal, or a named Windows exception ("access violation"); faulthandler logs every other SEH
 # code too ("code 0x8001010d", COM's, handled), and a run killed after one would leave a false report
 FATAL = re.compile(r'Fatal Python error|Windows fatal exception: (?!code 0x)')
@@ -168,7 +168,9 @@ class _Handler(logging.handlers.RotatingFileHandler):
 
 def _known_private(settings) -> None:
     if settings is not None:
-        private(settings.ui.mic, settings.ui.headphones, settings.ui.call_app)
+        from peresmeshnik.voice import APP_IDS
+        private(settings.ui.mic, settings.ui.headphones, settings.ui.call_app,  # the voice: a v1 name ("--name Ivan"),
+                *[v for v in [settings.local.voice] if not re.fullmatch(APP_IDS, v.removesuffix('.new'))])  # not 'me'
         try:
             from peresmeshnik.cloud import api_key
             private(api_key(settings.cloud))

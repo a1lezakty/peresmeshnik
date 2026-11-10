@@ -784,10 +784,13 @@ class VoicePage(QWizardPage):
             for x in (self.stock, self.prompt, self.own, self.record_button, self.import_button, self.check_button):
                 x.setVisible(False)
         if self.voice is None and s.local.voice and (voice.voices_dir() / s.local.voice / 'voice.json').exists():
-            self.voice = voice.load(s.local.voice)
-            q = self.voice.meta.get('quality', {})
-            self.out.setText(f'Saved voice "{self.voice.name}": {q.get("seconds", 0):.0f} s, '
-                             f'recorded {self.voice.meta.get("created", "")}.')
+            try:
+                self.voice = voice.load(s.local.voice)
+                q = self.voice.meta.get('quality', {})
+                self.out.setText(f'Saved voice "{self.voice.name}": {q.get("seconds", 0):.0f} s, '
+                                 f'recorded {self.voice.meta.get("created", "")}.')
+            except (OSError, ValueError) as e:  # a damaged voice.json: record again (Voices… deletes the folder)
+                self.out.setText(f'The saved voice cannot be read ({e}): record it again.')
         self._confirm_box()
         self._show_pack()
         self._buttons()
@@ -904,11 +907,12 @@ class VoicePage(QWizardPage):
         return bool(getattr(getattr(getattr(self.w, 'tray', None), 'ctl', None), 'on', False))
 
     def _buttons(self) -> None:
+        busy = self.running or getattr(self.confirm, 'running', False)  # the take is being confirmed: it stays
         for b in (self.record_button, self.import_button):
-            b.setEnabled(not self.running and self.own.isChecked())
+            b.setEnabled(not busy and self.own.isChecked())
         why = ('Turn translation off first: the check loads a second clone (~3 GB)' if self.translating() else
                self.no_check())
-        self.check_button.setEnabled(not self.running and self.voice is not None and not why and self.pack() in ('', 'ready'))
+        self.check_button.setEnabled(not busy and self.voice is not None and not why and self.pack() in ('', 'ready'))
         self.pack_button.setEnabled(not self.running and self.pack_consent.isChecked())
         self.stock.setEnabled(not self.packing)
         self.check_button.setToolTip(why)
@@ -928,6 +932,8 @@ class VoicePage(QWizardPage):
     def record(self) -> None:
         from peresmeshnik import voice
         from peresmeshnik.audio.mic import record
+        if getattr(self.confirm, 'running', False):  # the take is being confirmed (its buttons are off)
+            return
         s, sr = self.w.s, 24_000  # above the 16 kHz pipeline rate: the clone conditions at 22.05 kHz
         self.out.setText('Recording… read the text aloud.')
         self.clone_out.setText('')
@@ -935,10 +941,12 @@ class VoicePage(QWizardPage):
         self.bar.setValue(0)
         self.bar.setVisible(True)
         self._run(lambda: self.result.emit(voice.enroll(record(self.seconds, s.ui.mic or None, sr, self.progress.emit), sr,
-                                                        self.draft, s.my_lang, voice.PROMPTS.get(s.my_lang))))
+                                                        self.draft, s.my_lang, voice.PROMPTS.get(s.my_lang), source='mic')))
 
     def import_file(self, path: str | None = None) -> None:
         from peresmeshnik import voice
+        if getattr(self.confirm, 'running', False):  # the take is being confirmed (its buttons are off)
+            return
         path = path or QFileDialog.getOpenFileName(self, 'Your voice: a recording of 30-60 s', '',
                                                    'Audio (*.wav *.flac *.ogg *.mp3)')[0]
         if path:
@@ -966,12 +974,11 @@ class VoicePage(QWizardPage):
         from peresmeshnik import voice
         from peresmeshnik.ui.voices import ConfirmBox
         if self.confirm is not None:
-            self.confirm.setParent(None)
-            self.confirm.deleteLater()
+            self.confirm.retire()  # a result it may still bring is about the take before
             self.confirm = None
-        if self.voice is None or not voice.why_not_mine(self.voice.meta):
+        if self.voice is None or self.clone_off() or not voice.why_not_mine(self.voice):
             return
-        self.confirm = ConfirmBox(self.w.s, self.voice.name, voice.how_to_confirm(self.voice.meta), parent=self)
+        self.confirm = ConfirmBox(self.w.s, self.voice.name, parent=self, translating=self.translating)
         self.confirm.confirmed.connect(self._confirmed)
         self.confirm.busy.connect(lambda _: self._buttons())  # no Next while it records into the take
         self.layout().addWidget(self.confirm)

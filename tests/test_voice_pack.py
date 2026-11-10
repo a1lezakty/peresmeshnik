@@ -272,7 +272,9 @@ def me_side(monkeypatch, tmp_path, clone_error=None, key=True, meta=None):
     s = config.Settings()
     s.me_to_them, s.local.voice = 'local', 'me'
     monkeypatch.setattr(models, 'path', lambda model_id: tmp_path)
-    meta = {'kind': 'me', 'consent': {'how': 'mic-live'}} if meta is None else meta  # voice.json v2: mine, confirmed
+    (tmp_path / 'reference.wav').write_bytes(b'my recording')
+    sha = __import__('hashlib').sha256(b'my recording').hexdigest()  # voice.json v2: mine, confirmed on this recording
+    meta = {'kind': 'me', 'consent': {'how': 'mic-live', 'ref_sha256': sha}} if meta is None else meta
     monkeypatch.setattr(voice, 'load', lambda name, root=None: Voice(name, 'xtts', tmp_path, meta))
     made = []
 

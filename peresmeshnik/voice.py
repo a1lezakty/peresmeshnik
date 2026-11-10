@@ -226,10 +226,11 @@ def summary(r: Report) -> str:
 
 
 def enroll(pcm: np.ndarray, sr: int, name: str = 'me', lang: str = 'ru', transcript: str | None = None,
-           force: bool = False, root: Path | None = None, consent: dict | None = None) -> tuple[Report, Voice | None]:
-    """Check a recording and save it as the profile `name` if it passes (or `force`): (report, profile or None)."""
+           force: bool = False, root: Path | None = None, source: str = 'file') -> tuple[Report, Voice | None]:
+    """Check a recording and save it as the profile `name` if it passes (or `force`): (report, profile or None).
+    `source`: 'mic' recorded by the app, 'file' imported. Not confirmed as mine yet (confirm_live, set_consent)."""
     r = check(pcm, sr)
-    return r, (save(pcm, sr, name, lang, transcript, root, consent) if r.ok or force else None)
+    return r, (save(pcm, sr, name, lang, transcript, root, source) if r.ok or force else None)
 
 
 # --- after cloning: does the clone speak understandably, in the recorded voice? ---
@@ -345,11 +346,14 @@ def voices_dir() -> Path:
 # id       the folder: 'me' ('me.new' while the wizard holds a new take); a contact 'them-<8 hex>': no name in a path
 # name     shown on the voices screen; never in logs or crash reports
 # kind     'me': may speak into the call (virtual mic) and go to my server; 'them': only ever into my headphones
-# consent  None (not confirmed: it speaks nowhere as me) or {how, at, wer, similarity}; how:
-#            'mic-live'          (me) read random phrases at the microphone, the app's ASR heard them (wer)
-#            'import+mic-match'  (me) a file, matched by a few seconds read live at the microphone (similarity)
+# consent  None (not confirmed: it speaks nowhere as me) or {how, at, wer, similarity, windows, ref_sha256}; how:
+#            'mic-live'          (me) recorded at the microphone, then two random phrases read there: the app's ASR
+#                                heard them (wer), every window of the recording is the reader's voice (similarity: min)
+#            'import+mic-match'  (me) a file, confirmed the same way
 #            'call-saved'        (them) kept from a call by an explicit "remember", the other person agreed
-#          wer / similarity None: not measured (a v1 profile, recorded before the checks)
+#          ref_sha256: the reference.wav that was checked; another file there (a new take, a crash mid-save) is not
+#          confirmed. A v1 profile has none: 0.3.0 checked nothing (FIXES-s3 2)
+# source   (me) 'mic': recorded by the app, 'file': imported (how its confirmation is named)
 # seconds  speech the profile was made from
 # engines  {model id (models.toml, languages.clone_engine): {file, model}}: the voice of a profile without a recording
 #          (kind 'them'): `file` in the folder (np.save of the engine's state or vector), `model` the sha256 of the
@@ -363,34 +367,43 @@ class NotMine(RuntimeError):
     """A profile that may not speak as me (into the call, to my server): a contact's, or mine not confirmed yet."""
 
 
-def why_not_mine(meta: dict) -> str:
+def _sha(path: Path) -> str:
+    import hashlib
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ''
+
+
+def why_not_mine(v: Voice) -> str:
     """'' when the profile is my own voice confirmed at the microphone (M-20), else why not, for the user. The one
     check: the me side (virtual mic) and the server's voice go through `mine()`."""
-    if meta.get('kind', 'me') != 'me':
+    m = v.meta
+    if m.get('kind', 'me') != 'me':
         return 'it is the voice of someone you talk to: it speaks only in your headphones, never into the call'
-    if CONSENT.get((meta.get('consent') or {}).get('how')) != 'me':
-        return 'it is not confirmed as your own voice yet: read a short phrase at the microphone (Voices…)'
+    c = m.get('consent') or {}
+    if CONSENT.get(c.get('how')) != 'me':
+        return 'it is not confirmed as your own voice yet: read two short phrases at the microphone (Voices…)'
+    if not (sha := _sha(Path(v.path) / 'reference.wav')) or c.get('ref_sha256') != sha:
+        return 'its recording changed after it was confirmed: confirm it again (Voices…)'
     return ''
 
 
 def mine(name: str, root: Path | None = None) -> Voice:
     """The profile `name` if it may speak as me, else NotMine (the text names no voice: it may reach a log)."""
     v = load(name, root)
-    if why := why_not_mine(v.meta):
+    if why := why_not_mine(v):
         raise NotMine(f'this voice cannot speak for you: {why}')
     return v
 
 
 def upgrade(meta: dict, folder: str) -> dict:
-    """A v1 voice.json as v2. v1 had only my voice: read from the screen text (the wizard's Record, `--record`) it
-    counts as recorded live (wer not measured); an imported file has no consent until checked at the microphone."""
+    """A v1 voice.json as v2. v1 had only my voice, and nothing checked it (0.3.0's Record put the screen text in
+    `transcript` whatever was heard): not confirmed until read at the microphone once (Voices…)."""
     if meta.get('version', 1) >= VERSION:
         return meta
-    live = how_to_confirm(meta) == 'mic-live'
-    at = meta.get('created', '')
-    return meta | {'version': VERSION, 'id': folder, 'name': meta.get('name', folder), 'kind': 'me',
-                   'consent': {'how': 'mic-live', 'at': at, 'wer': None, 'similarity': None} if live else None,
-                   'seconds': meta.get('quality', {}).get('seconds', 0.0), 'engines': {}}
+    return meta | {'version': VERSION, 'id': folder, 'name': meta.get('name', folder), 'kind': 'me', 'consent': None,
+                   'source': 'file', 'seconds': meta.get('quality', {}).get('seconds', 0.0), 'engines': {}}
 
 
 def _private(*dirs: Path) -> None:
@@ -402,8 +415,11 @@ def _write(path: Path, meta: dict) -> None:
     import os
     import threading
     tmp = path / f'voice.json.{os.getpid()}-{threading.get_ident()}.tmp'  # both sides may upgrade a v1 profile at once
-    tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding='utf-8')
-    os.replace(tmp, path / 'voice.json')
+    try:
+        tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding='utf-8')
+        os.replace(tmp, path / 'voice.json')
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _now() -> str:
@@ -415,32 +431,51 @@ def save_them(name: str, lang: str, seconds: float, states: dict[str, tuple[np.n
     """Keep a contact's voice from a call (an explicit "remember", the other person agreed): the engines' states only,
     no recording of their speech. `states`: {model id: (the engine's state or vector, sha256 of its weights)}."""
     import secrets
+    import shutil
     base = root or voices_dir()
     vid = f'them-{secrets.token_hex(4)}'
-    path = base / vid
-    path.mkdir(parents=True)
-    _private(base, path)
-    engines = {}
-    for model, (state, sha) in states.items():
-        np.save(path / f'{model}.npy', np.asarray(state), allow_pickle=False)
-        engines[model] = {'file': f'{model}.npy', 'model': sha}
-    meta = {'version': VERSION, 'id': vid, 'name': name, 'kind': 'them', 'lang': lang, 'created': _now(),
-            'consent': {'how': 'call-saved', 'at': _now(), 'wer': None, 'similarity': None},
-            'seconds': round(float(seconds), 2), 'engines': engines}
-    _write(path, meta)
-    return Voice(name=vid, engine='reference', path=path, meta=meta)
+    tmp = base / f'{vid}.tmp'  # made whole aside, then renamed: never a folder without its voice.json
+    tmp.mkdir(parents=True)
+    _private(base, tmp)
+    try:
+        engines = {}
+        for model, (state, sha) in states.items():
+            np.save(tmp / f'{model}.npy', np.asarray(state), allow_pickle=False)
+            engines[model] = {'file': f'{model}.npy', 'model': sha}
+        meta = {'version': VERSION, 'id': vid, 'name': name, 'kind': 'them', 'lang': lang, 'created': _now(),
+                'consent': {'how': 'call-saved', 'at': _now(), 'wer': None, 'similarity': None},
+                'seconds': round(float(seconds), 2), 'engines': engines}
+        _write(tmp, meta)
+        tmp.rename(base / vid)
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    return Voice(name=vid, engine='reference', path=base / vid, meta=meta)
+
+
+APP_IDS = r'me|them-[0-9a-f]{8}'  # the app's own folder ids: they name nobody (crash reports keep them)
+ASIDE = ('.new', '.old', '.tmp')  # the wizard's take in progress, its last one, a contact's voice being saved
 
 
 def profiles(root: Path | None = None) -> list[Voice]:
-    """The saved voices: mine and the contacts' (not the wizard's take in progress, `.new` / `.old`)."""
+    """The saved voices: mine and the contacts' (not the folders set aside, ASIDE; not the damaged ones)."""
     out = []
     for p in sorted((root or voices_dir()).glob('*/voice.json')):
-        if not p.parent.name.endswith(('.new', '.old')):
+        if not p.parent.name.endswith(ASIDE):
             try:
                 out.append(load(p.parent.name, root))
-            except (OSError, ValueError):  # a broken voice.json: not listed (deleted with the folder)
+            except (OSError, ValueError, KeyError, AttributeError):  # a broken voice.json: damaged()
                 pass
     return out
+
+
+def damaged(root: Path | None = None) -> list[str]:
+    """Folders in the voices folder that are no voice: no or a broken voice.json (a crash mid-save); the voices
+    window offers to delete them."""
+    ok = {v.name for v in profiles(root)}
+    return sorted(p.name for p in (root or voices_dir()).glob('*') if p.is_dir() and p.name not in ok
+                  and not (p.name.endswith(('.new', '.old')) and (p / 'voice.json').is_file()))
+
 
 def names(root: Path | None = None) -> set[str]:
     """What in the voices folder may name a person, for crash reports to scrub: the names on the voices screen and
@@ -448,12 +483,14 @@ def names(root: Path | None = None) -> set[str]:
     import re
     out = set()
     for p in (root or voices_dir()).glob('*'):
-        out.add(p.name.removesuffix('.new').removesuffix('.old'))
+        out.add(p.name)
         try:
             out.add(json.loads((p / 'voice.json').read_text(encoding='utf-8')).get('name', ''))
         except (OSError, ValueError, AttributeError):
             pass
-    return {n for n in out if n and not re.fullmatch(r'me|them-[0-9a-f]{8}', n)}
+    out = {re.sub(r'\.(new|old|tmp)$', '', n) for n in out if n and isinstance(n, str)}
+    return {n for n in out if not re.fullmatch(APP_IDS, n)}
+
 
 def engine_state(v: Voice, model: str, sha: str) -> np.ndarray | None:
     """The state a profile keeps for the engine `model` with weights `sha`; None: not made with those weights."""
@@ -530,6 +567,10 @@ SPEAKER = 'wespeaker-resnet34'  # registry id: the speaker vector ("the same voi
 # in every condition (17 423 pairs, p99 0.43); the same person is refused 2.8 % clean, 6-8 % with a laptop mic at
 # SNR 20 dB, 14-20 % at 10 dB, 21 % against a phone-band file: a refusal asks for a quieter place, a try again helps
 MATCH = 0.45
+# the recording is checked window by window, each against the live reading (min): 30 s of someone else then 30 s of
+# me must not pass as me, and the clone takes the recording's start (XTTS its first 30 s, Pocket its first 10 s)
+WIN_S = 8.0
+TRIES, PAUSES_S = 3, (60, 300, 1500, 3600)  # failed checks in a row before a pause; the pauses after them, growing
 
 
 def live_phrases(lang: str, n: int = 2) -> list[str]:
@@ -542,6 +583,39 @@ def _to(pcm: np.ndarray, sr: int, to: int) -> np.ndarray:
     x = np.asarray(pcm, np.float32)
     x = x.mean(axis=1) if x.ndim > 1 else x
     return x if sr == to else np.interp(np.arange(0, len(x), sr / to), np.arange(len(x)), x).astype(np.float32)
+
+
+def _windows(x: np.ndarray, sr: int) -> list[np.ndarray]:
+    """WIN_S pieces of `x`; a last one shorter than half of it joins the one before."""
+    n = int(WIN_S * sr)
+    w = [x[i:i + n] for i in range(0, len(x), n)] or [x]
+    if len(w) > 1 and len(w[-1]) < n // 2:
+        w[-2:] = [np.concatenate(w[-2:])]
+    return w
+
+
+def _checks(voices: Path) -> Path:
+    return voices.parent / 'voice-checks.json'  # beside the voices: a new or deleted profile does not reset it
+
+
+def wait_s(root: Path | None = None) -> float:
+    """Seconds before the next live check may run (0: now): after TRIES failures in a row, a growing pause
+    (the threshold holds for one try: another person's best of many tries passes more often, BENCH)."""
+    try:
+        c = json.loads(_checks(root or voices_dir()).read_text(encoding='utf-8'))
+        return max(0.0, float(c['until']) - time.time())
+    except (OSError, ValueError, KeyError, TypeError):
+        return 0.0
+
+
+def _tried(ok: bool, voices: Path) -> None:
+    f = _checks(voices)
+    try:
+        fails = 0 if ok else int(json.loads(f.read_text(encoding='utf-8')).get('fails', 0)) + 1
+    except (OSError, ValueError, AttributeError):
+        fails = 0 if ok else 1
+    pause = PAUSES_S[min(fails - TRIES, len(PAUSES_S) - 1)] if fails >= TRIES else 0
+    f.write_text(json.dumps({'fails': fails, 'until': time.time() + pause}), encoding='utf-8')
 
 
 def _speech(pcm: np.ndarray, sr: int) -> np.ndarray:
@@ -576,45 +650,55 @@ class Speaker:
         return e / (np.linalg.norm(e) + 1e-12)
 
 
-def confirm_live(ref: Voice, pcm: np.ndarray, sr: int, said: list[str], asr, speaker: Speaker,
-                 how: str = 'mic-live') -> tuple[dict | None, str]:
+def confirm_live(ref: Voice, pcm: np.ndarray, sr: int, said: list[str], asr, speaker: Speaker) -> tuple[dict | None, str]:
     """The live reading `pcm` of the shown `said` against my profile `ref`: (consent for voice.json, '') when the
-    app's ASR (local/asr.OnnxAsr of the profile's language) heard the words and the voice is the recording's; else
-    (None, why, for the user). `how`: 'mic-live' (recorded just now) or 'import+mic-match' (a file)."""
+    app's ASR (local/asr.OnnxAsr of the profile's language) heard the words and every window of the recording is the
+    reader's voice; else (None, why, for the user). The consent names the recording it checked (ref_sha256): set_consent
+    writes it only onto that one. After TRIES failures in a row it waits (wait_s)."""
+    import io
+
+    import soundfile as sf
+
     from peresmeshnik.engines import SAMPLE_RATE
+    if w := wait_s(ref.path.parent):
+        return None, f'Too many tries: wait {w / 60:.0f} min before the next one.'
+    data = (ref.path / 'reference.wav').read_bytes()  # the bytes checked are the bytes the hash names
+    x, rsr = sf.read(io.BytesIO(data), dtype='float32', always_2d=True)
     heard = asr.recognize(_to(pcm, sr, SAMPLE_RATE), lang=ref.meta.get('lang')).text
     err = wer(' '.join(said), heard)
-    sim = float(speaker.embed(*read_audio(ref.path / 'reference.wav')) @ speaker.embed(_speech(pcm, sr), sr))
+    live = speaker.embed(_speech(pcm, sr), sr)
+    sims = [float(speaker.embed(w, rsr) @ live) for w in _windows(_speech(x.mean(axis=1), rsr), rsr)]
+    sim = min(sims)
     why = ([f'the words heard are not the ones on the screen ({err:.0%} differ): read them as written'] if err > LIVE_WER
            else []) + ([f'this is not the voice of the recording (similarity {sim:.2f})'] if sim < MATCH else [])
     if sim < MATCH and (r := check(pcm, sr)).speech_s and r.snr_db < FAIR_DB:  # the same person: refused 3x as often
         why.append(f'the background is loud (your speech only {r.snr_db:.0f} dB above it): try again somewhere quiet')
     if sim < MATCH and ref.meta.get('quality', {}).get('band_db', 0.0) < BAND_DB:
         why.append('the recording sounds like a phone call: one from a better microphone matches more reliably')
+    _tried(not why, ref.path.parent)
     if why:
         return None, 'Not confirmed: ' + '; '.join(why) + '.'
-    return {'how': how, 'at': _now(), 'wer': round(err, 3), 'similarity': round(sim, 3)}, ''
-
-
-def how_to_confirm(meta: dict) -> str:
-    """My profile's consent once confirmed: read from the screen text at the microphone (the wizard's Record,
-    `--record`): 'mic-live'; else a file: 'import+mic-match'."""
-    return 'mic-live' if meta.get('transcript') and meta['transcript'] == PROMPTS.get(meta.get('lang', '')) \
-        else 'import+mic-match'
+    import hashlib
+    how = 'mic-live' if ref.meta.get('source') == 'mic' else 'import+mic-match'
+    return {'how': how, 'at': _now(), 'wer': round(err, 3), 'similarity': round(sim, 3), 'windows': len(sims),
+            'ref_sha256': hashlib.sha256(data).hexdigest()}, ''
 
 def set_consent(name: str, consent: dict | None, root: Path | None = None) -> Voice:
-    """Write how my profile `name` was confirmed (confirm_live) into its voice.json."""
+    """Write how my profile `name` was confirmed (confirm_live) into its voice.json: only onto the recording that
+    was checked (a new take or import meanwhile: ValueError, nothing written)."""
     v = load(name, root)
     if consent and CONSENT.get(consent.get('how')) != v.meta['kind']:
         raise ValueError(f'{consent.get("how")!r} does not confirm a {v.meta["kind"]!r} voice')
+    if consent and consent.get('ref_sha256') != _sha(v.path / 'reference.wav'):
+        raise ValueError('the recording changed while it was checked: confirm it again')
     _write(v.path, v.meta | {'consent': consent})
     return load(name, root)
 
 
 def save(pcm: np.ndarray, sr: int, name: str, lang: str, transcript: str | None = None,
-         root: Path | None = None, consent: dict | None = None) -> Voice:
-    """Write my voice `<root>/<name>/reference.wav` + `voice.json` (v2, kind 'me'; `consent`: how it was confirmed,
-    None = not yet); returns the profile (engine 'reference')."""
+         root: Path | None = None, source: str = 'file') -> Voice:
+    """Write my voice `<root>/<name>/reference.wav` + `voice.json` (v2, kind 'me', not confirmed: confirm_live);
+    returns the profile (engine 'reference')."""
     import soundfile as sf
     x = np.asarray(pcm, dtype=np.float32)
     x = (x.mean(axis=1) if x.ndim > 1 else x)[:int(MAX_S * sr)]
@@ -629,7 +713,7 @@ def save(pcm: np.ndarray, sr: int, name: str, lang: str, transcript: str | None 
         old.unlink()
     sf.write(path / 'reference.wav', np.clip(x * gain, -1, 1), sr, subtype='PCM_16')
     meta = {'version': VERSION, 'id': name, 'name': name, 'kind': 'me', 'lang': lang, 'created': _now(),
-            'consent': consent, 'seconds': report.seconds, 'engines': {},
+            'consent': None, 'source': source, 'seconds': report.seconds, 'engines': {},
             'transcript': transcript or '', 'sample_rate': sr, 'gain_db': round(20 * np.log10(gain), 1),
             'quality': {k: v for k, v in asdict(report).items() if k not in ('errors', 'warnings')}}
     _write(path, meta)
@@ -736,7 +820,7 @@ def main(argv=None) -> int:
         sr = 24_000  # above the 16 kHz pipeline rate: the clone engine uses 22.05 kHz
         device = int(a.device) if a.device and a.device.isdigit() else a.device
         pcm = record(a.record, device=device, sample_rate=sr)
-    r, v = enroll(pcm, sr, a.name, a.lang, transcript, a.force, a.voices)
+    r, v = enroll(pcm, sr, a.name, a.lang, transcript, a.force, a.voices, 'file' if a.file else 'mic')
     _print_report(r)
     if v is None:
         print('Not saved (keep it anyway with --force).')

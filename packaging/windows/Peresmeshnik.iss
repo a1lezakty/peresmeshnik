@@ -156,8 +156,8 @@ begin
     Pack := Dir + '\voice-pack';
     if FindFirst(Pack + '*', F) then begin  { voice-pack itself or voice-pack.<leftover> }
       FindClose(F);
-      if MsgBox('Remove the voice pack and its downloads too (up to 12 GB, ' + Pack + ')? Your voices and models stay '
-                + 'either way.', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then begin
+      if MsgBox('Remove the voice pack and its downloads too (up to 12 GB, ' + Pack + ')? Models stay either way; your '
+                + 'voices are asked about next.', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then begin
         DelTree(Pack, True, True, True);
         DelTree(Pack + '.*', False, True, True);  { the leftovers above: a wildcard, files and folders }
       end;

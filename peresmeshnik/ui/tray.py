@@ -468,7 +468,7 @@ class Tray(QObject):
                 saved.local.voice = s.local.voice
                 config.save(saved)
                 self.restart()
-        self._show(VoicesDialog(s, changed))
+        self._show(VoicesDialog(s, changed, translating=lambda: bool(getattr(self.ctl, 'on', False))))
 
     def remember_voice(self) -> None:
         """Keep the voice of the person in this call (S2: Controller.them_voice() -> ({model id: (state, sha256 of the
@@ -607,9 +607,9 @@ class SettingsDialog(QDialog):
         self.voice = QComboBox()
         self.voice.addItem('none', '')
         from peresmeshnik import voice
-        for p in sorted(voice.voices_dir().glob('*/voice.json')):
-            if p.parent.suffix not in ('.new', '.old'):  # the wizard's draft of a new take, left by a crash
-                self.voice.addItem(p.parent.name, p.parent.name)
+        for v in voice.profiles():  # mine only: a contact's voice never speaks as me (the me side refuses it anyway)
+            if v.meta['kind'] == 'me':
+                self.voice.addItem(v.meta['name'], v.name)
         self.voice.setCurrentIndex(max(0, self.voice.findData(s.local.voice)))
         f.addRow('My voice (local clone)', self.voice)
         self.hotkey = QKeySequenceEdit(QKeySequence(s.ui.hotkey))

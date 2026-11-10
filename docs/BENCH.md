@@ -2432,3 +2432,91 @@ v02, female). "Voice" is from a clause's end to its translated voice starting.
 dev sentences in FLEURS v02's voice (English, female), Whisper small: WER 15.4 % with the marks, 17.8 % without (the
 same sentences, numbers and Latin as words in both). The marks are what the model was trained on; the accent they
 remove is for the ears (USER-CHECKS), not for this judge.
+
+## Stage 8: remote — the app's client and server (RC + RS)
+
+The app's own client (`RemoteDirection` behind the side's `Fallback`, `bench/fallback.py --remote`) on a laptop-sized
+VM with no models, against `peresmeshnik serve` on a rented box, through `ssh -tt -L` (the README's way for a server
+outside the home network). The recordings are `tests/data/call-en.ogg` (them → me, en → ru) and `call-ru.ogg`
+(me → them, ru → en), sent in real time.
+
+- **C** (GPU): the server held to 4 cores (`taskset`); them → me ASR on the CPU (onnxruntime), MT on an RTX A4000
+  (CTranslate2 CUDA); me → them the clone, XTTS-v2 on the same GPU in its own venv (torch + coqui-tts, as the voice
+  pack) — the Docker image's split. The voice profile going up is a FLEURS speaker (ru, CC-BY), confirmed as a live one would be.
+- **A** (CPU only): 4 cores of a 12-core box (`taskset`, its GPU unused), every engine on the CPU, models fetched by
+  `serve --fetch en-ru`; me → them with the stock voice (no clone without a GPU and the voice pack).
+
+Each row is 3 runs of `bench/fallback.py --remote PAIRING --fault none` (30 s recordings), served by `serve` at the
+branch's head; latencies are the overlay's (the server's measure from the clause end + the client's ping RTT),
+"first voice" is by the client's clock from the call's first audio sent. The RTT to C through the tunnel was
+0.30–0.33 s, to A 0.11–0.12 s (rented boxes, not a home network: USER-CHECKS «Сервер» asks for that one).
+
+| server | side | ready: cold / warm, s | subtitle p50 / max, s | voice p50 / max, s | first voice, s | clauses dropped by the queue |
+|---|---|---|---|---|---|---|
+| C (GPU) | them → me, en → ru, stock voice | 6.1 / 1.6–1.9 | 0.88–1.57 / 3.96 | 1.75–2.02 / 3.38 | 6.4–6.7 | 2–3 of 7 a run (13 of 43) |
+| C (GPU) | me → them, ru → en, clone (XTTS-v2) | 15.9–16.5 / 1.7–1.8 | 0.74–1.05 / 2.25 | 2.19–2.84 / 4.39 | 7.1–7.5 | 0 of 42 |
+| A (CPU, 4 cores) | them → me, en → ru, stock voice | 11.4 / 0.5–0.6 | 1.58–2.11 / 2.80 | 2.41–2.71 / 3.06 | 7.4–7.6 | 2 of 7 a run (6 of 21) |
+| A (CPU, 4 cores) | me → them, ru → en, stock voice (no clone without a GPU) | 6.8 / 0.5–0.6 | 0.92–1.03 / 2.40 | 3.07–3.14 / 5.42 | 7.8–8.4 | 0 of 21 |
+
+- **The dropped clauses are the pipeline's queue policy, not the network**: them → me drops a clause's voice that
+  would start more than `MAX_LAG_S` (4 s) after its end (`_play_end`, the same at home); `call-en` is 30 s of read
+  speech without pauses and the Russian is longer than the English. Locally a 30 s read monologue like this lost
+  half of its clauses on a 3-core runner, and continuous FLEURS read speech 11–13 % of its English clauses on the
+  7950X3D of stage 2 (tables above). Their subtitles all came.
+- **"The server stopped speaking" (no voice 6 s after a final subtitle) went off falsely** on 1 of the first 3 runs:
+  the client was not told that a clause's voice was dropped. Since the pipeline sends `Latency(clause, 'dropped')`
+  (this branch) and the client takes it as the clause's answer: 0 false alarms in the 39 runs after it (22 on C, 17 on A).
+  The longest voice after a final subtitle was 4.12 s on C and 4.68 s on A, against `slow_s` 6.
+- Cold start is the models loading on the server: them → me 6.1 s on C, 11.4 s on A (its CPU), me → them 16 s with
+  the clone (XTTS on the GPU), 6.8 s with the stock voice on A; a side that comes back within 10 minutes finds its
+  engines warm: 0.5–0.6 s on A, 1.6–1.9 s on C (the TLS handshake and `hello` over the longer RTT).
+- me → them has no queue policy (the other side has no subtitles to read instead), so its voice lag can grow past
+  4 s on the CPU box (5.42 s on A) where them → me would drop the clause.
+- The voice by the client's own clock (the start of sound after a pause, a rough method) came earlier than the
+  overlay's number (them → me p50 0.95–1.30 s on C, 1.31–1.69 s on A): the overlay does not show it better than it is.
+- Voice p50 here is 1.8–2.8 s against 0.78 s in remote-0 (C, A4000): remote-0 measured the first sound of a clause
+  without the playback queue, Piper in both directions; here it is the overlay's voice lag (the queue
+  included, me → them with the clone) plus the 0.3 s RTT.
+
+### Faults on the real network (RC)
+
+`--fault` on the tunnel's process 8 s into the call (them → me), 3 runs each; the client has no local models, so a
+failed side passes the call as it is (`mode` down) until the server answers again. "Decided" = the fault → the tray
+message; "back" = the network (or the server) up again → the side on the server without the user.
+
+| server | fault | decided, s | back after it is up, s | from the fault, s |
+|---|---|---|---|---|
+| C | drop: the tunnel killed (a reset) | 0.0, 0.0, 0.0 | — | — |
+| C | stall: the tunnel stopped (SIGSTOP, the network gone without a reset) | 5.60, 5.79, 5.84 | — | — |
+| C | back: stopped, going on 8 s later (SIGCONT) | 5.39–5.84 | 3.65, 4.03, 4.16 | 11.65–12.16 |
+| C | the server restarted mid-call (stopped with SIGTERM and started again: cold models) | 4.5 | — | 15.1 from the command |
+| A | drop | 0.0, 0.0, 0.0 | — | — |
+| A | stall | 5.70, 5.78, 5.87 | — | — |
+| A | back | 5.85–5.97 | 3.33, 3.42, 3.42 | 11.33–11.42 |
+| A | the server restarted mid-call | 1.63 | — | 17.6 from the command |
+| A | `serve --revoke` mid-call (the app's client) | 5.54 from the command's start (~1.6 s of it ssh) | — (permanent: no new tries) | — |
+
+- A stall is noticed in 5.6–5.9 s: 3 s with no pong (`PONG_S`), then one new connection that times out in its
+  handshake (2 s). A reset is noticed at once.
+- Back after the network returns in 3.3–4.2 s, by the side's own probe (the cut clause is sent again: the CI tests
+  check it is heard whole).
+- A restarted server: the side decides in 1.6 s (A) and 4.5 s (C) and is back 15–18 s after the command, most of it
+  the server's cold start (its models load again).
+- Revoked: one error ("pair it again" in the tray), the side passes the call as it is, and the server's log shows no
+  new connection from it until the end of the run.
+
+### Revoke during a live session, the server's side (RS)
+
+`peresmeshnik serve --revoke <name>` from a second ssh session while the side is translating (A, them → me, the
+revoke at 8, 9.7 and 11.4 s into the call so it falls at different points of the server's 5 s watch of
+`paired.json`):
+
+| run | revoke command (ssh + Python start) | 'auth' error on the client after it returned | closed (1000) | the old token again |
+|---|---|---|---|---|
+| 1 | 1.65 s | 0.42 s | 0.52 s | refused 'auth' at hello, 0.51 s |
+| 2 | 1.64 s | 3.94 s | 4.04 s | refused 'auth', 0.50 s |
+| 3 | 1.64 s | 2.27 s | 2.36 s | refused 'auth', 0.51 s |
+
+The cut comes within `REVOKE_S` (5 s) as designed: the server reads the paired devices every 5 s, so the wait is
+anywhere from 0 to 5 s plus one round trip. The client takes 'auth' as permanent (`protocol.PERMANENT`): it does not
+try again until paired anew.

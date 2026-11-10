@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import collections
 import contextlib
-import importlib.util
 import inspect
 import logging
 import queue
@@ -488,12 +487,16 @@ def _direction(name: str, s):
     return languages.direction(s, 'them_to_me' if name == 'them' else 'me_to_them')
 
 
-def _clone_not_ready(s, lang: str) -> str:
-    """Why the clone `languages.direction` chose cannot speak `lang` now ('' = it can): here at all (the app's one
-    answer, `languages.clone_why`: the language, the GPU), then enrolled, its voice pack, its model."""
+def _clone_not_ready(s, lang: str, engine: str = '') -> str:
+    """Why the clone engine `languages.direction` chose (`engine`; '': the one `languages.clone_engine` picks here for
+    `lang`) cannot speak `lang` now ('' = it can): here at all (the app's one answer, `languages.clone_why`: the language,
+    the GPU), then enrolled, my own confirmed voice, its voice pack (an NVIDIA engine's) or token, its model."""
     from peresmeshnik import languages, models
-    clone_why = getattr(languages, 'clone_why', None)  # stream B's (stage 7), merged after A: till then `direction`'s
-    if clone_why and (why := clone_why(s.local.clone, lang)):
+    if not engine:
+        engine, why = languages.clone_engine(lang)
+        if why:
+            return why
+    if why := languages.clone_why(engine, lang):
         return why
     if not s.local.voice:
         return 'no voice enrolled (setup wizard, "Your voice")'
@@ -501,11 +504,10 @@ def _clone_not_ready(s, lang: str) -> str:
     with contextlib.suppress(OSError, ValueError):  # missing or broken: said where it is loaded, as before
         if why := voice.why_not_mine(voice.load(s.local.voice)):  # M-20: a contact's voice never speaks as me
             return why
-    from peresmeshnik.local.clone import voice_cmd
-    if voice_cmd() is None and importlib.util.find_spec('torch') is None:  # the pack's runner, or torch here
-        return 'the voice pack is not installed (setup wizard, "Your voice")'
+    if why := languages.not_here(engine):  # an NVIDIA engine's voice pack, a gated model's token
+        return why
     try:
-        models.path(s.local.clone)
+        models.path(engine)
     except models.ModelMissing as e:
         return str(e)
     return ''
@@ -518,7 +520,7 @@ def local_voice(name: str, s) -> tuple[str, str]:
     d = _direction(name, s)
     if not d.local:
         return '', '; '.join(d.why)
-    why = _clone_not_ready(s, d.tgt) if d.voice == 'clone' else ''
+    why = _clone_not_ready(s, d.tgt, d.tts) if d.voice == 'clone' else ''
     if d.voice == 'clone' and not why:
         return d.tts, ''
     i = d.tts if d.voice == 'stock' else languages.pick(s.local.tts, d.tgt)
@@ -535,7 +537,13 @@ def stock(name: str, s) -> bool:
     """The side falls back to a stock (Piper) voice: them -> me always, me -> them when the settings say so (voice.STOCK:
     an 8 GB Mac), the clone cannot speak the language here (languages.direction) or is not ready (H-09)."""
     i = local_voice(name, s)[0]
-    return bool(i) and i != s.local.clone
+    return bool(i) and not _is_clone(i)
+
+
+def _is_clone(model_id: str) -> bool:
+    """A clone engine (languages.clone_engine's), not a stock voice."""
+    from peresmeshnik import models
+    return models.get(model_id).role == 'clone'
 
 
 def voice_why(name: str, s) -> str:
@@ -575,9 +583,9 @@ def make(name: str, s, key: str, on_state=lambda text: None, on_respawn=lambda e
     d = _direction(name, s)
     src, tgt = d.src, d.tgt
     tts_id, why = local_voice(name, s)
-    voice, piper = None, bool(tts_id) and tts_id != s.local.clone
-    note = _clone_not_ready(s, tgt) if piper and d.voice == 'clone' else ''  # a stock voice instead of the clone: why
-    if tts_id == s.local.clone:
+    voice, piper = None, bool(tts_id) and not _is_clone(tts_id)
+    note = _clone_not_ready(s, tgt, d.tts) if piper and d.voice == 'clone' else ''  # a stock voice instead of the clone: why
+    if tts_id and not piper:
         from peresmeshnik import voice as profiles
         try:
             voice = profiles.load(s.local.voice)
@@ -592,8 +600,8 @@ def make(name: str, s, key: str, on_state=lambda text: None, on_respawn=lambda e
             from peresmeshnik.local.tts import PiperTts
             return crash.Respawn(lambda: PiperTts(tts_id, threads=s.local.threads), on_respawn)
         from peresmeshnik import models
-        from peresmeshnik.local.clone import make_clone  # the voice pack's runner, or XTTS in this process
-        return make_clone(models.path(s.local.clone), threads=s.local.threads)
+        from peresmeshnik.local.clone import make_engine  # Pocket TTS here, or the voice pack's runner
+        return make_engine(tts_id, models.path(tts_id), threads=s.local.threads)
 
     def local(t):  # no local path for this pair (models.toml langs): the reason, not a KeyError
         if not d.subtitles:

@@ -1,5 +1,6 @@
 """Registry pins, download with resume and SHA-256 check, license screen, settings round trip."""
 import hashlib
+import os
 
 import pytest
 
@@ -278,3 +279,66 @@ def test_a_missing_model_points_to_the_wizard(tmp_path):
 
     from peresmeshnik import app
     assert 'python -m peresmeshnik' not in inspect.getsource(app.Side._local)
+
+
+def test_a_gated_model_sends_the_token_to_hugging_face_only(tmp_path, monkeypatch):
+    """`token = "hf"` (Kyutai's Pocket TTS): without a token, or one whose account has not accepted the conditions, the
+    download stops at once with the model card to open (models.Gated, not retried); with it the file comes, and the
+    token goes to the hub only, never along the redirect to the CDN."""
+    import http.server
+    import threading
+    blob, seen = b'weights' * 1000, []
+
+    class Cdn(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(('cdn', self.headers.get('Authorization')))
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(blob)))
+            self.end_headers()
+            self.wfile.write(blob)
+
+        def log_message(self, *a):
+            pass
+
+    class Hub(Cdn):
+        def do_GET(self):
+            auth = self.headers.get('Authorization')
+            seen.append(('hub', auth))
+            self.send_response(302 if auth == 'Bearer tok' else 403)
+            self.send_header('Location', f'http://localhost:{cdn.server_port}/signed')  # another host, as HF's CDN
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+    cdn, hub = (http.server.ThreadingHTTPServer(('127.0.0.1', 0), h) for h in (Cdn, Hub))
+    for s in (cdn, hub):
+        threading.Thread(target=s.serve_forever, daemon=True).start()
+    m = models.Model('gated', 'clone', ('en',), 'CC-BY-4.0', 'https://huggingface.co/kyutai/pocket-tts',
+                     f'http://127.0.0.1:{hub.server_port}/', {'model.safetensors': {
+                         'sha256': hashlib.sha256(blob).hexdigest(), 'size': len(blob)}}, token='hf')
+    monkeypatch.setattr(models, 'registry', lambda: {'gated': m})
+    monkeypatch.setattr(models, 'RETRY_PAUSE_S', 0.0)
+    monkeypatch.setattr(config, 'config_dir', lambda: tmp_path / 'config')
+    monkeypatch.delenv('HF_TOKEN', raising=False)
+    try:
+        with pytest.raises(models.Gated) as e:
+            models.fetch('gated', tmp_path / 'cache')
+        assert e.value.page == m.license_url and not seen  # no token: nothing asked
+        models.save_hf_token('wrong')
+        with pytest.raises(models.Gated, match='403') as e:
+            models.fetch('gated', tmp_path / 'cache')
+        assert seen == [('hub', 'Bearer wrong')] and 'account of your token' in str(e.value)  # refused: not retried
+        monkeypatch.setenv('HF_TOKEN', 'env-wrong')  # $HF_TOKEN comes before the file (FIXES 8): the message says so
+        with pytest.raises(models.Gated, match='the HF_TOKEN environment variable'):
+            models.fetch('gated', tmp_path / 'cache')
+        assert seen[-1] == ('hub', 'Bearer env-wrong')
+        monkeypatch.delenv('HF_TOKEN')
+        del seen[1:]
+        models.save_hf_token('tok')
+        if os.name == 'posix':
+            assert models.hf_token_file().stat().st_mode & 0o777 == 0o600
+        assert (models.fetch('gated', tmp_path / 'cache') / 'model.safetensors').read_bytes() == blob
+        assert seen[1:] == [('hub', 'Bearer tok'), ('cdn', None)]
+        models.save_hf_token('')
+        assert models.hf_token() == ''
+    finally:
+        for s in (cdn, hub):
+            s.shutdown()

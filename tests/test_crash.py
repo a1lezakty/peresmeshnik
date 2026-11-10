@@ -447,3 +447,14 @@ def test_a_generic_host_name_is_not_scrubbed(app, monkeypatch):
         monkeypatch.setattr(platform, 'node', lambda host=host: host)
         crash.install(app)
         assert (crash.scrub(f'lib/x86_64-{host}-gnu/libc.so') == f'lib/x86_64-{host}-gnu/libc.so') is kept, host
+
+
+def test_the_report_names_the_clone_engine_chosen_here(monkeypatch, tmp_path):
+    """FIXES 6: the report's me -> them voice is languages.direction's (Pocket TTS on a CPU), not the settings' xtts-v2."""
+    from peresmeshnik import languages, models
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
+    monkeypatch.setattr(models, 'hf_token', lambda: 'hf_test')
+    monkeypatch.setenv('PERESMESHNIK_MODELS', str(tmp_path))
+    s = config.Settings(me_to_them='local')
+    line = next(x for x in crash.about(s).splitlines() if x.startswith('me -> them'))
+    assert 'pocket-tts-en (not downloaded), voice none' in line and 'xtts' not in line

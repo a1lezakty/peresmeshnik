@@ -23,14 +23,17 @@ def test_fourteen_languages_with_names_and_cloud_codes():
     assert set(languages.WRITING) == set(languages.LANGS)
 
 
-def test_ru_en_is_local_both_ways():
+def test_ru_en_is_local_both_ways(monkeypatch):
+    monkeypatch.setattr(models, 'hf_token', lambda: 'hf_test')  # Kyutai's gated weights: the user gave a token
+    monkeypatch.setattr(languages, 'pack_here', lambda: True)  # and the voice pack (or torch) for an NVIDIA engine
     s = config.Settings()
     them, me = (languages.direction(s, side, has_gpu=True) for side in languages.SIDES)
     assert (them.src, them.tgt, me.src, me.tgt) == ('en', 'ru', 'ru', 'en')
     assert them.local and me.local and them.subtitles
     assert them.models == (s.local.asr['en'], s.local.mt['en-ru'], s.local.tts['ru'])
-    assert (me.tts, me.voice, me.notes) == (s.local.clone, 'clone', ())
-    assert languages.direction(s, 'me_to_them', has_gpu=False).notes  # no clone without an NVIDIA GPU: a stock voice
+    assert (me.tts, me.voice, me.notes) == ('xtts-v2', 'clone', ())  # an NVIDIA GPU: its clone engine
+    me = languages.direction(s, 'me_to_them', has_gpu=False)  # none: Pocket TTS on the CPU (stage 8)
+    assert (me.tts, me.voice, me.notes) == ('pocket-tts-en', 'clone', ())
     s.local.clone = 'piper'
     me = languages.direction(s, 'me_to_them', has_gpu=False)
     assert (me.tts, me.voice, me.notes) == (s.local.tts['en'], 'stock', ())
@@ -48,19 +51,24 @@ def test_a_pair_without_local_models_says_why_and_goes_to_the_cloud():
     assert languages.needed_models(s) == ['silero-vad']
 
 
+def no_clones(monkeypatch, *extra: models.Model) -> None:
+    """fake_registry without the real clone engines: `extra` the only ones."""
+    reg = {**{k: m for k, m in models.registry().items() if m.role != 'clone'}, **{m.id: m for m in extra}}
+    monkeypatch.setattr(models, 'registry', lambda: reg)
+
+
 def test_a_pair_on_stand_in_models_needs_only_its_own(monkeypatch):
-    fake_registry(monkeypatch, stub('asr-de', 'asr', 'de'), stub('asr-ja', 'asr', 'ja'), stub('mt-many', 'mt', 'de', 'ja'),
-                  stub('tts-de', 'tts', 'de'), stub('tts-ja', 'tts', 'ja'), stub('clone-ja', 'clone', 'ja'),
-                  stub('clone-de', 'clone', 'de'))
+    stand_ins = (stub('asr-de', 'asr', 'de'), stub('asr-ja', 'asr', 'ja'), stub('mt-many', 'mt', 'de', 'ja'),
+                 stub('tts-de', 'tts', 'de'), stub('tts-ja', 'tts', 'ja'))
+    no_clones(monkeypatch, *stand_ins, stub('clone-ja', 'clone', 'ja'), stub('clone-de', 'clone', 'de'))
     s = config.Settings(my_lang='de', their_lang='ja', them_to_me='local', me_to_them='local')
     s.local.asr.update(de='asr-de', ja='asr-ja')
     s.local.mt.update({'de-ja': 'mt-many', 'ja-de': 'mt-many'})  # a multilingual model: both languages in its langs
     s.local.tts.update(de='tts-de', ja='tts-ja')
-    s.local.clone = 'clone-ja'
     assert all(languages.direction(s, side, has_gpu=True).local for side in languages.SIDES)
     assert languages.needed_models(s) == ['silero-vad', 'asr-ja', 'mt-many', 'tts-de', 'asr-de', 'clone-ja',
                                           'tts-ja']  # the stock voice: the clone's fallback (S2)
-    s.local.clone = 'clone-de'  # a clone without Japanese: the stock voice, said so
+    no_clones(monkeypatch, *stand_ins, stub('clone-de', 'clone', 'de'))  # no clone engine has Japanese: the stock voice
     me = languages.direction(s, 'me_to_them', has_gpu=True)
     assert me.local and me.voice == 'stock' and me.tts == 'tts-ja' and 'cannot speak Japanese' in me.notes[0]
 
@@ -131,12 +139,11 @@ def test_a_model_that_needs_a_gpu_is_not_offered_without_one(monkeypatch):
     import tomllib
     row = tomllib.loads('role = "asr"\nlangs = ["ja"]\nlicense = "MIT"\nlicense_url = "u"\nurl = "u"\nneeds = "gpu"\n[files]\n')
     assert models.Model(id='asr-ja', langs=tuple(row.pop('langs')), **row).needs == 'gpu'  # as registry() reads a row
-    fake_registry(monkeypatch, stub('asr-ja', 'asr', 'ja', needs='gpu'), stub('asr-de', 'asr', 'de'),
-                  stub('mt-many', 'mt', 'de', 'ja'), stub('tts-de', 'tts', 'de'), stub('tts-ja', 'tts', 'ja'),
-                  stub('clone-big', 'clone', 'de', 'ja', needs='gpu'))
+    no_clones(monkeypatch, stub('asr-ja', 'asr', 'ja', needs='gpu'), stub('asr-de', 'asr', 'de'),
+              stub('mt-many', 'mt', 'de', 'ja'), stub('tts-de', 'tts', 'de'), stub('tts-ja', 'tts', 'ja'),
+              stub('clone-big', 'clone', 'de', 'ja', needs='gpu'))
     s = config.Settings(my_lang='de', their_lang='ja')
     s.local.asr, s.local.mt, s.local.tts = {'ja': 'asr-ja', 'de': 'asr-de'}, {'*': 'mt-many'}, {'de': 'tts-de', 'ja': 'tts-ja'}
-    s.local.clone = 'clone-big'
     them = languages.direction(s, 'them_to_me', has_gpu=False)
     assert not them.local and them.why == ('speech recognition for Japanese needs an NVIDIA GPU (asr-ja)',)
     assert not them.subtitles and languages.cloud_subtitles(s, 'them_to_me')  # no local ASR here: the cloud's subtitles
@@ -227,19 +234,23 @@ def test_the_cloud_gets_the_mapped_codes():
 
 
 def test_the_clone_is_offered_only_where_it_can_speak(monkeypatch):
+    monkeypatch.setattr(models, 'hf_token', lambda: 'hf_test')
     """M-23: `clone_why` is the one answer to "can the clone speak here": XTTS-v2 keeps up only on an NVIDIA GPU (its
-    registry row says `needs = "gpu"`), so without one me -> them local speaks in the stock voice, nothing of the clone is
-    downloaded and the why is said; a language it has no stock voice for is then not local at all (M-24), said why."""
-    s = config.Settings(me_to_them='local')
+    registry row says `needs = "gpu"`), so without one me -> them local speaks in the stock voice where no CPU engine has
+    the language (Polish), nothing of the clone is downloaded and the why is said; a language it has no stock voice for is
+    then not local at all (M-24), said why. Stage 8: English without a GPU — Pocket TTS on the CPU."""
+    s = config.Settings(me_to_them='local', their_lang='pl')
     assert languages.clone_why(s.local.clone, 'en', has_gpu=True) == ''
     assert languages.clone_why(s.local.clone, 'en', has_gpu=False) in ('your cloned voice needs an NVIDIA GPU',
                                                                        'no clone of your voice keeps up on a Mac')
     assert languages.clone_why(s.local.clone, 'uk', has_gpu=True) == 'your cloned voice cannot speak Ukrainian'
     monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
     me = languages.direction(s, 'me_to_them')
-    assert me.local and me.voice == 'stock' and me.tts == s.local.tts['en']
-    assert me.notes == (f'{languages.clone_why(s.local.clone, "en")}: a stock voice speaks instead',)
+    assert me.local and me.voice == 'stock' and me.tts == s.local.tts['pl']
+    assert me.notes == (f'{languages.clone_why(s.local.clone, "pl")}: a stock voice speaks instead',)
     assert 'xtts-v2' not in languages.needed_models(s)
+    s.their_lang = 'en'
+    assert languages.direction(s, 'me_to_them').tts == 'pocket-tts-en' and 'xtts-v2' not in languages.needed_models(s)
     s.their_lang = 'zh'  # no stock voice for Chinese
     me = languages.direction(s, 'me_to_them')
     assert not me.local and me.why == (f'{languages.clone_why(s.local.clone, "zh")}; no local voice for Chinese',)
@@ -282,8 +293,98 @@ def test_the_clone_needs_a_card_it_runs_on(monkeypatch):
     assert 'driver 570.65' in languages.gpu_why(old) and languages.gpu_why(old, windows=False) == ''
     monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
     monkeypatch.setattr(languages, 'nvidia_once', lambda: small)
-    s = config.Settings(me_to_them='local')
+    s = config.Settings(me_to_them='local', their_lang='pl')  # no CPU clone engine for Polish
     me = languages.direction(s, 'me_to_them')
     assert me.voice == 'stock' and 'at least 6 GB' in me.notes[0] and 'xtts-v2' not in languages.needed_models(s)
     monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu())
     assert languages.direction(s, 'me_to_them').voice == 'clone'
+
+
+def test_clone_engine_is_the_best_one_the_platform_runs(monkeypatch):
+    """Stage 8 S1: `clone_engine(lang, side, platform=)` picks the clone engine per platform and language (RESEARCH-clone
+    §7): Qwen3-TTS on an NVIDIA GPU, XTTS-v2 for what Qwen3 lacks, Pocket TTS on a CPU or a Mac (a model per language,
+    Russian too); a card the voice pack cannot use falls to the CPU engine, not to the stock voice; else (None, why)."""
+    reg = {'qwen3-tts': stub('qwen3-tts', 'clone', 'en', 'ru', 'de', 'fr', 'es', 'it', 'pt', 'zh', 'ja', 'ko', needs='gpu'),
+           **models.registry(), 'pocket-tts-en': stub('pocket-tts-en', 'clone', 'en'),
+           'pocket-tts-fr': stub('pocket-tts-fr', 'clone', 'fr'), 'pocket-tts-ru': stub('pocket-tts-ru', 'clone', 'ru')}
+    monkeypatch.setattr(models, 'registry', lambda: reg)
+    cpu, mac = languages.Platform('linux', False), languages.Platform('darwin', False)
+    card, old = languages.Gpu(8.0, (572, 83), 8.6), languages.Gpu(8.0, (472, 12), 8.6)
+    nvidia, old_win = languages.Platform('linux', card), languages.Platform('win32', old)
+    engine = languages.clone_engine
+    assert engine('en', platform=cpu) == engine('en', platform=mac) == ('pocket-tts-en', '')
+    assert engine('fr', platform=old_win) == ('pocket-tts-fr', '')
+    assert engine('ru', 'them_to_me', platform=cpu) == ('pocket-tts-ru', '')
+    assert engine('en', platform=nvidia) == engine('ru', platform=nvidia) == ('qwen3-tts', '')
+    assert engine('pl', platform=nvidia) == ('xtts-v2', '')
+    assert engine('zh', platform=old_win) == (None, languages.gpu_why(old))
+    assert engine('pl', platform=cpu) == (None, 'your cloned voice needs an NVIDIA GPU')
+    assert engine('pl', 'them_to_me', platform=mac) == (None, 'no clone of their voice keeps up on a Mac')
+    assert engine('uk', platform=nvidia) == (None, 'your cloned voice cannot speak Ukrainian')
+    with pytest.raises(ValueError):
+        engine('en', 'me')
+
+
+def test_clone_engine_on_this_computer_asks_the_card_once(monkeypatch):
+    """platform=None: this computer — sys.platform and its card (nvidia-smi once per run, as clone_why)."""
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
+    monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(8.0, (572, 83), 8.6))
+    monkeypatch.setattr(models, 'hf_token', lambda: 'hf_test')
+    monkeypatch.setattr(languages, 'pack_here', lambda: True)
+    assert languages.clone_engine('en') == ('xtts-v2', '')  # Qwen3-TTS after it until the voice pack has its packages
+    monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(4.0, (572, 83), 8.6))
+    assert languages.clone_engine('en') == ('pocket-tts-en', '')  # too small a card: Pocket TTS on the CPU
+    assert 'at least 6 GB' in languages.clone_engine('pl')[1]
+
+
+def test_qwen3_brings_its_fallback_engine():
+    """Qwen3-TTS on an NVIDIA GPU (once it is the first clone engine): Chatterbox Multilingual (its `fallback`) is
+    downloaded with it, it takes over a voice whose clause breaks down (voice pack, local/qwen3.py); XTTS-v2 stays for
+    Polish, Turkish, Arabic."""
+    s = config.Settings(me_to_them='local')
+    assert models.get('qwen3-tts').fallback == 'chatterbox-mtl'
+    import unittest.mock as um
+    with um.patch.object(languages, 'gpu', lambda engine='': True), \
+            um.patch.object(languages, 'nvidia_once', lambda: languages.Gpu(8.0, (572, 83), 8.6)), \
+            um.patch.object(languages, 'clone_engines', lambda: ['qwen3-tts', 'xtts-v2']):
+        ids = languages.needed_models(s)
+        assert {'qwen3-tts', 'chatterbox-mtl'} <= set(ids) and 'xtts-v2' not in ids
+        s.their_lang = 'pl'
+        assert 'xtts-v2' in languages.needed_models(s) and 'chatterbox-mtl' not in languages.needed_models(s)
+
+
+def test_gated_weights_without_a_token_give_the_stock_voice(monkeypatch):
+    """FIXES 1: Kyutai's gated Pocket TTS without the user's token (and not downloaded) is not chosen: the stock voice
+    speaks, said why, and it is not among the models to download; with a token it is chosen again."""
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
+    monkeypatch.setattr(models, 'hf_token', lambda: '')
+    monkeypatch.setattr(models, 'is_fetched', lambda m, base=None: False)
+    s = config.Settings(me_to_them='local')  # ru -> en
+    me = languages.direction(s, 'me_to_them')
+    assert me.voice == 'stock' and me.notes == ('your cloned voice needs a Hugging Face token (Voices…, setup wizard): a '
+                                                'stock voice speaks instead',)
+    assert 'pocket-tts-en' not in languages.needed_models(s)
+    s.their_lang = 'ru'  # Shtorm's Russian weights are not gated
+    assert languages.direction(s, 'me_to_them').tts == 'pocket-tts-ru'
+    s.their_lang = 'en'
+    monkeypatch.setattr(models, 'hf_token', lambda: 'hf_test')
+    assert languages.direction(s, 'me_to_them').tts == 'pocket-tts-en' and 'pocket-tts-en' in languages.needed_models(s)
+
+
+def test_an_nvidia_card_without_the_voice_pack_takes_pocket(monkeypatch):
+    """FIXES 9: Windows with an NVIDIA card of 6 GB or more but no voice pack (and no torch): the next engine that runs
+    here (Pocket TTS), not the stock voice; without one (Polish) the NVIDIA engine stays: its pack is the wizard's offer.
+    FIXES 10: Chatterbox (Qwen3's fallback) is never a clone engine of its own."""
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
+    monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(8.0, (572, 83), 8.6))
+    monkeypatch.setattr(models, 'hf_token', lambda: 'hf_test')
+    monkeypatch.setattr(languages, 'pack_here', lambda: False)
+    assert languages.clone_engine('en') == ('pocket-tts-en', '')
+    assert languages.clone_engine('pl') == ('xtts-v2', '')
+    monkeypatch.setattr(languages, 'pack_here', lambda: True)
+    assert languages.clone_engine('en') == ('xtts-v2', '')
+    assert 'chatterbox-mtl' not in languages.clone_engines() and 'qwen3-tts' in languages.clone_engines()
+    from peresmeshnik.local.clone import make_engine
+    with pytest.raises(ValueError, match='not a clone engine'):
+        make_engine('chatterbox-mtl', '/nowhere')
+

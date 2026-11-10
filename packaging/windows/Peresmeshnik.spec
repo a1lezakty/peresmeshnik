@@ -20,10 +20,13 @@ app = Analysis(
     hiddenimports=collect_submodules('peresmeshnik'),  # commands and engines are imported by name, when used
     datas=[(str(ROOT / 'peresmeshnik' / 'models.toml'), 'peresmeshnik'),
            (str(ROOT / 'peresmeshnik' / 'ui' / 'samples'), 'peresmeshnik/ui/samples'),
+           (str(ROOT / 'peresmeshnik' / 'local' / 'pocket_onnx'), 'peresmeshnik/local/pocket_onnx'),  # Pocket TTS graphs, their MIT LICENSE
+           *((str(ROOT / 'peresmeshnik' / 'local' / f), 'peresmeshnik/local')  # Russian stress (silero-stress, MIT)
+             for f in ('stress_ru.npz', 'stress_ru.LICENSE.txt')),
            (str(ROOT / 'assets' / 'icons'), 'assets/icons'),  # ui/tray.py finds them two levels above itself
            # the voice pack's runner, run by the pack's own Python (local/voicepack.py runner_dir): it matches this app
            *((str(ROOT / f), 'voice-runner') for f in ('voice-runner/voice_runner.py', 'voice-runner/pack-windows.json',
-                                                      'peresmeshnik/local/xtts.py')),
+                                                      'peresmeshnik/local/xtts.py', 'peresmeshnik/local/qwen3.py')),
            *collect_data_files('onnx_asr'), *copy_metadata('onnx-asr'), *copy_metadata('google-genai')],
     excludes=EXCLUDES + ['piper'],  # GPL: only in piper-runner's own archive (licenses.py fails if the app imports it)
 )

@@ -8,6 +8,8 @@ a call app records it -> ASR check.
     CLONE_SERVER='<command>' python bench/me_them.py run --remote --mic test_me_mic   # the recording goes into a test
                                                         # PipeWire microphone, taken from there by name like the app
     python bench/me_them.py serve --voice DIR --model-dir DIR  # what $CLONE_SERVER starts on the GPU box
+    python bench/me_them.py run --voice DIR --engine pocket-tts-en --with-them call-en.ogg --them-engine pocket-tts-ru \
+        --them-voice DIR --null-mic   # both sides cloned at once on this CPU (stage 8; models from the registry)
     python bench/me_them.py run --voice DIR --model-dir DIR --mic BlackHole16ch_UID [--with-them call-en.ogg]
                     # macOS: the recording plays into BlackHole 16ch, the app's microphone path takes it from there;
                     # --with-them: them -> me translates a file at the same time in this process (memory of both)
@@ -346,6 +348,11 @@ def run(a):
         tts, v = PiperTts('piper-en_US-john-medium', a.threads), None
     elif a.remote:
         tts, v = RemoteTts(os.environ['CLONE_SERVER']), None
+    elif a.engine:  # a registry clone engine, as the app makes it (languages.clone_engine's id)
+        from peresmeshnik import models
+        from peresmeshnik.local.clone import make_engine
+        tts = make_engine(a.engine, a.model_dir or models.path(a.engine), a.threads)  # --model-dir: other weights
+        v = voice.load(a.voice.name, a.voice.parent)
     else:
         from peresmeshnik.local.clone import XttsClone, make_clone  # make_clone: the voice pack's runner if set up
         tts = XttsClone(a.model_dir, a.device, a.threads) if a.device else make_clone(a.model_dir, a.threads)
@@ -357,7 +364,13 @@ def run(a):
     events, src = d.events, []
     them = None
     if a.with_them:  # them -> me at the same time, in this process, as in the app (its voice is not played)
-        them = pipeline.make_local('en', 'ru', threads=a.threads, max_lag_s=pipeline.MAX_LAG_S)
+        kw = {}
+        if a.them_engine:  # their voice cloned too (stage 8): both clones on the same cores
+            from peresmeshnik import models
+            from peresmeshnik.local.clone import make_engine
+            kw = {'tts': make_engine(a.them_engine, a.them_model_dir or models.path(a.them_engine), a.threads),
+                  'voice': voice.load(a.them_voice.name, a.them_voice.parent)}
+        them = pipeline.make_local('en', 'ru', threads=a.threads, max_lag_s=pipeline.MAX_LAG_S, **kw)
         them.warm_up()
         them.realtime = True
         threading.Thread(target=lambda: [None for _ in them.events()], daemon=True).start()
@@ -441,8 +454,10 @@ def run(a):
     for m in reversed(src):
         subprocess.run(['pactl', 'unload-module', m], capture_output=True)
 
+    theirs = []
     if them:  # both directions log their clauses: keep mine (they have my language's text),
         # before k below is matched with my utterances
+        theirs = [c for c in clauses if not re.search('[а-яё]', c.get('text', ''), re.I)]
         clauses[:] = [c for c in clauses if re.search('[а-яё]', c.get('text', ''), re.I)]
     for k, c in enumerate(clauses):  # clause end -> its translated audio at the call app's mic
         s, cap = starts.get(k), captions.get(c['clause'])
@@ -470,7 +485,8 @@ def run(a):
     hyp_dir = transcribe(np.concatenate(direct), sr) if direct else ''
     lags = [c['call_lag_s'] for c in clauses if c.get('call_lag_s') is not None]
     remote = tts.stats if a.remote else []  # RemoteTts: per-request rows (VoicePackClone.stats is a method)
-    row = record('e2e_me_them_mic' if a.mic else 'e2e_me_them', 'piper' if a.stock else 'xtts-remote' if a.remote else 'xtts',
+    row = record('e2e_me_them_mic' if a.mic else 'e2e_me_them', 'piper' if a.stock else 'xtts-remote' if a.remote else
+                 a.engine or 'xtts',
                  device=f'remote-{tts.device}' if a.remote else (a.device or 'auto'),
                  threads=a.threads, null_mic=a.null_mic, audio_s=round(len(pcm) / pipeline.SAMPLE_RATE, 2), clauses=len(clauses),
                  load_s=round(load_s, 1), wall_s=round(wall, 1), tail_after_input_s=round(done - feed_end, 1),
@@ -484,7 +500,9 @@ def run(a):
                  server_ttfa_s=[s['ttfa_s'] for s in remote], server_rtf=per_audio_s(remote, 'synth_s'),
                  server_cpu_per_audio_s=per_audio_s(remote, 'cpu_s'),
                  wer_recorded=wer(mt, hyp_rec), wer_direct=wer(mt, hyp_dir), summary=d.summary(),
-                 with_them=bool(them), tts_rtf=tts_rtf(marked), **peak,
+                 with_them=bool(them), them_engine=a.them_engine or ('piper' if them else None),
+                 them_voice_lag_s=[c.get('voice_lag_s') for c in theirs],
+                 them_tts_first_ms=[c.get('tts_first_ms') for c in theirs], tts_rtf=tts_rtf(marked), **peak,
                  recorded_peak=round(float(np.max(np.abs(x))), 3) if len(x) else 0.0)
     (out / 'summary.json').write_text(json.dumps(row | {'mt': mt, 'asr_recorded': hyp_rec, 'asr_direct': hyp_dir},
                                                  ensure_ascii=False, indent=1), encoding='utf-8')
@@ -509,6 +527,10 @@ def main():
     r.add_argument('--null-mic', action='store_true', help='no sound server: play into memory in real time (a GPU box)')
     r.add_argument('--stock', action='store_true', help='the stock Piper voice instead of the clone (no --voice needed)')
     r.add_argument('--with-them', type=Path, help='also translate this English file them -> me in this process (memory of both)')
+    r.add_argument('--engine', help='me -> them: this registry clone engine (pocket-tts-en, ...) with --voice')
+    r.add_argument('--them-engine', help='with --with-them: their side speaks in this clone engine (pocket-tts-ru)')
+    r.add_argument('--them-voice', type=Path, help='their voice profile folder for --them-engine')
+    r.add_argument('--them-model-dir', type=Path, help='--them-engine on these weights instead of the registry folder')
     r.add_argument('--mic', help='play the recording into a test microphone of this PipeWire name and take it from there '
                                  'like the app (Microphone, LiveSwitch), not from the file')
     r.add_argument('--out-dir', default=str(ROOT.parent / 'out' / 'me_them'))

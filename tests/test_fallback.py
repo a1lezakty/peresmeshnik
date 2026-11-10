@@ -593,4 +593,22 @@ def test_a_clone_not_ready_falls_back_to_the_stock_voice(monkeypatch):
         asked.append((model_id, lang))
         return 'your cloned voice needs an NVIDIA GPU'
     monkeypatch.setattr(languages, 'clone_why', clone_why, raising=False)  # stream B's, merged after this one
-    assert fallback.voice_why('me', s) == '' and fallback.stock('me', s) and asked[-1] == (s.local.clone, 'en')
+    assert fallback.voice_why('me', s) == '' and fallback.stock('me', s) and (s.local.clone, 'en') in asked
+
+
+def test_a_cloud_side_falls_back_on_pocket_without_a_voice_pack(monkeypatch):
+    """Stage 8: no NVIDIA GPU and no voice pack — me -> them's local fallback is still my cloned voice: Pocket TTS runs
+    in the app itself (languages.clone_engine picks it); fallback.make builds it by its id (local.clone.make_engine)."""
+    from pathlib import Path
+
+    from peresmeshnik import config, languages, models
+    from peresmeshnik.local import clone
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
+    monkeypatch.setattr(models, 'path', lambda i: Path('/models') / i)
+    monkeypatch.setattr(clone, 'voice_cmd', lambda: None)
+    monkeypatch.setattr(models, 'hf_token', lambda: 'hf_test')  # Kyutai's gated weights: with the user's token
+    s = config.Settings()
+    s.me_to_them, s.my_lang, s.their_lang, s.local.voice = 'cloud', 'ru', 'en', 'mine'
+    assert fallback.local_voice('me', s) == ('pocket-tts-en', '') and not fallback.stock('me', s)
+    s.their_lang = 'pl'  # no clone engine for Polish without a GPU: the stock voice
+    assert fallback.stock('me', s)

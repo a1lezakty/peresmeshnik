@@ -201,6 +201,15 @@ def _devices_now() -> None:
         pass
 
 
+def _me_tts(s) -> str:
+    """The me -> them voice languages.direction chose here (the clone engine or the stock voice), not the settings'."""
+    try:
+        from peresmeshnik import languages
+        return languages.direction(s, 'me_to_them').tts or '-'
+    except Exception as e:  # a report must not fail on it
+        return f'? ({type(e).__name__})'
+
+
 def about(settings=None) -> str:
     from peresmeshnik import models
     lines = [f'Peresmeshnik {__version__} ({"installed" if getattr(sys, "frozen", False) else "from source"}), '
@@ -227,7 +236,7 @@ def about(settings=None) -> str:
                                        ('me -> them', s.me_to_them, s.my_lang, s.their_lang)):
             local = [have(s.local.asr.get(src, '?')), have(s.local.mt.get(f'{src}-{tgt}', '?'))]
             local.append(have(s.local.tts.get(tgt, '?')) if side.startswith('them') else
-                         f'{have(s.local.clone)}, voice {"enrolled" if s.local.voice else "none"}')
+                         f'{have(_me_tts(s))}, voice {"enrolled" if s.local.voice else "none"}')
             cloud = f'cloud {s.cloud.translate_model}, subtitles {"cloud" if s.cloud.subtitles else "local"}; ' \
                 if engine == 'cloud' else ''
             lines.append(f'{side}: {engine} {src}->{tgt}: {cloud}local {", ".join(local)}')

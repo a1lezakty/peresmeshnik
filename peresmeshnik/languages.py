@@ -7,11 +7,13 @@ and the tests all ask this module.
     languages.label('de')                        # 'Deutsch (German)'
     d = languages.direction(s, 'me_to_them')     # Direction: d.local, d.why, d.notes, d.asr/mt/tts, d.voice
     languages.clone_why(s.local.clone, 'de')     # '' = the clone of my voice speaks German live here, else why not
+    languages.clone_engine('de', 'them_to_me')  # ('pocket-tts-de', '') = the engine of a cloned voice here, (None, why)
     languages.needed_models(s)                   # registry ids the chosen engines need, nothing more
     languages.optional_models(s)                 # cloud sides' fallback voices under a license to accept (asked)
 """
 from __future__ import annotations
 
+import importlib.util
 import shutil
 import subprocess
 import sys
@@ -211,13 +213,14 @@ def gpu(engine: str = '') -> bool:
     return {'asr': device.onnx_cuda, 'mt': device.ct2_cuda}.get(engine, lambda: True)()
 
 
-def clone_why(model_id: str, lang: str = '', has_gpu: bool | Gpu | None = None) -> str:
+def clone_why(model_id: str, lang: str = '', has_gpu: bool | Gpu | None = None, os: str = '') -> str:
     """Why the clone `model_id` cannot speak `lang` live on this computer ('' = it can): the one answer the wizard, the
     tray, the app and the cloud's fallback get (through `direction` or directly). It reads the registry — the model's
     `langs` and `needs = "gpu"` (XTTS-v2 keeps up only on an NVIDIA GPU, BENCH stage 6) — and for such a model the GPU
     (`gpu_why`: memory; on Windows also the voice pack's driver and compute capability), so another clone engine is a
     registry row, not a change here. `has_gpu`: None looks (nvidia-smi, once per run), a `Gpu` is that card, True / False
-    say there is a suitable one or none."""
+    say there is a suitable one or none. `os`: sys.platform of the computer it runs on ('' = this one)."""
+    os = os or sys.platform
     if lang and not covers(model_id, lang):
         return f'your cloned voice cannot speak {name(lang)}'
     if not needs_gpu(model_id) or has_gpu is True:
@@ -226,15 +229,72 @@ def clone_why(model_id: str, lang: str = '', has_gpu: bool | Gpu | None = None) 
     if has_gpu is None and gpu() and not (g.vram or g.why):  # nvidia-smi said nothing (a stand-in): taken as able
         return ''
     if not (g.vram or g.why):
-        return 'no clone of your voice keeps up on a Mac' if sys.platform == 'darwin' else 'your cloned voice needs an NVIDIA GPU'
-    return gpu_why(g, windows=sys.platform == 'win32')
+        return 'no clone of your voice keeps up on a Mac' if os == 'darwin' else 'your cloned voice needs an NVIDIA GPU'
+    return gpu_why(g, windows=os == 'win32')
+
+
+class Platform(NamedTuple):
+    """The computer the voice engines run on: this one (`Platform()`), or a server's, from its hello (remote/)."""
+    os: str = ''  # sys.platform there: 'darwin' | 'win32' | 'linux'; '' = this computer's
+    gpu: Gpu | bool | None = None  # its NVIDIA card as `clone_why`'s has_gpu: None = look here (nvidia-smi, once per run)
+
+
+def clone_engines() -> list[str]:
+    """The registry's clone engines (`role = "clone"`), best first where each runs (RESEARCH-clone §7): those that need an
+    NVIDIA GPU (Qwen3-TTS, then XTTS-v2 for the languages Qwen3 lacks: pl, tr, ar), then those on any CPU, Mac too
+    (Pocket TTS, a model per language); models.toml's order within each. A new engine is a registry row."""
+    from peresmeshnik import models
+    reg = models.registry().values()
+    backups = {m.fallback for m in reg}  # Chatterbox: only where Qwen3 breaks down, never chosen on its own
+    return [m.id for m in sorted((m for m in reg if m.role == 'clone' and m.id not in backups), key=lambda m: m.needs != 'gpu')]
+
+
+def pack_here() -> bool:
+    """Whether an NVIDIA clone engine can start on this computer: the voice pack's runner, or torch in this Python."""
+    from peresmeshnik.local.clone import voice_cmd
+    return voice_cmd() is not None or importlib.util.find_spec('torch') is not None
+
+
+def not_here(engine: str) -> str:
+    """Why `engine` cannot start on this computer as it is now ('' = it can): a gated model without its weights and
+    without the user's Hugging Face token, an NVIDIA engine without the voice pack (or torch from source)."""
+    from peresmeshnik import models
+    m = models.get(engine)
+    if m.token == 'hf' and not models.hf_token() and not models.is_fetched(m):
+        return 'your cloned voice needs a Hugging Face token (Voices…, setup wizard)'
+    if needs_gpu(engine) and not pack_here():
+        return 'the voice pack is not installed (setup wizard, "Your voice")'
+    return ''
+
+
+def clone_engine(lang: str, side: str = 'me_to_them', *, platform: Platform | None = None) -> tuple[str | None, str]:
+    """(the clone engine that speaks `lang` live for `side` on `platform` (None: this computer), '') or (None, why not):
+    then the stock voice of `lang` speaks, if there is one. The one answer to "can a cloned voice speak here, and which":
+    the wizard, the tray, the app, the cloud's fallback and a server's client ask it, nobody checks on their own. Whether
+    its weights are downloaded is not asked here (models). On this computer (`platform` without `os`) an engine that
+    cannot start here (`not_here`) gives way to the next one that can: an NVIDIA engine without the voice pack to Pocket
+    TTS; if none can, the NVIDIA engine stays (its pack is the wizard's offer, the app says why at start), a gated one
+    without the user's token does not (the stock voice, said why; with the token it is chosen again)."""
+    if side not in SIDES:
+        raise ValueError(f'side {side!r}: one of {SIDES}')
+    p = platform or Platform()
+    whys = [(e, clone_why(e, lang, p.gpu, **({'os': p.os} if p.os else {}))) for e in clone_engines() if covers(e, lang)]
+    fits = [e for e, why in whys if not why]  # its hardware is there
+    if not p.os:  # this computer: also what is installed here
+        late = {e: not_here(e) for e in fits}
+        fits = [e for e in fits if not late[e]] or [e for e in fits if needs_gpu(e)]
+        whys = [(e, late[e]) for e in late if late[e]] + whys
+    if fits:
+        return fits[0], ''
+    why = next((why for _, why in whys if why), f'your cloned voice cannot speak {name(lang)}')  # the best engine's reason
+    return None, why.replace('your', 'their') if side == 'them_to_me' else why  # the other person's voice
 
 
 def direction(s, side: str, has_gpu: bool | None = None) -> Direction:
     """What `side` of the pair in settings `s` runs on locally, and why not. A model with `needs = "gpu"` in the
     registry is not offered without an NVIDIA GPU (`has_gpu` None: look for nvidia-smi, and for the ASR and the MT also for
     CUDA in their engine in the app): for the ASR, the MT and a stock voice the side is then not local (`why`); for the
-    clone (`clone_why`) the stock voice speaks instead (`notes`), if there is one."""
+    clone (`clone_engine`: its engine per platform and language) the stock voice speaks instead (`notes`), if there is one."""
     from peresmeshnik.voice import STOCK
     src, tgt = (s.their_lang, s.my_lang) if side == 'them_to_me' else (s.my_lang, s.their_lang)
     loc, why, notes = s.local, [], []
@@ -257,13 +317,14 @@ def direction(s, side: str, has_gpu: bool | None = None) -> Direction:
         stock, no_voice = '', f'the voice for {name(tgt)} needs an NVIDIA GPU ({stock})'
     tts, voice = stock, 'stock' if stock else ''
     if side == 'me_to_them' and loc.clone != STOCK:
-        if instead := clone_why(loc.clone, tgt, asked):  # None: it looks at the card itself
+        engine, instead = clone_engine(tgt, side, platform=Platform(gpu=asked))  # None: it looks at the card itself
+        if instead:
             if stock:
                 notes.append(f'{instead}: a stock voice speaks instead')
             else:
                 no_voice = f'{instead}; {no_voice}'
         else:
-            tts, voice = loc.clone, 'clone'
+            tts, voice = engine, 'clone'
             if not stock:  # the clone's fallback (app.py) is the stock voice
                 notes.append(f'no stock voice for {name(tgt)} takes over if your cloned voice fails')
     if not tts:
@@ -285,6 +346,11 @@ def fallback_voice(s, side: str) -> str:
     return d.tts if d.voice == 'stock' else pick(s.local.tts, d.tgt)
 
 
+def _fallback_engine(model_id: str) -> str:
+    from peresmeshnik import models
+    return models.get(model_id).fallback
+
+
 def _consent(model_id: str) -> bool:
     from peresmeshnik import models
     return models.get(model_id).consent
@@ -301,6 +367,7 @@ def needed_models(s) -> list[str]:
             ids += d.models
             if d.voice == 'clone':  # the clone's fallback (~60 MB): the stock voice when the clone cannot speak (S2)
                 ids += [i for i in [pick(s.local.tts, d.tgt)] if i]
+                ids += [i for i in [_fallback_engine(d.tts)] if i]  # its own fallback engine (Qwen3: Chatterbox)
         elif getattr(s, side) == 'cloud' and not cloud_subtitles(s, side):  # local subtitles, and with its stock voice
             ids += [d.asr, d.mt] + [i for i in [fallback_voice(s, side)] if i and not _consent(i)]  # the side's way when
             # the cloud fails; remote: all of it on the server
@@ -328,9 +395,10 @@ def table(s=None) -> str:
         return f'— (cloud; {i} from source with onnxruntime-gpu on an NVIDIA GPU)' if needs_gpu(i) else cell(i)
     rows = ['| Language | Speech recognition | Stock voice | Your cloned voice | Cloud (Gemini Live) |', '|---|---|---|---|---|']
     for c in LANGS:
-        clone = loc.clone if covers(loc.clone, c) and reg[loc.clone].role == 'clone' else ''
+        cpu, nvidia = (clone_engine(c, platform=Platform('linux', g))[0] for g in (False, True))
+        clone = ' or '.join([f'{nvidia} (NVIDIA GPU)'] * (nvidia != cpu) + [cpu] * bool(cpu))
         rows.append(f'| {label(c)} | {asr(pick(loc.asr, c))} | {cell(pick(loc.tts, c))} | '
-                    f'{clone + " (NVIDIA GPU)" if clone else "— (cloud or a stock voice)"} | {"✔" if c in CLOUD else "—"} |')
+                    f'{clone or "— (cloud or a stock voice)"} | {"✔" if c in CLOUD else "—"} |')
     gpu_mark = {True: ' (NVIDIA GPU)', False: ''}
     pairs = [k.replace('-', ' → ') + gpu_mark[needs_gpu(loc.mt[k])] for k in sorted(loc.mt) if k != '*' and pick(loc.mt, k)]
     if (any_pair := loc.mt.get('*', '')) in reg:  # one model for every pair of its languages

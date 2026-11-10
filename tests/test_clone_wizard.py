@@ -132,7 +132,8 @@ def test_clone_check(page, tmp_path, monkeypatch, hears, sim, verdict):
     sf.write(good, speech_like(45), 24_000)
     page.import_file(str(good))
     pump(lambda: not page.running)
-    monkeypatch.setitem(sys.modules, 'peresmeshnik.local.clone', types.SimpleNamespace(make_clone=lambda *a, **k: FakeClone(sim)))
+    monkeypatch.setitem(sys.modules, 'peresmeshnik.local.clone',
+                        types.SimpleNamespace(make_engine=lambda *a, **k: FakeClone(sim), voice_cmd=lambda: None))
     from peresmeshnik import models
     from peresmeshnik.local import asr
     monkeypatch.setattr(asr, 'OnnxAsr', lambda *a, **k: FakeAsr(list(hears)))
@@ -160,7 +161,8 @@ def test_clone_check_runs_a_gpu_only_asr_offline(page, tmp_path, monkeypatch):
     phrases = ['bir iki üç dört', 'yarın görüşürüz']
     monkeypatch.setitem(voice.TEST_PHRASES, 'tr', phrases)  # voice.py has en / ru only
     made = []
-    monkeypatch.setitem(sys.modules, 'peresmeshnik.local.clone', types.SimpleNamespace(make_clone=lambda *a, **k: FakeClone(0.6)))
+    monkeypatch.setitem(sys.modules, 'peresmeshnik.local.clone',
+                        types.SimpleNamespace(make_engine=lambda *a, **k: FakeClone(0.6), voice_cmd=lambda: None))
     monkeypatch.setattr(asr, 'OnnxAsr', lambda *a, **k: made.append((a, k)) or FakeAsr(list(phrases)))
     monkeypatch.setattr(models, 'path', lambda model_id: tmp_path)
     page.check_clone()
@@ -443,7 +445,8 @@ def test_the_voice_is_yours_before_it_is_recorded_or_imported(page):
 def test_where_the_pack_cannot_run_the_clone_the_page_wants_the_stock_voice(windows, monkeypatch):
     """S3-01 (b): a GPU the voice pack refuses (4 GB): a recording alone does not finish the page, the stock voice does."""
     from peresmeshnik import models
-    monkeypatch.setattr(models, 'is_fetched', lambda m, base=None: True)  # the stock voice is here: nothing to download
+    # the stock voice is here: nothing to download (Pocket TTS is not: with it the CPU would clone, no pack needed)
+    monkeypatch.setattr(models, 'is_fetched', lambda m, base=None: not m.id.startswith('pocket-tts'))
     page = windows(4.0)
     page.voice = types.SimpleNamespace(name='me.new')  # a good take
     assert page.pack() == 'gpu' and not page.isComplete()
@@ -470,3 +473,21 @@ def test_no_dead_end_where_there_is_no_stock_voice(page, windows):
     text = page.pack_out.text()
     assert page.pack() == 'gpu' and page.stock.isHidden() and not page.isComplete()
     assert 'Choose cloud for "me → them" on the first page' in text and 'stock voice above' not in text, text
+
+
+def test_pocket_on_windows_needs_neither_the_voice_pack_nor_a_gpu(page, tmp_path, monkeypatch):
+    """FIXES 2: Windows without a fitting NVIDIA GPU, English: Pocket TTS clones on the CPU in the app itself, so the
+    page neither offers the 3.7 GB voice pack nor holds back on the GPU once the recording is there."""
+    from peresmeshnik import languages, models
+    from peresmeshnik.ui import wizard
+    monkeypatch.setattr(models, 'hf_token', lambda: 'hf_test')  # Kyutai's gated weights: with the user's token
+    monkeypatch.setattr(languages, 'pack_here', lambda: False)
+    monkeypatch.setattr(wizard, 'WINDOWS', True)
+    monkeypatch.delenv('PERESMESHNIK_VOICE_CMD', raising=False)
+    page.gpu = wizard.Gpu()  # no NVIDIA GPU
+    assert languages.direction(page.w.s, 'me_to_them').tts == 'pocket-tts-en'
+    good = tmp_path / 'me.wav'
+    sf.write(good, speech_like(45), 24_000)
+    page.import_file(str(good))
+    pump(lambda: not page.running)
+    assert page.pack() == '' and page.isComplete()

@@ -98,6 +98,28 @@ def make_clone(model_dir: Path | str, threads: int = 2):
         raise CloneUnavailable(f'the voice clone needs the voice pack (torch, coqui-tts): {e}') from e
 
 
+def make_engine(model_id: str, model_dir: Path | str, threads: int = 2):
+    """The clone engine of the registry's `model_id` (`languages.clone_engine` picks it): Pocket TTS in this process on
+    onnxruntime (local/pocket.py), XTTS-v2 through the voice pack (`make_clone`). Raises CloneUnavailable with the reason
+    when it cannot speak here."""
+    if model_id.startswith('pocket-tts'):
+        from peresmeshnik.local.pocket import PocketTts
+        try:
+            # int8: 1.5x faster and 0.15 GB smaller than fp32 at the same similarity and WER (BENCH stage 8)
+            return PocketTts(model_dir, threads=threads, model_id=model_id, int8=True)
+        except Exception as e:  # a broken weights file; onnxruntime's own errors (Fail, InvalidGraph, out of memory)
+            raise CloneUnavailable(f'Pocket TTS did not start: {e}') from e
+    if model_id == 'qwen3-tts':  # the voice pack's runner with Qwen3, Chatterbox taking over a voice that breaks down
+        from peresmeshnik import models
+        if not (cmd := voice_cmd()):
+            raise CloneUnavailable('Qwen3-TTS needs the voice pack: install it in the setup wizard (Your voice)')
+        return VoicePackClone(model_dir, threads, [*cmd, '--kind', 'qwen3', '--fallback-dir',
+                                                   str(models.path(models.get(model_id).fallback))])
+    if model_id != 'xtts-v2':  # chatterbox-mtl: only Qwen3's runner speaks with it, never an engine of its own
+        raise ValueError(f'{model_id} is not a clone engine')
+    return make_clone(model_dir, threads)
+
+
 class VoicePackClone:
     """XttsClone's interface over the voice pack's runner (voice-runner/voice_runner.py: the protocol is there).
     `info`: what the runner got (device, torch, VRAM). A runner that fails at start raises CloneUnavailable; one that

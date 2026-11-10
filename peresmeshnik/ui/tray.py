@@ -406,7 +406,10 @@ class Tray(QObject):
         def work():
             try:
                 for m in todo:
-                    models.fetch(m.id)  # one download per model at a time (the wizard may fetch it too)
+                    try:
+                        models.fetch(m.id)  # one download per model at a time (the wizard may fetch it too)
+                    except models.Gated as e:  # its token refused: the others still download; the clone gives way
+                        self.told.emit(f'{name}: {e}; a stock voice speaks meanwhile')
             except Exception as e:  # the network: the .part files stay, choosing it again resumes them
                 return self.pair_ready.emit(s, str(e))
             for m in extra:  # optional: its failure does not hold the pair back

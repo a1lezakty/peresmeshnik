@@ -40,7 +40,7 @@ class Cancelled(PackError):
 
 
 def runner_dir() -> Path:
-    """voice_runner.py, xtts.py and pack-windows.json: in the frozen app's data (PyInstaller's _internal beside the
+    """voice_runner.py, xtts.py, qwen3.py and pack-windows.json: in the frozen app's data (PyInstaller's _internal beside the
     executable), else in the checkout."""
     if getattr(sys, 'frozen', False):
         return Path(getattr(sys, '_MEIPASS', Path(sys.executable).parent)) / 'voice-runner'

@@ -1,11 +1,14 @@
-"""Voice pack runner: XTTS-v2 voice clone in its own process, on the voice pack's own Python (torch CUDA, coqui-tts).
+"""Voice pack runner: the voice clone (XTTS-v2 or Qwen3-TTS) in its own process, on the voice pack's own Python (torch CUDA).
 
 The app never imports torch for the clone where the voice pack is installed: it starts this script and talks to it
 over stdin/stdout (local/clone.py VoicePackClone). Its own process keeps a second OpenMP runtime, the pack's numpy
 and huggingface packages and a CUDA crash away from the app, and the CPML-licensed weights behind the pipe. It needs
-no `peresmeshnik` package: the model code is one file, peresmeshnik/local/xtts.py (or an `xtts.py` beside this one).
+no `peresmeshnik` package: the model code is one file per kind, peresmeshnik/local/<kind>.py (or `<kind>.py` beside this
+one): xtts.py (the default), qwen3.py (Qwen3-TTS; Chatterbox Multilingual from --fallback-dir takes over a voice it runs
+away on; it uses xtts.py's guards).
 
-    python voice_runner.py --model-dir XTTS_DIR [--device cuda|cpu] [--threads 2] [--vram-gb 6]
+    python voice_runner.py --model-dir MODEL_DIR [--kind xtts|qwen3] [--fallback-dir CHATTERBOX_DIR] [--device cuda|cpu]
+                           [--threads 2] [--vram-gb 6]
 
 Without --device it needs CUDA (on CPU the clone is slower than real time: an explicit --device cpu only).
 Protocol, all JSON in ASCII:
@@ -13,7 +16,8 @@ Protocol, all JSON in ASCII:
   {"error": "..."} (then it exits);
 - requests: one JSON line each, with a client-chosen "id": {"cmd": "synth", "text", "lang", "voice": <profile folder>},
   {"cmd": "latents", "voice", "fresh": bool}, {"cmd": "similarity", "voice", "pcm": <base64 float32 LE>, "sr"},
-  {"cmd": "info"}; {"cmd": "stop", "id"} at any time stops that synth after its current chunk (barge-in);
+  {"cmd": "info"} (CUDA memory; qwen3 adds its runaways and the voices Chatterbox speaks); {"cmd": "stop", "id"} at any
+  time stops that synth after its current chunk (barge-in);
 - a synth reply: chunks of uint32 LE byte count + float32 LE mono PCM; 0 ends it; 0xFFFFFFFF + a JSON line
   {"error"} ends it with an error. Any other reply is one JSON line: the result fields, or {"error": "..."}.
 The process sleeps in blocking reads between requests; stdin closed ends it.
@@ -35,10 +39,10 @@ ERR = 0xFFFFFFFF
 HERE = Path(__file__).resolve().parent
 
 
-def engine_path() -> Path:
+def engine_path(kind: str = 'xtts') -> Path:
     """The model code: beside this script (a voice pack folder), else in the checkout's package."""
-    return next((p for p in (HERE / 'xtts.py', HERE.parent / 'peresmeshnik' / 'local' / 'xtts.py') if p.exists()),
-                HERE / 'xtts.py')
+    return next((p for p in (HERE / f'{kind}.py', HERE.parent / 'peresmeshnik' / 'local' / f'{kind}.py') if p.exists()),
+                HERE / f'{kind}.py')
 
 
 def load_module(path: Path):
@@ -51,11 +55,15 @@ def load_module(path: Path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--model-dir', required=True, help='XTTS-v2 folder (config.json, model.pth, vocab.json)')
+    ap.add_argument('--model-dir', required=True, help='the model folder: XTTS-v2 (config.json, model.pth, vocab.json) '
+                    'or Qwen3-TTS 0.6B Base')
+    ap.add_argument('--kind', choices=['xtts', 'qwen3'], default='xtts', help='the clone engine (default: xtts)')
+    ap.add_argument('--fallback-dir', help='qwen3: Chatterbox Multilingual folder (ve.pt, t3_mtl23ls_v2.safetensors, '
+                    's3gen.pt, ...): it speaks a voice Qwen3 ran away on')
     ap.add_argument('--device', help='cuda or cpu (default: cuda, or an error without it)')
     ap.add_argument('--threads', type=int, default=2, help='CPU threads of torch')
     ap.add_argument('--vram-gb', type=float, help='cap of CUDA memory: emulates a smaller card')
-    ap.add_argument('--engine', type=Path, default=engine_path(), help=argparse.SUPPRESS)  # tests: a stub engine
+    ap.add_argument('--engine', type=Path, help=argparse.SUPPRESS)  # tests: a stub engine
     a = ap.parse_args()
     out = os.fdopen(os.dup(1), 'wb')  # the protocol; the libraries' prints go to stderr instead
     os.dup2(2, 1)
@@ -66,15 +74,16 @@ def main():
         out.flush()
 
     try:
-        xtts = load_module(a.engine)
-        info = xtts.cuda_info()
+        code = load_module(a.engine or engine_path(a.kind))
+        info = code.cuda_info()
         if a.device is None and not info.get('cuda'):
             raise RuntimeError(f'no CUDA GPU for the voice clone (torch {info.get("torch")} sees none)')
         device = a.device or 'cuda'
         if a.vram_gb and device == 'cuda':
-            xtts.cap_vram(a.vram_gb)
+            code.cap_vram(a.vram_gb)
             info['vram_cap_gb'] = a.vram_gb
-        engine = xtts.Engine(a.model_dir, device=device, threads=a.threads)
+        kw = {'fallback_dir': a.fallback_dir} if a.fallback_dir else {}
+        engine = code.Engine(a.model_dir, device=device, threads=a.threads, **kw)
     except Exception as e:  # the client says why instead of "exited (1)"
         with contextlib.suppress(OSError):  # a stderr nobody reads (a pipe of a windowed app) must not hide the reason
             traceback.print_exc()
@@ -122,7 +131,7 @@ def main():
                 pcm = np.frombuffer(base64.b64decode(req['pcm']), '<f4')
                 say({'similarity': engine.similarity(req['voice'], pcm, req['sr'])})
             elif cmd == 'info':
-                say(xtts.cuda_info())
+                say({**code.cuda_info(), **(engine.info() if hasattr(engine, 'info') else {})})
             else:
                 say({'error': f'unknown request {cmd!r}'})
         except Exception as e:  # CUDA out of memory, a bad voice folder: the reply says so, the runner goes on

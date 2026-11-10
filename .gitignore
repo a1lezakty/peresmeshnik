@@ -13,6 +13,7 @@ dist/
 # Models, caches, data
 models/
 *.onnx
+!peresmeshnik/local/pocket_onnx/*.onnx
 *.bin
 *.safetensors
 *.pt

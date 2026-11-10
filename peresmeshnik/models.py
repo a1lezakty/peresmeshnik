@@ -9,7 +9,8 @@ Engines ask for a model's local folder and never download anything themselves:
     peresmeshnik models fetch silero-vad parakeet-tdt-0.6b-v3 quickmt-en-ru [--accept-licenses]
 
 Downloads are plain HTTPS without credentials (public Hugging Face files and this project's
-GitHub releases). A folder counts as fetched once every file matched its hash; the marker
+GitHub releases), but for a gated Hugging Face repo (`token = "hf"`: Kyutai's Pocket TTS): the user's own token
+(`hf_token`), sent to Hugging Face only. A folder counts as fetched once every file matched its hash; the marker
 holds a fingerprint of the pins, so a registry update makes the model "missing" again.
 """
 from __future__ import annotations
@@ -22,6 +23,8 @@ import sys
 import threading
 import time
 import tomllib
+import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from functools import cache
@@ -38,6 +41,14 @@ class ModelMissing(RuntimeError):
     pass
 
 
+class Gated(RuntimeError):
+    """Hugging Face refused a gated model (`token = "hf"`): no token, or its account has not accepted the conditions on
+    `page` (the model card: the wizard opens it). Not retried."""
+    def __init__(self, text: str, page: str):
+        super().__init__(text)
+        self.page = page
+
+
 @dataclass(frozen=True)
 class Model:
     id: str
@@ -52,6 +63,8 @@ class Model:
     via: tuple[str, ...] = ()  # a pair through another language: these models one after the other, no files of its own
     needs: str = ''  # 'gpu': runs live only with an NVIDIA GPU; without one languages.direction() does not offer it
     pivot: bool = False  # mt: the model of its language to or from English for a pair through English
+    token: str = ''  # 'hf': a gated Hugging Face repo: the download needs the user's token (hf_token) and its conditions
+    fallback: str = ''  # clone: the model that takes over a voice when this one breaks down; downloaded with it
 
     @property
     def size(self) -> int:
@@ -120,6 +133,40 @@ def path(model_id: str, base: Path | None = None) -> Path:
     return (base or root()) / (m.via[0] if m.via else model_id)
 
 
+def hf_token_file() -> Path:
+    return config.config_dir() / 'hf-token'
+
+
+def hf_token() -> str:
+    """The user's Hugging Face token for gated models: $HF_TOKEN, else `hf-token` in the config folder ('' = none)."""
+    f = hf_token_file()
+    return os.environ.get('HF_TOKEN', '').strip() or (f.read_text().strip() if f.is_file() else '')
+
+
+def save_hf_token(token: str) -> None:
+    """The token goes into its own file, readable only by the user (never into settings.toml); '' forgets it."""
+    f = hf_token_file()
+    if not token.strip():
+        f.unlink(missing_ok=True)
+        return
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.touch(0o600)
+    f.chmod(0o600)
+    f.write_text(token.strip() + '\n')
+
+
+class _SameHostAuth(urllib.request.HTTPRedirectHandler):
+    """Hugging Face sends a file from its CDN (a signed URL): the token goes to huggingface.co only, never along."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and urllib.parse.urlsplit(newurl).hostname != urllib.parse.urlsplit(req.full_url).hostname:
+            new.remove_header('Authorization')
+        return new
+
+
+_auth_opener = urllib.request.build_opener(_SameHostAuth)
+
+
 def sha256(file: Path) -> str:
     h = hashlib.sha256()
     with open(file, 'rb') as f:
@@ -132,7 +179,7 @@ def _size(file: Path) -> int:
     return file.stat().st_size if file.exists() else 0
 
 
-def _download(url: str, part: Path, size: int, progress):
+def _download(url: str, part: Path, size: int, progress, token: str = ''):
     """Append to `part` from where it stopped (HTTP Range); restart when the server ignores the range.
     A connection closed mid-body just ends the read (no exception): the caller sees a short part."""
     have = _size(part)
@@ -141,7 +188,9 @@ def _download(url: str, part: Path, size: int, progress):
     headers = {'User-Agent': f'peresmeshnik/{__version__}'}
     if have:
         headers['Range'] = f'bytes={have}-'
-    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=60) as r:
+    if token:
+        headers['Authorization'] = f'Bearer {token}'
+    with _auth_opener.open(urllib.request.Request(url, headers=headers), timeout=60) as r:
         if r.status != 206 and have:
             progress(-have)  # the server sent the whole file again
             have = 0
@@ -178,6 +227,10 @@ def _fetch(model_id: str, base: Path | None, progress, retries: int) -> Path:
     folder = (base or root()) / m.id
     if is_fetched(m, base):
         return folder
+    token = hf_token() if m.token == 'hf' else ''
+    if m.token == 'hf' and not token:
+        raise Gated(f'{m.id} is in a gated Hugging Face repo: accept its conditions on {m.license_url} and give the setup '
+                    'wizard your Hugging Face token (or set HF_TOKEN)', m.license_url)
     folder.mkdir(parents=True, exist_ok=True)
     (folder / MARKER).unlink(missing_ok=True)
     for name, f in m.files.items():
@@ -190,8 +243,14 @@ def _fetch(model_id: str, base: Path | None, progress, retries: int) -> Path:
         progress(min(_size(part), f['size']))
         for attempt in range(retries):
             try:
-                _download(m.url + name, part, f['size'], progress)
+                _download(m.url + name, part, f['size'], progress, token)
                 err = 'connection closed early'
+            except urllib.error.HTTPError as e:
+                if token and e.code in (401, 403):  # a wrong token, or its account did not accept: retrying won't help
+                    whose = 'the HF_TOKEN environment variable' if os.environ.get('HF_TOKEN', '').strip() else 'your token'
+                    raise Gated(f'Hugging Face refused {m.id} ({e.code}): accept its conditions on {m.license_url} with '
+                                f'the account of {whose}, or check that token', m.license_url) from None
+                err = str(e)
             except (OSError, http.client.HTTPException) as e:  # URLError, timeouts, resets, IncompleteRead
                 err = str(e)
             if _size(part) >= f['size']:

@@ -193,31 +193,36 @@ def test_not_paired_says_so(monkeypatch):
 
 
 def test_only_my_confirmed_voice_goes_up(tmp_path, monkeypatch):
-    """M-20, the leader's rule for the server: only voice.json v2 of kind 'me' confirmed by a live recording goes up;
-    anything else -> None and why (the server's stock voice speaks, the side goes on); the stock setting is this
+    """M-20 through S3's voice.mine(): only my own voice confirmed at the microphone, its recording unchanged since, goes
+    up; anything else -> None and why (the server's stock voice speaks, the side goes on); the stock setting is this
     computer's."""
+    from test_voice_profiles import confirmed, speech
+
     from peresmeshnik import voice
     monkeypatch.setattr(voice, 'voices_dir', lambda: tmp_path)
     s = config.Settings()
     assert fallback.my_voice(s) == (None, '')  # no voice recorded: nothing to say
     s.local.voice = 'v'
-    assert fallback.my_voice(s)[1] == 'your voice profile is not there or cannot be read'  # no folder
+    unreadable = (None, 'your voice profile is not there or cannot be read: record it again (Voices…)')
+    assert fallback.my_voice(s) == unreadable  # no folder
     (tmp_path / 'v').mkdir()
     for bad in ('{broken', '[]', '"x"', 'null'):  # not JSON, or JSON but not an object: no exception out of make()
         (tmp_path / 'v' / 'voice.json').write_text(bad)
-        assert fallback.my_voice(s) == (None, 'your voice profile is not there or cannot be read')
-    for meta, ok in (({'name': 'v'}, False),  # v1: not checked live (an imported file could be anyone's)
-                     ({'version': 2, 'kind': 'me', 'consent': {'how': 'mic-live'}}, True),
-                     ({'version': 2, 'kind': 'me', 'consent': {'how': 'import+mic-match'}}, True),
-                     ({'version': 2, 'kind': 'them', 'consent': {'how': 'call-saved'}}, False),
-                     ({'version': 2, 'kind': 'me', 'consent': None}, False),
-                     ({'version': 2, 'kind': 'me', 'consent': {'how': 'call-saved'}}, False)):
-        (tmp_path / 'v' / 'voice.json').write_text(json.dumps(meta))
-        up, why = fallback.my_voice(s)
-        assert (up is not None, why) == ((True, '') if ok else (False, 'your voice is not confirmed by a live recording'))
+        assert fallback.my_voice(s) == unreadable
+    s.local.voice = 'mine'
+    voice.save(*speech(5), 'mine', 'ru', 'text', tmp_path)
+    up, why = fallback.my_voice(s)
+    assert up is None and 'not confirmed as your own voice' in why  # recorded, not read at the microphone yet
+    confirmed('mine', tmp_path)
     s.local.clone = voice.STOCK  # this computer's stock voice does not hold the voice back from the server
-    (tmp_path / 'v' / 'voice.json').write_text(json.dumps({'version': 2, 'kind': 'me', 'consent': {'how': 'mic-live'}}))
-    assert fallback.my_voice(s)[0]
+    up, why = fallback.my_voice(s)
+    assert why == '' and protocol.voice_ref(up)['bytes'] == len(up)
+    ref = tmp_path / 'mine' / 'reference.wav'
+    ref.write_bytes(ref.read_bytes() + b'\0\0')  # another recording than the one confirmed
+    assert 'changed after it was confirmed' in fallback.my_voice(s)[1]
+    meta = json.loads((tmp_path / 'mine' / 'voice.json').read_text('utf-8'))
+    (tmp_path / 'mine' / 'voice.json').write_text(json.dumps(meta | {'kind': 'them'}))  # a contact's voice
+    assert 'someone you talk to' in fallback.my_voice(s)[1]
 
 
 def test_an_unconfirmed_voice_does_not_stop_the_side(srv, monkeypatch, tmp_path):
@@ -235,8 +240,8 @@ def test_an_unconfirmed_voice_does_not_stop_the_side(srv, monkeypatch, tmp_path)
     try:
         assert side.directions[0][0].inner.cloud.ready.wait(5)
         assert srv.hellos[-1]['voice'] is None  # the server's stock voice
-        assert [x for x in states if x.startswith('note') and 'record your voice again (Voices…) to hear it on the server'
-                in x], states
+        assert [x for x in states if x.startswith('note') and 'not confirmed as your own voice' in x
+                and 'the server speaks with its stock voice meanwhile' in x], states
     finally:
         side.stop()
 

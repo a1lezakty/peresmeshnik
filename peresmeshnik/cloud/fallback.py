@@ -543,34 +543,23 @@ def voice_why(name: str, s) -> str:
     return local_voice(name, s)[1]
 
 
-MINE = ('mic-live', 'import+mic-match')  # voice.json v2 consent.how of my own voice, confirmed by a live recording (S3)
-
-
 def my_voice(s) -> tuple[bytes | None, str]:
     """What me -> them on the user's server speaks with: (the enrolled profile zipped (protocol.pack_voice), '') only when
-    it is the user's own voice confirmed by a live recording - voice.json v2 (stream S3) with kind 'me' and consent from
-    the microphone (M-20, the leader's rule for the server: a v1 profile, a file imported without the live check, a
-    contact's voice never go up); else (None, why): the server's stock voice speaks and the side goes on. The stock
-    setting ([local] clone = piper) is this computer's and does not hold the user's voice back from the server.
-    ponytail: S3's voice.mine() is the one check once it is on main."""
-    import json
-
+    `voice.mine()` lets it speak as me (M-20: my own voice confirmed at the microphone, its recording unchanged since); else
+    (None, why): the server's stock voice speaks and the side goes on. The stock setting ([local] clone = piper) is this
+    computer's and does not hold the user's voice back from the server."""
     from peresmeshnik import voice as profiles
     from peresmeshnik.remote import protocol
     if not s.local.voice:
         return None, ''
-    folder = profiles.voices_dir() / s.local.voice
     try:
-        meta = json.loads((folder / 'voice.json').read_text('utf-8'))
-    except (OSError, ValueError):
-        meta = None
-    if not isinstance(meta, dict):  # no file, not JSON, or JSON but not an object
-        return None, 'your voice profile is not there or cannot be read'
-    consent = meta.get('consent')
-    if not (meta.get('version') == 2 and meta.get('kind') == 'me' and isinstance(consent, dict) and consent.get('how') in MINE):
-        return None, 'your voice is not confirmed by a live recording'
+        v = profiles.mine(s.local.voice)
+    except profiles.NotMine as e:
+        return None, str(e)
+    except (OSError, ValueError, AttributeError):  # no folder, not JSON, or JSON but not an object (load's meta.get)
+        return None, 'your voice profile is not there or cannot be read: record it again (Voices…)'
     try:
-        return protocol.pack_voice(folder), ''
+        return protocol.pack_voice(v.path), ''
     except (OSError, ValueError) as e:
         return None, f'your voice profile cannot be sent ({e})'
 
@@ -616,8 +605,7 @@ def make(name: str, s, key: str, on_state=lambda text: None, on_respawn=lambda e
         from peresmeshnik.remote.client import RemoteDirection
         up, up_why = my_voice(s) if name == 'me' else (None, '')
         if up_why:
-            on_state(f'note: {ARROW[name]}: {up_why}: record your voice again (Voices…) to hear it on the server; its stock '
-                     'voice speaks meanwhile')
+            on_state(f'note: {ARROW[name]}: {up_why}; the server speaks with its stock voice meanwhile')
         return Fallback(
             name, tgt, True,
             make_cloud=lambda: RemoteDirection(remote['address'], name, src, tgt, remote['token'], remote['fp'], voice=up,

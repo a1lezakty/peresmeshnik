@@ -119,7 +119,12 @@ def test_settings_round_trip(tmp_path):
     s = config.Settings()
     s.me_to_them, s.local.asr['ru'], s.cloud.reconnect_s, s.local.voice = 'local', 'gigaam-v3-e2e-ctc', 300.0, 'my "voice"'
     p = config.save(s, tmp_path / 'settings.toml')
-    assert config.load(p) == s
+    assert config.load(p) == s and config.load(p).forced_cloud == []
+    s.them_to_me, s.forced_cloud = 'cloud', ['them_to_me']  # a side the tray moved to the cloud for a pair (H-02)
+    assert config.load(config.save(s, p)) == s
+    p.write_text('forced_cloud = ["mine"]\n')
+    with pytest.raises(ValueError, match='forced_cloud'):
+        config.load(p)
     p.write_text('them_to_me = "both"\n')
     with pytest.raises(ValueError, match='them_to_me'):
         config.load(p)

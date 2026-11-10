@@ -114,6 +114,9 @@ class Settings:
     their_lang: str = 'en'
     them_to_me: str = 'local'  # 'local' | 'cloud'
     me_to_them: str = 'cloud'  # default for an 8 GB Mac (ARCHITECTURE §6): no live local clone there
+    # the sides ('them_to_me', 'me_to_them') the app itself moved to the cloud, for a pair they cannot run locally: they
+    # go back to 'local' with a pair that can (a side the user set to 'cloud' is not here)
+    forced_cloud: list[str] = field(default_factory=list)
     models_dir: str = ''  # '' = <cache dir>/models; $PERESMESHNIK_MODELS wins
     local: Local = field(default_factory=Local)
     cloud: Cloud = field(default_factory=Cloud)
@@ -143,7 +146,8 @@ def _fill(obj, data: dict, where: str = ''):
             continue
         if isinstance(cur, float) and type(v) is int:
             v = float(v)
-        if type(v) is not type(cur) or (isinstance(v, dict) and not all(isinstance(x, str) for x in v.values())):
+        if type(v) is not type(cur) or (isinstance(v, dict | list) and not all(isinstance(x, str) for x in
+                                                                               (v.values() if isinstance(v, dict) else v))):
             raise ValueError(f'settings: {where}{k} must be {type(cur).__name__}, got {v!r}')
         if isinstance(cur, dict) and any(cur.get(x) == y for x, y in v.items()):  # a table saved whole
             v = {x: y for x, y in v.items() if OLD_DEFAULTS.get(f'{where}{k}', {}).get(x) != y}
@@ -158,6 +162,8 @@ def load(path: Path | None = None) -> Settings:
     for k in ('them_to_me', 'me_to_them'):
         if getattr(s, k) not in ENGINES:
             raise ValueError(f'settings: {k} must be one of {ENGINES}, got {getattr(s, k)!r}')
+    if bad := set(s.forced_cloud) - {'them_to_me', 'me_to_them'}:
+        raise ValueError(f'settings: forced_cloud may hold only them_to_me, me_to_them, got {sorted(bad)}')
     if not 0.2 <= (r := s.local.mic_echo_rho_on) <= 0.8:  # near 0 it zeroes my speech, near 1 lets every echo through
         s.local.mic_echo_rho_on = min(max(r, 0.2), 0.8)
         print(f'settings: local.mic_echo_rho_on {r} is outside 0.2..0.8, {s.local.mic_echo_rho_on} used', file=sys.stderr)
@@ -171,6 +177,8 @@ def _toml(v) -> str:
         return repr(v)
     if isinstance(v, str):
         return json.dumps(v, ensure_ascii=False)  # JSON string escapes are valid TOML basic strings
+    if isinstance(v, list):
+        return '[' + ', '.join(_toml(x) for x in v) + ']'
     if isinstance(v, dict):
         return '{ ' + ', '.join(f'{json.dumps(k)} = {_toml(x)}' for k, x in v.items()) + ' }'
     raise TypeError(f'cannot write {v!r} to TOML')

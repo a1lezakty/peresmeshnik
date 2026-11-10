@@ -2306,3 +2306,78 @@ German is the one where it does not hold up: in the engine run above it went on 
 Polish, Turkish, Chinese, Japanese, Arabic: no tail either way, the period stays. English and Russian are left as they
 are here (stage 5 measures the clone's tails in them: Russian had 4 of 18 with the period, 0 with a comma). Whether a
 comma at the end sounds unfinished (rising) is a check by ear (USER-CHECKS).
+
+## Stage 8: the speaker-match threshold that confirms my voice (S3)
+
+The live check (`voice.confirm_live`) compares the speaker vector of a ~5 s live reading with the profile's recording
+(an imported file or the wizard's take). Model: WeSpeaker ResNet34 VoxCeleb (`wespeaker-resnet34`, 26.5 MB), run as the
+app runs it (onnx-asr 0.12.0's numpy Kaldi fbank, mean over time out, `feats` → `embs`, 256-d). Script:
+`bench/speaker_threshold.py` (stages `embed`, `report`, `timing`, `padded`, `report_padded`); a CPU server, 2 threads.
+
+Data: LibriSpeech dev-clean, 40 people (20 f, 20 m). File = the first 40 s of a chapter; live = 3 / 5 / 8 s from
+another chapter of the same person (another session: 667 pairs), the same chapter (379), another person of the same
+sex (17 423), of the other sex (18 294). File as is, through Opus 24 kbit/s, or through an 8 kHz phone band; live as
+is or as a laptop mic (100–7000 Hz, speech at −30 dBFS, white or pink noise at SNR 20 and 10 dB).
+
+Cosine, 5 s live:
+
+| file / live | same person, another session p1 / p5 / p50 | another person, same sex p95 / p99 / max | EER |
+|---|---|---|---|
+| clean / clean | 0.27 / 0.57 / 0.79 | 0.37 / 0.43 / 0.59 | 2.5 % |
+| clean / white noise, SNR 20 | 0.16 / 0.39 / 0.64 | 0.32 / 0.40 / 0.54 | 3.9 % |
+| clean / white noise, SNR 10 | 0.15 / 0.31 / 0.55 | 0.31 / 0.39 / 0.53 | 5.0 % |
+| Opus 24k / clean | 0.26 / 0.56 / 0.77 | 0.36 / 0.43 / 0.59 | 2.6 % |
+| 8 kHz phone / clean | 0.21 / 0.33 / 0.55 | 0.28 / 0.34 / 0.52 | 3.9 % |
+
+Refused / passed at the chosen **0.45** (`voice.MATCH`), same person / another person of the same sex: clean 2.8 % /
+0.64 %; Opus file 3.1 % / 0.59 %; laptop mic SNR 20: 6–8 % / ≤ 0.25 %; SNR 10: 14–20 % / ≤ 0.15 %; an 8 kHz phone file:
+21 % / 0.04 %. Another person passes at most 0.64 % in all 15 conditions. One threshold cannot also keep the same person
+under 5 % in noise (that needs ≤ 0.30): a refusal says when the background is loud or the file sounds like a phone, and
+a second try (the best of two) brings the noisy SNR 20 case to 4–5 %. An 8 s live window with 1.5 s of room noise
+before and after and a pause between the phrases: the same as 5 s of speech; with every quiet frame cut out other
+people match ~0.02 less (0.99 → 0.58 % passed), the same person as much (3.3 → 3.0 % refused) — in quiet only; in
+noise that cut costs much more (below: the app cuts only the edges). Time per vector,
+1 thread: 5 s — 176 ms, 40 s — 1.41 s (Ryzen 5 5600X).
+
+Not measured: real laptop microphones, a person on different days; Russian (FLEURS has no speaker ids: only
+other-sex pairs, p99 0.33, max 0.42). 40 English readers, pairs of one person not independent: the 1 % is a rough
+bound. The CI step runs the real model on `tests/data`: the reader matches herself at 0.88, FLEURS people at −0.03
+and 0.20.
+
+### Stage 8, review: every window of the recording, a splice, many tries (S3, FIXES-s3 1 and 4)
+
+One vector over the whole recording lets a splice through: 30 s of someone else, then 30 s of me, and my live reading.
+The app now cuts the recording (silence out) into 8 s windows (a last piece under 4 s joins the one before) and takes
+the lowest cosine of a window with the live reading. Same data and script (`bench/speaker_threshold.py`, stages `wlive`,
+`wfile`, `splice`, `report2`, `timing2`, `trimcheck`); 40 s recordings, 5 s live readings, 1634 own pairs, 42 978
+other-person pairs of the same sex.
+
+| file / live | one vector, 0.45 | 8 s windows, 0.45 | 10 s | 12 s |
+|---|---|---|---|---|
+| clean / clean: same person refused / another passes | 3.4 % / 0.40 % | 4.1 % / 0.07 % | 3.9 % / 0.11 % | 3.9 % / 0.12 % |
+| Opus 24k / clean | 3.4 % / 0.34 % | 4.3 % / 0.06 % | 4.3 % / 0.08 % | 4.0 % / 0.10 % |
+| clean / white noise, SNR 20 | 12.6 % / 0.07 % | 19.9 % / 0.01 % | 18.2 % | 17.4 % |
+| 8 kHz phone / clean | 21.5 % / 0.01 % | 35.4 % / 0 % | 30.7 % | 31.2 % |
+
+A splice (another person of the same sex + the owner, 88 splices, 20 + 20 s and 30 + 30 s, either order) passes 88–90 %
+with one vector and 0 % with 8 s windows (≤ 0.24 % with 10–12 s). Another person trying N live readings, passing on any:
+
+| tries | 1 | 3 | 6 | 10 |
+|---|---|---|---|---|
+| one vector, 0.45 | 0.40 % | 1.06 % | 1.83 % | 2.59 % |
+| 8 s windows, 0.45 | 0.06 % | 0.19 % | 0.37 % | 0.61 % |
+
+Kept: 8 s windows, 0.45, and a pause after three failed tries (`voice.TRIES`, `voice.PAUSES_S`). Time, 1 thread: the
+60 s recording in windows 1.72 s (one vector 2.13 s), the live reading 0.12 s. Not measured: a piece of someone else
+shorter than a window inside my own speech.
+
+The live reading trimmed three ways (8 s windows of a 40 s recording, 0.45; same person refused / another passes /
+another passes in 3 tries; 649 own and ~17 000 other pairs per row):
+
+| live reading | not trimmed | edges only (the app) | every quiet frame |
+|---|---|---|---|
+| 5 s, clean | 4.0 / 0.06 / 0.18 % | 4.2 / 0.06 / 0.17 % | 4.3 / 0.09 / 0.30 % |
+| 5 s, white noise SNR 20 | 15.9 / 0.01 / 0.06 % | 16.0 / 0.02 / 0.12 % | 22.0 / 0.01 / 0.04 % |
+| 5 s, white noise SNR 10 | 37.3 / 0 / 0 % | 38.5 / 0.01 / 0.01 % | 72.0 / 0.01 / 0.02 % (2.3 s of 5 s left) |
+| 8 s with silence and a pause, quiet | 4.5 / 0.07 / 0.20 % | 4.7 / 0.10 / 0.28 % | 4.4 / 0.07 / 0.20 % |
+| 8 s with silence and a pause, SNR 20 | 19.5 / 0.02 / 0.09 % | 15.9 / 0.03 / 0.10 % | 17.8 / 0.02 / 0.06 % |

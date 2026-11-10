@@ -558,10 +558,11 @@ class Side:
                                    'or switch "Me → them" to cloud')
             from peresmeshnik import models, voice
             from peresmeshnik.local.clone import make_clone
-            model_dir, v = models.path(s.local.clone), voice.load(s.local.voice)  # missing: said as usual, no fallback
+            model_dir = models.path(s.local.clone)  # missing: said as usual, no fallback
             try:
+                v = voice.mine(s.local.voice)  # M-20: only my own voice, confirmed at the microphone; a contact's never
                 tts = make_clone(model_dir, threads=s.local.threads)
-            except RuntimeError as e:  # no voice pack, no CUDA, its runner did not start
+            except RuntimeError as e:  # not my confirmed voice (voice.NotMine), no voice pack, no CUDA, no runner
                 return self._fallback(s, e)
             d = make_local(self.src, self.tgt, tts=tts, voice=v, **kw)
             try:

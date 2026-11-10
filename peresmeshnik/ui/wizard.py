@@ -17,8 +17,8 @@ import time
 from pathlib import Path
 
 import psutil
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QKeySequence
+from PySide6.QtCore import Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QVBoxLayout,
+    QWidget,
     QWizard,
     QWizardPage,
 )
@@ -463,6 +464,55 @@ class CallSoundPage(QWizardPage):
         return not self.running
 
 
+HF_TEXT = ('Your cloned voice without an NVIDIA GPU speaks through Kyutai\'s Pocket TTS. Its weights are behind a '
+           'button on Hugging Face: open the page, sign in, accept the conditions, then make a read token (Settings → '
+           'Access Tokens) and paste it here. It is kept in the settings folder, readable only by you, and sent only to '
+           'huggingface.co.')
+
+
+def gated(ms: list) -> list:
+    """The models of `ms` behind Hugging Face's "accept the conditions" (`token = "hf"`, stream S1), not here yet."""
+    base = models.root()  # ponytail: getattr until S1's Model.token is merged, then m.token
+    return [m for m in ms if getattr(m, 'token', '') == 'hf' and not models.is_fetched(m, base)]
+
+
+class HfTokenBox(QWidget):
+    """The models page's box for gated models: their page (accept the conditions there) and the user's token."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.text = QLabel(HF_TEXT)
+        self.text.setWordWrap(True)
+        self.open = QPushButton('Open the page')
+        self.token = QLineEdit()
+        self.token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.save = QPushButton('Save the token')
+        self.save.clicked.connect(self._save)
+        self.token.returnPressed.connect(self._save)
+        self.open.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self.page)))
+        row = QHBoxLayout()
+        for w in (self.open, self.token, self.save):
+            row.addWidget(w)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.text)
+        lay.addLayout(row)
+        self.page = ''
+
+    def show_for(self, ms: list) -> None:
+        """Shown while a gated model is missing; the page of the first (all of them are Kyutai's one card)."""
+        self.setVisible(bool(ms))
+        if ms:
+            self.page = ms[0].url.split('/resolve/')[0]
+            self.token.setPlaceholderText('a token is saved' if models.hf_token() else 'hf_…')
+
+    def _save(self) -> None:
+        if t := self.token.text().strip():
+            models.save_hf_token(t)
+            self.token.clear()
+            self.token.setPlaceholderText('a token is saved')
+
+
 class ModelsPage(QWizardPage):
     progress = Signal(float, float, str)  # done bytes, total bytes, current model: past 2 GB a Qt int overflows
     finished = Signal(str)  # '' or the error
@@ -483,7 +533,9 @@ class ModelsPage(QWizardPage):
         self.bar = QProgressBar()
         self.state = QLabel()
         self.state.setWordWrap(True)
-        for x in (self.list, self.consent, self.button, self.bar, self.state):
+        self.hf = HfTokenBox()
+        self.hf.setVisible(False)
+        for x in (self.list, self.consent, self.hf, self.button, self.bar, self.state):
             lay.addWidget(x)
         self.progress.connect(self._progress)
         self.finished.connect(self._finished)
@@ -548,6 +600,7 @@ class ModelsPage(QWizardPage):
     def _finished(self, err: str) -> None:
         self.busy = False
         todo, extra = self.missing(), self.extra()
+        self.hf.show_for(gated(todo + extra))  # Hugging Face refused (models.Gated: no token, conditions not accepted)
         self.button.setEnabled(bool(todo) or bool(extra) and self.consent.isChecked())
         self.bar.setVisible(bool(todo) or bool(err))
         self.state.setText(f'Download failed: {err}. Press Download again to resume.' if err else
@@ -690,6 +743,7 @@ class VoicePage(QWizardPage):
         self.gpu_found.connect(self._gpu_found)
         self._cancel_pack = threading.Event()
         self.draft = f'{self.name}.new'
+        self.confirm = None  # ui.voices.ConfirmBox of the voice shown while it is not confirmed as mine (M-20)
 
     def local(self) -> bool:
         return self.w.s.me_to_them == 'local'
@@ -730,14 +784,20 @@ class VoicePage(QWizardPage):
             for x in (self.stock, self.prompt, self.own, self.record_button, self.import_button, self.check_button):
                 x.setVisible(False)
         if self.voice is None and s.local.voice and (voice.voices_dir() / s.local.voice / 'voice.json').exists():
-            self.voice = voice.load(s.local.voice)
-            q = self.voice.meta.get('quality', {})
-            self.out.setText(f'Saved voice "{self.voice.name}": {q.get("seconds", 0):.0f} s, '
-                             f'recorded {self.voice.meta.get("created", "")}.')
+            try:
+                self.voice = voice.load(s.local.voice)
+                q = self.voice.meta.get('quality', {})
+                self.out.setText(f'Saved voice "{self.voice.name}": {q.get("seconds", 0):.0f} s, '
+                                 f'recorded {self.voice.meta.get("created", "")}.')
+            except (OSError, ValueError) as e:  # a damaged voice.json: record again (Voices… deletes the folder)
+                self.out.setText(f'The saved voice cannot be read ({e}): record it again.')
+        self._confirm_box()
         self._show_pack()
         self._buttons()
 
     def isComplete(self) -> bool:  # noqa: N802
+        if getattr(self.confirm, 'running', False):  # it records into the take: no Next meanwhile
+            return False
         return not self.running and not self.packing and (not self.local() or self.stock.isChecked() or bool(self.clone_off())
                                                           or self.voice is not None and self.pack() != 'gpu')
 
@@ -847,11 +907,12 @@ class VoicePage(QWizardPage):
         return bool(getattr(getattr(getattr(self.w, 'tray', None), 'ctl', None), 'on', False))
 
     def _buttons(self) -> None:
+        busy = self.running or getattr(self.confirm, 'running', False)  # the take is being confirmed: it stays
         for b in (self.record_button, self.import_button):
-            b.setEnabled(not self.running and self.own.isChecked())
+            b.setEnabled(not busy and self.own.isChecked())
         why = ('Turn translation off first: the check loads a second clone (~3 GB)' if self.translating() else
                self.no_check())
-        self.check_button.setEnabled(not self.running and self.voice is not None and not why and self.pack() in ('', 'ready'))
+        self.check_button.setEnabled(not busy and self.voice is not None and not why and self.pack() in ('', 'ready'))
         self.pack_button.setEnabled(not self.running and self.pack_consent.isChecked())
         self.stock.setEnabled(not self.packing)
         self.check_button.setToolTip(why)
@@ -871,6 +932,8 @@ class VoicePage(QWizardPage):
     def record(self) -> None:
         from peresmeshnik import voice
         from peresmeshnik.audio.mic import record
+        if getattr(self.confirm, 'running', False):  # the take is being confirmed (its buttons are off)
+            return
         s, sr = self.w.s, 24_000  # above the 16 kHz pipeline rate: the clone conditions at 22.05 kHz
         self.out.setText('Recording… read the text aloud.')
         self.clone_out.setText('')
@@ -878,10 +941,12 @@ class VoicePage(QWizardPage):
         self.bar.setValue(0)
         self.bar.setVisible(True)
         self._run(lambda: self.result.emit(voice.enroll(record(self.seconds, s.ui.mic or None, sr, self.progress.emit), sr,
-                                                        self.draft, s.my_lang, voice.PROMPTS.get(s.my_lang))))
+                                                        self.draft, s.my_lang, voice.PROMPTS.get(s.my_lang), source='mic')))
 
     def import_file(self, path: str | None = None) -> None:
         from peresmeshnik import voice
+        if getattr(self.confirm, 'running', False):  # the take is being confirmed (its buttons are off)
+            return
         path = path or QFileDialog.getOpenFileName(self, 'Your voice: a recording of 30-60 s', '',
                                                    'Audio (*.wav *.flac *.ogg *.mp3)')[0]
         if path:
@@ -900,6 +965,27 @@ class VoicePage(QWizardPage):
             self.out.setText(f'<b>{voice.verdict(r)}</b>{saved}<br>{voice.summary(r)}')
             if v:
                 self.voice, self.w.s.local.voice = v, v.name
+                self._confirm_box()
+        self._buttons()
+
+    def _confirm_box(self) -> None:
+        """The voice shown speaks into the call only once confirmed at the microphone (voice.mine): until then the box
+        to read two phrases, and the page says so; Next is not held (a stock voice speaks meanwhile, the tray says why)."""
+        from peresmeshnik import voice
+        from peresmeshnik.ui.voices import ConfirmBox
+        if self.confirm is not None:
+            self.confirm.retire()  # a result it may still bring is about the take before
+            self.confirm = None
+        if self.voice is None or self.clone_off() or not voice.why_not_mine(self.voice):
+            return
+        self.confirm = ConfirmBox(self.w.s, self.voice.name, parent=self, translating=self.translating)
+        self.confirm.confirmed.connect(self._confirmed)
+        self.confirm.busy.connect(lambda _: self._buttons())  # no Next while it records into the take
+        self.layout().addWidget(self.confirm)
+
+    def _confirmed(self, consent: dict) -> None:
+        from peresmeshnik import voice
+        self.voice = voice.load(self.voice.name)
         self._buttons()
 
     def no_check(self) -> str:

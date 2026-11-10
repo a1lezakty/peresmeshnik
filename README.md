@@ -15,9 +15,13 @@ runs from source. Not yet tried in a real call (see below).
   ([Languages](#languages)).
 - macOS, Windows and Linux. Local models (CPU, Apple Silicon, optional NVIDIA GPU) or cloud
   (Gemini Live), switchable in settings.
-- Voice cloning of **your own voice only** (the wizard asks you to confirm the recording is yours), from a 30–60 s
-  recording, on an NVIDIA GPU with 6 GB or more (Windows, Linux; on Windows also a recent driver, see below). On a Mac
-  and without such a GPU no clone keeps up live: a stock voice or the cloud speaks for you.
+- Voice cloning of **your own voice only**: a recording (or an imported file) speaks for you once you read two random
+  phrases at the microphone and the app hears those words in the voice of every part of the recording; after three
+  failed tries it waits a while. This stops a downloaded recording of someone else from speaking for you in a few
+  clicks; it cannot stop someone who edits the app's files. A voice recorded in 0.3.0 is confirmed once the same way.
+  Tray → **Voices…** lists and deletes the voices. Cloned from a 30–60 s recording, on an NVIDIA GPU with 6 GB or more
+  (Windows, Linux; on Windows also a recent driver, see below). On a Mac and without such a GPU no clone keeps up live:
+  a stock voice or the cloud speaks for you.
 - A hotkey switches between translation and your live voice.
 
 **The cloud is Google's, with your own key.** A direction set to the cloud sends its sound to Google Gemini Live: the
@@ -110,7 +114,7 @@ that is a macOS shortcut or another app's global hotkey is refused with the reas
 another app's own menus is not detected and the hotkey takes it over everywhere).
 
 Removing it: quit it from its menu, drag Peresmeshnik from Applications to the Bin, then delete two folders it
-leaves: `~/Library/Application Support/Peresmeshnik` (settings with your Gemini key, your voice recording, logs, crash
+leaves: `~/Library/Application Support/Peresmeshnik` (settings with your Gemini key, your voices, logs, crash
 reports) and `~/Library/Caches/Peresmeshnik` (the models). The two permissions go with
 `tccutil reset All io.github.a1lezakty.peresmeshnik`. The key alone: Settings… → Forget the key → Save (a key in
 `GEMINI_API_KEY` stays: unset it there).
@@ -154,8 +158,8 @@ Windows 10 version 2004 or later, or Windows 11 (x64).
 The hotkey Ctrl+Alt+Space switches between translation and your live voice (Settings to change it; a combo that
 Windows keeps for itself, such as Alt+Tab or Win+Space, or that another app has taken is refused with the reason).
 The uninstaller (Settings → Apps → Peresmeshnik, or `unins000.exe` in its folder) closes the app and removes its files.
-It asks whether to remove the voice pack and its downloads (up to about 12 GB) and your settings with your Gemini key
-("No" by default for both); your voice recording, logs and the models stay in `%LOCALAPPDATA%\Peresmeshnik` (the models
+It asks whether to remove the voice pack and its downloads (up to about 12 GB), your saved voices, and your settings
+with your Gemini key ("No" by default for each); logs and the models stay in `%LOCALAPPDATA%\Peresmeshnik` (the models
 in its `Cache` folder) until you delete that folder. A silent uninstall (`/VERYSILENT`) asks nothing and keeps it all.
 The key alone: Settings… → Forget the key → Save (a key in `GEMINI_API_KEY` stays: unset it there).
 
@@ -185,7 +189,7 @@ the app's own environment, in place of the CPU one (CUDA 12 and cuDNN 9 installe
 the CPU one back). These steps are not checked by the project; its benchmarks ran Whisper with onnxruntime-gpu
 1.31.1.
 What stays when you stop using it: `~/.config/Peresmeshnik` (settings with your Gemini key),
-`~/.local/share/Peresmeshnik` (your voice recording, logs, crash reports, the clone's venv if you made it there) and
+`~/.local/share/Peresmeshnik` (your voices, logs, crash reports, the clone's venv if you made it there) and
 `~/.cache/Peresmeshnik` (the models).
 
 **Models pile up.** The app does not delete models: every pair you try keeps its own in the `models` folder of the
@@ -210,7 +214,7 @@ downloads them again.
   shows **Crash report…**: read it, copy it, or open a GitHub issue with it and send it yourself — the app sends
   nothing. A report has the app's version, the OS, CPU, RAM, GPU, the engines and models of the settings, where it
   failed and the last lines of the log. It has no subtitles or translations, no audio, no names of devices, of the
-  call app or of your voice, no key and not your user name. When the Piper voice helper dies, only it starts again and
+  call app or of the voices, no key and not your user name. When the Piper voice helper dies, only it starts again and
   the voice goes on a few seconds later; a side whose translation dies otherwise starts again by itself (its models
   load again: up to ~20 s); after 4 failures within a minute it stays off and says why. One tray message each time.
 - **Latency.** Tray → **Show latency**: each subtitle ends with its clause's times from the end of the speech to the

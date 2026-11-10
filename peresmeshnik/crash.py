@@ -12,7 +12,7 @@ app, the voice profile's name, keys or the user's name in paths (`clean`, `scrub
 - a log line keeps its format string and only its numbers ("microphone <…> is not there: using <…>"); the latency
   logger's JSON keeps only its numbers. Every log call of the app passes data as arguments (none builds its message);
 - what is left as text (exception messages, the stack) loses the private values known: the settings' devices, call app
-  and voice, the voice profiles, the devices seen this run (`private()`) and listed now, the key and anything shaped like
+  and key, the voices' names (`voice.names`), the devices seen this run (`private()`) and listed now, the key and anything shaped like
   one, the home folder (URL-encoded too), the user's and the host's names, the last subtitles (`said()`, kept in
   memory only) whole, every word of 3 letters and more said this run, and any Chinese / Japanese / Korean character
   said (no spaces there: a part of a phrase is not a word). A third-party logger's message is text built with its
@@ -40,7 +40,7 @@ from peresmeshnik import __version__, config
 
 LINES = 200  # of the log in a report
 KEEP = 10  # reports kept
-KEY = re.compile(r'AIza[0-9A-Za-z_\-]{20,}')
+KEY = re.compile(r'AIza[0-9A-Za-z_\-]{20,}|hf_[A-Za-z0-9]{30,}')  # Gemini, Hugging Face (Pocket TTS)
 # a fault file's crash: a signal, or a named Windows exception ("access violation"); faulthandler logs every other SEH
 # code too ("code 0x8001010d", COM's, handled), and a run killed after one would leave a false report
 FATAL = re.compile(r'Fatal Python error|Windows fatal exception: (?!code 0x)')
@@ -168,15 +168,17 @@ class _Handler(logging.handlers.RotatingFileHandler):
 
 def _known_private(settings) -> None:
     if settings is not None:
-        private(settings.ui.mic, settings.ui.headphones, settings.ui.call_app, settings.local.voice)
+        from peresmeshnik.voice import APP_IDS
+        private(settings.ui.mic, settings.ui.headphones, settings.ui.call_app,  # the voice: a v1 name ("--name Ivan"),
+                *[v for v in [settings.local.voice] if not re.fullmatch(APP_IDS, v.removesuffix('.new'))])  # not 'me'
         try:
             from peresmeshnik.cloud import api_key
             private(api_key(settings.cloud))
         except BaseException:  # no key: SystemExit
             pass
-    try:
-        from peresmeshnik.voice import voices_dir
-        private(*(p.name.removesuffix('.new').removesuffix('.old') for p in voices_dir().iterdir()))
+    try:  # the voices' names (my own, the people I talk to); their folders are ids ('me' stays in "them -> me")
+        from peresmeshnik.voice import names
+        private(*names())
     except OSError:
         pass
 

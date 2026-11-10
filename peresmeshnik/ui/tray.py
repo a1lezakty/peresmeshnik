@@ -124,6 +124,8 @@ class Tray(QObject):
         m.addSeparator()
         m.addAction('Settings…', self.open_settings)
         m.addAction('Setup wizard…', self.open_wizard)
+        m.addAction('Voices…', self.open_voices)
+        self.remember = m.addAction('Keep the voice of the person in this call…', self.remember_voice)
         self.show_latency = m.addAction('Show latency')  # per clause in the subtitles: end of speech -> subtitle, -> voice
         self.show_latency.setCheckable(True)
         self.show_latency.toggled.connect(self._latency_chosen)
@@ -167,6 +169,7 @@ class Tray(QObject):
                 for a in group.actions():
                     a.setChecked(a.data()[1] == getattr(s, key))
         self.live.setChecked(self.ctl.live)
+        self.remember.setVisible(bool(getattr(self.ctl, 'on', False)) and hasattr(self.ctl, 'them_voice'))
 
     def hotkey_note(self, combo: str, why: str, announce: bool = False) -> None:
         """The hotkey in the menu item; why there is none in its tooltip, on the wizard's hotkey page and, with
@@ -455,6 +458,31 @@ class Tray(QObject):
         from peresmeshnik.ui.wizard import SetupWizard
         self._show(SetupWizard(self))
 
+    def open_voices(self) -> None:
+        from peresmeshnik.ui.voices import VoicesDialog
+        s = config.load()
+
+        def changed(mine: bool) -> None:  # my voice deleted or confirmed: the me side takes it (or the stock voice)
+            if mine:
+                saved = config.load()
+                saved.local.voice = s.local.voice
+                config.save(saved)
+                self.restart()
+        self._show(VoicesDialog(s, changed, translating=lambda: bool(getattr(self.ctl, 'on', False))))
+
+    def remember_voice(self) -> None:
+        """Keep the voice of the person in this call (S2: Controller.them_voice() -> ({model id: (state, sha256 of the
+        weights)}, language, seconds of their speech) or None while there is none yet), only with their agreement."""
+        from peresmeshnik.ui.voices import RememberDialog
+        live = self.ctl.them_voice()
+        if not live:
+            self.message('Their voice is not ready yet: it takes a few seconds of their speech.')
+            return
+        d = RememberDialog()
+        if d.exec():
+            d.keep(*live)
+            self.message('Kept: their voice is in Voices…, heard only by you.')
+
     def _quit(self) -> None:
         from PySide6.QtWidgets import QApplication
         QApplication.quit()
@@ -579,9 +607,9 @@ class SettingsDialog(QDialog):
         self.voice = QComboBox()
         self.voice.addItem('none', '')
         from peresmeshnik import voice
-        for p in sorted(voice.voices_dir().glob('*/voice.json')):
-            if p.parent.suffix not in ('.new', '.old'):  # the wizard's draft of a new take, left by a crash
-                self.voice.addItem(p.parent.name, p.parent.name)
+        for v in voice.profiles():  # mine only: a contact's voice never speaks as me (the me side refuses it anyway)
+            if v.meta['kind'] == 'me':
+                self.voice.addItem(v.meta['name'], v.name)
         self.voice.setCurrentIndex(max(0, self.voice.findData(s.local.voice)))
         f.addRow('My voice (local clone)', self.voice)
         self.hotkey = QKeySequenceEdit(QKeySequence(s.ui.hotkey))

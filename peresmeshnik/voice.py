@@ -5,10 +5,10 @@
     python -m peresmeshnik.voice check me.wav
     python -m peresmeshnik.voice list
 
-A profile is a folder `<voices>/<name>/` with `reference.wav` (level-normalised) and `voice.json`
-(language, transcript, quality numbers). Clone engines add their own cache next to it (XTTS:
-`xtts.pt`). Profiles stay local and are never uploaded. This module is torch-free; the clone
-engine is imported only for `--engine`.
+A profile is a folder `<voices>/<id>/` with `voice.json` (schema v2 below). My own voice (kind 'me') also has
+`reference.wav` (level-normalised); clone engines add their own cache next to it (XTTS: `xtts.pt`). Profiles stay on
+this computer (my voice goes only to my own server, for a session). This module is torch-free; the clone engine is
+imported only for `--engine`.
 
 Two checks, each with a verdict for the user ("good" / "record again, because ..."): `check()` of the
 recording (length, speech time, level, clipping, background), and after cloning `check_clone()`: the
@@ -226,10 +226,11 @@ def summary(r: Report) -> str:
 
 
 def enroll(pcm: np.ndarray, sr: int, name: str = 'me', lang: str = 'ru', transcript: str | None = None,
-           force: bool = False, root: Path | None = None) -> tuple[Report, Voice | None]:
-    """Check a recording and save it as the profile `name` if it passes (or `force`): (report, profile or None)."""
+           force: bool = False, root: Path | None = None, source: str = 'file') -> tuple[Report, Voice | None]:
+    """Check a recording and save it as the profile `name` if it passes (or `force`): (report, profile or None).
+    `source`: 'mic' recorded by the app, 'file' imported. Not confirmed as mine yet (confirm_live, set_consent)."""
     r = check(pcm, sr)
-    return r, (save(pcm, sr, name, lang, transcript, root) if r.ok or force else None)
+    return r, (save(pcm, sr, name, lang, transcript, root, source) if r.ok or force else None)
 
 
 # --- after cloning: does the clone speak understandably, in the recorded voice? ---
@@ -339,9 +340,372 @@ def voices_dir() -> Path:
     return data_dir() / 'voices'
 
 
+# --- voice.json v2: my voice and the voices of the people I talk to (RESEARCH-clone §5-6, FINDINGS M-20) ---
+#   {version: 2, id, name, kind, lang, created, consent, seconds, engines,
+#    and for kind 'me' as in v1: transcript, sample_rate, gain_db, quality}   (v1 readers still find their keys)
+# id       the folder: 'me' ('me.new' while the wizard holds a new take); a contact 'them-<8 hex>': no name in a path
+# name     shown on the voices screen; never in logs or crash reports
+# kind     'me': may speak into the call (virtual mic) and go to my server; 'them': only ever into my headphones
+# consent  None (not confirmed: it speaks nowhere as me) or {how, at, wer, similarity, windows, ref_sha256}; how:
+#            'mic-live'          (me) recorded at the microphone, then two random phrases read there: the app's ASR
+#                                heard them (wer), every window of the recording is the reader's voice (similarity: min)
+#            'import+mic-match'  (me) a file, confirmed the same way
+#            'call-saved'        (them) kept from a call by an explicit "remember", the other person agreed
+#          ref_sha256: the reference.wav that was checked; another file there (a new take, a crash mid-save) is not
+#          confirmed. A v1 profile has none: 0.3.0 checked nothing (FIXES-s3 2)
+# source   (me) 'mic': recorded by the app, 'file': imported (how its confirmation is named)
+# seconds  speech the profile was made from
+# engines  {model id (models.toml, languages.clone_engine): {file, model}}: the voice of a profile without a recording
+#          (kind 'them'): `file` in the folder (np.save of the engine's state or vector), `model` the sha256 of the
+#          weights it was made with; other weights cannot use it (a contact is made again only from a new call).
+#          'me' needs none: its engines cache what they need next to reference.wav and check it against the recording.
+VERSION = 2
+CONSENT = {'mic-live': 'me', 'import+mic-match': 'me', 'call-saved': 'them'}  # how -> the kind it confirms
+
+
+class NotMine(RuntimeError):
+    """A profile that may not speak as me (into the call, to my server): a contact's, or mine not confirmed yet."""
+
+
+def _sha(path: Path) -> str:
+    import hashlib
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ''
+
+
+def why_not_mine(v: Voice) -> str:
+    """'' when the profile is my own voice confirmed at the microphone (M-20), else why not, for the user. The one
+    check: the me side (virtual mic) and the server's voice go through `mine()`."""
+    m = v.meta
+    if m.get('kind', 'me') != 'me':
+        return 'it is the voice of someone you talk to: it speaks only in your headphones, never into the call'
+    c = m.get('consent') or {}
+    if CONSENT.get(c.get('how')) != 'me':
+        return 'it is not confirmed as your own voice yet: read two short phrases at the microphone (Voices…)'
+    if not (sha := _sha(Path(v.path) / 'reference.wav')) or c.get('ref_sha256') != sha:
+        return 'its recording changed after it was confirmed: confirm it again (Voices…)'
+    return ''
+
+
+def mine(name: str, root: Path | None = None) -> Voice:
+    """The profile `name` if it may speak as me, else NotMine (the text names no voice: it may reach a log)."""
+    v = load(name, root)
+    if why := why_not_mine(v):
+        raise NotMine(f'this voice cannot speak for you: {why}')
+    return v
+
+
+def upgrade(meta: dict, folder: str) -> dict:
+    """A v1 voice.json as v2. v1 had only my voice, and nothing checked it (0.3.0's Record put the screen text in
+    `transcript` whatever was heard): not confirmed until read at the microphone once (Voices…)."""
+    if meta.get('version', 1) >= VERSION:
+        return meta
+    return meta | {'version': VERSION, 'id': folder, 'name': meta.get('name', folder), 'kind': 'me', 'consent': None,
+                   'source': 'file', 'seconds': meta.get('quality', {}).get('seconds', 0.0), 'engines': {}}
+
+
+def _private(*dirs: Path) -> None:
+    for d in dirs:  # a voice (enough to clone it) and its states: the user's only (L-09; Linux, a shared machine with
+        d.chmod(0o700)  # a 0755 home). The rest of the data folder keeps the umask
+
+
+def _write(path: Path, meta: dict) -> None:
+    import os
+    import threading
+    tmp = path / f'voice.json.{os.getpid()}-{threading.get_ident()}.tmp'  # both sides may upgrade a v1 profile at once
+    try:
+        tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding='utf-8')
+        os.replace(tmp, path / 'voice.json')
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _now() -> str:
+    return time.strftime('%Y-%m-%dT%H:%M:%S%z')
+
+
+def save_them(name: str, lang: str, seconds: float, states: dict[str, tuple[np.ndarray, str]],
+              root: Path | None = None) -> Voice:
+    """Keep a contact's voice from a call (an explicit "remember", the other person agreed): the engines' states only,
+    no recording of their speech. `states`: {model id: (the engine's state or vector, sha256 of its weights)}."""
+    import secrets
+    import shutil
+    base = root or voices_dir()
+    vid = f'them-{secrets.token_hex(4)}'
+    tmp = base / f'{vid}.tmp'  # made whole aside, then renamed: never a folder without its voice.json
+    tmp.mkdir(parents=True)
+    _private(base, tmp)
+    try:
+        engines = {}
+        for model, (state, sha) in states.items():
+            np.save(tmp / f'{model}.npy', np.asarray(state), allow_pickle=False)
+            engines[model] = {'file': f'{model}.npy', 'model': sha}
+        meta = {'version': VERSION, 'id': vid, 'name': name, 'kind': 'them', 'lang': lang, 'created': _now(),
+                'consent': {'how': 'call-saved', 'at': _now(), 'wer': None, 'similarity': None},
+                'seconds': round(float(seconds), 2), 'engines': engines}
+        _write(tmp, meta)
+        tmp.rename(base / vid)
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    return Voice(name=vid, engine='reference', path=base / vid, meta=meta)
+
+
+APP_IDS = r'me|them-[0-9a-f]{8}'  # the app's own folder ids: they name nobody (crash reports keep them)
+ASIDE = ('.new', '.old', '.tmp')  # the wizard's take in progress, its last one, a contact's voice being saved
+
+
+def profiles(root: Path | None = None) -> list[Voice]:
+    """The saved voices: mine and the contacts' (not the folders set aside, ASIDE; not the damaged ones)."""
+    out = []
+    for p in sorted((root or voices_dir()).glob('*/voice.json'), key=lambda p: p.parent.name):  # one order on every OS
+        if not p.parent.name.endswith(ASIDE):
+            try:
+                out.append(load(p.parent.name, root))
+            except (OSError, ValueError, KeyError, AttributeError):  # a broken voice.json: damaged()
+                pass
+    return out
+
+
+def damaged(root: Path | None = None) -> list[str]:
+    """Folders in the voices folder that are no voice: no or a broken voice.json (a crash mid-save); the voices
+    window offers to delete them."""
+    ok = {v.name for v in profiles(root)}
+    return sorted(p.name for p in (root or voices_dir()).glob('*') if p.is_dir() and p.name not in ok
+                  and not (p.name.endswith(('.new', '.old')) and (p / 'voice.json').is_file()))
+
+
+def names(root: Path | None = None) -> set[str]:
+    """What in the voices folder may name a person, for crash reports to scrub: the names on the voices screen and
+    folders the user named (v1 `--name`); not the app's own ids ('me', 'them-<hex>'), which name nobody."""
+    import re
+    out = set()
+    for p in (root or voices_dir()).glob('*'):
+        out.add(p.name)
+        try:
+            out.add(json.loads((p / 'voice.json').read_text(encoding='utf-8')).get('name', ''))
+        except (OSError, ValueError, AttributeError):
+            pass
+    out = {re.sub(r'\.(new|old|tmp)$', '', n) for n in out if n and isinstance(n, str)}
+    return {n for n in out if not re.fullmatch(APP_IDS, n)}
+
+
+def engine_state(v: Voice, model: str, sha: str) -> np.ndarray | None:
+    """The state a profile keeps for the engine `model` with weights `sha`; None: not made with those weights."""
+    e = v.meta.get('engines', {}).get(model)
+    if not e or e.get('model') != sha:
+        return None
+    return np.load(v.path / Path(e['file']).name, allow_pickle=False)
+
+
+# --- the live check: my voice is mine (M-20, RESEARCH-clone 6.1) ---
+
+LIVE_PHRASES = {  # read at the microphone to confirm a voice, two at random (a recording made before cannot say them);
+    # short everyday sentences written for the app, the same eight in every language
+    'en': ['The weather is nice today, let us go for a walk.', 'I usually drink tea in the morning and coffee after lunch.',
+           'Please close the window, it is getting cold in here.', 'My neighbour has a small dog that barks at every bird.',
+           'We bought fresh bread and cheese at the market.', 'The train was late again, so I took a taxi home.',
+           'She reads a book every evening before going to sleep.', "Could you send me the notes from yesterday's meeting?"],
+    'ru': ['Сегодня хорошая погода, давай пойдём гулять.', 'Утром я обычно пью чай, а после обеда кофе.',
+           'Закрой, пожалуйста, окно, здесь становится холодно.', 'У моего соседа маленькая собака, которая лает на птиц.',
+           'Мы купили на рынке свежий хлеб и сыр.', 'Поезд опять опоздал, и я поехал домой на такси.',
+           'Каждый вечер перед сном она читает книгу.', 'Пришлите мне, пожалуйста, заметки со вчерашней встречи.'],
+    'uk': ['Сьогодні гарна погода, ходімо на прогулянку.', "Вранці я зазвичай п'ю чай, а після обіду каву.",
+           'Зачиніть, будь ласка, вікно, тут стає холодно.', 'У мого сусіда є маленький пес, який гавкає на птахів.',
+           'Ми купили на ринку свіжий хліб і сир.', 'Потяг знову запізнився, тож я поїхав додому таксі.',
+           'Щовечора перед сном вона читає книжку.', 'Надішліть мені, будь ласка, нотатки з учорашньої зустрічі.'],
+    'de': ['Heute ist schönes Wetter, lass uns spazieren gehen.', 'Morgens trinke ich meistens Tee und nach dem Mittagessen Kaffee.',
+           'Mach bitte das Fenster zu, es wird hier kalt.', 'Mein Nachbar hat einen kleinen Hund, der jeden Vogel anbellt.',
+           'Wir haben auf dem Markt frisches Brot und Käse gekauft.', 'Der Zug hatte wieder Verspätung, also nahm ich ein Taxi.',
+           'Sie liest jeden Abend ein Buch, bevor sie schlafen geht.', 'Kannst du mir die Notizen von der gestrigen Besprechung schicken?'],
+    'fr': ["Il fait beau aujourd'hui, allons nous promener.", 'Le matin, je bois souvent du thé et du café après le déjeuner.',
+           "Ferme la fenêtre, s'il te plaît, il commence à faire froid.", 'Mon voisin a un petit chien qui aboie après chaque oiseau.',
+           'Nous avons acheté du pain frais et du fromage au marché.', "Le train était encore en retard, alors j'ai pris un taxi.",
+           'Elle lit un livre tous les soirs avant de dormir.', "Peux-tu m'envoyer les notes de la réunion d'hier ?"],
+    'es': ['Hoy hace buen tiempo, vamos a dar un paseo.', 'Por la mañana suelo tomar té y después de comer café.',
+           'Cierra la ventana, por favor, aquí empieza a hacer frío.', 'Mi vecino tiene un perro pequeño que le ladra a cada pájaro.',
+           'Compramos pan fresco y queso en el mercado.', 'El tren volvió a llegar tarde, así que tomé un taxi a casa.',
+           'Ella lee un libro todas las noches antes de dormir.', '¿Me puedes enviar las notas de la reunión de ayer?'],
+    'it': ['Oggi è una bella giornata, andiamo a fare una passeggiata.', 'La mattina di solito bevo tè e dopo pranzo un caffè.',
+           'Chiudi la finestra, per favore, qui comincia a fare freddo.', 'Il mio vicino ha un cagnolino che abbaia a ogni uccello.',
+           'Abbiamo comprato pane fresco e formaggio al mercato.', 'Il treno era di nuovo in ritardo, così ho preso un taxi.',
+           'Lei legge un libro ogni sera prima di dormire.', 'Mi puoi mandare gli appunti della riunione di ieri?'],
+    'pt': ['Hoje está um dia bonito, vamos dar um passeio.', 'De manhã costumo tomar chá e depois do almoço café.',
+           'Feche a janela, por favor, aqui está ficando frio.', 'O meu vizinho tem um cachorro pequeno que late para cada pássaro.',
+           'Compramos pão fresco e queijo na feira.', 'O trem atrasou de novo, então peguei um táxi para casa.',
+           'Ela lê um livro todas as noites antes de dormir.', 'Você pode me enviar as anotações da reunião de ontem?'],
+    'pl': ['Dzisiaj jest ładna pogoda, chodźmy na spacer.', 'Rano zwykle piję herbatę, a po obiedzie kawę.',
+           'Zamknij proszę okno, robi się tu zimno.', 'Mój sąsiad ma małego psa, który szczeka na każdego ptaka.',
+           'Kupiliśmy na targu świeży chleb i ser.', 'Pociąg znowu się spóźnił, więc wróciłem do domu taksówką.',
+           'Ona co wieczór czyta książkę przed snem.', 'Czy możesz mi wysłać notatki z wczorajszego spotkania?'],
+    'tr': ['Bugün hava çok güzel, hadi yürüyüşe çıkalım.', 'Sabahları genellikle çay, öğleden sonra kahve içerim.',
+           'Lütfen pencereyi kapat, burası soğumaya başladı.', 'Komşumun her kuşa havlayan küçük bir köpeği var.',
+           'Pazardan taze ekmek ve peynir aldık.', 'Tren yine gecikti, bu yüzden eve taksiyle döndüm.',
+           'Her akşam uyumadan önce kitap okur.', 'Dünkü toplantının notlarını bana gönderebilir misin?'],
+    'zh': ['今天天气很好，我们出去散散步吧。', '我早上一般喝茶，午饭以后喝咖啡。', '请把窗户关上，这里有点冷了。',
+           '我的邻居有一只小狗，看见鸟就叫。', '我们在市场上买了新鲜的面包和奶酪。', '火车又晚点了，所以我打车回家。',
+           '她每天晚上睡觉前都看书。', '你能把昨天开会的笔记发给我吗？'],
+    'ja': ['今日はいい天気なので、散歩に行きましょう。', '朝はたいていお茶を飲み、昼ご飯の後にコーヒーを飲みます。',
+           '寒くなってきたので、窓を閉めてください。', '隣の人は、鳥を見るとほえる小さな犬を飼っています。',
+           '市場で焼きたてのパンとチーズを買いました。', '電車がまた遅れたので、タクシーで帰りました。',
+           '彼女は毎晩寝る前に本を読みます。', '昨日の会議のメモを送ってもらえますか？'],
+    'ko': ['오늘은 날씨가 좋으니까 산책하러 가요.', '아침에는 보통 차를 마시고 점심 후에는 커피를 마셔요.',
+           '추워지니까 창문 좀 닫아 주세요.', '우리 이웃집에는 새만 보면 짖는 작은 개가 있어요.',
+           '시장에서 신선한 빵과 치즈를 샀어요.', '기차가 또 늦어서 택시를 타고 집에 갔어요.', '그녀는 매일 밤 자기 전에 책을 읽어요.',
+           '어제 회의 메모를 저에게 보내 줄 수 있어요?'],
+    'ar': ['الجو جميل اليوم، هيا نخرج في نزهة.', 'في الصباح أشرب الشاي عادة، وبعد الغداء أشرب القهوة.',
+           'أغلق النافذة من فضلك، بدأ الجو يبرد هنا.', 'عند جاري كلب صغير ينبح على كل طائر.', 'اشترينا خبزا طازجا وجبنا من السوق.',
+           'تأخر القطار مرة أخرى، فعدت إلى البيت بسيارة أجرة.', 'هي تقرأ كتابا كل مساء قبل النوم.',
+           'هل يمكنك أن ترسل لي ملاحظات اجتماع الأمس؟'],
+}
+LIVE_WER = 0.3  # the live reading: the app's ASR heard the screen text (RESEARCH-clone 6.1, as loose as check_clone's)
+SPEAKER = 'wespeaker-resnet34'  # registry id: the speaker vector ("the same voice"; S2: who is speaking now)
+# cosine of the speaker vectors, the live reading (silence cut out) against the profile's recording. Stage 8, LibriSpeech
+# dev-clean (40 people, another chapter as another session), 5 s live: another person of the same sex passes <= 0.64 %
+# in every condition (17 423 pairs, p99 0.43); the same person is refused 2.8 % clean, 6-8 % with a laptop mic at
+# SNR 20 dB, 14-20 % at 10 dB, 21 % against a phone-band file: a refusal asks for a quieter place, a try again helps
+MATCH = 0.45
+# the recording is checked window by window, each against the live reading (min): 30 s of someone else then 30 s of
+# me must not pass as me, and the clone takes the recording's start (XTTS its first 30 s, Pocket its first 10 s).
+# BENCH (FIXES-s3): such splices pass 88-90 % with one vector, 0 % with 8 s windows; the same person is refused 4.1 %
+# clean (3.4 % with one vector), another person passes 0.06 % a try, 0.19 % in 3 tries. 10-12 s: fewer refusals in
+# noise, more of another person in a mixed window
+WIN_S = 8.0
+TRIES, PAUSES_S = 3, (60, 300, 1500, 3600)  # failed checks in a row before a pause; the pauses after them, growing
+
+
+def live_phrases(lang: str, n: int = 2) -> list[str]:
+    """What the live check shows: `n` of the language's LIVE_PHRASES, a new pick each time."""
+    import random
+    return random.SystemRandom().sample(LIVE_PHRASES[lang], n)
+
+
+def _to(pcm: np.ndarray, sr: int, to: int) -> np.ndarray:
+    x = np.asarray(pcm, np.float32)
+    x = x.mean(axis=1) if x.ndim > 1 else x
+    return x if sr == to else np.interp(np.arange(0, len(x), sr / to), np.arange(len(x)), x).astype(np.float32)
+
+
+def _windows(x: np.ndarray, sr: int) -> list[np.ndarray]:
+    """WIN_S pieces of `x`; a last one shorter than half of it joins the one before."""
+    n = int(WIN_S * sr)
+    w = [x[i:i + n] for i in range(0, len(x), n)] or [x]
+    if len(w) > 1 and len(w[-1]) < n // 2:
+        w[-2:] = [np.concatenate(w[-2:])]
+    return w
+
+
+def _checks(voices: Path) -> Path:
+    return voices.parent / 'voice-checks.json'  # beside the voices: a new or deleted profile does not reset it
+
+
+def wait_s(root: Path | None = None) -> float:
+    """Seconds before the next live check may run (0: now): after TRIES failures in a row, a growing pause
+    (the threshold holds for one try: another person's best of many tries passes more often, BENCH)."""
+    try:
+        c = json.loads(_checks(root or voices_dir()).read_text(encoding='utf-8'))
+        return max(0.0, float(c['until']) - time.time())
+    except (OSError, ValueError, KeyError, TypeError):
+        return 0.0
+
+
+def _tried(ok: bool, voices: Path) -> None:
+    f = _checks(voices)
+    try:
+        fails = 0 if ok else int(json.loads(f.read_text(encoding='utf-8')).get('fails', 0)) + 1
+    except (OSError, ValueError, AttributeError):
+        fails = 0 if ok else 1
+    pause = PAUSES_S[min(fails - TRIES, len(PAUSES_S) - 1)] if fails >= TRIES else 0
+    f.write_text(json.dumps({'fails': fails, 'until': time.time() + pause}), encoding='utf-8')
+
+
+def _speech(pcm: np.ndarray, sr: int, edges: bool = False) -> np.ndarray:
+    """The speech of a recording: its 30 ms frames above the background, as check() counts them. `edges`: only the
+    silence before the first and after the last such frame goes, the pauses stay (the live reading: in noise, cutting
+    every quiet frame cuts quiet speech too, and the same person was refused 72 % at SNR 10 against 38 %, BENCH)."""
+    x = np.asarray(pcm, np.float32)
+    x = x.mean(axis=1) if x.ndim > 1 else x
+    f = _frames(x - x.mean(), sr)
+    db = 10 * np.log10(np.mean(f ** 2, axis=1) + 1e-12)
+    live = db[db > -100]
+    on = db > max(float(np.percentile(live, 10)) + 6 if len(live) else -120.0, -60.0)
+    if not on.any():
+        return x
+    i, j = np.flatnonzero(on)[[0, -1]]
+    return (f[i:j + 1] if edges else f[on]).reshape(-1).astype(np.float32)
+
+
+class Speaker:
+    """A voice -> its speaker vector (unit length): wespeaker ResNet34 VoxCeleb on onnxruntime, run as onnx-asr 0.12.0
+    (uv.lock) runs it: its numpy Kaldi fbank, mean over time removed, `feats` -> `embs`. No torch."""
+
+    def __init__(self, model_dir: Path, threads: int = 1):
+        import onnxruntime as rt
+        from onnx_asr.preprocessors.numpy_preprocessor import KaldiPreprocessorNumpy
+
+        from peresmeshnik.local.vad import ort_options
+        self._fbank = KaldiPreprocessorNumpy('wespeaker')
+        self._s = rt.InferenceSession(str(next(Path(model_dir).glob('*.onnx'))), ort_options(threads),
+                                      providers=['CPUExecutionProvider'])
+
+    def embed(self, pcm: np.ndarray, sr: int) -> np.ndarray:
+        x = _to(pcm, sr, 16_000)[None]
+        f, _ = self._fbank(x, np.array([x.shape[1]], np.int64))
+        e = self._s.run(['embs'], {'feats': (f - f.mean(axis=1, keepdims=True)).astype(np.float32)})[0][0]
+        return e / (np.linalg.norm(e) + 1e-12)
+
+
+def confirm_live(ref: Voice, pcm: np.ndarray, sr: int, said: list[str], asr, speaker: Speaker) -> tuple[dict | None, str]:
+    """The live reading `pcm` of the shown `said` against my profile `ref`: (consent for voice.json, '') when the
+    app's ASR (local/asr.OnnxAsr of the profile's language) heard the words and every window of the recording is the
+    reader's voice; else (None, why, for the user). The consent names the recording it checked (ref_sha256): set_consent
+    writes it only onto that one. After TRIES failures in a row it waits (wait_s)."""
+    import io
+
+    import soundfile as sf
+
+    from peresmeshnik.engines import SAMPLE_RATE
+    if w := wait_s(ref.path.parent):
+        return None, f'Too many tries: wait {w / 60:.0f} min before the next one.'
+    data = (ref.path / 'reference.wav').read_bytes()  # the bytes checked are the bytes the hash names
+    x, rsr = sf.read(io.BytesIO(data), dtype='float32', always_2d=True)
+    heard = asr.recognize(_to(pcm, sr, SAMPLE_RATE), lang=ref.meta.get('lang')).text
+    err = wer(' '.join(said), heard)
+    live = speaker.embed(_speech(pcm, sr, edges=True), sr)
+    sims = [float(speaker.embed(w, rsr) @ live) for w in _windows(_speech(x.mean(axis=1), rsr), rsr)]
+    sim = min(sims)
+    why = ([f'the words heard are not the ones on the screen ({err:.0%} differ): read them as written'] if err > LIVE_WER
+           else []) + ([f'this is not the voice of the recording (similarity {sim:.2f})'] if sim < MATCH else [])
+    if sim < MATCH and (r := check(pcm, sr)).speech_s and r.snr_db < FAIR_DB:  # the same person: refused 3x as often
+        why.append(f'the background is loud (your speech only {r.snr_db:.0f} dB above it): try again somewhere quiet')
+    if sim < MATCH and ref.meta.get('quality', {}).get('band_db', 0.0) < BAND_DB:
+        why.append('the recording sounds like a phone call: one from a better microphone matches more reliably')
+    _tried(not why, ref.path.parent)
+    if why:
+        return None, 'Not confirmed: ' + '; '.join(why) + '.'
+    import hashlib
+    how = 'mic-live' if ref.meta.get('source') == 'mic' else 'import+mic-match'
+    return {'how': how, 'at': _now(), 'wer': round(err, 3), 'similarity': round(sim, 3), 'windows': len(sims),
+            'ref_sha256': hashlib.sha256(data).hexdigest()}, ''
+
+def set_consent(name: str, consent: dict | None, root: Path | None = None) -> Voice:
+    """Write how my profile `name` was confirmed (confirm_live) into its voice.json: only onto the recording that
+    was checked (a new take or import meanwhile: ValueError, nothing written)."""
+    v = load(name, root)
+    if consent and CONSENT.get(consent.get('how')) != v.meta['kind']:
+        raise ValueError(f'{consent.get("how")!r} does not confirm a {v.meta["kind"]!r} voice')
+    if consent and consent.get('ref_sha256') != _sha(v.path / 'reference.wav'):
+        raise ValueError('the recording changed while it was checked: confirm it again')
+    _write(v.path, v.meta | {'consent': consent})
+    return load(name, root)
+
+
 def save(pcm: np.ndarray, sr: int, name: str, lang: str, transcript: str | None = None,
-         root: Path | None = None) -> Voice:
-    """Write `<root>/<name>/reference.wav` + `voice.json`; returns the profile (engine 'reference')."""
+         root: Path | None = None, source: str = 'file') -> Voice:
+    """Write my voice `<root>/<name>/reference.wav` + `voice.json` (v2, kind 'me', not confirmed: confirm_live);
+    returns the profile (engine 'reference')."""
     import soundfile as sf
     x = np.asarray(pcm, dtype=np.float32)
     x = (x.mean(axis=1) if x.ndim > 1 else x)[:int(MAX_S * sr)]
@@ -351,15 +715,15 @@ def save(pcm: np.ndarray, sr: int, name: str, lang: str, transcript: str | None 
     base = root or voices_dir()
     path = base / name
     path.mkdir(parents=True, exist_ok=True)
-    for d in (base, path):  # the user's voice (enough to clone it) and its latents: theirs only (L-09; Linux, a shared
-        d.chmod(0o700)  # machine with a 0755 home). The rest of the data folder keeps the umask
+    _private(base, path)
     for old in path.glob('*.pt'):  # engine caches of an older recording
         old.unlink()
     sf.write(path / 'reference.wav', np.clip(x * gain, -1, 1), sr, subtype='PCM_16')
-    meta = {'name': name, 'lang': lang, 'transcript': transcript or '', 'sample_rate': sr,
-            'created': time.strftime('%Y-%m-%dT%H:%M:%S%z'), 'gain_db': round(20 * np.log10(gain), 1),
+    meta = {'version': VERSION, 'id': name, 'name': name, 'kind': 'me', 'lang': lang, 'created': _now(),
+            'consent': None, 'source': source, 'seconds': report.seconds, 'engines': {},
+            'transcript': transcript or '', 'sample_rate': sr, 'gain_db': round(20 * np.log10(gain), 1),
             'quality': {k: v for k, v in asdict(report).items() if k not in ('errors', 'warnings')}}
-    (path / 'voice.json').write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding='utf-8')
+    _write(path, meta)
     return Voice(name=name, engine='reference', path=path, meta=meta)
 
 
@@ -375,8 +739,8 @@ def promote(draft: str, name: str, root: Path | None = None) -> Voice:
     (base / draft).rename(base / name)
     if old.exists():
         shutil.rmtree(old)
-    meta = json.loads((base / name / 'voice.json').read_text(encoding='utf-8')) | {'name': name}
-    (base / name / 'voice.json').write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding='utf-8')
+    _write(base / name, upgrade(json.loads((base / name / 'voice.json').read_text(encoding='utf-8')), name)
+           | {'id': name, 'name': name})
     return load(name, base)
 
 
@@ -387,8 +751,15 @@ def discard(name: str, root: Path | None = None) -> None:
 
 
 def load(name: str, root: Path | None = None) -> Voice:
+    """A profile; a v1 voice.json is upgraded to v2 on disk once (an older app still reads it)."""
     path = (root or voices_dir()) / name
     meta = json.loads((path / 'voice.json').read_text(encoding='utf-8'))
+    if meta.get('version', 1) < VERSION:
+        meta = upgrade(meta, name)
+        try:
+            _write(path, meta)
+        except OSError:  # read-only: upgraded in memory again next time
+            pass
     return Voice(name=name, engine='reference', path=path, meta=meta)
 
 
@@ -428,10 +799,10 @@ def main(argv=None) -> int:
         ap.error('--engine needs --model-dir')
 
     if a.cmd == 'list':
-        root = a.voices or voices_dir()
-        for p in sorted(root.glob('*/voice.json')):
-            m = json.loads(p.read_text(encoding='utf-8'))
-            print(f"{m['name']}\t{m['lang']}\t{m['quality']['seconds']:.0f} s\t{m['created']}\t{p.parent}")
+        for v in profiles(a.voices):
+            m = v.meta
+            print(f"{m['name']}\t{m['lang']}\t{m['seconds']:.0f} s\t{m['created']}\t{m['kind']}\t"
+                  f"{(m['consent'] or {}).get('how', 'not confirmed')}\t{v.path}")
         return 0
     if a.cmd == 'check':
         r = check(*read_audio(a.file))
@@ -456,7 +827,7 @@ def main(argv=None) -> int:
         sr = 24_000  # above the 16 kHz pipeline rate: the clone engine uses 22.05 kHz
         device = int(a.device) if a.device and a.device.isdigit() else a.device
         pcm = record(a.record, device=device, sample_rate=sr)
-    r, v = enroll(pcm, sr, a.name, a.lang, transcript, a.force, a.voices)
+    r, v = enroll(pcm, sr, a.name, a.lang, transcript, a.force, a.voices, 'file' if a.file else 'mic')
     _print_report(r)
     if v is None:
         print('Not saved (keep it anyway with --force).')

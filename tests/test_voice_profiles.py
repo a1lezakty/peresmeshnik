@@ -4,6 +4,7 @@ import os
 
 import numpy as np
 import pytest
+from test_crash import app  # noqa: F401  (the fixture: crash reports into tmp_path)
 
 from peresmeshnik import voice
 
@@ -144,3 +145,27 @@ def test_speaker_tells_the_reader_from_other_people():
     others = [float(ref @ spk.embed(y[:6 * r], r)) for y, r in (voice.read_audio(data / f) for f in ('call-en.ogg', 'ours-en.ogg'))]
     print(f'\nsame reader {same:.2f}, other people {others}')
     assert same >= voice.MATCH > max(others)
+
+
+
+def test_crash_report_names_no_voice(app, tmp_path):  # noqa: F811 (the fixture from test_crash)
+    """A contact's and my own voice's names never reach a report; the app's folder ids name nobody and stay: 'me' is not
+    cut out of "them -> me"."""
+    import threading
+
+    from peresmeshnik import crash
+    root = tmp_path / 'data' / 'voices'  # the fixture's data folder
+    them = voice.save_them('Анна Смирнова', 'en', 6.0, {}, root)
+    voice.save(*speech(), 'Petrov', 'ru', 'text', root)  # a v1-era profile the user named (--name)
+    voice.save(*speech(), 'me', 'ru', 'text', root)
+    assert voice.names(root) == {'Анна Смирнова', 'Petrov', 'Ivan Petrov'}  # and the fixture's settings' voice
+    crash._known_private(None)  # as at a start with these profiles
+
+    def worker():
+        raise ValueError(f'voice Анна Смирнова ({them.name}) and Petrov at {them.path}: them -> me')
+    t = threading.Thread(target=worker, name='speak')
+    t.start()
+    t.join()
+    text = next(crash.reports_dir().glob('crash-*.txt')).read_text('utf-8')
+    assert 'Анна' not in text and 'Смирнова' not in text and 'Petrov' not in text, text[-800:]
+    assert f'({them.name})' in text and ': them -> me' in text

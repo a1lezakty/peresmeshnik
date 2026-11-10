@@ -3,7 +3,7 @@
 ; Inno Setup 6 script: the installer of the one-folder build in dist\Peresmeshnik (packaging/windows/build.sh runs
 ; ISCC with /DVersion=<version>). Per-user by default (no administrator rights, %LOCALAPPDATA%\Programs), a Start menu
 ; shortcut, start at sign-in only when ticked, an uninstaller. Settings (with the Gemini key) go only when the user says
-; so at uninstall; voices and models stay in the user's folders.
+; so at uninstall; models stay in the user's folders, voices if the user keeps them.
 #ifndef Version
   #error pass /DVersion=<version>
 #endif
@@ -131,9 +131,11 @@ end;
   - the voice pack (the CUDA clone, ~8 GB, in the app's data folder: config.data_dir) goes only when the user says so,
     and with it what an install leaves beside it (local/voicepack.py): voice-pack.download (up to 3.7 GB),
     voice-pack.tmp, voice-pack.pip-tmp, voice-pack.old-*; asked about also when only those are there;
+  - the voices (voices: my own recording, the voices of people I talk to that I chose to keep) go only when the user
+    says so, a question of their own;
   - the settings go only when the user says so, and with them the Gemini API key, which is a plain-text file there.
   Settings, data and cache are one folder on Windows (config.config_dir, data_dir, cache_dir: %LOCALAPPDATA%\Peresmeshnik):
-  the voices (voices), logs, crash reports and the models (Cache\models) stay, and the dialog says where. }
+  logs, crash reports and the models (Cache\models) stay, and the dialog says where. }
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   Dir, Pack, Apps: String;
@@ -160,10 +162,14 @@ begin
         DelTree(Pack + '.*', False, True, True);  { the leftovers above: a wildcard, files and folders }
       end;
     end;
+    if DirExists(Dir + '\voices') then
+      if MsgBox('Remove your saved voices too: the recording of your own voice and the voices of people you talk to '
+                + 'that you chose to keep (' + Dir + '\voices)?', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+        DelTree(Dir + '\voices', True, True, True);
     if FileExists(Dir + '\settings.toml') or FileExists(Dir + '\gemini-key') then
       if MsgBox('Remove your settings and your Gemini API key too? The key is stored as plain text in ' + Dir
                 + '\gemini-key: anyone signed in to your Windows account can read it.' + #13#10#13#10
-                + 'Your voices, logs and the downloaded models stay either way, in ' + Dir + ' (the models in its Cache '
+                + 'Logs and the downloaded models stay either way, in ' + Dir + ' (the models in its Cache '
                 + 'folder): delete that folder to remove them as well.', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES
       then begin
         DeleteFile(Dir + '\gemini-key');

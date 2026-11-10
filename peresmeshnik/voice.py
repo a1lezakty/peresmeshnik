@@ -430,6 +430,19 @@ def save_them(name: str, lang: str, seconds: float, states: dict[str, tuple[np.n
     return Voice(name=vid, engine='reference', path=path, meta=meta)
 
 
+def names(root: Path | None = None) -> set[str]:
+    """What in the voices folder may name a person, for crash reports to scrub: the names on the voices screen and
+    folders the user named (v1 `--name`); not the app's own ids ('me', 'them-<hex>'), which name nobody."""
+    import re
+    out = set()
+    for p in (root or voices_dir()).glob('*'):
+        out.add(p.name.removesuffix('.new').removesuffix('.old'))
+        try:
+            out.add(json.loads((p / 'voice.json').read_text(encoding='utf-8')).get('name', ''))
+        except (OSError, ValueError, AttributeError):
+            pass
+    return {n for n in out if n and not re.fullmatch(r'me|them-[0-9a-f]{8}', n)}
+
 def engine_state(v: Voice, model: str, sha: str) -> np.ndarray | None:
     """The state a profile keeps for the engine `model` with weights `sha`; None: not made with those weights."""
     e = v.meta.get('engines', {}).get(model)

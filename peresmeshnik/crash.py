@@ -12,7 +12,7 @@ app, the voice profile's name, keys or the user's name in paths (`clean`, `scrub
 - a log line keeps its format string and only its numbers ("microphone <…> is not there: using <…>"); the latency
   logger's JSON keeps only its numbers. Every log call of the app passes data as arguments (none builds its message);
 - what is left as text (exception messages, the stack) loses the private values known: the settings' devices, call app
-  and voice, the voice profiles, the devices seen this run (`private()`) and listed now, the key and anything shaped like
+  and key, the voices' names (`voice.names`), the devices seen this run (`private()`) and listed now, the key and anything shaped like
   one, the home folder (URL-encoded too), the user's and the host's names, the last subtitles (`said()`, kept in
   memory only) whole, every word of 3 letters and more said this run, and any Chinese / Japanese / Korean character
   said (no spaces there: a part of a phrase is not a word). A third-party logger's message is text built with its
@@ -168,15 +168,15 @@ class _Handler(logging.handlers.RotatingFileHandler):
 
 def _known_private(settings) -> None:
     if settings is not None:
-        private(settings.ui.mic, settings.ui.headphones, settings.ui.call_app, settings.local.voice)
+        private(settings.ui.mic, settings.ui.headphones, settings.ui.call_app)
         try:
             from peresmeshnik.cloud import api_key
             private(api_key(settings.cloud))
         except BaseException:  # no key: SystemExit
             pass
-    try:
-        from peresmeshnik.voice import voices_dir
-        private(*(p.name.removesuffix('.new').removesuffix('.old') for p in voices_dir().iterdir()))
+    try:  # the voices' names (my own, the people I talk to); their folders are ids ('me' stays in "them -> me")
+        from peresmeshnik.voice import names
+        private(*names())
     except OSError:
         pass
 

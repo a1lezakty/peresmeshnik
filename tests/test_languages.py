@@ -287,3 +287,37 @@ def test_the_clone_needs_a_card_it_runs_on(monkeypatch):
     assert me.voice == 'stock' and 'at least 6 GB' in me.notes[0] and 'xtts-v2' not in languages.needed_models(s)
     monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu())
     assert languages.direction(s, 'me_to_them').voice == 'clone'
+
+
+def test_clone_engine_is_the_best_one_the_platform_runs(monkeypatch):
+    """Stage 8 S1: `clone_engine(lang, side, platform=)` picks the clone engine per platform and language (RESEARCH-clone
+    §7): Qwen3-TTS on an NVIDIA GPU, XTTS-v2 for what Qwen3 lacks, Pocket TTS on a CPU or a Mac (a model per language,
+    Russian too); a card the voice pack cannot use falls to the CPU engine, not to the stock voice; else (None, why)."""
+    reg = {'qwen3-tts': stub('qwen3-tts', 'clone', 'en', 'ru', 'de', 'fr', 'es', 'it', 'pt', 'zh', 'ja', 'ko', needs='gpu'),
+           **models.registry(), 'pocket-tts-en': stub('pocket-tts-en', 'clone', 'en'),
+           'pocket-tts-fr': stub('pocket-tts-fr', 'clone', 'fr'), 'pocket-tts-ru': stub('pocket-tts-ru', 'clone', 'ru')}
+    monkeypatch.setattr(models, 'registry', lambda: reg)
+    cpu, mac = languages.Platform('linux', False), languages.Platform('darwin', False)
+    card, old = languages.Gpu(8.0, (572, 83), 8.6), languages.Gpu(8.0, (472, 12), 8.6)
+    nvidia, old_win = languages.Platform('linux', card), languages.Platform('win32', old)
+    engine = languages.clone_engine
+    assert engine('en', platform=cpu) == engine('en', platform=mac) == ('pocket-tts-en', '')
+    assert engine('fr', platform=old_win) == ('pocket-tts-fr', '')
+    assert engine('ru', 'them_to_me', platform=cpu) == ('pocket-tts-ru', '')
+    assert engine('en', platform=nvidia) == engine('ru', platform=nvidia) == ('qwen3-tts', '')
+    assert engine('pl', platform=nvidia) == ('xtts-v2', '')
+    assert engine('zh', platform=old_win) == (None, languages.gpu_why(old))
+    assert engine('pl', platform=cpu) == (None, 'your cloned voice needs an NVIDIA GPU')
+    assert engine('pl', 'them_to_me', platform=mac) == (None, 'no clone of their voice keeps up on a Mac')
+    assert engine('uk', platform=nvidia) == (None, 'no cloned voice speaks Ukrainian')
+    with pytest.raises(ValueError):
+        engine('en', 'me')
+
+
+def test_clone_engine_on_this_computer_asks_the_card_once(monkeypatch):
+    """platform=None: this computer — sys.platform and its card (nvidia-smi once per run, as clone_why)."""
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
+    monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(8.0, (572, 83), 8.6))
+    assert languages.clone_engine('en') == ('xtts-v2', '')  # the registry has no Qwen3 / Pocket row yet
+    monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(4.0, (572, 83), 8.6))
+    assert 'at least 6 GB' in languages.clone_engine('en')[1]

@@ -60,7 +60,13 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
         with:
-          version: '0.13.7'  # uv itself pinned, not the latest
+          version: '0.13.7'  # uv itself pinned, not the latest; setup-uv v6.8.0 knows no checksum past 0.8.20, so ours:
+          # the SHA-256 of the release's uv-<target> archive (its .sha256 file) for Windows and Linux x64, macOS arm64 and
+          # x64; another runner gets a sum that fails
+          checksum: ${{ runner.os == 'Windows' && '0cdc5b38fe5a8168ed6a25814f5ba43c21d313dd3187314fccb37b7cec46e021'
+            || runner.os == 'Linux' && 'c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83'
+            || runner.arch == 'ARM64' && '81b811b57e4624df7ed3aac148e0359100d9962f3d9dce00aec533dc2e086731'
+            || '20c47e4c1f630b8abaff8c291fa9b9aa300fef92c4fbff95adf198b55287cda7' }}
           python-version: '3.12'
       - name: Machine
         run: |
@@ -95,8 +101,10 @@ jobs:
                    7B:126325496bc8e3575f1d8615b8ca951d8483f206:fc87637e4dd29547811a28170770c2ac17725fb7690b7c4aafa4f463c3e77568; do
             IFS=: read -r size rev sum <<< "$m"
             f=models/gguf/HY-MT1.5-$size-Q4_K_M.gguf
-            [ -f $f ] || curl -sL -o $f https://huggingface.co/tencent/HY-MT1.5-$size-GGUF/resolve/$rev/HY-MT1.5-$size-Q4_K_M.gguf
-            echo "$sum  $f" | shasum -a 256 -c
+            url=https://huggingface.co/tencent/HY-MT1.5-$size-GGUF/resolve/$rev/HY-MT1.5-$size-Q4_K_M.gguf
+            [ -f $f ] || curl -sfL -o $f $url
+            # a cache of an older revision (restore-keys) has another file: fetched once again, else it fails for good
+            echo "$sum  $f" | shasum -a 256 -c || { rm -f $f; curl -sfL -o $f $url; echo "$sum  $f" | shasum -a 256 -c; }
           done
           echo "GGUF=$PWD/models/gguf/HY-MT1.5-1.8B-Q4_K_M.gguf $PWD/models/gguf/HY-MT1.5-7B-Q4_K_M.gguf" >> $GITHUB_ENV
       - name: Run ${{ matrix.suite }}

@@ -5,7 +5,8 @@ name: release
 # with a green `ci` and a green `voice-pack` (the real clone in 13 languages) on that very commit, and no release of
 # that tag yet. workflow_dispatch and pull requests run the same builds and checks without a release: the files are
 # workflow artifacts. workflow_dispatch with dry_run runs everything a tag runs (the version against v<version>, the
-# REQUIRE_* guards, those checks as warnings, the notes) and keeps the notes as an artifact instead of a release:
+# REQUIRE_* guards, those checks as warnings, the notes; not the build attestations) and keeps the notes as an artifact
+# instead of a release:
 #   gh workflow run release.yml --ref main -f dry_run=true
 on:
   push:
@@ -35,13 +36,19 @@ jobs:
     timeout-minutes: 40
     permissions:
       contents: read
-      id-token: write  # the build attestation (a tag, a dry run)
+      id-token: write  # the build attestation (a tag only: a dry run's would sit in the public log for good)
       attestations: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
         with:
-          version: '0.13.7'  # uv itself pinned, not the latest
+          version: '0.13.7'  # uv itself pinned, not the latest; setup-uv v6.8.0 knows no checksum past 0.8.20, so ours:
+          # the SHA-256 of the release's uv-<target> archive (its .sha256 file) for Windows and Linux x64, macOS arm64 and
+          # x64; another runner gets a sum that fails
+          checksum: ${{ runner.os == 'Windows' && '0cdc5b38fe5a8168ed6a25814f5ba43c21d313dd3187314fccb37b7cec46e021'
+            || runner.os == 'Linux' && 'c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83'
+            || runner.arch == 'ARM64' && '81b811b57e4624df7ed3aac148e0359100d9962f3d9dce00aec533dc2e086731'
+            || '20c47e4c1f630b8abaff8c291fa9b9aa300fef92c4fbff95adf198b55287cda7' }}
           python-version: '3.12'
           enable-cache: true
       - name: Version matches the tag (on a dry run, the tag it would be)
@@ -87,7 +94,8 @@ jobs:
       - name: SHA-256
         run: cd dist && shasum -a 256 *.dmg | tee "$(ls *.dmg).sha256"
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
-        if: env.RELEASE == '1'  # a signed record that this file was built here, from this commit (gh attestation verify)
+        if: startsWith(github.ref, 'refs/tags/v')  # a signed record that this file was built here, from this tag
+        # (gh attestation verify ... --source-ref refs/tags/<tag>); not on a dry run, whose files are no release
         with:
           subject-path: dist/*.dmg
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
@@ -101,7 +109,7 @@ jobs:
     timeout-minutes: 50
     permissions:
       contents: read
-      id-token: write  # the build attestation (a tag, a dry run)
+      id-token: write  # the build attestation (a tag only: a dry run's would sit in the public log for good)
       attestations: write
     defaults:
       run:
@@ -112,7 +120,13 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
         with:
-          version: '0.13.7'  # uv itself pinned, not the latest
+          version: '0.13.7'  # uv itself pinned, not the latest; setup-uv v6.8.0 knows no checksum past 0.8.20, so ours:
+          # the SHA-256 of the release's uv-<target> archive (its .sha256 file) for Windows and Linux x64, macOS arm64 and
+          # x64; another runner gets a sum that fails
+          checksum: ${{ runner.os == 'Windows' && '0cdc5b38fe5a8168ed6a25814f5ba43c21d313dd3187314fccb37b7cec46e021'
+            || runner.os == 'Linux' && 'c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83'
+            || runner.arch == 'ARM64' && '81b811b57e4624df7ed3aac148e0359100d9962f3d9dce00aec533dc2e086731'
+            || '20c47e4c1f630b8abaff8c291fa9b9aa300fef92c4fbff95adf198b55287cda7' }}
           python-version: '3.12'
           enable-cache: true
       - name: Version matches the tag (on a dry run, the tag it would be)
@@ -159,7 +173,7 @@ jobs:
       - name: SHA-256
         run: cd dist && for f in *.zip *-setup.exe; do sha256sum "$f" | sed 's/ \*/  /' | tee "$f.sha256"; done  # as shasum on macOS
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
-        if: env.RELEASE == '1'
+        if: startsWith(github.ref, 'refs/tags/v')  # as on macOS
         with:
           subject-path: |
             dist/*.zip
@@ -233,7 +247,8 @@ jobs:
           Checked on this commit by CI: the tests ($CI_RUN) and the voice clone in 13 languages ($VOICE_RUN). The real
           cloud (Gemini Live) is checked by hand before a release is published.
 
-          SHA-256 (and where each file was built: \`gh attestation verify <file> --repo $GITHUB_REPOSITORY\`):
+          SHA-256 (and that each file was built here from this tag:
+          \`gh attestation verify <file> --repo $GITHUB_REPOSITORY --source-ref refs/tags/$TAG\`):
 
           $sums
           EOF

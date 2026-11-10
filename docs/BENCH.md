@@ -2306,3 +2306,114 @@ German is the one where it does not hold up: in the engine run above it went on 
 Polish, Turkish, Chinese, Japanese, Arabic: no tail either way, the period stays. English and Russian are left as they
 are here (stage 5 measures the clone's tails in them: Russian had 4 of 18 with the period, 0 with a comma). Whether a
 comma at the end sounds unfinished (rising) is a check by ear (USER-CHECKS).
+
+## Stage 7: light clone engines for both directions (research)
+
+Measured 2026-11-10. Research only: nothing here is in the app yet. The question: which engine can speak in a cloned
+voice **without a GPU** (and on a Mac), from a few seconds of a voice picked up in the call, with the first sound
+right after the translated clause. `bench/clone_light.py` (engines, short references, judge),
+`bench/clone_light_ci.sh` (the macOS runner), `bench/me_them.py --remote` with `$CLONE_SERVER` (the whole pipeline).
+
+- **Method** as "Stage 6: the clone" above: the 6 shortest FLEURS sentences (macOS: 4), the LibriVox reader (ru) and
+  the LibriSpeech reader (en) as voices, ECAPA cosine against the **whole** ~40 s recording, CER / WER by Whisper
+  small. New: the engine gets only the first **3 / 5 / 10 s** of the recording (cut at a pause; the 3 s transcript by
+  the judge), as a voice picked up in a call would be. Baselines: another speaker 0.085, the same reader 0.90–0.93,
+  XTTS in the app with the whole recording ru → en 0.37–0.40, en → ru 0.35–0.38.
+- **Hosts:** `i7-13700-2t` / `-4t`: 2 / 4 P-cores by `taskset`, CUDA hidden; `rtx-a4000`: one A4000, 2 CPU threads;
+  `macos-15`: the GitHub runner (virtual M1, 3 cores, 7 GB, no usable GPU). The judge runs after the synthesis.
+- **Speed** columns are from the quiet pass (rows `clone_light_quiet`: nothing else on the machine); the similarity
+  rows (`clone_light`) were made while other work shared the CPU, their own speed fields are up to 1.5× slower.
+- `first audio`: from the text to the first chunk of sound; `RTF`: synthesis time per second of sound; `voice s`:
+  preparing the voice from the reference, once.
+
+**Engines, 5 s reference unless said** (sim / WER: ru → en, then en → ru; "—": the engine has no Russian):
+
+| engine | weights | 2 thr.: first audio s / RTF | 4 thr.: first audio s / RTF | RAM GB | voice s | sim ru → en | WER | sim en → ru | WER |
+|---|---|---|---|---|---|---|---|---|---|
+| Piper, no clone (the floor) | 60 MB per voice | 0.11 / 0.02 | 0.11 / 0.02 | 0.45 | 0 | 0.12 | 7 % | 0.19 | 11 % |
+| **Pocket TTS** (int8 ONNX) | 146 MB per language | **0.09 / 0.28** | 0.09 / 0.28 | 0.9 (10 s ref.: 1.4) | 0.2–0.9 | 0.32–0.36 | 4–7 % | — | — |
+| MOSS-TTS-Nano (ONNX) | 0.76 GB | 0.23 / 0.53 | 0.18 / 0.43 | 1.9 (10 s ref.: 2.5–3.2) | 0.2–0.9 | 0.39 | 6 % | 0.36 | **39–40 %** |
+| ZONOS3-Mini (GGUF, CPU) | 1.2 GB | 0.37 / 0.72 | 0.22 / 0.52 | 2.2 | 2–8 | **0.61** | 7 % | — | — |
+| Piper → MeanVC2 (int8 ONNX) | 56 MB + Piper | 0.13 / 0.10 | 0.12 / 0.09 | 1.1 | 0.2–0.9 | 0.37–0.43 | 7–18 % | 0.48 | **63 %** |
+| Piper → OpenVoice v2 converter (fp32 ONNX) | 128 MB + Piper | 1.6 / 0.35 | 1.2 / 0.26 | 0.9 | 0.5 | 0.26 | 10–12 % | 0.22–0.24 | 21–36 % |
+| Qwen3-TTS 0.6B, C engine, int8 | 0.6B, int8 | — | 1.0–1.2 / 1.4–2.0 | 3.6 | 4–5 | 0.52 (macOS) | 0 % | 0.43–0.45 (macOS) | 4 % |
+| Piper → kNN-VC, 10 s ref. | 0.4 GB | — | 1.6 / 0.44 | 1.8 | 0 | 0.45 | 41 % | 0.37 | 56 % |
+| Piper → Chatterbox VC (S3Gen), 10 s ref. | 1 GB | — | 15 / 3.1–3.5 | 2.4 | 0 | 0.45 | 10 % | 0.45 | 30 % |
+
+| GPU, RTX A4000 | first audio s | RTF | VRAM GB | sim ru → en | WER | sim en → ru | WER | sim ru → ru | sim en → en |
+|---|---|---|---|---|---|---|---|---|---|
+| XTTS-v2 in the app (stage 6, whole recording) | 0.15 | 0.18 | — | 0.37 | 4 % | 0.35 | 14 % | 0.65 | 0.58 |
+| **Qwen3-TTS 0.6B, `faster-qwen3-tts`, speaker vector only** | **0.08–0.12** | 0.42–0.54 | 2.4–2.5 | **0.52** | 3 % | **0.41** | 10 % | 0.69 | 0.63 |
+| the same, the reference with its text as a prompt, 5 s | 0.13 | 0.52 | 2.6 | 0.58 | 4 % | 0.45 | 10 % | 0.70 | 0.65 |
+| the same, 10 s | 0.13–0.15 | 0.46–0.61 | 2.8 | 0.55 | **264 %** | 0.63 | 29 % | 0.76 | 0.68 |
+| Qwen3-TTS 0.6B, the official package (no streaming) | 6.0–8.0 | 1.2–1.3 | 2.5 | 0.61 | 5 % | 0.45 | 4 % | 0.71 | 0.61 |
+| ZONOS3-Mini (GGUF, CUDA) | 0.03–0.12 | 0.06–0.26 | — | 0.57–0.68 | 28–29 % | — | — | — | 0.67–0.69 |
+
+**How many seconds of a voice** (sim ru → en / en → en; Qwen3: ru → en / en → ru):
+
+| reference | Pocket TTS | MOSS-TTS-Nano | ZONOS3-Mini | Piper → MeanVC2 | Piper → OpenVoice | Qwen3, speaker vector |
+|---|---|---|---|---|---|---|
+| 3 s | 0.30 / 0.52 | 0.30 / 0.47 | 0.58 / 0.63 | 0.42 / 0.54 | 0.27 / 0.36 | 0.52 / 0.38 |
+| 5 s | 0.32–0.36 / 0.54–0.55 | 0.39 / 0.48 | 0.61 / 0.68 | 0.37 / 0.60 | 0.26 / 0.40 | 0.52 / 0.41 |
+| 10 s | 0.35–0.36 / 0.59–0.60 | 0.50 / 0.52 | 0.69 / 0.69 | 0.43 / 0.60 | 0.29 / 0.39 | 0.51 / 0.42 |
+| whole (~40 s) | breaks (noise, 14 GB) | — | 0.71 / 0.74 | — | 0.30 / 0.35 | — |
+| 5 s through Opus 24 kbit/s | 0.41 / 0.54 | 0.37 / — | 0.59 / 0.67 | — | — | — |
+
+**The whole pipeline, live pace** (`me_them.py --remote --null-mic`: the app's ASR and MT **and** the engine on the same
+4 cores, rows `e2e_me_them` on `i7-13700-4c` / `-2c`; 9–10 clauses; `voice`: from the end of a clause to the start of
+its sound; `tail`: how long the voice goes on after the speech ended):
+
+| engine | direction | engine first audio ms, median | voice s: median (max) | tail s | WER of what was said |
+|---|---|---|---|---|---|
+| **Pocket TTS**, 10 s ref. | ru → en | 84 | **1.8** (4.2) | 1.7 | 1 % |
+| the same on 2 cores | ru → en | 88 | 2.2 (4.8) | 1.7 | 8 % |
+| Piper, no clone | ru → en | 96 | 3.1 (5.2) | 2.6 | 9 % |
+| Piper → MeanVC2 | ru → en | 106 | 3.7 (5.6) | 3.3 | 9 % |
+| Piper → OpenVoice | ru → en | 1234 | 5.1 (7.2) | 4.6 | 9 % |
+| MOSS-TTS-Nano | ru → en | 321 | 7.3 (14.6) | 17.1 | 12 % |
+| ZONOS3-Mini | ru → en | 269 | 8.5 (11.4) | 12.9 | 29 % |
+| Piper, no clone | en → ru | 65 | 1.5 (4.2) | 3.6 | 21 % |
+| Piper → OpenVoice, 5 s ref. | en → ru | 765 | 2.9 (5.8) | 5.1 | 37 % |
+| MOSS-TTS-Nano, 5 s ref. | en → ru | 267 | 2.8 (31.0) | 33.9 | 57 % |
+
+**The macOS runner** (5 s reference, 4 sentences, 2 threads; 3 threads: close to these):
+
+| engine | first audio s | RTF | RAM GB | sim ru → en | WER ru → en | sim en → ru | WER en → ru |
+|---|---|---|---|---|---|---|---|
+| Piper, no clone | 0.57–0.70 | 0.13–0.16 | 0.43 | 0.11 | 2 % | 0.19 | 11 % |
+| **Pocket TTS** | 0.11–0.20 | 0.28–0.39 | 1.0 | 0.30 | 2 % | — | — |
+| MOSS-TTS-Nano | 0.50–0.70 | 0.79–0.91 | 1.8 | 0.41 | 2 % | 0.32 | 20 % |
+| Piper → MeanVC2 | 0.82–0.85 | 0.29–0.31 | 1.2 | 0.37 | 3 % | — | — |
+| Piper → OpenVoice | 3.5–4.1 | 0.80–0.86 | 0.9 | 0.23 | 11 % | 0.26 | 22 % |
+| Qwen3-TTS 0.6B, C engine, int8 (3 threads) | 1.4–3.3 | 1.4–2.3 | 3.7 | 0.52 | 0 % | 0.45 | 4 % |
+| ZONOS3-Mini, CPU | 7.0 | 37–39 | 2.0 | 0.63 | 2 % | — | — |
+
+- **Pocket TTS is the one engine that holds a call on a CPU.** First sound in 0.09 s, 3.5× faster than real time on 2
+  threads (4 threads add nothing), under 1 GB with a 5 s reference, and next to the app's own ASR and MT on 4 cores
+  its voice starts 1.8 s after a clause ends (the stock Piper voice in the same run: 3.1 s; the runs are single, so
+  read the difference between the two as noise, not as "Pocket is faster than Piper"). Its similarity is XTTS's
+  (ru → en 0.32–0.36 against 0.37) at a tenth of XTTS's CPU time. It has no Russian, Ukrainian or Arabic:
+  English, French, German, Spanish, Portuguese, Italian (and community weights for Polish, Turkish, Japanese,
+  Chinese, Korean, not measured).
+- **A reference must be short for it:** 3 s already gives 0.30 / 0.52, 10 s 0.35 / 0.60; the whole 40 s recording
+  breaks Pocket TTS (noise instead of speech, 14 GB), so the app would cut the reference to 10 s.
+- **No engine here speaks cloned Russian on a CPU.** MOSS-TTS-Nano is the only one with Russian that is faster than
+  real time, and the judge cannot read 33–56 % of its Russian words (its English: 6–12 %); in the pipeline it falls
+  behind as well (tail 17–34 s). Piper → MeanVC2 destroys Russian (WER 63–89 %: the converter was trained on
+  Chinese), Piper → OpenVoice keeps the words (21–37 %) but its similarity (0.22–0.26) is next to the floor
+  (0.12–0.19) and it waits for the whole clause (first sound 1.2–1.6 s).
+- **ZONOS3-Mini sounds most like the speaker** (0.58 from 3 s, 0.69 from 10 s; its voice is one 192-number vector), but
+  it is one day old, about 1 clause in 6 from the Russian voice comes out broken (WER 12–29 % in the worse runs), it
+  needs 4 cores to itself (RTF 0.52; with the pipeline on the same cores it falls behind) and computing the vector
+  takes 2–8 s. On CUDA: first sound 0.03–0.12 s. Its Metal build aborted on the runner's virtual GPU, and its CPU
+  build there is 37× slower than real time: a real Mac has to say.
+- **With an NVIDIA card, Qwen3-TTS 0.6B through `faster-qwen3-tts` beats XTTS in the app** on similarity (ru → en
+  0.52 against 0.37, en → ru 0.41 against 0.35) with the same first sound (0.08–0.12 s) and readable Russian (WER
+  3–13 %), under Apache-2.0 instead of the non-commercial CPML. In the speaker-vector mode: with the reference as a
+  prompt a 10 s cross-lingual reference made it go on and on (WER 264 %). It lacks Polish, Turkish, Arabic and
+  Ukrainian, so XTTS stays for those.
+- **The C engine of Qwen3-TTS** (no Python, int8) is 1.4–2.3× slower than real time on 4 x86 cores and on the 3-core
+  runner; its author reports 0.7–0.9 on a real M1 and 0.3–0.4 with Metal. Not measured here.
+- **Opus does not hurt:** a 5 s reference through Opus 24 kbit/s and back gives the same similarity within the noise
+  of 6 sentences (Pocket 0.41 / 0.54, MOSS 0.37, ZONOS3 0.59 / 0.67).
+- Nobody has listened to any of this: the similarity and the words are the judges' numbers.

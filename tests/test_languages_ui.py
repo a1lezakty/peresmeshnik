@@ -128,7 +128,11 @@ def test_tray_switches_the_pair_fetching_only_its_models(tmp_path, monkeypatch, 
     t.confirm = lambda text: asked.append(text) or False
     pick = {k: {a.data()[1]: a for a in g.actions()} for k, g in t.langs.items()}
     assert len(pick['my_lang']) == 14 and pick['my_lang']['ru'].isChecked() and pick['their_lang']['en'].isChecked()
-    pick['my_lang']['de'].trigger()  # de <-> en: no German models -> both sides to the cloud, nothing to download
+    pick['my_lang']['de'].trigger()  # de <-> en: no German models -> both sides to the cloud, asked first (H-02)
+    settle(0.1)
+    assert 'Google' in asked[-1] and config.load().my_lang == 'ru' and not calls  # declined: nothing changes
+    t.confirm = lambda text: asked.append(text) or 'Google' in text  # yes to the cloud, no to restricted licenses
+    pick['my_lang']['de'].trigger()
     settle(0.1)
     assert (config.load().my_lang, config.load().them_to_me, config.load().me_to_them) == ('de', 'cloud', 'cloud')
     assert len(calls) == 1 and pick['my_lang']['de'].isChecked()
@@ -136,7 +140,7 @@ def test_tray_switches_the_pair_fetching_only_its_models(tmp_path, monkeypatch, 
     t.sync()
     pick['my_lang']['de'].setChecked(True)
     t.switch_pair('de', 'ja')
-    assert 'mt-de-ja (CPML' in asked[0] and config.load().my_lang == 'ru' and len(calls) == 1  # declined: nothing changes
+    assert 'mt-de-ja (CPML' in asked[-1] and config.load().my_lang == 'ru' and len(calls) == 1  # declined: nothing changes
     t.confirm = lambda text: True
     t.switch_pair('de', 'ja')
     end = time.monotonic() + 30
@@ -171,6 +175,7 @@ def tray_with(monkeypatch, tmp_path, s, on=True):
     t = tray_mod.Tray(Ctl())
     t.said = []
     t.message = t.said.append
+    t.confirm = lambda text: True  # a real question box would wait for a click
     return t, calls
 
 
@@ -195,7 +200,7 @@ def test_tray_pair_switch_details(tmp_path, monkeypatch):
     pick = {k: {a.data()[1]: a for a in g.actions()} for k, g in t.langs.items()}
     pick['my_lang']['ru'].trigger()  # already mine
     assert switched == []
-    t._pair = (config.Settings(my_lang='de', their_lang='ja'), [])  # de -> ja downloading
+    t._pair = (config.Settings(my_lang='de', their_lang='ja'), [], [])  # de -> ja downloading
     pick['their_lang']['ko'].trigger()
     assert switched == [('de', 'ko')]  # from the pair on its way, not from the saved ru / en
     t._pair, t.switch_pair = None, real_switch
@@ -594,3 +599,71 @@ def test_a_star_model_reaches_the_side(tmp_path, monkeypatch):
         assert sorted(made) == ['asr-many', 'mt-many']
     finally:
         fb.close()
+
+
+def test_tray_asks_before_a_side_goes_to_the_cloud_and_brings_it_back(tmp_path, monkeypatch):
+    """H-02: a pair a local side cannot run makes the tray ask first (its sound goes to Google), declined nothing changes;
+    accepted the side is remembered as moved by the app and comes back to local with a pair it can run. A side the user
+    set to the cloud stays there; the user's own choice of an engine forgets the move."""
+    s = wire(config.Settings(my_lang='de', their_lang='ja', them_to_me='local', me_to_them='local'))
+    s.local.clone = 'piper'  # the stock voice
+    t, calls = tray_with(monkeypatch, tmp_path, s)
+    asked = []
+    t.confirm = lambda text: asked.append(text) or False
+    t.switch_pair('de', 'fr')  # no French models: both sides would go to the cloud
+    assert len(asked) == 1 and 'Google' in asked[0] and 'the call' in asked[0] and 'your voice' in asked[0], asked
+    got = config.load()
+    assert (got.their_lang, got.them_to_me, got.me_to_them, got.forced_cloud) == ('ja', 'local', 'local', []) and not calls
+    t.confirm = lambda text: asked.append(text) or True
+    t.switch_pair('de', 'fr')
+    assert wait_for(lambda: calls)
+    got = config.load()
+    assert (got.their_lang, got.them_to_me, got.me_to_them) == ('fr', 'cloud', 'cloud')
+    assert sorted(got.forced_cloud) == ['me_to_them', 'them_to_me']
+    t.switch_pair('de', 'ja')  # a pair both run locally: both come back, nothing asked
+    assert wait_for(lambda: len(calls) == 2) and len(asked) == 2
+    got = config.load()
+    assert (got.their_lang, got.them_to_me, got.me_to_them, got.forced_cloud) == ('ja', 'local', 'local', [])
+    assert any('back on this computer' in m for m in t.said), t.said
+
+    got.me_to_them = 'cloud'  # the user's own cloud: not moved by the app, it stays
+    config.save(got)
+    t.sync()
+    t.switch_pair('de', 'fr')
+    assert wait_for(lambda: len(calls) == 3) and config.load().forced_cloud == ['them_to_me']
+    t.switch_pair('de', 'ja')
+    assert wait_for(lambda: len(calls) == 4)
+    got = config.load()
+    assert (got.them_to_me, got.me_to_them, got.forced_cloud) == ('local', 'cloud', [])
+
+    t.switch_pair('de', 'fr')
+    assert wait_for(lambda: len(calls) == 5) and config.load().forced_cloud == ['them_to_me']
+    t.restart = lambda: None
+    next(a for a in t.engines['them_to_me'].actions() if a.data()[1] == 'cloud').trigger()  # chosen by the user now
+    settle(0.1)
+    assert config.load().forced_cloud == []
+
+
+def test_languages_page_brings_back_a_side_it_moved_to_the_cloud(tmp_path, monkeypatch):
+    """H-02 in the wizard: a pair a side cannot run moves it to the cloud; the pair it can run brings it back to local, and
+    the move is saved (`forced_cloud`) for the tray. A side the user set to the cloud by hand stays there."""
+    from peresmeshnik.ui import wizard
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    monkeypatch.setenv('PERESMESHNIK_MODELS', str(tmp_path / 'models'))
+    monkeypatch.setenv('GEMINI_API_KEY', 'a-key')
+    stand_ins(monkeypatch)
+    s = wire(config.Settings(my_lang='de', their_lang='ja', them_to_me='local', me_to_them='local'))
+    s.local.clone = 'piper'
+    config.save(s)
+    page = wizard.LanguagesPage(type('W', (), {'s': s, 'key': ''})())
+    engines = lambda: tuple(page.engine[k].currentText() for k in languages.SIDES)  # noqa: E731
+    page.their_lang.setCurrentIndex(page.their_lang.findData('fr'))  # nothing local for French
+    assert engines() == ('cloud', 'cloud')
+    assert page.validatePage() and sorted(page.w.s.forced_cloud) == ['me_to_them', 'them_to_me']
+    page.their_lang.setCurrentIndex(page.their_lang.findData('ja'))
+    assert engines() == ('local', 'local')
+    assert page.validatePage() and page.w.s.forced_cloud == []
+    page.engine['me_to_them'].setCurrentText('cloud')  # by hand
+    page.their_lang.setCurrentIndex(page.their_lang.findData('fr'))
+    page.their_lang.setCurrentIndex(page.their_lang.findData('ja'))
+    assert engines() == ('local', 'cloud')

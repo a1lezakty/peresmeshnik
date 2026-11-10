@@ -38,6 +38,7 @@ ICONS = Path(__file__).resolve().parents[2] / 'assets' / 'icons'  # ponytail: re
 LANGS = {c: languages.label(c) for c in languages.LANGS}
 MIC_LABEL = 'Microphone'  # me -> them and the loopback while translation is off
 SIDES = {'them_to_me': 'Them → me', 'me_to_them': 'Me → them'}
+SENT = {'them_to_me': "the call's sound (the other person's voice)", 'me_to_them': 'your voice'}  # what a cloud side sends
 MAC, WIN = sys.platform == 'darwin', sys.platform == 'win32'
 BROWSER_NOTE = (f'A browser {"is taken" if MAC or WIN else "moves"} with all of its sound: YouTube in another tab is translated too. '
                 'For calls a separate browser is better.')
@@ -271,6 +272,7 @@ class Tray(QObject):
         key, engine = action.data()
         s = config.load()
         setattr(s, key, engine)
+        s.forced_cloud = [k for k in s.forced_cloud if k != key]  # the user's own choice now: a pair does not move it back
         config.save(s)
         self.restart()
 
@@ -290,10 +292,11 @@ class Tray(QObject):
         return QMessageBox.question(None, 'Peresmeshnik', text) == QMessageBox.Yes
 
     def switch_pair(self, my: str, their: str) -> None:
-        """Another pair without restarting the app: a local side that cannot run for it goes to the cloud (said), what a
-        local side does differently is said (a stock voice instead of the clone); its missing models are fetched first
-        (size and licenses said, restricted ones asked) while translation goes on with the old pair; then it is saved
-        and the sides are made again for it (Controller.set_languages)."""
+        """Another pair without restarting the app: a local side that cannot run for it goes to the cloud only when the
+        user says yes (its sound goes to Google), and is remembered as moved (`forced_cloud`): a later pair it can run
+        brings it back to local. What a local side does differently is said (a stock voice instead of the clone); its
+        missing models are fetched first (size and licenses said, restricted ones asked) while translation goes on with
+        the old pair; then it is saved and the sides are made again for it (Controller.set_languages)."""
         from peresmeshnik import models
         from peresmeshnik.ui.overlay import font_note
         from peresmeshnik.ui.wizard import has_key
@@ -305,18 +308,29 @@ class Tray(QObject):
             return
         s.my_lang, s.their_lang = my, their
         name = f'{languages.name(my)} ⇄ {languages.name(their)}'
-        notes, moved = [], []
+        notes, moved, back, why = [], [], [], {}
         for key in languages.SIDES:
             d = languages.direction(s, key)
             if getattr(s, key) == 'local' and not d.local:
                 setattr(s, key, 'cloud')
                 moved.append(key)
-                notes.append(f'{SIDES[key]} goes to the cloud ({"; ".join(d.why)})')
-            elif getattr(s, key) == 'local':
+                why[key] = '; '.join(d.why)
+                notes.append(f'{SIDES[key]} goes to the cloud ({why[key]})')
+            elif getattr(s, key) == 'cloud' and key in s.forced_cloud and d.local:  # the app moved it: this pair runs here
+                setattr(s, key, 'local')
+                back.append(key)
+                notes.append(f'{SIDES[key]} is back on this computer')
+            if getattr(s, key) == 'local':
                 notes += [f'{SIDES[key]}: {n}' for n in d.notes]
         if 'cloud' in (s.them_to_me, s.me_to_them) and not has_key(s):
             self.message(f'{name}: not changed — it needs the cloud ({"; ".join(notes) or "chosen"}) and no Gemini key is '
                          'set (Settings…)')
+            self.sync()
+            return
+        if moved and not self.confirm(
+                f'{name}: ' + ' '.join(f'{SIDES[k]} cannot run on this computer ({why[k]}).' for k in moved)
+                + f' In the cloud {" and ".join(SENT[k] for k in moved)} {"go" if len(moved) > 1 else "goes"} to Google '
+                '(Gemini Live). Switch to the cloud for this pair? A pair that runs here brings it back.'):
             self.sync()
             return
         todo = [m for m in map(models.get, languages.needed_models(s)) if not models.is_fetched(m)]
@@ -329,7 +343,7 @@ class Tray(QObject):
             return
         if note := font_note([my, their]):
             notes.append(note)
-        self._pair = s, moved
+        self._pair = s, moved, back
         if not todo:
             if notes:
                 self.message(f'{name}: ' + '. '.join(notes))
@@ -350,16 +364,17 @@ class Tray(QObject):
     def _pair_ready(self, s: config.Settings, err: str) -> None:
         if not self._pair or s is not self._pair[0]:  # another pair was chosen since
             return
-        moved, self._pair = self._pair[1], None
+        (_, moved, back), self._pair = self._pair, None
         name = f'{languages.name(s.my_lang)} ⇄ {languages.name(s.their_lang)}'
         if err:
             self.set_state(f'error: {name} not changed: the download failed ({err}); choose it again to resume')
             self.sync()
             return
-        saved = config.load()  # the pair, and the sides it moved to the cloud; the rest as saved now (changed meanwhile)
+        saved = config.load()  # the pair, and the sides it moved; the rest as saved now (changed meanwhile)
         saved.my_lang, saved.their_lang = s.my_lang, s.their_lang
-        for key in moved:
-            setattr(saved, key, 'cloud')
+        for key in moved + back:
+            setattr(saved, key, 'cloud' if key in moved else 'local')
+        saved.forced_cloud = [k for k in languages.SIDES if k in moved or (k in saved.forced_cloud and k not in back)]
         config.save(saved)
         self.sync()
         self.ctl.set_languages()  # its control thread knows whether translation is on (a start may be under way)
@@ -530,6 +545,8 @@ class SettingsDialog(QDialog):
             self.note.setText('Choose two different languages.')
             return
         for key, c in self.engine.items():
+            if c.currentText() != getattr(s, key):  # the user's own choice: a pair does not move it back
+                s.forced_cloud = [k for k in s.forced_cloud if k != key]
             setattr(s, key, c.currentText())
         s.cloud.subtitles = self.subtitles.isChecked()
         s.local.threads = self.threads.value()

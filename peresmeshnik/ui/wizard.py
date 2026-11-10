@@ -207,6 +207,9 @@ class LanguagesPage(QWizardPage):
         f.addRow(note)
         self.err = QLabel()
         f.addRow(self.err)
+        self.forced = set(s.forced_cloud)  # sides moved to the cloud for a pair they cannot run: a pair they can brings them back
+        for key, c in self.engine.items():  # a programmatic change blocks the signal: this is the user's own choice
+            c.currentIndexChanged.connect(lambda _, key=key: self.forced.discard(key))
         for c in (self.my_lang, self.their_lang, *self.engine.values()):
             c.currentIndexChanged.connect(self.refresh)
         self.subtitles.toggled.connect(self.refresh)
@@ -229,11 +232,12 @@ class LanguagesPage(QWizardPage):
             d = languages.direction(s, key)
             item = c.model().item(config.ENGINES.index('local'))
             item.setEnabled(d.local)
-            if not d.local and c.currentText() == 'local':
+            if (move := not d.local and c.currentText() == 'local') or d.local and key in self.forced and c.currentText() == 'cloud':
                 c.blockSignals(True)
-                c.setCurrentText('cloud')
+                c.setCurrentText('cloud' if move else 'local')
                 c.blockSignals(False)
-                setattr(s, key, 'cloud')
+                setattr(s, key, c.currentText())
+                (self.forced.add if move else self.forced.discard)(key)
             if not d.local:
                 text = f'✘ Not on this computer: {"; ".join(d.why)}. The cloud translates {languages.name(d.src)} → ' \
                        f'{languages.name(d.tgt)}.'
@@ -274,6 +278,7 @@ class LanguagesPage(QWizardPage):
         self.w.s.my_lang, self.w.s.their_lang, self.w.s.cloud.subtitles = s.my_lang, s.their_lang, s.cloud.subtitles
         for k in languages.SIDES:
             setattr(self.w.s, k, getattr(s, k))
+        self.w.s.forced_cloud = [k for k in languages.SIDES if k in self.forced]
         if self.w.key:
             save_key(self.w.key, s.cloud)  # the test phrase on a later page already needs it
         return True

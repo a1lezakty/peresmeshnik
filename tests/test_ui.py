@@ -639,10 +639,41 @@ def test_settings_forget_the_key(tmp_path, monkeypatch):
     monkeypatch.setattr(config, 'config_dir', lambda: tmp_path)
     tray_mod.save_key('secret-key')
     t = tray_mod.Tray(type('Ctl', (), {'live': False, 'on': False})())
+    monkeypatch.delenv('GEMINI_API_KEY', raising=False)
     d = tray_mod.SettingsDialog(t)
     assert d.key.placeholderText() == 'saved' and d.forget.isEnabled()
     d.forget.click()
-    assert not (tmp_path / 'gemini-key').exists() and not d.forget.isEnabled() and 'Gemini API key' in d.key.placeholderText()
+    assert (tmp_path / 'gemini-key').exists() and not d.forget.isEnabled()  # FIXES-b 6: on Save, Cancel keeps it
+    d.reject()
+    assert (tmp_path / 'gemini-key').exists()
+    d = tray_mod.SettingsDialog(t)
+    d.forget.click()
+    d.save()
+    assert not (tmp_path / 'gemini-key').exists()
+    assert 'Gemini API key' in tray_mod.SettingsDialog(t).key.placeholderText()
+
+
+def test_settings_forgets_only_the_apps_own_key(tmp_path, monkeypatch):
+    """FIXES-b 6: a key from $GEMINI_API_KEY or from one's own `cloud.key_file` is not the app's to forget: the button
+    is off and says where the key comes from; the user's file stays."""
+    from peresmeshnik.ui import tray as tray_mod
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    monkeypatch.setattr(config, 'config_dir', lambda: tmp_path)
+    tray_mod.save_key('secret-key')
+    t = tray_mod.Tray(type('Ctl', (), {'live': False, 'on': False})())
+    monkeypatch.setenv('GEMINI_API_KEY', 'env-key')
+    d = tray_mod.SettingsDialog(t)
+    assert not d.forget.isEnabled() and 'GEMINI_API_KEY' in d.forget.toolTip() + d.key.placeholderText()
+    monkeypatch.delenv('GEMINI_API_KEY')
+    s = config.Settings()
+    s.cloud.key_file = str(tmp_path / 'my-own-key')
+    tray_mod.save_key('mine', s.cloud)
+    config.save(s)
+    d = tray_mod.SettingsDialog(t)
+    assert not d.forget.isEnabled() and 'my-own-key' in d.forget.toolTip()
+    d.forget.click()  # off: nothing
+    d.save()
+    assert (tmp_path / 'my-own-key').exists() and (tmp_path / 'gemini-key').exists()
 
 
 @pytest.mark.parametrize('name', ['Speakers (Realtek(R) Audio)', 'Динамики (Realtek(R) Audio)', 'Динаміки (Realtek(R) Audio)',

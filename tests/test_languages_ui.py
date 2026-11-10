@@ -739,6 +739,25 @@ def test_languages_page_says_what_a_cloud_side_falls_back_on(tmp_path, monkeypat
     assert 'If the cloud fails, it stops until it is back' in page.why['them_to_me'].text()
 
 
+def test_settings_local_subtitles_download_their_models_first(tmp_path, monkeypatch, server):
+    """FIXES-b 7: "Subtitles from the cloud" unticked in Settings… goes through switch_pair: the cloud sides' local ASR and
+    MT are downloaded first, then it is saved (not saved at once into a fallback and local subtitles that cannot start)."""
+    from peresmeshnik.ui import tray as tray_mod
+    httpd, url = server
+    blob = b'm' * 40_000
+    (httpd.root / 'w.bin').write_bytes(blob)
+    s = wire(config.Settings(my_lang='de', their_lang='ja', them_to_me='cloud', me_to_them='cloud'))
+    s.local.clone, s.cloud.subtitles = 'piper', True
+    t, calls = tray_with(monkeypatch, tmp_path, s)
+    stand_ins(monkeypatch, url, files={'w.bin': {'sha256': hashlib.sha256(blob).hexdigest(), 'size': len(blob)}})
+    d = tray_mod.SettingsDialog(t)
+    d.subtitles.setChecked(False)
+    d.save()
+    assert config.load().cloud.subtitles and any('downloading' in m and 'subtitles from the local' in m for m in t.said), t.said
+    assert wait_for(lambda: calls, 30) and not config.load().cloud.subtitles
+    assert {'asr-ja', 'asr-de'} <= {p.name for p in (tmp_path / 'models').iterdir() if (p / models.MARKER).exists()}
+
+
 def test_settings_window_keeps_the_mark_of_a_side_the_app_moved(tmp_path, monkeypatch):
     """FIXES-b 1 (H-02 through Settings…): the settings window hands switch_pair only the engines the user changed. Its
     combo showing "cloud" for a side the app moved is not the user's choice: the pair it runs again brings it back; the

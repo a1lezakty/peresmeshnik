@@ -112,7 +112,7 @@ another app's own menus is not detected and the hotkey takes it over everywhere)
 Removing it: quit it from its menu, drag Peresmeshnik from Applications to the Bin, then delete two folders it
 leaves: `~/Library/Application Support/Peresmeshnik` (settings with your Gemini key, your voice recording, logs, crash
 reports) and `~/Library/Caches/Peresmeshnik` (the models). The two permissions go with
-`tccutil reset All io.github.a1lezakty.peresmeshnik`. The key alone: Settings… → Forget the key.
+`tccutil reset All io.github.a1lezakty.peresmeshnik`. The key alone: Settings… → Forget the key → Save (a key in `GEMINI_API_KEY` stays: unset it there).
 
 Checked so far only on GitHub's `macos-15` runners (a virtual M1 without GPU, without a real call or real
 headphones): the app starts from the .dmg, its menu-bar icon, overlay and hotkey work there, it idles at
@@ -156,7 +156,7 @@ The uninstaller (Settings → Apps → Peresmeshnik, or `unins000.exe` in its fo
 It asks whether to remove the voice pack and its downloads (up to about 12 GB) and your settings with your Gemini key
 ("No" by default for both); your voice recording, logs and the models stay in `%LOCALAPPDATA%\Peresmeshnik` (the models
 in its `Cache` folder) until you delete that folder. A silent uninstall (`/VERYSILENT`) asks nothing and keeps it all.
-The key alone: Settings… → Forget the key.
+The key alone: Settings… → Forget the key → Save (a key in `GEMINI_API_KEY` stays: unset it there).
 
 Checked so far only on GitHub's `windows-latest` runners (Windows Server 2025 in a VM, without a GPU, real sound
 devices or a real call): the installer runs silently, the installed app starts, its tray icon, overlay and hotkey

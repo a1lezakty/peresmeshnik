@@ -7,6 +7,7 @@ the state does.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import threading
 from pathlib import Path
@@ -300,7 +301,8 @@ class Tray(QObject):
         return box.exec() == QMessageBox.Yes
 
     def switch_pair(self, my: str, their: str, engines: dict[str, str] | None = None) -> None:
-        """Another pair, or another engine for a side (`engines`, the user's choice), without restarting the app: a local
+        """Another pair, or another engine for a side (`engines`, the user's choice; 'subtitles': 'cloud' or 'local' is
+        Settings…' "Subtitles from the cloud", whose local ASR and MT may be missing), without restarting the app: a local
         side that cannot run for the pair goes to the cloud only when the user says yes (its sound goes to Google), and
         is remembered as moved (`forced_cloud`): a later pair it can run brings it back to local; a side the user sets to
         local where it cannot run is said why and nothing changes. What a local side does differently is said (a stock
@@ -311,11 +313,13 @@ class Tray(QObject):
         from peresmeshnik.ui.wizard import has_key
         s = config.load()
         chosen = dict(engines or {})
+        subs = chosen.pop('subtitles', None)
+        subs = None if subs is None or (subs == 'cloud') == s.cloud.subtitles else subs  # only a change
         # "cloud" chosen for a side the app moved there: the user's own from now on (no move back). Saved with the rest,
         # after the questions: a No keeps the mark
         kept = [k for k, v in chosen.items() if v == getattr(s, k) and k in s.forced_cloud]
         engines = {k: v for k, v in chosen.items() if v != getattr(s, k)}
-        if (my, their) == (s.my_lang, s.their_lang) and not engines:  # back to what runs: another's download is let go
+        if (my, their) == (s.my_lang, s.their_lang) and not engines and not subs:  # back to what runs: another's download is let go
             if kept:  # nothing else changes: nothing to ask
                 s.forced_cloud = [k for k in s.forced_cloud if k not in kept]
                 config.save(s)
@@ -324,8 +328,11 @@ class Tray(QObject):
             self.sync()
             return
         pair = f'{languages.name(my)} ⇄ {languages.name(their)}'
-        name = ', '.join(([pair] if (my, their) != (s.my_lang, s.their_lang) else []) + [f'{SIDES[k]}: {v}' for k, v in engines.items()])
+        name = ', '.join(([pair] if (my, their) != (s.my_lang, s.their_lang) else []) + [f'{SIDES[k]}: {v}' for k, v in engines.items()]
+                         + ([f'subtitles from the {subs}'] if subs else []))
         s.my_lang, s.their_lang = my, their
+        if subs:
+            s.cloud.subtitles = subs == 'cloud'
         for key, engine in engines.items():
             setattr(s, key, engine)
         s.forced_cloud = [k for k in s.forced_cloud if k not in [*engines, *kept]]  # the user's own: no move back
@@ -376,7 +383,7 @@ class Tray(QObject):
             lic = ', '.join(dict.fromkeys(p.license for m in todo for p in models.parts(m)))
         if note := font_note([my, their]):
             notes.append(note)
-        self._pair = s, moved, back, {**engines, **{k: getattr(s, k) for k in kept}}
+        self._pair = s, moved, back, {**engines, **{k: getattr(s, k) for k in kept}, **({'subtitles': subs} if subs else {})}
         if not todo:
             if notes:
                 self.message(f'{name}: ' + '. '.join(notes))
@@ -405,8 +412,10 @@ class Tray(QObject):
             return
         saved = config.load()  # the pair, and the sides it or the user moved; the rest as saved now (changed meanwhile)
         saved.my_lang, saved.their_lang = s.my_lang, s.their_lang
-        for key in moved + back + list(engines):
+        for key in moved + back + [k for k in engines if k in languages.SIDES]:
             setattr(saved, key, getattr(s, key))
+        if 'subtitles' in engines:
+            saved.cloud.subtitles = s.cloud.subtitles
         saved.forced_cloud = [k for k in languages.SIDES if k in moved or (k in saved.forced_cloud and k not in back + list(engines))]
         config.save(saved)
         self.sync()
@@ -542,8 +551,9 @@ class SettingsDialog(QDialog):
         f.addRow('Cloud', self.subtitles)
         self.key = QLineEdit()
         self.key.setEchoMode(QLineEdit.Password)
-        self.forget = QPushButton('Forget the key')  # an empty field keeps it: this removes its file
+        self.forget = QPushButton('Forget the key')  # an empty field keeps it: this removes the app's own file, on Save
         self.forget.clicked.connect(self.forget_key)
+        self.forgotten = False
         self._key_state()
         row = QWidget()
         lay = QHBoxLayout(row)
@@ -578,12 +588,16 @@ class SettingsDialog(QDialog):
         f.addRow(b)
 
     def _key_state(self) -> None:
+        env, mine = os.environ.get('GEMINI_API_KEY', '').strip(), not self.s.cloud.key_file  # cloud.api_key's order
         saved = key_file(self.s.cloud).exists()
-        self.key.setPlaceholderText('saved' if saved else 'Gemini API key (aistudio.google.com)')
-        self.forget.setEnabled(saved)
+        self.key.setPlaceholderText('from $GEMINI_API_KEY' if env else 'forgotten on Save' if self.forgotten else
+                                    'saved' if saved else 'Gemini API key (aistudio.google.com)')
+        self.forget.setEnabled(saved and mine and not env and not self.forgotten)
+        self.forget.setToolTip('The key comes from the environment ($GEMINI_API_KEY): unset it there.' if env else
+                               '' if mine else f'The key is read from your own file {self.s.cloud.key_file}: not removed here.')
 
     def forget_key(self) -> None:
-        key_file(self.s.cloud).unlink(missing_ok=True)  # $GEMINI_API_KEY, if set, is the environment's: not ours to drop
+        self.forgotten = True  # Cancel keeps it
         self._key_state()
 
     def save(self) -> None:
@@ -594,7 +608,8 @@ class SettingsDialog(QDialog):
             return
         # only what the user changed (a side the app moved shows "cloud": not a choice), saved with the pair by switch_pair
         engines = {key: c.currentText() for key, c in self.engine.items() if c.currentText() != getattr(s, key)}
-        s.cloud.subtitles = self.subtitles.isChecked()
+        if self.subtitles.isChecked() != s.cloud.subtitles:  # local subtitles need the local ASR and MT: fetched first
+            engines['subtitles'] = 'cloud' if self.subtitles.isChecked() else 'local'
         s.local.threads = self.threads.value()
         s.local.voice = self.voice.currentData()
         combo = self.hotkey.keySequence().toString(QKeySequence.PortableText)
@@ -606,7 +621,9 @@ class SettingsDialog(QDialog):
         s.ui.headphones, s.ui.mic = self.headphones.currentData(), self.mic.currentData()
         if new_key := bool(self.key.text().strip()):
             save_key(self.key.text(), s.cloud)
-        if new_key or s != config.load():  # the pair and the engines as they were: switch_pair saves them, models first
+        elif self.forgotten:
+            key_file().unlink(missing_ok=True)  # the app's own file only (its button is off for one's own key_file, env)
+        if new_key or self.forgotten or s != config.load():  # the pair and the engines as they were: switch_pair saves them, models first
             config.save(s)
             self.tray.sync()
             self.tray.restart()

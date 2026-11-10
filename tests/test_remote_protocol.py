@@ -95,12 +95,12 @@ def test_voice_unpack_refuses_a_bomb_garbage_and_no_profile(tmp_path):
 
 
 def test_pairing_macs():
-    fp, nonce, code = 'f' * 64, '0' * 64, 'K7QM-2XPA-9DFE'
+    fp, nonce, code = 'f' * 64, '0' * 64, 'K7QM-2XPA-4DFE'
     m = json.loads(p.pair(code, fp, nonce, 'laptop'))
-    assert m['mac'] == p.pair_mac('k7qm 2xpa 9dfe', fp, nonce)  # as typed
+    assert m['mac'] == p.pair_mac('k7qm 2xpa 4dfe', fp, nonce)  # as typed
     assert p.pair_mac('B0I1', fp, nonce) == p.pair_mac('BOII', fp, nonce)  # base32 has no 0 / 1
     assert m['mac'] != p.pair_mac(code, 'e' * 64, nonce)  # another certificate (a man in the middle): another mac
-    assert m['mac'] != p.pair_mac('K7QM-2XPA-9DFF', fp, nonce)
+    assert m['mac'] != p.pair_mac('K7QM-2XPA-4DFF', fp, nonce)
     r = json.loads(p.paired(code, fp, nonce, TOKEN))
     assert r['mac'] == p.pair_mac(code, fp, nonce, TOKEN) != m['mac']  # the server's proof is not the client's echoed
     assert p.fingerprint(b'der') == p.fingerprint(b'der') != p.fingerprint(b'der2')

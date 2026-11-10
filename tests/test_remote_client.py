@@ -26,10 +26,10 @@ def server():
     s.close()
 
 
-def until(cond, timeout=5.0):
+def until(cond, timeout=5.0, why=lambda: ''):
     end = time.monotonic() + timeout
     while not cond():
-        assert time.monotonic() < end, 'timed out'
+        assert time.monotonic() < end, f'timed out {why()}'
         time.sleep(0.01)
 
 

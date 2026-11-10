@@ -518,6 +518,7 @@ class Side:
     RETRY_S = 2.0  # the live voice's output failed: tried again at most this often (on the frames that come anyway)
     on_failure = None  # (why, exception): the controller restarts the side; None: the tray hears it
     _stopping = False
+    auto = False  # the translation is down (cloud/fallback.py: on_mode): the call's own sound passes meanwhile
 
     def __init__(self, name: str, s: config.Settings, inp, out, overlay, on_error=lambda text: None, echo=None):
         """`echo`: an audio.echo.EchoGate on the input (our own speech coming back from the other side is not translated)."""
@@ -533,6 +534,8 @@ class Side:
         self._live_q: queue.Queue = queue.Queue()  # the live pass-through, played on its own thread
         if self.engine == 'local':
             self.directions.append((self._local(s), True, True))
+        elif self.engine == 'remote':  # the user's own server; the local path only when it fails (cloud/fallback.py)
+            self.directions.append((self._remote(s), True, True))
         else:  # Gemini speaks; the local path makes the subtitles and speaks when the cloud fails (cloud/fallback.py)
             self.directions.append((self._cloud(s), True, True))
         d, captions, speech = self.directions[0]
@@ -630,7 +633,16 @@ class Side:
             key = api_key(s.cloud)
         except SystemExit as e:  # the CLI's way to say "no key"
             raise RuntimeError(str(e)) from None
-        return fallback.make(self.name, s, key, on_state=self.on_error, on_respawn=self._tts_respawned)
+        return fallback.make(self.name, s, key, on_state=self.on_error, on_respawn=self._tts_respawned, on_mode=self._on_mode)
+
+    def _remote(self, s: config.Settings):
+        from peresmeshnik.cloud import fallback
+        from peresmeshnik.remote import pairing
+        if (paired := pairing.load()) is None:
+            raise RuntimeError(f'"{ARROW[self.name].capitalize()}" runs on your server, but this computer is not paired '
+                               'with one: tray menu, Server…')
+        return fallback.make(self.name, s, '', on_state=self.on_error, on_respawn=self._tts_respawned, remote=paired,
+                             on_mode=self._on_mode)
 
     def _tts_respawned(self, e: BaseException) -> None:  # the speak worker's thread: the voice goes on, the side too
         crash.report(f'{ARROW[self.name]}: the voice helper died', e, quiet=True)
@@ -647,16 +659,19 @@ class Side:
         self.inp.start(self._gate or self._on_frames)
 
     def _on_frames(self, pcm: np.ndarray) -> None:  # capture thread or PortAudio callback: only hand on
-        if self.live and not self._supports_live:
+        if (self.live or self.auto) and not self._supports_live:
             self._live_q.put(pcm)  # ponytail: a hard switch, no crossfade; S2's set_live crossfades
-            return
+            if not self.auto:
+                return
         for d, _, _ in self.directions[:1] if self.live else self.directions:  # live: only the switch, nothing translates
             d.feed(pcm)
+        if self.auto and (inner := getattr(self.directions[0][0], 'inner', None)) is not None:
+            inner.feed(pcm)  # down: LiveSwitch passes my voice and feeds nothing, the side still hears it to find its way back
 
     def _pass_through(self) -> None:
         failed = 0.0  # when the output last failed (0: it works); the tray hears it once per outage
         while (pcm := self._live_q.get()) is not None:
-            if not self.live:  # frames queued just before switching back are dropped
+            if not (self.live or self.auto):  # frames queued just before switching back are dropped
                 continue
             now = time.monotonic()
             if failed and now - failed < self.RETRY_S:  # still out: the frame goes, the queue does not grow
@@ -685,7 +700,7 @@ class Side:
                     self.overlay.show(e)
                     if not e.final and len(e.original.split()) >= BARGE_IN_WORDS:
                         self.on_talk()
-                elif isinstance(e, Speech) and speech and (not self.live or self._supports_live):
+                elif isinstance(e, Speech) and speech and (not (self.live or self.auto) or self._supports_live):
                     self.out.play(e.pcm, e.sample_rate)
                 elif isinstance(e, Latency) and captions and hasattr(self.overlay, 'latency'):
                     self.overlay.latency(e)
@@ -711,7 +726,7 @@ class Side:
 
     def interrupt(self) -> None:
         """Barge-in: the user talks over this side's voice. What is not heard yet goes; the subtitles stay."""
-        if self.live:  # the original voice passes through: the user chose to hear it
+        if self.live or self.auto:  # the original voice passes through: the user chose to hear it, or nothing translates
             return
         for d, _, _ in self.directions:
             if hasattr(d, 'interrupt'):
@@ -719,14 +734,26 @@ class Side:
         self.out.flush()
 
     def set_live(self, on: bool) -> None:
+        self._live(on, self.auto)
+
+    def _on_mode(self, mode: str) -> None:
+        """The side's Fallback switched (its events thread): while it is 'down' nothing translates, the call app is muted
+        for the translation and the other side would hear nothing, so the call's own sound passes (the user's live voice),
+        until it is back ('cloud') or local."""
+        if (mode == 'down') != self.auto:
+            log.info('%s: %s: the live voice %s', self.name, mode, 'on' if mode == 'down' else 'off')
+            self._live(self.live, mode == 'down')
+
+    def _live(self, live: bool, auto: bool) -> None:
+        was, on = self.live or self.auto, live or auto
         if self._supports_live:
             self.directions[0][0].set_live(on)
-            if on and not self.live:  # the local subtitles get no input while live: a pause closes their open clause
+            if on and not was:  # the local subtitles get no input while live: a pause closes their open clause
                 for d, _, _ in self.directions[1:]:
                     d.feed(np.zeros(SAMPLE_RATE // 2, np.float32))
-        elif on != self.live:
+        elif on != was:
             self.out.flush()  # drop translated speech still queued (going live) or the live tail (back)
-        self.live = on
+        self.live, self.auto = live, auto
 
     def stop(self) -> None:
         with self._lock:

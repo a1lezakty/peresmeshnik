@@ -104,7 +104,7 @@ class Pairing:
         self.lock = threading.Lock()  # handle() and check() may come from different threads of the server
 
     def new_code(self) -> str:
-        """A new code (the old one stops working), shown as K7QM-2XPA-9DFE."""
+        """A new code (the old one stops working), shown as K7QM-2XPA-4DFE."""
         self.code = ''.join(secrets.choice(B32) for _ in range(CODE_LEN))
         self.until, self.tries, self.used = self.clock() + CODE_S, 0, False
         return '-'.join(self.code[i:i + 4] for i in range(0, CODE_LEN, 4))
@@ -225,7 +225,7 @@ def addresses() -> list[str]:
 # --- the client ----------------------------------------------------------------------------------------------------
 
 def parse(url: str) -> tuple[str, int, str]:
-    """`https://192.168.1.20:47000/#K7QM-2XPA-9DFE` (no scheme, no port, [IPv6] all fine) -> (host, port, code)."""
+    """`https://192.168.1.20:47000/#K7QM-2XPA-4DFE` (no scheme, no port, [IPv6] all fine) -> (host, port, code)."""
     s = url.strip()
     try:
         u = urlsplit(s if '://' in s else 'https://' + s)
@@ -234,10 +234,10 @@ def parse(url: str) -> tuple[str, int, str]:
         u = None
     if u is None or u.scheme not in ('https', 'wss') or not u.hostname or u.path not in ('', '/') or u.query:
         raise ValueError(f'{url!r} is not a server address: copy the whole line peresmeshnik serve shows, like '
-                         f'https://192.168.1.20:{protocol.PORT}/#K7QM-2XPA-9DFE')
+                         f'https://192.168.1.20:{protocol.PORT}/#K7QM-2XPA-4DFE')
     code = protocol.norm_code(u.fragment)
     if len(code) != CODE_LEN or set(code) - set(B32):
-        raise ValueError(f'no pairing code after # in {url!r}: it is 12 letters and digits, like K7QM-2XPA-9DFE')
+        raise ValueError(f'no pairing code after # in {url!r}: it is 12 letters and digits, like K7QM-2XPA-4DFE')
     return u.hostname, port, code
 
 

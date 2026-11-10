@@ -301,8 +301,9 @@ def needed_models(s) -> list[str]:
             ids += d.models
             if d.voice == 'clone':  # the clone's fallback (~60 MB): the stock voice when the clone cannot speak (S2)
                 ids += [i for i in [pick(s.local.tts, d.tgt)] if i]
-        elif not cloud_subtitles(s, side):  # local subtitles, and with its stock voice the side's way when the cloud fails
-            ids += [d.asr, d.mt] + [i for i in [fallback_voice(s, side)] if i and not _consent(i)]
+        elif getattr(s, side) == 'cloud' and not cloud_subtitles(s, side):  # local subtitles, and with its stock voice
+            ids += [d.asr, d.mt] + [i for i in [fallback_voice(s, side)] if i and not _consent(i)]  # the side's way when
+            # the cloud fails; remote: all of it on the server
     return list(dict.fromkeys(ids))
 
 

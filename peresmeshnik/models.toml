@@ -109,7 +109,8 @@ url = "https://huggingface.co/t-tech/t-one/resolve/106f3b0b32a9e107eb613312e4ebc
 
 # OPUS-MT -> CTranslate2 int8, converted by this project from the original Marian models
 # (opus-2020-02-11.zip, ctranslate2 OpusMTConverter, add_source_eos = true) and published as
-# assets of the release "models-1"; LICENSE and README of the original are included.
+# assets of the release "models-1"; LICENSE and README of the original are included. A models-N release is made as a
+# pre-release (`gh release create models-N --prerelease ...`): the repository's "Latest" stays the app's release.
 [opus-mt-en-ru]
 role = "mt"
 langs = ["en-ru"]

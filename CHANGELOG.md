@@ -27,6 +27,17 @@ Chinese, Japanese, Korean, Arabic — both ways.
 - A test phrase in each of the 14 languages for the wizard's "Test" buttons (FLEURS, CC-BY-4.0).
 - README: a table of what runs locally and what in the cloud per language, made from the model registry.
 - Cloud fallback, crash reports without your data and the latency on screen (stage 5) are in this version too.
+- **Windows: the call app is no longer left silent.** While translating it is turned down to near silence instead of
+  muted (muted, its sound was lost to the translation too), and its volume comes back when translation stops, also
+  when the call app was closed first, after a crash, or on a headset unplugged meanwhile (at the app's next sound
+  there). A restart of Windows Audio no longer silences the translation of the call; closing the call app is no error.
+- **macOS:** after `sudo killall coreaudiod` the sound helpers start again by themselves; Ctrl+C in the Terminal the
+  app was started from no longer leaves the call app muted; a busy microphone is taken once it is free; the helper
+  no longer grows with every call.
+- **Licenses and builds:** the source offer of the LGPL libraries (Qt, libsndfile) and the notices of the code inside
+  Qt, of hts_engine and of the Unicode data are in the licenses folder; the macOS app runs with the hardened runtime;
+  the Windows uninstaller says what stays on disk (your Gemini key, the models) and offers to remove your settings.
+  Releases are built by pinned actions and tools, only from a commit whose tests and voice-clone checks passed.
 
 ## 0.2.0 — built, not published
 

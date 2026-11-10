@@ -143,7 +143,8 @@ are found by themselves, otherwise choose the app in the tray menu "Call app" wh
 browser (Meet) moves with all of its sound, other tabs too. One instance runs per user:
 while yours is open, the app instances that the tests start exit with code 3 ("already running").
 Your cloned voice runs in a venv of its own (PyTorch and coqui-tts, ~7 GB with CUDA): `uv venv -p 3.12 ~/.local/share/Peresmeshnik/clone-venv`,
-`uv pip install -p ~/.local/share/Peresmeshnik/clone-venv/bin/python -r voice-runner/requirements-linux.in`, then start the
+`uv pip install -p ~/.local/share/Peresmeshnik/clone-venv/bin/python --require-hashes -r voice-runner/requirements-linux-cuda.txt`
+(every package pinned and checked by its SHA-256; `requirements-linux.txt` is the same with CPU-only PyTorch), then start the
 app with `PERESMESHNIK_VOICE_CMD="$HOME/.local/share/Peresmeshnik/clone-venv/bin/python voice-runner/voice_runner.py"`.
 
 ## When something goes wrong

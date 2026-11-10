@@ -97,6 +97,38 @@ def test_fetch_resumes_after_cut(server, tmp_path, monkeypatch):
     assert srv.ranges == [('/model.bin', None), ('/model.bin', f'bytes={len(blob) // 2}-')]  # resumed, not restarted
 
 
+
+def test_fetch_restarts_when_the_server_ignores_range(server, tmp_path, monkeypatch):
+    """A proxy or mirror without Range answers 200 with the whole file: it replaces the .part, is not appended to it."""
+    srv, url = server
+    blob = bytes(range(256)) * 4000
+    (srv.root / 'model.bin').write_bytes(blob)
+    srv.whole.add('/model.bin')
+    fake(monkeypatch, url, {'model.bin': blob})
+    (tmp_path / 'fake').mkdir()
+    (tmp_path / 'fake' / 'model.bin.part').write_bytes(blob[:1000])  # interrupted download
+    got = []
+    folder = models.fetch('fake', tmp_path, got.append)
+    assert (folder / 'model.bin').read_bytes() == blob
+    assert srv.ranges == [('/model.bin', 'bytes=1000-')]  # one request: the whole file came back, used as is
+    assert sum(got) == len(blob)  # the part counted, then taken back
+
+
+def test_a_registry_update_fetches_the_new_files(server, tmp_path, monkeypatch):
+    """New pins for a model (its files replaced in models.toml): the folder of the old ones is no longer fetched, and
+    fetch downloads the new files."""
+    srv, url = server
+    (srv.root / 'model.bin').write_bytes(b'old weights')
+    old = fake(monkeypatch, url, {'model.bin': b'old weights'})
+    models.fetch('fake', tmp_path)
+    (srv.root / 'model.bin').write_bytes(b'new weights')
+    new = fake(monkeypatch, url, {'model.bin': b'new weights'})
+    assert old.fingerprint != new.fingerprint and not models.is_fetched(new, tmp_path)
+    with pytest.raises(models.ModelMissing):
+        models.path('fake', tmp_path)
+    assert (models.fetch('fake', tmp_path) / 'model.bin').read_bytes() == b'new weights'
+    assert models.is_fetched(new, tmp_path) and [r[0] for r in srv.ranges] == ['/model.bin'] * 2
+
 def test_fetch_rejects_bad_hash(server, tmp_path, monkeypatch):
     srv, url = server
     (srv.root / 'model.bin').write_bytes(b'tampered')

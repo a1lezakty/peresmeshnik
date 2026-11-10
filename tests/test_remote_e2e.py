@@ -13,7 +13,7 @@ from remote_stubs import profile, start
 from test_remote_client import until
 from test_ui import FakeIn, FakeOut
 
-from peresmeshnik import app, config, voice
+from peresmeshnik import app, config, languages, voice
 from peresmeshnik.cloud import fallback
 from peresmeshnik.engines import Caption, Speech
 from peresmeshnik.remote import client, pairing, server
@@ -36,13 +36,14 @@ class Net:
 
     def again(self):
         """`peresmeshnik serve` started again: the same folder and port."""
-        self.srv = start(self.folder, self.srv.ports[0], warm_s=0.5)
+        self.srv = start(self.folder, port=self.srv.ports[0], warm_s=0.5)
 
 
 @pytest.fixture
 def net(tmp_path, made, monkeypatch):
     monkeypatch.setenv('PERESMESHNIK_MODELS', str(tmp_path / 'models'))  # no local models here: the live voice when down
     monkeypatch.setattr(server, 'REVOKE_S', 0.1)
+    monkeypatch.setattr(languages, 'clone_why', lambda *a, **k: '')  # the server's GPU can speak my voice (CI: none)
     monkeypatch.setattr(pairing, 'remote_path', lambda: tmp_path / 'remote')
     monkeypatch.setattr(voice, 'voices_dir', lambda: tmp_path / 'voices')
     n = Net(tmp_path / 'server', tmp_path / 'remote')
@@ -109,7 +110,7 @@ def test_a_call_through_the_server(net, made, tmp_path):
     try:
         them, me = ([f for f in made if f.side == name][0] for name in SIDES)
         assert (them.src, them.tgt, me.src, me.tgt) == ('en', 'ru', 'ru', 'en')
-        assert me.voice_dir and (Path(me.voice_dir) / 'state.npy').stat().st_size == 1000  # my confirmed voice speaks
+        assert me.voice_dir and (Path(me.voice_dir) / 'reference.wav').stat().st_size == 1000  # my confirmed voice speaks
         assert them.voice_dir == ''
         c.heard(made)
         c.inp['me'].cb(np.full(512, 0.2, np.float32))  # my microphone, up to "me -> them"

@@ -124,10 +124,11 @@ def test_settings_round_trip(tmp_path):
     assert config.load(config.save(s, p)) == s
 
 
-def test_a_broken_settings_file_does_not_stop_the_app(tmp_path):
-    """H-01: a value the app cannot use keeps its default and is said (an engine: local, never the cloud by a typo:
-    the voice would go to Google unasked); a file that does not parse is kept aside as settings.toml.bad (not
-    overwritten) and the defaults are used; nothing raises."""
+def test_a_broken_settings_file_does_not_stop_the_app(tmp_path, monkeypatch):
+    """H-01: nothing in the file raises. A file read only in part (a value the app cannot use, a file that does not
+    parse or cannot be opened) sends nothing to the cloud: both directions are local, `problem` says why (the Gemini
+    key is kept apart, so a default 'cloud' would really go to Google). A file that does not parse is kept aside as
+    settings.toml.bad (not overwritten); one saved by Notepad with a BOM reads as it is."""
     p = tmp_path / 'settings.toml'
     p.write_text('their_lang = "de"\nforced_cloud = ["mine"]\nthem_to_me = "both"\nme_to_them = "lokal"\n[local]\n'
                  'threads = "two"\nfuture_key = 1\n[ui]\nmic = "USB"\n[cloud]\nsubtitles = 1\n')
@@ -135,13 +136,29 @@ def test_a_broken_settings_file_does_not_stop_the_app(tmp_path):
     assert (s.their_lang, s.ui.mic, s.forced_cloud, s.them_to_me, s.me_to_them, s.local.threads, s.cloud.subtitles) == \
         ('de', 'USB', [], 'local', 'local', 2, False)
     assert all(k in config.problem for k in ('forced_cloud', 'them_to_me', 'me_to_them', 'local.threads',
-                                             'cloud.subtitles'))
+                                             'cloud.subtitles', 'both directions are local'))
     assert p.exists() and config.load(tmp_path / 'none.toml') == config.Settings() and not config.problem
-    for broken in ('[local\nthreads = 3\n', 'my_lang = "ru\n', b'my_lang = "\xff"\n'):
+    cloud = 'them_to_me = "cloud"\n'  # the user's own choice: the cloud for them -> me, me -> them by default (cloud)
+    for broken in (cloud + 'me_to_them = local\n', cloud + 'my_lang = "ru\n', cloud + '[local\nthreads = 3\n',
+                   (cloud + 'my_lang = "\xff"\n').encode('latin-1'), cloud + 'me_to_them = 0\n',
+                   cloud + 'me_to_them = ["local"]\n', cloud + '[ui]\nmic = 3\n'):
         p.write_bytes(broken if isinstance(broken, bytes) else broken.encode())
-        assert config.load(p) == config.Settings() and 'settings.toml.bad' in config.problem
-        assert not p.exists() and (tmp_path / 'settings.toml.bad').read_bytes() == (
-            broken if isinstance(broken, bytes) else broken.encode())
+        s = config.load(p)
+        assert (s.them_to_me, s.me_to_them) == ('local', 'local') and 'both directions are local' in config.problem, \
+            (broken, config.problem)
+        if not p.exists():  # did not parse: kept aside
+            assert (tmp_path / 'settings.toml.bad').read_bytes() == (broken if isinstance(broken, bytes) else broken.encode())
+    p.write_bytes(b'\xef\xbb\xbf' + cloud.encode())  # Notepad's BOM: read as it is, nothing lost
+    assert config.load(p).them_to_me == 'cloud' and not config.problem and p.exists()
+    real = config.Path.read_text
+
+    def locked(self, *a, **k):  # an antivirus holds the file: not readable now, not broken
+        if self == p:
+            raise PermissionError(13, 'in use')
+        return real(self, *a, **k)
+    monkeypatch.setattr(config.Path, 'read_text', locked)
+    s = config.load(p)
+    assert (s.them_to_me, s.me_to_them) == ('local', 'local') and 'in use' in config.problem and p.exists()
 
 
 def test_settings_are_written_whole_or_not_at_all(tmp_path, monkeypatch):

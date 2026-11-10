@@ -6,7 +6,8 @@
     config.save(s)
 
 Unknown keys (from a newer version) are ignored with a warning; a value of the wrong type keeps its default, a file that
-does not parse is kept aside as settings.toml.bad and the defaults are used: `problem` says so (the app shows it at start).
+does not parse is kept aside as settings.toml.bad and the defaults are used. A file read only in part sends nothing to the
+cloud: both directions are local, and `problem` says why (the app shows it at start and when translation goes on).
 """
 from __future__ import annotations
 
@@ -168,14 +169,19 @@ def load(path: Path | None = None) -> Settings:
     import tomllib
     global problem
     s, path, bad = Settings(), path or settings_path(), []
-    if path.exists():
+    try:
+        _fill(s, tomllib.loads(path.read_text('utf-8-sig')), bad)  # -sig: Notepad's BOM
+    except FileNotFoundError:  # none yet (the wizard writes it)
+        pass
+    except ValueError as e:  # TOML or UTF-8: kept aside, not overwritten by the next save
+        keep = path.with_name(path.name + '.bad')
         try:
-            data = tomllib.loads(path.read_text('utf-8'))
-        except ValueError as e:  # TOML or UTF-8: kept aside, not overwritten by the next save
-            data, keep = {}, path.with_name(path.name + '.bad')
             os.replace(path, keep)
-            bad.append(f'{path.name} could not be read ({e}): it is kept as {keep.name}, the defaults are used')
-        _fill(s, data, bad)
+            bad.append(f'it does not parse ({e}), it is kept as {keep.name}')
+        except OSError as e2:  # held by an antivirus, or gone meanwhile
+            bad.append(f'it does not parse ({e}) and could not be kept aside ({e2})')
+    except OSError as e:  # cannot be opened now (an antivirus holds it): not broken, not moved
+        bad.append(f'it cannot be opened ({e})')
     for k in ('them_to_me', 'me_to_them'):
         if getattr(s, k) not in ENGINES:  # local, not the default: a typo must not send the voice to Google unasked
             bad.append(f'{k} must be one of {ENGINES}, got {getattr(s, k)!r}: local is used')
@@ -186,9 +192,12 @@ def load(path: Path | None = None) -> Settings:
     if not 0.2 <= (r := s.local.mic_echo_rho_on) <= 0.8:  # near 0 it zeroes my speech, near 1 lets every echo through
         s.local.mic_echo_rho_on = min(max(r, 0.2), 0.8)
         print(f'settings: local.mic_echo_rho_on {r} is outside 0.2..0.8, {s.local.mic_echo_rho_on} used', file=sys.stderr)
+    if bad:  # read in part: nothing goes to the cloud by a mistake in the file (the key is kept apart, H-01)
+        s.them_to_me = s.me_to_them = 'local'
+        bad.insert(0, f'{path.name} could not be read whole, both directions are local now')
     for b in bad:
         print(f'settings: {b}', file=sys.stderr)
-    problem = '; '.join(bad)
+    problem = f'{bad[0]}: {"; ".join(bad[1:])}' if bad else ''
     return s
 
 

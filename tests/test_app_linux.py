@@ -236,6 +236,7 @@ def test_our_devices_come_back_when_the_sound_server_does(devices):
         ctl._events.p.kill()  # ... and the end of the event stream
         assert wait_for(lambda: names() == before, 10), (names(), before)
         assert wait_for(lambda: any('sound server restarted' in x for x in states), 5), states
+        assert any(x == 'error: the sound server is gone, waiting for it' for x in states), states  # said meanwhile
         for m in reversed(pactl('list', 'short', 'modules').splitlines()):  # gone again while the app idles
             if 'peresmeshnik_' in m:
                 pactl('unload-module', m.split('\t')[0])
@@ -285,6 +286,63 @@ def test_every_side_moves_to_the_new_devices_when_one_ends_first(devices, monkey
                 pactl('unload-module', m.split('\t')[0])
         ctl._restart(ctl.sides[0], 'the call sound ended', None)
         assert ctl.on and ctl._vmic is not old and [x.vmic for x in ctl.sides] == [ctl._vmic, ctl._vmic]
+    finally:
+        ctl.quit()
+    assert not ours()
+
+
+def test_restarts_on_devices_made_again_have_a_limit(devices, monkeypatch):
+    """M-01 (review of PR #22): a side that keeps failing on devices made again each time is restarted RESTARTS times
+    within a minute, each with a report, then translation stops and says why (not an endless off/on)."""
+    from peresmeshnik import app, config
+    from peresmeshnik.ui.selftest import pactl
+    reports = []
+    monkeypatch.setattr(app.crash, 'report', lambda *a, **k: reports.append(a[0]))
+    s = config.Settings()
+    s.ui.mic = devices['mic']
+    overlay_side, states = type('S', (), {'hide': lambda self: None})(), []
+    ctl = app.Controller(type('O', (), {'side': lambda self, name: overlay_side})(), states.append, settings=s)
+    ctl.startup()
+    ctl._route = lambda s: ''
+    ctl._side = lambda name, s: FakeSide(name, ctl._vmic)
+    try:
+        ctl.set_translation(True).result(10)
+        for _ in range(app.RESTARTS + 1):
+            assert ctl.on, states
+            for m in reversed(pactl('list', 'short', 'modules').splitlines()):
+                if 'peresmeshnik_' in m:
+                    pactl('unload-module', m.split('\t')[0])
+            ctl.submit(ctl._restart, ctl.sides[0], 'the call sound ended', None).result(10)
+        assert not ctl.on and len(reports) == app.RESTARTS + 1 and 'translation stopped' in states[-1], states
+    finally:
+        ctl.quit()
+    assert not ours()
+
+
+def test_translation_turned_off_while_the_sound_server_is_gone_stays_off(devices, monkeypatch):
+    """M-01 (review of PR #22): the sound server goes, the user turns translation off meanwhile; when the server is
+    back translation stays off (it went on again: a cloud side sending the microphone, the tray's box unticked)."""
+    from peresmeshnik import app, config
+    from peresmeshnik.ui.selftest import pactl
+    s = config.Settings()
+    s.ui.mic = devices['mic']
+    overlay_side, states = type('S', (), {'hide': lambda self: None})(), []
+    ctl = app.Controller(type('O', (), {'side': lambda self, name: overlay_side})(), states.append, settings=s)
+    ctl.startup()
+    ctl._route = lambda s: ''
+    ctl._side = lambda name, s: FakeSide(name, ctl._vmic)
+    try:
+        ctl.set_translation(True).result(10)
+        assert ctl.on
+        for m in reversed(pactl('list', 'short', 'modules').splitlines()):  # the server went: none of ours
+            if 'peresmeshnik_' in m:
+                pactl('unload-module', m.split('\t')[0])
+        assert ctl._down.acquire(blocking=False)  # as _sound_gone does, translation on (was_on)
+        ctl.set_translation(False).result(10)  # the user, meanwhile
+        ctl.submit(ctl._sound_back, True).result(10)  # the server is back
+        assert not ctl.on and not ctl.sides and 'peresmeshnik_mic' in pactl('list', 'short', 'sources'), states
+        ctl.set_translation(True).result(10)  # and on again by the user: on the devices made again
+        assert ctl.on and [x.vmic for x in ctl.sides] == [ctl._vmic, ctl._vmic]
     finally:
         ctl.quit()
     assert not ours()

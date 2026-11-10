@@ -197,6 +197,30 @@ def test_quit_while_warming_up_loads_no_further_side(monkeypatch):
     assert time.monotonic() - t < 1.5 and ctl.stuck
 
 
+def test_settings_broken_while_running_are_said_when_translation_goes_on(monkeypatch, tmp_path):
+    """H-01 (review of PR #22): the settings file broken while the app runs (edited by hand): translation reads it again
+    when it goes on, so the tray says what was not used, and both sides are local (nothing to the cloud by a typo)."""
+    from peresmeshnik import app
+    rec = str(Path(__file__).parent / 'data' / 'call-en.ogg')
+    p = tmp_path / 'settings.toml'
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(p))
+    got, states = [], []
+
+    def side(self, name, s):
+        got.append((name, s.them_to_me, s.me_to_them))
+        return _QuitSide(name)
+    monkeypatch.setattr(app.Controller, '_side', side)
+    overlay = type('O', (), {'side': lambda self, name: type('S', (), {'hide': lambda self: None})()})()
+    ctl = app.Controller(overlay, states.append, them_file=rec, me_file=rec)
+    try:
+        p.write_text('them_to_me = "cloud"\nme_to_them = local\n', encoding='utf-8')  # no quotes: does not parse
+        ctl.set_translation(True).result(10)
+        assert got == [('them', 'local', 'local'), ('me', 'local', 'local')], got
+        assert any(x.startswith('error: settings') and 'both directions are local' in x for x in states), states
+    finally:
+        ctl.quit()
+
+
 def test_a_microphone_helper_that_dies_restarts_its_side(monkeypatch):
     """L-18: macOS / Windows: the microphone helper of me -> them dies (a trap, a COM failure): the side starts again,
     as them -> me does when its capture helper dies; no permission is said, not retried."""

@@ -802,6 +802,7 @@ class Controller:
         self.sides: list[Side] = []
         self.live = False
         self.on = False
+        self.wanted = False  # the user turned translation on (set_translation), and did not turn it off since
         self.startup_error = ''
         self._quitting = False  # quit() came: _on loads no further side, _off starts nothing for the idle
         self.stuck = False  # quit() did not wait for a side still loading: the process exits without its thread
@@ -848,6 +849,7 @@ class Controller:
         return self._vmic
 
     def set_translation(self, on: bool) -> concurrent.futures.Future:
+        self.wanted = on  # the user's choice: a sound server back does not undo an "off" made while it was gone
         return self.submit(self._on if on else self._off)
 
     def startup(self) -> None:
@@ -891,6 +893,7 @@ class Controller:
             return
         was_on, wait = self.on, 0.5
         log.warning('the sound server went away: waiting for it')
+        self.on_state('error: the sound server is gone, waiting for it')  # not a silent "translating" meanwhile
         while not self._quitting:  # ponytail: a short poll only while there is no sound server; none while it runs
             if sound_server():
                 self.submit(self._sound_back, was_on)
@@ -907,7 +910,7 @@ class Controller:
             self._events = self._watch_sound()
         except Exception as e:
             log.warning('sound events: %s', e)
-        if self.on and self._sides_n != self._devices_n or was_on and not self.on:  # their streams went with the server
+        if self.on and self._sides_n != self._devices_n or was_on and self.wanted and not self.on:  # their streams went
             self._off()
             self._on()
         self.on_state('note: the sound server restarted: "Peresmeshnik Mic" and "Peresmeshnik Call" are there again'
@@ -1094,6 +1097,8 @@ class Controller:
         self._sides_n = self._devices_n
         self._refresh_devices()  # macOS: devices plugged in since (AirPods back) become visible to PortAudio
         s = self.settings or config.load()
+        if not self.settings and config.problem:  # the file broke since the start (edited by hand): said now (H-01)
+            self.on_state(f'error: settings: {config.problem}. Set them again in Settings')
         self._pair_to_overlay(s)
         files = {'them': self.them_file, 'me': self.me_file}
         from peresmeshnik.voice import STOCK
@@ -1190,14 +1195,20 @@ class Controller:
             self._sides_n = -1  # _sound_back makes them all again
             threading.Thread(target=self._sound_gone, name='sound-wait', daemon=True).start()  # none if one waits
             return
+        crash.report(f'{ARROW[side.name]}: {why}', e, self.settings, quiet=True)  # the message below names it
+        now = time.monotonic()
+        times = self._restarts[side.name] = [t for t in self._restarts.get(side.name, ()) if now - t < 60]
         if self._ensure_devices():  # the server is back before its event: every side plays into the old devices
+            if len(times) >= RESTARTS:  # made again each time and still failing: not an endless off/on
+                self._off()
+                self.on_state(f'error: translation stopped: {ARROW[side.name]} failed {RESTARTS + 1} times within a '
+                              f'minute ({why}). A report without your data is in the tray menu (Crash report…)')
+                return
+            times.append(now)
             self._off()
             self._on()
             return
-        crash.report(f'{ARROW[side.name]}: {why}', e, self.settings, quiet=True)  # the message below names it
         self._drop(side)
-        now = time.monotonic()
-        times = self._restarts[side.name] = [t for t in self._restarts.get(side.name, ()) if now - t < 60]
         if len(times) >= RESTARTS:
             self.on_state(f'error: {ARROW[side.name]} stopped: it failed {RESTARTS + 1} times within a minute ({why}). '
                           'A report without your data is in the tray menu (Crash report…)')

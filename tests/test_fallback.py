@@ -249,8 +249,7 @@ def test_stock_voice_falls_back_to_piper():
     s.local.clone, s.local.voice = 'piper', ''
     why = fallback.voice_why('me', s)
     assert fallback.stock('me', s) and 'NVIDIA' not in why and 'enrolled' not in why, why
-    s.local.clone = config.Settings().local.clone
-    assert not fallback.stock('me', s) and 'enrolled' in fallback.voice_why('me', s)
+    # the clone chosen: test_a_clone_not_ready_falls_back_to_the_stock_voice
 
 
 def test_a_cloud_me_side_passes_latency_through_the_live_switch(monkeypatch):
@@ -472,3 +471,22 @@ def test_turning_off_while_the_voice_preloads_leaves_no_runner():
     fb.close()
     time.sleep(1.0)
     assert SlowTts.live == [] and fb.muted._tts is None
+
+
+def test_a_clone_not_ready_falls_back_to_the_stock_voice(monkeypatch):
+    """H-09: me -> them in the cloud with the clone chosen, but no voice enrolled yet (or no voice pack, no model): when
+    the cloud fails, the language's stock voice speaks; the side is down only when there is neither."""
+    from pathlib import Path
+
+    from peresmeshnik import config, languages, models
+    from peresmeshnik.local import clone
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': True)  # the clone keeps up here (languages.clone_why)
+    monkeypatch.setattr(models, 'path', lambda i: Path('/models') / i)  # every model downloaded
+    monkeypatch.setattr(clone, 'voice_cmd', lambda: ['voice-runner'])  # the voice pack is installed
+    s = config.Settings()
+    s.me_to_them, s.my_lang, s.their_lang = 'cloud', 'ru', 'en'
+    assert fallback.voice_why('me', s) == '' and fallback.stock('me', s)  # no voice enrolled: the stock en voice
+    s.local.voice = 'mine'
+    assert fallback.voice_why('me', s) == '' and not fallback.stock('me', s)  # the clone
+    s.local.voice, s.their_lang = '', 'zh'  # no stock voice for Chinese: nothing to fall back to
+    assert 'enrolled' in fallback.voice_why('me', s)

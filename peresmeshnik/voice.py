@@ -5,10 +5,10 @@
     python -m peresmeshnik.voice check me.wav
     python -m peresmeshnik.voice list
 
-A profile is a folder `<voices>/<name>/` with `reference.wav` (level-normalised) and `voice.json`
-(language, transcript, quality numbers). Clone engines add their own cache next to it (XTTS:
-`xtts.pt`). Profiles stay local and are never uploaded. This module is torch-free; the clone
-engine is imported only for `--engine`.
+A profile is a folder `<voices>/<id>/` with `voice.json` (schema v2 below). My own voice (kind 'me') also has
+`reference.wav` (level-normalised); clone engines add their own cache next to it (XTTS: `xtts.pt`). Profiles stay on
+this computer (my voice goes only to my own server, for a session). This module is torch-free; the clone engine is
+imported only for `--engine`.
 
 Two checks, each with a verdict for the user ("good" / "record again, because ..."): `check()` of the
 recording (length, speech time, level, clipping, background), and after cloning `check_clone()`: the
@@ -226,10 +226,10 @@ def summary(r: Report) -> str:
 
 
 def enroll(pcm: np.ndarray, sr: int, name: str = 'me', lang: str = 'ru', transcript: str | None = None,
-           force: bool = False, root: Path | None = None) -> tuple[Report, Voice | None]:
+           force: bool = False, root: Path | None = None, consent: dict | None = None) -> tuple[Report, Voice | None]:
     """Check a recording and save it as the profile `name` if it passes (or `force`): (report, profile or None)."""
     r = check(pcm, sr)
-    return r, (save(pcm, sr, name, lang, transcript, root) if r.ok or force else None)
+    return r, (save(pcm, sr, name, lang, transcript, root, consent) if r.ok or force else None)
 
 
 # --- after cloning: does the clone speak understandably, in the recorded voice? ---
@@ -339,9 +339,109 @@ def voices_dir() -> Path:
     return data_dir() / 'voices'
 
 
+# --- voice.json v2: my voice and the voices of the people I talk to (RESEARCH-clone §5-6, FINDINGS M-20) ---
+#   {version: 2, id, name, kind, lang, created, consent, seconds, engines,
+#    and for kind 'me' as in v1: transcript, sample_rate, gain_db, quality}   (v1 readers still find their keys)
+# id       the folder: 'me' ('me.new' while the wizard holds a new take); a contact 'them-<8 hex>': no name in a path
+# name     shown on the voices screen; never in logs or crash reports
+# kind     'me': may speak into the call (virtual mic) and go to my server; 'them': only ever into my headphones
+# consent  None (not confirmed: it speaks nowhere as me) or {how, at, wer, similarity}; how:
+#            'mic-live'          (me) read random phrases at the microphone, the app's ASR heard them (wer)
+#            'import+mic-match'  (me) a file, matched by a few seconds read live at the microphone (similarity)
+#            'call-saved'        (them) kept from a call by an explicit "remember", the other person agreed
+#          wer / similarity None: not measured (a v1 profile, recorded before the checks)
+# seconds  speech the profile was made from
+# engines  {model id (models.toml, languages.clone_engine): {file, model}}: the voice of a profile without a recording
+#          (kind 'them'): `file` in the folder (np.save of the engine's state or vector), `model` the sha256 of the
+#          weights it was made with; other weights cannot use it (a contact is made again only from a new call).
+#          'me' needs none: its engines cache what they need next to reference.wav and check it against the recording.
+VERSION = 2
+CONSENT = {'mic-live': 'me', 'import+mic-match': 'me', 'call-saved': 'them'}  # how -> the kind it confirms
+
+
+class NotMine(RuntimeError):
+    """A profile that may not speak as me (into the call, to my server): a contact's, or mine not confirmed yet."""
+
+
+def why_not_mine(meta: dict) -> str:
+    """'' when the profile is my own voice confirmed at the microphone (M-20), else why not, for the user. The one
+    check: the me side (virtual mic) and the server's voice go through `mine()`."""
+    if meta.get('kind', 'me') != 'me':
+        return 'it is the voice of someone you talk to: it speaks only in your headphones, never into the call'
+    if CONSENT.get((meta.get('consent') or {}).get('how')) != 'me':
+        return 'it is not confirmed as your own voice yet: read a short phrase at the microphone (Voices…)'
+    return ''
+
+
+def mine(name: str, root: Path | None = None) -> Voice:
+    """The profile `name` if it may speak as me, else NotMine (the text names no voice: it may reach a log)."""
+    v = load(name, root)
+    if why := why_not_mine(v.meta):
+        raise NotMine(f'this voice cannot speak for you: {why}')
+    return v
+
+
+def upgrade(meta: dict, folder: str) -> dict:
+    """A v1 voice.json as v2. v1 had only my voice: read from the screen text (the wizard's Record, `--record`) it
+    counts as recorded live (wer not measured); an imported file has no consent until checked at the microphone."""
+    if meta.get('version', 1) >= VERSION:
+        return meta
+    live = bool(meta.get('transcript')) and meta.get('transcript') == PROMPTS.get(meta.get('lang', ''))
+    at = meta.get('created', '')
+    return meta | {'version': VERSION, 'id': folder, 'name': meta.get('name', folder), 'kind': 'me',
+                   'consent': {'how': 'mic-live', 'at': at, 'wer': None, 'similarity': None} if live else None,
+                   'seconds': meta.get('quality', {}).get('seconds', 0.0), 'engines': {}}
+
+
+def _private(*dirs: Path) -> None:
+    for d in dirs:  # a voice (enough to clone it) and its states: the user's only (L-09; Linux, a shared machine with
+        d.chmod(0o700)  # a 0755 home). The rest of the data folder keeps the umask
+
+
+def _write(path: Path, meta: dict) -> None:
+    import os
+    tmp = path / 'voice.json.tmp'
+    tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding='utf-8')
+    os.replace(tmp, path / 'voice.json')
+
+
+def _now() -> str:
+    return time.strftime('%Y-%m-%dT%H:%M:%S%z')
+
+
+def save_them(name: str, lang: str, seconds: float, states: dict[str, tuple[np.ndarray, str]],
+              root: Path | None = None) -> Voice:
+    """Keep a contact's voice from a call (an explicit "remember", the other person agreed): the engines' states only,
+    no recording of their speech. `states`: {model id: (the engine's state or vector, sha256 of its weights)}."""
+    import secrets
+    base = root or voices_dir()
+    vid = f'them-{secrets.token_hex(4)}'
+    path = base / vid
+    path.mkdir(parents=True)
+    _private(base, path)
+    engines = {}
+    for model, (state, sha) in states.items():
+        np.save(path / f'{model}.npy', np.asarray(state), allow_pickle=False)
+        engines[model] = {'file': f'{model}.npy', 'model': sha}
+    meta = {'version': VERSION, 'id': vid, 'name': name, 'kind': 'them', 'lang': lang, 'created': _now(),
+            'consent': {'how': 'call-saved', 'at': _now(), 'wer': None, 'similarity': None},
+            'seconds': round(float(seconds), 2), 'engines': engines}
+    _write(path, meta)
+    return Voice(name=vid, engine='reference', path=path, meta=meta)
+
+
+def engine_state(v: Voice, model: str, sha: str) -> np.ndarray | None:
+    """The state a profile keeps for the engine `model` with weights `sha`; None: not made with those weights."""
+    e = v.meta.get('engines', {}).get(model)
+    if not e or e.get('model') != sha:
+        return None
+    return np.load(v.path / Path(e['file']).name, allow_pickle=False)
+
+
 def save(pcm: np.ndarray, sr: int, name: str, lang: str, transcript: str | None = None,
-         root: Path | None = None) -> Voice:
-    """Write `<root>/<name>/reference.wav` + `voice.json`; returns the profile (engine 'reference')."""
+         root: Path | None = None, consent: dict | None = None) -> Voice:
+    """Write my voice `<root>/<name>/reference.wav` + `voice.json` (v2, kind 'me'; `consent`: how it was confirmed,
+    None = not yet); returns the profile (engine 'reference')."""
     import soundfile as sf
     x = np.asarray(pcm, dtype=np.float32)
     x = (x.mean(axis=1) if x.ndim > 1 else x)[:int(MAX_S * sr)]
@@ -351,15 +451,15 @@ def save(pcm: np.ndarray, sr: int, name: str, lang: str, transcript: str | None 
     base = root or voices_dir()
     path = base / name
     path.mkdir(parents=True, exist_ok=True)
-    for d in (base, path):  # the user's voice (enough to clone it) and its latents: theirs only (L-09; Linux, a shared
-        d.chmod(0o700)  # machine with a 0755 home). The rest of the data folder keeps the umask
+    _private(base, path)
     for old in path.glob('*.pt'):  # engine caches of an older recording
         old.unlink()
     sf.write(path / 'reference.wav', np.clip(x * gain, -1, 1), sr, subtype='PCM_16')
-    meta = {'name': name, 'lang': lang, 'transcript': transcript or '', 'sample_rate': sr,
-            'created': time.strftime('%Y-%m-%dT%H:%M:%S%z'), 'gain_db': round(20 * np.log10(gain), 1),
+    meta = {'version': VERSION, 'id': name, 'name': name, 'kind': 'me', 'lang': lang, 'created': _now(),
+            'consent': consent, 'seconds': report.seconds, 'engines': {},
+            'transcript': transcript or '', 'sample_rate': sr, 'gain_db': round(20 * np.log10(gain), 1),
             'quality': {k: v for k, v in asdict(report).items() if k not in ('errors', 'warnings')}}
-    (path / 'voice.json').write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding='utf-8')
+    _write(path, meta)
     return Voice(name=name, engine='reference', path=path, meta=meta)
 
 
@@ -375,8 +475,8 @@ def promote(draft: str, name: str, root: Path | None = None) -> Voice:
     (base / draft).rename(base / name)
     if old.exists():
         shutil.rmtree(old)
-    meta = json.loads((base / name / 'voice.json').read_text(encoding='utf-8')) | {'name': name}
-    (base / name / 'voice.json').write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding='utf-8')
+    _write(base / name, upgrade(json.loads((base / name / 'voice.json').read_text(encoding='utf-8')), name)
+           | {'id': name, 'name': name})
     return load(name, base)
 
 
@@ -387,8 +487,15 @@ def discard(name: str, root: Path | None = None) -> None:
 
 
 def load(name: str, root: Path | None = None) -> Voice:
+    """A profile; a v1 voice.json is upgraded to v2 on disk once (an older app still reads it)."""
     path = (root or voices_dir()) / name
     meta = json.loads((path / 'voice.json').read_text(encoding='utf-8'))
+    if meta.get('version', 1) < VERSION:
+        meta = upgrade(meta, name)
+        try:
+            _write(path, meta)
+        except OSError:  # read-only: upgraded in memory again next time
+            pass
     return Voice(name=name, engine='reference', path=path, meta=meta)
 
 
@@ -430,8 +537,9 @@ def main(argv=None) -> int:
     if a.cmd == 'list':
         root = a.voices or voices_dir()
         for p in sorted(root.glob('*/voice.json')):
-            m = json.loads(p.read_text(encoding='utf-8'))
-            print(f"{m['name']}\t{m['lang']}\t{m['quality']['seconds']:.0f} s\t{m['created']}\t{p.parent}")
+            m = load(p.parent.name, root).meta
+            print(f"{m['name']}\t{m['lang']}\t{m['seconds']:.0f} s\t{m['created']}\t{m['kind']}\t"
+                  f"{(m['consent'] or {}).get('how', 'not confirmed')}\t{p.parent}")
         return 0
     if a.cmd == 'check':
         r = check(*read_audio(a.file))

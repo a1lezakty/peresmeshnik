@@ -3,8 +3,9 @@
 # Peresmeshnik
 
 Real-time translator for calls. You hear the other side in your language — as a voice in your
-headphones and as subtitles — and they hear you in theirs, spoken in **your own cloned voice** (on an NVIDIA GPU;
-elsewhere in a stock voice or the cloud's). Works with any call app (Google Meet, Zoom, Telegram, …) through system
+headphones and as subtitles — and they hear you in theirs, spoken in **your own cloned voice** (on any computer in
+English, French, German, Spanish, Portuguese, Italian and Russian, in 13 languages on an NVIDIA GPU; elsewhere in a stock
+voice or the cloud's). Works with any call app (Google Meet, Zoom, Telegram, …) through system
 audio devices.
 
 **Status: in development.** Version 0.3.0 adds languages: any pair of 14. macOS and Windows have builds; on Linux it
@@ -19,8 +20,10 @@ runs from source. Not yet tried in a real call (see below).
   phrases at the microphone and the app hears those words in the voice of every part of the recording; after three
   failed tries it waits a while. This stops a downloaded recording of someone else from speaking for you in a few
   clicks; it cannot stop someone who edits the app's files. A voice recorded in 0.3.0 is confirmed once the same way.
-  Tray → **Voices…** lists and deletes the voices. Cloned from a 30–60 s recording, on an NVIDIA GPU with 6 GB or more
-  (Windows, Linux; on Windows also a recent driver, see below). On a Mac and without such a GPU no clone keeps up live:
+  Tray → **Voices…** lists and deletes the voices. Cloned from a 30–60 s recording. On any computer, a Mac too: Kyutai's
+  Pocket TTS on the CPU in English, French, German, Spanish, Portuguese, Italian (its weights need your Hugging Face
+  token, of an account that accepted Kyutai's conditions on huggingface.co/kyutai/pocket-tts) and Russian. On an NVIDIA
+  GPU with 6 GB or more (Windows, Linux; on Windows also a recent driver, see below) XTTS-v2 in 13 languages. Elsewhere
   a stock voice or the cloud speaks for you.
 - A hotkey switches between translation and your live voice.
 
@@ -44,8 +47,8 @@ direction the wizard says before anything is downloaded whether it can run on th
 recognition, translation or voice for a language), what it downloads and under which licenses; a direction that
 cannot run here is translated in the cloud (Gemini Live has all 14 languages). When a new pair from the tray would
 move a direction you keep on this computer to the cloud, the app asks first (its sound would go to Google); a later pair
-that runs here brings it back. Where your cloned voice does not speak the language, or there is no NVIDIA GPU for it,
-a stock voice speaks instead, and the wizard says so.
+that runs here brings it back. Where your cloned voice does not speak the language here (without an NVIDIA GPU:
+Polish, Turkish, Chinese, Japanese, Korean, Arabic), a stock voice speaks instead, and the wizard says so.
 
 Speech recognition of Turkish, Chinese and Korean on this computer is Whisper on an NVIDIA GPU, through a CUDA build of
 onnxruntime: the macOS and Windows apps have none, so there these three are recognized in the cloud. From source on

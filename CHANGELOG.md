@@ -10,6 +10,12 @@ version is the top of its GitHub release notes (`.github/workflows/release.yml`)
   stock voice until confirmed once (tray → Voices…). Tray → **Voices…** lists, confirms and deletes the voices.
 - Back to 0.3.0 after this version: its `python -m peresmeshnik.voice list` stops at a kept voice of someone you talk to
   (`them-…`, it has no `quality`).
+- **Your cloned voice without an NVIDIA GPU, on any computer, a Mac too:** Kyutai's Pocket TTS on the CPU (onnxruntime,
+  no torch) speaks English, French, German, Spanish, Portuguese and Italian in your voice, and Russian
+  (Shtorm-PocketTTS-RU, with stress marks). Your voice starts about 2 s after you finish a phrase, and with both
+  directions cloned at once 4 cores keep up. Its English to Italian weights download with your Hugging Face token, of
+  an account that accepted Kyutai's conditions. On an NVIDIA GPU XTTS-v2 as before; Polish, Turkish, Chinese, Japanese,
+  Korean and Arabic without one: a stock voice, and the wizard says why.
 
 ## 0.3.0
 

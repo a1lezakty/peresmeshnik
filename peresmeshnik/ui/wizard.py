@@ -257,6 +257,8 @@ class LanguagesPage(QWizardPage):
                 text += ' Its subtitles come from the cloud too.'
             if c.currentText() == 'cloud' and not (d.local and not languages.cloud_subtitles(s, key)):
                 text += ' If the cloud fails, it stops until it is back.'  # else it goes on here (needed_models: its voice)
+            elif c.currentText() == 'cloud' and (v := languages.fallback_voice(s, key)) and models.get(v).consent:
+                text += ' Its fallback voice is noncommercial: asked on the models page.'
             if d.src == 'ar' and c.currentText() == 'cloud' and languages.cloud_subtitles(s, key):
                 text += ' Arabic subtitles from the cloud are Egyptian Arabic (Gemini has no other): other dialects come out ' \
                         'worse.'
@@ -541,7 +543,7 @@ class ModelsPage(QWizardPage):
         self.list.setWordWrap(True)
         self.list.setOpenExternalLinks(True)
         self.consent = QCheckBox()
-        self.consent.toggled.connect(self.completeChanged)
+        self.consent.toggled.connect(lambda: self.busy or self._finished(''))  # an optional voice to download, or not
         self.button = QPushButton('Download')
         self.button.clicked.connect(self.download)
         self.bar = QProgressBar()
@@ -555,27 +557,35 @@ class ModelsPage(QWizardPage):
 
     def initializePage(self) -> None:  # noqa: N802
         self.ms = [models.get(i) for i in needed_models(self.w.s)]
+        self.optional = [models.get(i) for i in languages.optional_models(self.w.s)]  # with its license only
         base = models.root()
-        lic = {m.id: ' + '.join(f'<a href="{p.license_url}">{p.license}</a>' for p in models.parts(m)) for m in self.ms}
-        rows = [f'<tr><td>{"✔" if models.is_fetched(m, base) else "·"}</td><td>{m.id}</td>'
-                f'<td align=right>{models.size(m) / 1e6:.0f} MB</td><td>{lic[m.id]}</td></tr>' for m in self.ms]
+        lic = {m.id: ' + '.join(f'<a href="{p.license_url}">{p.license}</a>' for p in models.parts(m))
+               for m in self.ms + self.optional}
+        rows = [f'<tr><td>{"✔" if models.is_fetched(m, base) else "·"}</td><td>{m.id}'
+                f'{" (optional: a cloud direction falls back on it)" if m in self.optional else ""}</td>'
+                f'<td align=right>{models.size(m) / 1e6:.0f} MB</td><td>{lic[m.id]}</td></tr>' for m in self.ms + self.optional]
         self.list.setText(f'<table cellspacing=6>{"".join(rows)}</table><p>Folder: {base}</p>')
-        restricted = [m for m in self.ms if m.consent and not models.is_fetched(m, base)]
+        restricted = [m for m in self.ms + self.optional if m.consent and not models.is_fetched(m, base)]
         self.consent.setVisible(bool(restricted))
         self.consent.setText('I accept the restricted licenses (noncommercial use only, they bind me as the user): '
-                             + ', '.join(f'{m.id} ({m.license})' for m in restricted))
+                             + ', '.join(f'{m.id} ({m.license}{", optional" if m in self.optional else ""})' for m in restricted))
         self._finished('')
 
     def missing(self) -> list:
         base = models.root()
         return [m for m in self.ms if not models.is_fetched(m, base)]
 
+    def extra(self) -> list:
+        """The optional voices not here yet: downloaded with the rest when their license is accepted."""
+        base = models.root()
+        return [m for m in getattr(self, 'optional', []) if not models.is_fetched(m, base)]
+
     def isComplete(self) -> bool:  # noqa: N802
         return not self.busy and not self.missing()
 
     def download(self) -> None:
-        todo = self.missing()
-        if any(m.consent for m in todo) and not self.consent.isChecked():
+        todo = self.missing() + (self.extra() if self.consent.isChecked() else [])
+        if any(m.consent for m in self.missing()) and not self.consent.isChecked():
             self.state.setText('Accept the restricted licenses first, or choose cloud for that direction.')
             return
         self.busy = True
@@ -603,11 +613,14 @@ class ModelsPage(QWizardPage):
 
     def _finished(self, err: str) -> None:
         self.busy = False
-        todo = self.missing()
-        self.button.setEnabled(bool(todo))
+        todo, extra = self.missing(), self.extra()
+        self.button.setEnabled(bool(todo) or bool(extra) and self.consent.isChecked())
         self.bar.setVisible(bool(todo) or bool(err))
         self.state.setText(f'Download failed: {err}. Press Download again to resume.' if err else
                            f'{len(todo)} to download, {sum(map(models.size, todo)) / 1e6:.0f} MB.' if todo else 'All models are here.')
+        if extra and not err:  # nobody chose it: without it that side has nothing to go local with
+            self.state.setText(self.state.text() + f' Without {", ".join(m.id for m in extra)} (its license unticked) '
+                               'that cloud direction stops until the cloud is back when the cloud fails.')
         self.completeChanged.emit()
 
 

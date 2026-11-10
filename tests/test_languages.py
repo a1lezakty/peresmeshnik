@@ -216,3 +216,15 @@ def test_a_cloud_side_downloads_its_fallback_voice():
     assert s.local.tts['ru'] in ids and s.local.tts['de'] in ids  # them -> me speaks Russian, me -> them German
     s.cloud.subtitles = True
     assert languages.needed_models(s) == ['silero-vad']
+
+
+def test_a_fallback_voice_under_a_license_to_accept_is_optional():
+    """FIXES-b 2: a cloud side's fallback voice that needs consent (tr, ko, ja: noncommercial) is not needed: the setup
+    runs without it (that side stops while the cloud is down), it is downloaded only when its license is accepted."""
+    s = config.Settings(my_lang='ru', their_lang='ja', them_to_me='local', me_to_them='cloud')  # the default engines
+    ja = s.local.tts['ja']
+    assert models.get(ja).consent and ja not in languages.needed_models(s) and languages.optional_models(s) == [ja]
+    s.their_lang = 'de'  # a free fallback voice: needed, nothing optional
+    assert s.local.tts['de'] in languages.needed_models(s) and languages.optional_models(s) == []
+    s.their_lang, s.me_to_them = 'ja', 'local'  # chosen local: the voice is the side's own, needed (asked as before)
+    assert ja in languages.needed_models(s) and languages.optional_models(s) == []

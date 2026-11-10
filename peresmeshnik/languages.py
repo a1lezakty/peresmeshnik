@@ -8,6 +8,7 @@ and the tests all ask this module.
     d = languages.direction(s, 'me_to_them')     # Direction: d.local, d.why, d.notes, d.asr/mt/tts, d.voice
     languages.clone_why(s.local.clone, 'de')     # '' = the clone of my voice speaks German live here, else why not
     languages.needed_models(s)                   # registry ids the chosen engines need, nothing more
+    languages.optional_models(s)                 # cloud sides' fallback voices under a license to accept (asked)
 """
 from __future__ import annotations
 
@@ -173,9 +174,24 @@ def cloud_subtitles(s, side: str) -> bool:
     return s.cloud.subtitles or not direction(s, side).subtitles
 
 
+def fallback_voice(s, side: str) -> str:
+    """A cloud side's stock voice for when the cloud fails ('' = none: its subtitles come from the cloud, so there is no
+    local ASR + MT to go on with, or its language has no stock voice)."""
+    if getattr(s, side) != 'cloud' or cloud_subtitles(s, side):
+        return ''
+    d = direction(s, side)
+    return d.tts if d.voice == 'stock' else pick(s.local.tts, d.tgt)
+
+
+def _consent(model_id: str) -> bool:
+    from peresmeshnik import models
+    return models.get(model_id).consent
+
+
 def needed_models(s) -> list[str]:
     """Registry ids the chosen setup runs on (ARCHITECTURE §6): a local side its ASR, MT and voice; a cloud side its
-    local subtitles (unless they come from the cloud). Silero VAD is always there: it gates the cloud too."""
+    local subtitles (unless they come from the cloud) and its fallback voice when that needs no consent (else it is
+    optional: `optional_models`). Silero VAD is always there: it gates the cloud too."""
     ids = ['silero-vad']
     for side in SIDES:
         d = direction(s, side)
@@ -184,8 +200,15 @@ def needed_models(s) -> list[str]:
             if d.voice == 'clone':  # the clone's fallback (~60 MB): the stock voice when the clone cannot speak (S2)
                 ids += [i for i in [pick(s.local.tts, d.tgt)] if i]
         elif not cloud_subtitles(s, side):  # local subtitles, and with its stock voice the side's way when the cloud fails
-            ids += [d.asr, d.mt] + [i for i in [d.tts if d.voice == 'stock' else pick(s.local.tts, d.tgt)] if i]
+            ids += [d.asr, d.mt] + [i for i in [fallback_voice(s, side)] if i and not _consent(i)]
     return list(dict.fromkeys(ids))
+
+
+def optional_models(s) -> list[str]:
+    """Cloud sides' fallback voices under a license to accept (tr, ko, ja: noncommercial): downloaded only when it is
+    accepted; without one that side stops while the cloud is down. Nobody chose them, so nothing waits for them."""
+    need = set(needed_models(s))
+    return list(dict.fromkeys(v for side in SIDES if (v := fallback_voice(s, side)) and _consent(v) and v not in need))
 
 
 def table(s=None) -> str:

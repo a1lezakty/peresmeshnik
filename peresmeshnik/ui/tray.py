@@ -366,6 +366,14 @@ class Tray(QObject):
                                            f'you as the user): {", ".join(restricted)}. Download and accept them?'):
             self.sync()
             return
+        extra = [m for m in map(models.get, languages.optional_models(s)) if not models.is_fetched(m)]
+        if extra and self.confirm(  # a cloud side's fallback voice nobody chose: asked apart, a No changes nothing else
+                f'{name}: when the cloud fails, a cloud direction goes on with the stock voice '
+                f'{", ".join(f"{m.id} ({m.license}, {m.license_url})" for m in extra)}, under a restricted license '
+                '(noncommercial use only, it binds you as the user). Download and accept it? No: that direction stops '
+                'until the cloud is back.'):
+            todo += extra
+            lic = ', '.join(dict.fromkeys(p.license for m in todo for p in models.parts(m)))
         if note := font_note([my, their]):
             notes.append(note)
         self._pair = s, moved, back, {**engines, **{k: getattr(s, k) for k in kept}}

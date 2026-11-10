@@ -201,7 +201,7 @@ downloads them again.
   most every 15 min while it stays down: nothing runs on a timer) and goes back to it at the next phrase. Going local
   needs that direction's speech recognition, translation and stock voice on this computer: the wizard downloads them
   for a cloud direction too, unless its subtitles come from the cloud ("Subtitles from the cloud") or its languages
-  have no local models. Your cloned voice takes over where it is ready, else the stock voice. Without a local path
+  have no local models; a noncommercial stock voice (Turkish, Korean, Japanese) only if you accept its license. Your cloned voice takes over where it is ready, else the stock voice. Without a local path
   the wizard says so beforehand, the tray says what is missing, and the hotkey gives the call your own voice
   meanwhile.
 - **A crash.** A report goes to the `reports` folder in the app's data folder (macOS `~/Library/Application

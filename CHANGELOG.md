@@ -28,7 +28,7 @@ Chinese, Japanese, Korean, Arabic — both ways.
   and the app says so: no clone download and no recording asked for nothing. Recording or importing a voice asks you
   to confirm it is your own.
 - A direction in the cloud gets its stock voice too, so it goes on locally when the cloud fails (unless its subtitles
-  come from the cloud).
+  come from the cloud; a noncommercial voice — Turkish, Korean, Japanese — only when you accept its license).
 - **Your cloned voice in 13 of the 14 languages** (all but Ukrainian) with an NVIDIA GPU: first audio in about 0.2 s and
   3–5 times faster than real time in each of them on an RTX A4000 (other cards not measured); money and clock times
   are said right, and most other numbers (Japanese digits, Turkish and Arabic decimals, a currency sign apart from its

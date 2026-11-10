@@ -731,6 +731,10 @@ def test_languages_page_says_what_a_cloud_side_falls_back_on(tmp_path, monkeypat
     config.save(s)
     page = wizard.LanguagesPage(type('W', (), {'s': s})())
     assert 'If the cloud fails' not in page.why['them_to_me'].text()  # it goes on here: nothing to warn about
+    stand_ins(monkeypatch, consent=('tts-ja',))  # me -> them falls back on a noncommercial voice: optional, said
+    page.refresh()
+    assert 'fallback voice is noncommercial' in page.why['me_to_them'].text()
+    assert 'noncommercial' not in page.why['them_to_me'].text()
     page.subtitles.setChecked(True)
     assert 'If the cloud fails, it stops until it is back' in page.why['them_to_me'].text()
 
@@ -770,3 +774,34 @@ def test_settings_window_keeps_the_mark_of_a_side_the_app_moved(tmp_path, monkey
     config.save(got)
     t.switch_pair('de', 'fr', {'them_to_me': 'cloud'})  # the user's "cloud" for the moved side, and a pair that asks: No
     assert asked and config.load().forced_cloud == ['them_to_me'] and config.load().their_lang == 'ja'
+
+
+def test_an_optional_fallback_voice_does_not_hold_the_wizard_or_the_tray(tmp_path, monkeypatch, server):
+    """FIXES-b 2: a cloud side's noncommercial fallback voice does not hold anything: the tray asks for it apart and a No
+    changes the pair all the same (that side has no fallback); the models page completes without it and downloads it
+    only with the box ticked."""
+    from peresmeshnik.ui import wizard
+    httpd, url = server
+    blob = b'v' * 30_000
+    (httpd.root / 'w.bin').write_bytes(blob)
+    s = wire(config.Settings(my_lang='de', their_lang='ja', them_to_me='cloud', me_to_them='cloud'))  # local subtitles
+    s.local.clone = 'piper'
+    t, calls = tray_with(monkeypatch, tmp_path, s)
+    stand_ins(monkeypatch, url, files={'w.bin': {'sha256': hashlib.sha256(blob).hexdigest(), 'size': len(blob)}},
+              consent=('tts-ja',))
+    asked = []
+    t.confirm = lambda text: asked.append(text) or False
+    t.switch_pair('ja', 'de')  # them -> me de -> ja in the cloud: its fallback voice tts-ja (noncommercial) is asked apart
+    assert wait_for(lambda: calls, 30) and config.load().my_lang == 'ja'  # No: the pair changed all the same
+    assert len(asked) == 1 and 'tts-ja' in asked[0] and 'stops' in asked[0], asked
+    assert not models.is_fetched(models.get('tts-ja')) and models.is_fetched(models.get('tts-de'))
+
+    s = config.load()
+    assert languages.optional_models(s) == ['tts-ja'] and 'tts-ja' not in languages.needed_models(s)
+    page = wizard.ModelsPage(type('W', (), {'s': s})())
+    page.initializePage()
+    assert page.isComplete() and not page.consent.isHidden() and 'tts-ja' in page.consent.text()
+    assert 'optional' in page.list.text() and 'stops until the cloud is back' in page.state.text()
+    page.consent.setChecked(True)
+    page.download()
+    assert wait_for(lambda: not page.busy, 30) and models.is_fetched(models.get('tts-ja')), page.state.text()

@@ -50,3 +50,19 @@ def server(tmp_path, monkeypatch):
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     yield httpd, f'http://127.0.0.1:{httpd.server_port}/'
     httpd.shutdown()
+
+
+@pytest.fixture
+def made(monkeypatch):
+    """Every stub engine the remote server's sides made, in order (app.Side._local, so the server's Side runs as in the
+    app); tests/remote_stubs.py."""
+    from remote_stubs import Fake
+
+    from peresmeshnik import app
+    out = []
+
+    def local(side, s):
+        out.append(Fake(side, s))
+        return out[-1]
+    monkeypatch.setattr(app.Side, '_local', local)
+    return out

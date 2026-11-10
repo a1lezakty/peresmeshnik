@@ -105,7 +105,8 @@ def make_engine(model_id: str, model_dir: Path | str, threads: int = 2):
     if model_id.startswith('pocket-tts'):
         from peresmeshnik.local.pocket import PocketTts
         try:
-            return PocketTts(model_dir, threads=threads, model_id=model_id)
+            # int8: 1.5x faster and 0.15 GB smaller than fp32 at the same similarity and WER (BENCH stage 8)
+            return PocketTts(model_dir, threads=threads, model_id=model_id, int8=True)
         except (OSError, ValueError) as e:  # onnxruntime cannot load it, a broken weights file
             raise CloneUnavailable(f'Pocket TTS did not start: {e}') from e
     return make_clone(model_dir, threads)

@@ -20,6 +20,7 @@ app = Analysis(
     hiddenimports=collect_submodules('peresmeshnik'),  # commands and engines are imported by name, when used
     datas=[(str(ROOT / 'peresmeshnik' / 'models.toml'), 'peresmeshnik'),
            (str(ROOT / 'peresmeshnik' / 'ui' / 'samples'), 'peresmeshnik/ui/samples'),
+           (str(ROOT / 'peresmeshnik' / 'local' / 'pocket_onnx'), 'peresmeshnik/local/pocket_onnx'),  # Pocket TTS graphs
            (str(ROOT / 'assets' / 'icons'), 'assets/icons'),  # ui/tray.py finds them two levels above itself
            *collect_data_files('onnx_asr'), *copy_metadata('onnx-asr'), *copy_metadata('google-genai')],
     excludes=EXCLUDES + ['piper'],  # GPL: only in piper-runner's own archive (build.sh fails if the app imports it)

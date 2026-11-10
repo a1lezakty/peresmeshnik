@@ -20,6 +20,7 @@ app = Analysis(
     hiddenimports=collect_submodules('peresmeshnik'),  # commands and engines are imported by name, when used
     datas=[(str(ROOT / 'peresmeshnik' / 'models.toml'), 'peresmeshnik'),
            (str(ROOT / 'peresmeshnik' / 'ui' / 'samples'), 'peresmeshnik/ui/samples'),
+           (str(ROOT / 'peresmeshnik' / 'local' / 'pocket_onnx'), 'peresmeshnik/local/pocket_onnx'),  # Pocket TTS graphs
            (str(ROOT / 'assets' / 'icons'), 'assets/icons'),  # ui/tray.py finds them two levels above itself
            # the voice pack's runner, run by the pack's own Python (local/voicepack.py runner_dir): it matches this app
            *((str(ROOT / f), 'voice-runner') for f in ('voice-runner/voice_runner.py', 'voice-runner/pack-windows.json',

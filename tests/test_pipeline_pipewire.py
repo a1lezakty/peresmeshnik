@@ -263,7 +263,7 @@ def test_app_moves_the_call_on_and_back_off_and_on_exit(speakers, procs, monkeyp
         player('Firefox', 'firefox', procs)
         sinks_of('telegram-desktop')
         ctl.set_translation(True).result()
-        assert 'call sound: telegram-desktop;' in states[-1], states
+        assert 'call sound: telegram-desktop;' in next(x for x in states if x.startswith('translating')), states
         assert config.load().ui.call_app == 'telegram-desktop'  # remembered
         wait_sinks('telegram-desktop', [call])
         assert sinks_of('firefox') == [spk]

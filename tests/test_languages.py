@@ -30,7 +30,7 @@ def test_ru_en_is_local_both_ways():
     assert them.local and me.local and them.subtitles
     assert them.models == (s.local.asr['en'], s.local.mt['en-ru'], s.local.tts['ru'])
     assert (me.tts, me.voice, me.notes) == (s.local.clone, 'clone', ())
-    assert languages.direction(s, 'me_to_them', has_gpu=False).notes  # the clone falls behind without an NVIDIA GPU
+    assert languages.direction(s, 'me_to_them', has_gpu=False).notes  # no clone without an NVIDIA GPU: a stock voice
     s.local.clone = 'piper'
     me = languages.direction(s, 'me_to_them', has_gpu=False)
     assert (me.tts, me.voice, me.notes) == (s.local.tts['en'], 'stock', ())
@@ -74,12 +74,55 @@ def test_covers_reads_the_registry_langs(monkeypatch, mid, key, ok):
     assert languages.covers(mid, key) is ok
 
 
+
+def test_the_gpu_is_asked_once_unless_its_driver_did_not_answer(monkeypatch):
+    """FIXES-b r2 1: nvidia-smi once per process, the wizard's tier and direction() alike (a hung driver costs its
+    timeouts once, not per call); a driver that did not answer is asked again later ("update it, then open this page
+    again"), not at once."""
+    from types import SimpleNamespace
+
+    from peresmeshnik.ui import wizard
+    answers, now = [languages.Gpu(why='timed out'), languages.Gpu(8.0, (572, 83), 8.6)], [100.0]
+    calls = []
+    monkeypatch.setattr(languages, '_PROBED', {})
+    monkeypatch.setattr(languages.shutil, 'which', lambda name: '/usr/bin/nvidia-smi')
+    monkeypatch.setattr(languages, 'nvidia', lambda: calls.append(1) or answers[min(len(calls), 2) - 1])
+    monkeypatch.setattr(languages, 'time', SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
+    assert 'NVIDIA driver does not answer' in languages.clone_why('xtts-v2') and wizard.tier()[1] == 'cloud'
+    assert len(calls) == 1
+    now[0] += languages.FAILED_TTL_S + 1
+    assert languages.clone_why('xtts-v2') == '' and wizard.tier()[1] == 'local' and len(calls) == 2
+    now[0] += 3600
+    assert languages.nvidia_once().vram == 8.0 and len(calls) == 2  # a card that answered: asked once
+
+
+def test_readme_pair_sizes_are_the_registrys(monkeypatch):
+    """H-08, FIXES-b 8: README's download per pair (no NVIDIA GPU, them -> me local, a side that cannot run here in the
+    cloud) is the registry's: the smallest and largest, and the quartiles as "typically"."""
+    from pathlib import Path
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
+    xs = []
+    for a in languages.LANGS:
+        for b in set(languages.LANGS) - {a}:
+            s = config.Settings(my_lang=a, their_lang=b, them_to_me='local', me_to_them='cloud')
+            for k in languages.SIDES:
+                if getattr(s, k) == 'local' and not languages.direction(s, k).local:
+                    setattr(s, k, 'cloud')
+            xs.append(sum(models.size(models.get(i)) for i in languages.needed_models(s)) / 1e9)
+    xs = sorted(x for x in xs if x > 0.01)
+    q = lambda f: xs[int(f * (len(xs) - 1))]  # noqa: E731
+    want = f'{xs[0]:.1f}–{xs[-1]:.1f} GB for a pair, typically {q(.25):.1f}–{q(.75):.1f} GB'
+    assert (Path(__file__).parents[1] / 'README.md').read_text('utf-8').count(want) == 2, want
+
 def test_readme_table_is_the_generated_one():
     """README's "what runs locally, what in the cloud" is languages.table(): a registry change shows up there."""
     from pathlib import Path
     readme = (Path(__file__).parents[1] / 'README.md').read_text('utf-8')
     block = readme.split('<!-- languages:begin', 1)[1].split('\n', 1)[1].split('<!-- languages:end -->')[0].strip()
     assert block == languages.table(), 'README is stale: python -m peresmeshnik.languages, into README.md'
+    # H-07: the builds' onnxruntime has no CUDA: speech recognition that needs it is the cloud's there, said so
+    assert '| Türkçe (Turkish) | — (cloud; whisper-large-v3-turbo from source with onnxruntime-gpu on an NVIDIA GPU) |' in block
 
 
 def test_a_model_that_needs_a_gpu_is_not_offered_without_one(monkeypatch):
@@ -100,11 +143,12 @@ def test_a_model_that_needs_a_gpu_is_not_offered_without_one(monkeypatch):
     assert languages.direction(s, 'them_to_me', has_gpu=True).local
     me = languages.direction(s, 'me_to_them', has_gpu=False)
     assert me.local and (me.tts, me.voice) == ('tts-ja', 'stock')
-    assert me.notes == ('your cloned voice needs an NVIDIA GPU: a stock voice speaks instead',)
+    assert me.notes == (f'{languages.clone_why("clone-big", has_gpu=False)}: a stock voice speaks instead',)
     assert languages.direction(s, 'me_to_them', has_gpu=True).voice == 'clone'
     s.local.tts = {'de': 'tts-de'}  # and no stock voice for Japanese: no local voice, and why
-    assert languages.direction(s, 'me_to_them', has_gpu=False).why == ('your cloned voice needs an NVIDIA GPU',)
-    assert '| 日本語 (Japanese) | asr-ja (NVIDIA GPU) |' in languages.table(s)
+    assert languages.direction(s, 'me_to_them', has_gpu=False).why == (
+        f'{languages.clone_why("clone-big", has_gpu=False)}; no local voice for Japanese',)
+    assert '| 日本語 (Japanese) | — (cloud; asr-ja from source with onnxruntime-gpu on an NVIDIA GPU) |' in languages.table(s)
     fake_registry(monkeypatch, stub('asr-de', 'asr', 'de'), stub('mt-many', 'mt', 'de', 'ja'), stub('tts-ja', 'tts', 'ja', needs='gpu'))
     s.local.clone, s.local.tts = 'piper', {'ja': 'tts-ja'}  # a stock voice that needs one: said so, not "no voice"
     assert languages.direction(s, 'me_to_them', has_gpu=False).why == ('the voice for Japanese needs an NVIDIA GPU (tts-ja)',)
@@ -180,3 +224,66 @@ def test_the_cloud_gets_the_mapped_codes():
     assert _Link(d, 'transcribe').config().input_audio_transcription.language_codes == ['ar-EG']
     assert (languages.CLOUD_TRANSLATE['zh'], languages.CLOUD_TRANSCRIBE['zh'], languages.CLOUD_TRANSCRIBE['es']) == \
         ('zh-Hans', 'cmn-Hans-CN', 'es-419')
+
+
+def test_the_clone_is_offered_only_where_it_can_speak(monkeypatch):
+    """M-23: `clone_why` is the one answer to "can the clone speak here": XTTS-v2 keeps up only on an NVIDIA GPU (its
+    registry row says `needs = "gpu"`), so without one me -> them local speaks in the stock voice, nothing of the clone is
+    downloaded and the why is said; a language it has no stock voice for is then not local at all (M-24), said why."""
+    s = config.Settings(me_to_them='local')
+    assert languages.clone_why(s.local.clone, 'en', has_gpu=True) == ''
+    assert languages.clone_why(s.local.clone, 'en', has_gpu=False) in ('your cloned voice needs an NVIDIA GPU',
+                                                                       'no clone of your voice keeps up on a Mac')
+    assert languages.clone_why(s.local.clone, 'uk', has_gpu=True) == 'your cloned voice cannot speak Ukrainian'
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
+    me = languages.direction(s, 'me_to_them')
+    assert me.local and me.voice == 'stock' and me.tts == s.local.tts['en']
+    assert me.notes == (f'{languages.clone_why(s.local.clone, "en")}: a stock voice speaks instead',)
+    assert 'xtts-v2' not in languages.needed_models(s)
+    s.their_lang = 'zh'  # no stock voice for Chinese
+    me = languages.direction(s, 'me_to_them')
+    assert not me.local and me.why == (f'{languages.clone_why(s.local.clone, "zh")}; no local voice for Chinese',)
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
+    me = languages.direction(s, 'me_to_them')
+    assert me.voice == 'clone' and 'no stock voice for Chinese takes over if your cloned voice fails' in me.notes
+
+
+def test_a_cloud_side_downloads_its_fallback_voice():
+    """H-09: a cloud side with local subtitles can go local when the cloud fails: its stock voice is downloaded too; with
+    the cloud's subtitles (no local ASR + MT) there is nothing local to fall back on, so nothing is."""
+    s = config.Settings(my_lang='ru', their_lang='de', them_to_me='cloud', me_to_them='cloud')
+    s.local.clone = 'piper'
+    ids = languages.needed_models(s)
+    assert s.local.tts['ru'] in ids and s.local.tts['de'] in ids  # them -> me speaks Russian, me -> them German
+    s.cloud.subtitles = True
+    assert languages.needed_models(s) == ['silero-vad']
+
+
+def test_a_fallback_voice_under_a_license_to_accept_is_optional():
+    """FIXES-b 2: a cloud side's fallback voice that needs consent (tr, ko, ja: noncommercial) is not needed: the setup
+    runs without it (that side stops while the cloud is down), it is downloaded only when its license is accepted."""
+    s = config.Settings(my_lang='ru', their_lang='ja', them_to_me='local', me_to_them='cloud')  # the default engines
+    ja = s.local.tts['ja']
+    assert models.get(ja).consent and ja not in languages.needed_models(s) and languages.optional_models(s) == [ja]
+    s.their_lang = 'de'  # a free fallback voice: needed, nothing optional
+    assert s.local.tts['de'] in languages.needed_models(s) and languages.optional_models(s) == []
+    s.their_lang, s.me_to_them = 'ja', 'local'  # chosen local: the voice is the side's own, needed (asked as before)
+    assert ja in languages.needed_models(s) and languages.optional_models(s) == []
+
+
+def test_the_clone_needs_a_card_it_runs_on(monkeypatch):
+    """FIXES-b 4: clone_why also looks at the card (once per run): under 6 GB of memory — and on Windows an old driver or
+    GPU for the voice pack's torch — the clone is not offered, said why; the stock voice speaks and nothing of the clone
+    is downloaded. A card that answers nothing (a stand-in nvidia-smi) is taken as able."""
+    big, small = languages.Gpu(8.0, (572, 83), 8.6), languages.Gpu(4.0, (572, 83), 8.6)
+    assert languages.clone_why('xtts-v2', 'en', has_gpu=big) == ''
+    assert 'at least 6 GB' in languages.clone_why('xtts-v2', 'en', has_gpu=small)
+    old = languages.Gpu(8.0, (472, 12), 8.6)
+    assert 'driver 570.65' in languages.gpu_why(old) and languages.gpu_why(old, windows=False) == ''
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
+    monkeypatch.setattr(languages, 'nvidia_once', lambda: small)
+    s = config.Settings(me_to_them='local')
+    me = languages.direction(s, 'me_to_them')
+    assert me.voice == 'stock' and 'at least 6 GB' in me.notes[0] and 'xtts-v2' not in languages.needed_models(s)
+    monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu())
+    assert languages.direction(s, 'me_to_them').voice == 'clone'

@@ -2,7 +2,9 @@
 
 Each row is one clause: the original (grey) above its translation (white). Captions come from the
 direction threads through a queued Qt signal; the window repaints only when the visible text
-changes, and nothing in it runs on a timer, so in silence it costs nothing. With `show_latency`
+changes, and nothing in it polls: one single-shot timer hides the rows `FADE_S` after the last caption, partial or
+final, or the last sign of its voice (a local clause's voice starting, a cloud phrase's voice ending), so in silence it
+costs nothing. With `show_latency`
 (tray: "Show latency", `ui.show_latency`) the original's line ends with the clause's latencies
 from the end of its speech (`engines.Latency`): to its subtitle, to its voice (a cloud phrase: to the
 end of its voice).
@@ -14,7 +16,7 @@ import sys
 import time
 from collections import OrderedDict, deque
 
-from PySide6.QtCore import QRect, Qt, Signal
+from PySide6.QtCore import QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QFontMetrics, QGuiApplication, QImage, QPainter
 from PySide6.QtWidgets import QWidget
 
@@ -24,6 +26,7 @@ log = logging.getLogger('peresmeshnik.ui')
 GREY, WHITE, BACK = QColor(170, 170, 170), QColor(255, 255, 255), QColor(0, 0, 0, 170)
 ME_PREFIX = '» '  # rows of what I said (me -> them)
 FINAL_AFTER_END_S = 1.5  # a phrase's last final caption comes this long after its speech ends, at most
+FADE_S = 8.0  # the rows go this long after the last caption or voice event (the next phrase brings them back)
 SHOWN = {'caption': 'subtitle', 'voice': 'voice', 'voice_end': 'voice ends'}  # Latency kinds shown, in this order
 FONT_HINT = {'darwin': 'macOS has them: Font Book → File → Restore Standard Fonts',
              'win32': 'Settings → Time & language → Language & region → Add a language (its fonts come with it)'}.get(
@@ -110,6 +113,10 @@ class SubtitleOverlay(QWidget):
         self.pair.connect(self._warm)
         self.latency.connect(self._on_latency)
         self.clear.connect(self._on_clear)
+        self.fade = QTimer(self)
+        self.fade.setSingleShot(True)
+        self.fade.setInterval(int(FADE_S * 1000))
+        self.fade.timeout.connect(self._on_clear)
         self.on_top = None
         if sys.platform == 'win32':  # above other always-on-top windows too, while shown
             from peresmeshnik.ui.windows import OnTop
@@ -169,6 +176,7 @@ class SubtitleOverlay(QWidget):
         row[1] = c.translation or row[1]
         if c.final:
             self._final_at[k] = self.clock()
+        self.fade.start()  # a partial too: one that never gets its final does not hang until translation goes off
         while len(self._rows) > self.rows:
             self._final_at.pop(self._rows.popitem(last=False)[0], None)
         if self._refresh():
@@ -177,6 +185,9 @@ class SubtitleOverlay(QWidget):
     def _on_latency(self, side: str, lat: Latency) -> None:
         if lat.what not in SHOWN:  # the pipeline's own links: the log has them
             return
+        if lat.what != 'caption' and self._rows:  # its voice: a cloud phrase's ended, a local clause's starts (queued
+            self.fade.start()  # at most MAX_LAG_S). ponytail: a local clause voiced past FADE_S outlives its row; a
+            # voice-end event from the local pipeline if live calls show it
         k = (side, 'c', lat.clause)
         if lat.clause < 0:  # a cloud phrase (its voice ended s after its speech): the newest row final by then
             end = self.clock() - lat.s + FINAL_AFTER_END_S
@@ -215,6 +226,7 @@ class SubtitleOverlay(QWidget):
         return True
 
     def _on_clear(self) -> None:
+        self.fade.stop()
         self._rows.clear()
         self._open.clear()
         self._final_at.clear()

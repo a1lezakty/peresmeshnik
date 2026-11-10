@@ -86,7 +86,7 @@ def test_languages_page_says_before_the_download_what_runs_where(tmp_path, monke
         assert 'subtitles come from the cloud too' in page.why[key].text()
     assert page.download.text().startswith('1 MB for this pair') or page.download.text().startswith('2 MB')  # Silero VAD
     assert page.validatePage() and (page.w.s.my_lang, page.w.s.their_lang, page.w.s.them_to_me) == ('de', 'ja', 'cloud')
-    assert ('On a Mac your voice goes to the call through the cloud' in page.why['me_to_them'].text()) == (sys.platform == 'darwin')
+    assert 'On a Mac your voice goes' not in page.why['me_to_them'].text()  # FIXES-b 4: clone_why's note says it
 
     stand_ins(monkeypatch, files={'w.bin': {'sha256': '0' * 64, 'size': 50_000_000}}, consent=('tts-ja',))
     s = wire(config.Settings(my_lang='de', their_lang='ja', them_to_me='local', me_to_them='local'))
@@ -128,7 +128,11 @@ def test_tray_switches_the_pair_fetching_only_its_models(tmp_path, monkeypatch, 
     t.confirm = lambda text: asked.append(text) or False
     pick = {k: {a.data()[1]: a for a in g.actions()} for k, g in t.langs.items()}
     assert len(pick['my_lang']) == 14 and pick['my_lang']['ru'].isChecked() and pick['their_lang']['en'].isChecked()
-    pick['my_lang']['de'].trigger()  # de <-> en: no German models -> both sides to the cloud, nothing to download
+    pick['my_lang']['de'].trigger()  # de <-> en: no German models -> both sides to the cloud, asked first (H-02)
+    settle(0.1)
+    assert 'Google' in asked[-1] and config.load().my_lang == 'ru' and not calls  # declined: nothing changes
+    t.confirm = lambda text: asked.append(text) or 'Google' in text  # yes to the cloud, no to restricted licenses
+    pick['my_lang']['de'].trigger()
     settle(0.1)
     assert (config.load().my_lang, config.load().them_to_me, config.load().me_to_them) == ('de', 'cloud', 'cloud')
     assert len(calls) == 1 and pick['my_lang']['de'].isChecked()
@@ -136,7 +140,7 @@ def test_tray_switches_the_pair_fetching_only_its_models(tmp_path, monkeypatch, 
     t.sync()
     pick['my_lang']['de'].setChecked(True)
     t.switch_pair('de', 'ja')
-    assert 'mt-de-ja (CPML' in asked[0] and config.load().my_lang == 'ru' and len(calls) == 1  # declined: nothing changes
+    assert 'mt-de-ja (CPML' in asked[-1] and config.load().my_lang == 'ru' and len(calls) == 1  # declined: nothing changes
     t.confirm = lambda text: True
     t.switch_pair('de', 'ja')
     end = time.monotonic() + 30
@@ -150,6 +154,23 @@ def test_tray_switches_the_pair_fetching_only_its_models(tmp_path, monkeypatch, 
     pick['their_lang']['de'].trigger()  # my language as theirs: the pair turns round
     settle(0.1)
     assert (config.load().my_lang, config.load().their_lang) == ('ja', 'de')
+
+
+@pytest.fixture(autouse=True)
+def _no_tray_icon_left(monkeypatch):
+    """A Tray made here may outlive its test (its menu holds its callbacks): its icon, left shown, takes
+    a place in the macOS runner's menu bar, and enough of them push the app's own off the screen
+    (test_macos.py::test_app_menu_bar_icon_hotkey_and_sigterm). Hidden after each test, as test_macos does."""
+    from peresmeshnik.ui import tray as tray_mod
+    made, init = [], tray_mod.Tray.__init__
+
+    def record(self, *a, **k):
+        init(self, *a, **k)
+        made.append(self)
+    monkeypatch.setattr(tray_mod.Tray, '__init__', record)
+    yield
+    for t in made:
+        t.icon.hide()
 
 
 def tray_with(monkeypatch, tmp_path, s, on=True):
@@ -171,6 +192,7 @@ def tray_with(monkeypatch, tmp_path, s, on=True):
     t = tray_mod.Tray(Ctl())
     t.said = []
     t.message = t.said.append
+    t.confirm = lambda text: True  # a real question box would wait for a click
     return t, calls
 
 
@@ -191,11 +213,11 @@ def test_tray_pair_switch_details(tmp_path, monkeypatch):
     s = wire(config.Settings(them_to_me='local', me_to_them='local'))
     t, calls = tray_with(monkeypatch, tmp_path, s, on=False)
     switched = []
-    real_switch, t.switch_pair = t.switch_pair, lambda my, their: switched.append((my, their))
+    real_switch, t.switch_pair = t.switch_pair, lambda my, their, engines=None: switched.append((my, their))
     pick = {k: {a.data()[1]: a for a in g.actions()} for k, g in t.langs.items()}
     pick['my_lang']['ru'].trigger()  # already mine
     assert switched == []
-    t._pair = (config.Settings(my_lang='de', their_lang='ja'), [])  # de -> ja downloading
+    t._pair = (config.Settings(my_lang='de', their_lang='ja'), [], [], {})  # de -> ja downloading
     pick['their_lang']['ko'].trigger()
     assert switched == [('de', 'ko')]  # from the pair on its way, not from the saved ru / en
     t._pair, t.switch_pair = None, real_switch
@@ -263,7 +285,7 @@ def test_settings_window_changes_only_the_pair_without_a_restart(tmp_path, monke
     t, calls = tray_with(monkeypatch, tmp_path, wire(config.Settings()))
     restarts, switched = [], []
     t.restart = lambda: restarts.append(1)
-    t.switch_pair = lambda my, their: switched.append((my, their))
+    t.switch_pair = lambda my, their, engines=None: switched.append((my, their))
     d = tray_mod.SettingsDialog(t)
     d.their_lang.setCurrentIndex(d.their_lang.findData('ja'))
     d.save()
@@ -594,3 +616,296 @@ def test_a_star_model_reaches_the_side(tmp_path, monkeypatch):
         assert sorted(made) == ['asr-many', 'mt-many']
     finally:
         fb.close()
+
+
+def test_tray_asks_before_a_side_goes_to_the_cloud_and_brings_it_back(tmp_path, monkeypatch):
+    """H-02: a pair a local side cannot run makes the tray ask first (its sound goes to Google), declined nothing changes;
+    accepted the side is remembered as moved by the app and comes back to local with a pair it can run. A side the user
+    set to the cloud stays there; the user's own choice of an engine forgets the move."""
+    s = wire(config.Settings(my_lang='de', their_lang='ja', them_to_me='local', me_to_them='local'))
+    s.local.clone = 'piper'  # the stock voice
+    t, calls = tray_with(monkeypatch, tmp_path, s)
+    asked = []
+    t.confirm = lambda text: asked.append(text) or False
+    t.switch_pair('de', 'fr')  # no French models: both sides would go to the cloud
+    assert len(asked) == 1 and 'Google' in asked[0] and 'the call' in asked[0] and 'your voice' in asked[0], asked
+    got = config.load()
+    assert (got.their_lang, got.them_to_me, got.me_to_them, got.forced_cloud) == ('ja', 'local', 'local', []) and not calls
+    t.confirm = lambda text: asked.append(text) or True
+    t.switch_pair('de', 'fr')
+    assert wait_for(lambda: calls)
+    got = config.load()
+    assert (got.their_lang, got.them_to_me, got.me_to_them) == ('fr', 'cloud', 'cloud')
+    assert sorted(got.forced_cloud) == ['me_to_them', 'them_to_me']
+    t.switch_pair('de', 'ja')  # a pair both run locally: both come back, nothing asked
+    assert wait_for(lambda: len(calls) == 2) and len(asked) == 2
+    got = config.load()
+    assert (got.their_lang, got.them_to_me, got.me_to_them, got.forced_cloud) == ('ja', 'local', 'local', [])
+    assert any('back on this computer' in m for m in t.said), t.said
+
+    got.me_to_them = 'cloud'  # the user's own cloud: not moved by the app, it stays
+    config.save(got)
+    t.sync()
+    t.switch_pair('de', 'fr')
+    assert wait_for(lambda: len(calls) == 3) and config.load().forced_cloud == ['them_to_me']
+    t.switch_pair('de', 'ja')
+    assert wait_for(lambda: len(calls) == 4)
+    got = config.load()
+    assert (got.them_to_me, got.me_to_them, got.forced_cloud) == ('local', 'cloud', [])
+
+    t.switch_pair('de', 'fr')
+    assert wait_for(lambda: len(calls) == 5) and config.load().forced_cloud == ['them_to_me']
+    t.restart = lambda: None
+    next(a for a in t.engines['them_to_me'].actions() if a.data()[1] == 'cloud').trigger()  # chosen by the user now
+    settle(0.1)
+    assert config.load().forced_cloud == []
+
+
+def test_languages_page_brings_back_a_side_it_moved_to_the_cloud(tmp_path, monkeypatch):
+    """H-02 in the wizard: a pair a side cannot run moves it to the cloud; the pair it can run brings it back to local, and
+    the move is saved (`forced_cloud`) for the tray. A side the user set to the cloud by hand stays there."""
+    from peresmeshnik.ui import wizard
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    monkeypatch.setenv('PERESMESHNIK_MODELS', str(tmp_path / 'models'))
+    monkeypatch.setenv('GEMINI_API_KEY', 'a-key')
+    stand_ins(monkeypatch)
+    s = wire(config.Settings(my_lang='de', their_lang='ja', them_to_me='local', me_to_them='local'))
+    s.local.clone = 'piper'
+    config.save(s)
+    page = wizard.LanguagesPage(type('W', (), {'s': s, 'key': ''})())
+    engines = lambda: tuple(page.engine[k].currentText() for k in languages.SIDES)  # noqa: E731
+    page.their_lang.setCurrentIndex(page.their_lang.findData('fr'))  # nothing local for French
+    assert engines() == ('cloud', 'cloud')
+    assert page.validatePage() and sorted(page.w.s.forced_cloud) == ['me_to_them', 'them_to_me']
+    page.their_lang.setCurrentIndex(page.their_lang.findData('ja'))
+    assert engines() == ('local', 'local')
+    assert page.validatePage() and page.w.s.forced_cloud == []
+    page.engine['me_to_them'].setCurrentText('cloud')  # by hand
+    page.their_lang.setCurrentIndex(page.their_lang.findData('fr'))
+    page.their_lang.setCurrentIndex(page.their_lang.findData('ja'))
+    assert engines() == ('local', 'cloud')
+
+
+def test_local_from_the_tray_or_settings_downloads_its_models_first(tmp_path, monkeypatch, server):
+    """M-07: "local" chosen in the tray menu (or the settings window) for a side whose models are not here: they are
+    downloaded first, as for a new pair, then it is saved and the sides are made again — not saved at once into a start
+    that fails. A pair the side cannot run locally: said why, nothing changes."""
+    from peresmeshnik.ui import tray as tray_mod
+    httpd, url = server
+    blob = b'm' * 40_000
+    (httpd.root / 'w.bin').write_bytes(blob)
+    s = wire(config.Settings(my_lang='de', their_lang='ja', them_to_me='cloud', me_to_them='cloud'))
+    s.local.clone, s.cloud.subtitles = 'piper', True  # the cloud's subtitles: a cloud side needs nothing local
+    t, calls = tray_with(monkeypatch, tmp_path, s)
+    stand_ins(monkeypatch, url, files={'w.bin': {'sha256': hashlib.sha256(blob).hexdigest(), 'size': len(blob)}})
+    local = {k: next(a for a in g.actions() if a.data()[1] == 'local') for k, g in t.engines.items()}
+    local['them_to_me'].trigger()
+    assert config.load().them_to_me == 'cloud' and any('downloading' in m for m in t.said), t.said  # not yet
+    assert wait_for(lambda: calls, 30)
+    got = config.load()
+    assert (got.them_to_me, got.me_to_them) == ('local', 'cloud') and len(calls) == 1
+    fetched = sorted(p.name for p in (tmp_path / 'models').iterdir() if (p / models.MARKER).exists())
+    assert {'asr-ja', 'mt-ja-de', 'tts-de'} <= set(fetched) and 'asr-de' not in fetched  # them -> me's own, nothing else
+
+    d = tray_mod.SettingsDialog(t)
+    d.engine['me_to_them'].setCurrentText('local')
+    d.save()
+    assert wait_for(lambda: len(calls) == 2, 30) and config.load().me_to_them == 'local'
+    assert 'asr-de' in [p.name for p in (tmp_path / 'models').iterdir() if (p / models.MARKER).exists()]
+
+    got.my_lang, got.their_lang, got.them_to_me = 'de', 'fr', 'cloud'  # nothing local for French
+    config.save(got)
+    t.sync()
+    local['them_to_me'].trigger()
+    settle(0.1)
+    assert config.load().them_to_me == 'cloud' and len(calls) == 2
+    assert 'Them → me cannot run on this computer for German ⇄ French (no local speech recognition for French' in t.said[-1]
+    assert local['them_to_me'].isChecked() is False  # the menu shows what runs
+
+
+def test_voice_page_without_an_nvidia_gpu_asks_for_no_recording(tmp_path, monkeypatch):
+    """M-23: no NVIDIA GPU (a Mac, most laptops): me -> them local speaks in the stock voice, says why, and wants no
+    recording; nothing says the clone "runs on the CPU"."""
+    from peresmeshnik.ui import wizard
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
+    s = config.Settings(me_to_them='local')
+    page = wizard.VoicePage(type('W', (), {'s': s})())
+    page.initializePage()
+    assert page.isComplete() and page.record_button.isHidden() and page.own.isHidden()
+    assert languages.clone_why(s.local.clone, 'en') in page.subTitle() and 'runs on the CPU' not in page.subTitle()
+
+
+def test_languages_page_says_what_a_cloud_side_falls_back_on(tmp_path, monkeypatch):
+    """H-09: a cloud side with nothing local to fall back on (subtitles from the cloud, or no local models) says it stops
+    until the cloud is back; one that goes on locally (its stock voice is downloaded) says nothing more."""
+    from peresmeshnik.ui import wizard
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    monkeypatch.setenv('PERESMESHNIK_MODELS', str(tmp_path / 'models'))
+    monkeypatch.setenv('GEMINI_API_KEY', 'a-key')
+    stand_ins(monkeypatch)
+    s = wire(config.Settings(my_lang='de', their_lang='ja', them_to_me='cloud', me_to_them='cloud'))
+    s.local.clone = 'piper'
+    config.save(s)
+    page = wizard.LanguagesPage(type('W', (), {'s': s})())
+    assert 'If the cloud fails' not in page.why['them_to_me'].text()  # it goes on here: nothing to warn about
+    stand_ins(monkeypatch, consent=('tts-ja',))  # me -> them falls back on a noncommercial voice: optional, said
+    page.refresh()
+    assert 'fallback voice is noncommercial' in page.why['me_to_them'].text()
+    assert 'noncommercial' not in page.why['them_to_me'].text()
+    page.subtitles.setChecked(True)
+    assert 'If the cloud fails, it stops until it is back' in page.why['them_to_me'].text()
+
+
+def test_settings_local_subtitles_download_their_models_first(tmp_path, monkeypatch, server):
+    """FIXES-b 7: "Subtitles from the cloud" unticked in Settings… goes through switch_pair: the cloud sides' local ASR and
+    MT are downloaded first, then it is saved (not saved at once into a fallback and local subtitles that cannot start)."""
+    from peresmeshnik.ui import tray as tray_mod
+    httpd, url = server
+    blob = b'm' * 40_000
+    (httpd.root / 'w.bin').write_bytes(blob)
+    s = wire(config.Settings(my_lang='de', their_lang='ja', them_to_me='cloud', me_to_them='cloud'))
+    s.local.clone, s.cloud.subtitles = 'piper', True
+    t, calls = tray_with(monkeypatch, tmp_path, s)
+    stand_ins(monkeypatch, url, files={'w.bin': {'sha256': hashlib.sha256(blob).hexdigest(), 'size': len(blob)}})
+    d = tray_mod.SettingsDialog(t)
+    d.subtitles.setChecked(False)
+    d.save()
+    assert config.load().cloud.subtitles and any('downloading' in m and 'local subtitles' in m for m in t.said), t.said
+    assert wait_for(lambda: calls, 30) and not config.load().cloud.subtitles
+    assert {'asr-ja', 'asr-de'} <= {p.name for p in (tmp_path / 'models').iterdir() if (p / models.MARKER).exists()}
+
+
+def test_settings_window_keeps_the_mark_of_a_side_the_app_moved(tmp_path, monkeypatch):
+    """FIXES-b 1 (H-02 through Settings…): the settings window hands switch_pair only the engines the user changed. Its
+    combo showing "cloud" for a side the app moved is not the user's choice: the pair it runs again brings it back; the
+    other side's engine changed keeps the mark; a question answered No leaves the mark as it was."""
+    from peresmeshnik.ui import tray as tray_mod
+    s = wire(config.Settings(my_lang='de', their_lang='ja', them_to_me='local', me_to_them='local'))
+    s.local.clone = 'piper'
+    t, calls = tray_with(monkeypatch, tmp_path, s)
+    t.switch_pair('de', 'fr')  # both sides moved (the question answered Yes)
+    assert wait_for(lambda: calls) and sorted(config.load().forced_cloud) == ['me_to_them', 'them_to_me']
+    d = tray_mod.SettingsDialog(t)
+    d.their_lang.setCurrentIndex(d.their_lang.findData('ja'))
+    d.save()
+    assert wait_for(lambda: len(calls) == 2)
+    got = config.load()
+    assert (got.their_lang, got.them_to_me, got.me_to_them, got.forced_cloud) == ('ja', 'local', 'local', [])
+
+    t.switch_pair('de', 'fr')
+    assert wait_for(lambda: len(calls) == 3) and len(config.load().forced_cloud) == 2
+    got = config.load()
+    got.cloud.subtitles = True  # nothing local to download for a cloud side
+    config.save(got)
+    d = tray_mod.SettingsDialog(t)
+    d.engine['me_to_them'].setCurrentText('local')  # not possible for de -> fr: said, nothing changes
+    d.save()
+    settle(0.1)
+    assert sorted(config.load().forced_cloud) == ['me_to_them', 'them_to_me']
+
+    asked = []
+    t.confirm = lambda text: asked.append(text) or False
+    got = wire(config.load())
+    got.my_lang, got.their_lang, got.them_to_me, got.me_to_them, got.forced_cloud = 'de', 'ja', 'cloud', 'local', ['them_to_me']
+    config.save(got)
+    t.switch_pair('de', 'fr', {'them_to_me': 'cloud'})  # the user's "cloud" for the moved side, and a pair that asks: No
+    assert asked and config.load().forced_cloud == ['them_to_me'] and config.load().their_lang == 'ja'
+
+    t.confirm = lambda text: True  # FIXES-b r2 6: the other side's engine changed in Settings… keeps the moved side's mark
+    got = config.load()
+    got.local.asr['ja'] = 'asr-de'  # no Japanese speech recognition here: them -> me stays in the cloud
+    config.save(got)
+    d = tray_mod.SettingsDialog(t)
+    d.engine['me_to_them'].setCurrentText('cloud')
+    n = len(calls)
+    d.save()
+    assert wait_for(lambda: len(calls) > n)
+    got = config.load()
+    assert (got.them_to_me, got.me_to_them, got.forced_cloud) == ('cloud', 'cloud', ['them_to_me'])
+
+
+def test_an_optional_fallback_voice_does_not_hold_the_wizard_or_the_tray(tmp_path, monkeypatch, server):
+    """FIXES-b 2: a cloud side's noncommercial fallback voice does not hold anything: the tray asks for it apart and a No
+    changes the pair all the same (that side has no fallback); the models page completes without it and downloads it
+    only with the box ticked."""
+    from peresmeshnik.ui import wizard
+    httpd, url = server
+    blob = b'v' * 30_000
+    (httpd.root / 'w.bin').write_bytes(blob)
+    s = wire(config.Settings(my_lang='de', their_lang='ja', them_to_me='cloud', me_to_them='cloud'))  # local subtitles
+    s.local.clone = 'piper'
+    t, calls = tray_with(monkeypatch, tmp_path, s)
+    stand_ins(monkeypatch, url, files={'w.bin': {'sha256': hashlib.sha256(blob).hexdigest(), 'size': len(blob)}},
+              consent=('tts-ja',))
+    asked = []
+    t.confirm = lambda text: asked.append(text) or False
+    t.switch_pair('ja', 'de')  # them -> me de -> ja in the cloud: its fallback voice tts-ja (noncommercial) is asked apart
+    assert wait_for(lambda: calls, 30) and config.load().my_lang == 'ja'  # No: the pair changed all the same
+    assert len(asked) == 1 and 'tts-ja' in asked[0] and 'stops' in asked[0], asked
+    assert not models.is_fetched(models.get('tts-ja')) and models.is_fetched(models.get('tts-de'))
+
+    s = config.load()
+    assert languages.optional_models(s) == ['tts-ja'] and 'tts-ja' not in languages.needed_models(s)
+    page = wizard.ModelsPage(type('W', (), {'s': s})())
+    page.initializePage()
+    assert page.isComplete() and not page.consent.isHidden() and 'tts-ja' in page.consent.text()
+    assert 'optional' in page.list.text() and 'stops until the cloud is back' in page.state.text()
+    page.consent.setChecked(True)
+    assert 'Without' not in page.state.text(), page.state.text()  # FIXES-b r2 3: ticked, it is downloaded
+    page.download()
+    assert wait_for(lambda: not page.busy, 30) and models.is_fetched(models.get('tts-ja')), page.state.text()
+
+
+def test_a_fallback_voice_that_fails_to_download_does_not_hold_the_pair(tmp_path, monkeypatch, server):
+    """FIXES-b r2 2: the optional fallback voice is fetched after the pair's own models; its download failing is said,
+    and the pair changes all the same (not "not changed" with everything it needs here)."""
+    httpd, url = server
+    blob = b'v' * 30_000
+    (httpd.root / 'w.bin').write_bytes(blob)
+    s = wire(config.Settings(my_lang='de', their_lang='ja', them_to_me='cloud', me_to_them='cloud'))  # local subtitles
+    s.local.clone = 'piper'
+    t, calls = tray_with(monkeypatch, tmp_path, s)
+    stand_ins(monkeypatch, url, files={'w.bin': {'sha256': hashlib.sha256(blob).hexdigest(), 'size': len(blob)}},
+              consent=('tts-ja',))
+    fetch = models.fetch
+
+    def no_network_for_tts_ja(mid, *a, **k):
+        if mid == 'tts-ja':
+            raise OSError('network down')
+        return fetch(mid, *a, **k)
+    monkeypatch.setattr(models, 'fetch', no_network_for_tts_ja)
+    t.switch_pair('ja', 'de')  # the fallback voice tts-ja asked apart: Yes
+    assert wait_for(lambda: calls, 30) and config.load().my_lang == 'ja', t.said
+    assert any('tts-ja did not download (network down)' in m for m in t.said), t.said
+    assert models.is_fetched(models.get('tts-de')) and not models.is_fetched(models.get('tts-ja'))
+
+
+def test_voice_page_offers_no_recording_where_the_clone_never_speaks(tmp_path, monkeypatch):
+    """FIXES-b 5 (M-23): me -> them in the cloud on a computer where no clone speaks (a Mac, no suitable NVIDIA GPU): no
+    "optional" recording, the reason instead; where the clone can speak it stays optional (the cloud's fallback)."""
+    from peresmeshnik.ui import wizard
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
+    s = config.Settings(me_to_them='cloud')
+    page = wizard.VoicePage(type('W', (), {'s': s})())
+    page.initializePage()
+    assert page.isComplete() and page.record_button.isHidden() and page.import_button.isHidden()
+    assert languages.clone_why(s.local.clone, 'en') in page.subTitle() and 'Optional' not in page.subTitle()
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': True)  # nvidia-smi says nothing here: taken as able
+    page.initializePage()  # the same page again (Back, then Next): the recording is offered anew
+    assert not page.record_button.isHidden() and not page.prompt.isHidden() and page.subTitle().startswith('Optional')
+
+
+def test_languages_page_says_the_clone_once_on_a_mac(tmp_path, monkeypatch):
+    """FIXES-b 4 (L-30): no hard-coded "On a Mac …" line beside clone_why's own note."""
+    from peresmeshnik.ui import wizard
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    monkeypatch.setenv('GEMINI_API_KEY', 'a-key')
+    monkeypatch.setattr(wizard, 'MACOS', True)
+    monkeypatch.setattr(languages.sys, 'platform', 'darwin')
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
+    s = config.Settings(me_to_them='local')
+    config.save(s)
+    page = wizard.LanguagesPage(type('W', (), {'s': s})())
+    text = page.why['me_to_them'].text()
+    monkeypatch.undo()
+    assert text.count('keeps up') == 1 and 'On a Mac' not in text, text

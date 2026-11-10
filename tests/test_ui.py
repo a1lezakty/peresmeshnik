@@ -196,14 +196,18 @@ def test_selftest_finds_the_chirp_only_when_it_is_there():
     assert selftest.find(sine, ref)[0] < selftest.MIN_SCORE  # a steady tone is no chirp
 
 
-def test_wizard_asks_for_the_right_models():
+def test_wizard_asks_for_the_right_models(monkeypatch):
+    from peresmeshnik import languages
     from peresmeshnik.ui.wizard import needed_models
-    s = config.Settings()  # them -> me local, me -> them cloud with local subtitles
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
+    s = config.Settings()  # them -> me local, me -> them cloud with local subtitles and its fallback voice (H-09)
     assert needed_models(s) == ['silero-vad', 'parakeet-tdt-0.6b-v3', s.local.mt['en-ru'], 'piper-ru_RU-dmitri-medium',
-                                'gigaam-v3-e2e-ctc', 'opus-mt-ru-en']
+                                'gigaam-v3-e2e-ctc', 'opus-mt-ru-en', 'piper-en_US-john-medium']
     s.cloud.subtitles, s.them_to_me = True, 'cloud'
     assert needed_models(s) == ['silero-vad']
-    s.me_to_them = 'local'
+    s.me_to_them = 'local'  # no NVIDIA GPU: no clone (M-23), the stock voice
+    assert needed_models(s) == ['silero-vad', 'gigaam-v3-e2e-ctc', 'opus-mt-ru-en', s.local.tts[s.their_lang]]
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
     assert needed_models(s) == ['silero-vad', 'gigaam-v3-e2e-ctc', 'opus-mt-ru-en', 'xtts-v2',
                                 s.local.tts[s.their_lang]]  # the stock voice: the clone's fallback
 
@@ -386,12 +390,27 @@ def test_wizard_models_page_downloads_with_consent(tmp_path, monkeypatch, server
     assert ('/a.bin', None) in httpd.ranges and any(p == '/a.bin' and r for p, r in httpd.ranges)  # resumed with Range
 
 
+def test_models_page_counts_past_2_gb():
+    """M-13: byte counts above 2**31 (a pair with the clone, most local pairs) reach the page whole from the download
+    thread: '3000 of 3390 MB', not '-905' (a Qt int overflowed)."""
+    from peresmeshnik.ui import wizard
+    page = wizard.ModelsPage(type('W', (), {'s': config.Settings()})())
+    t = threading.Thread(target=lambda: page.progress.emit(3_000_000_000, 3_390_000_000, 'xtts-v2'))
+    t.start()
+    t.join()
+    settle(0.1)
+    assert page.state.text() == 'xtts-v2: 3000 of 3390 MB', page.state.text()
+    assert (page.bar.value(), page.bar.maximum()) == (3_000_000_000 // 1024, 3_390_000_000 // 1024)
+
+
 def test_tray_menu_and_settings_window(tmp_path, monkeypatch):
     """The menu reflects the settings; choosing an engine saves it; the settings window saves its fields
     (the Gemini key into its own file, never into settings.toml) and asks the app to rebind the hotkey."""
+    from peresmeshnik import models
     from peresmeshnik.ui import tray as tray_mod
     monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
     monkeypatch.setattr(config, 'config_dir', lambda: tmp_path)
+    monkeypatch.setattr(models, 'is_fetched', lambda m, base=None: True)  # a side made local: its models are here
     calls = []
 
     class Ctl:
@@ -399,12 +418,19 @@ def test_tray_menu_and_settings_window(tmp_path, monkeypatch):
 
         def set_translation(self, on):
             calls.append(('translation', on))
+
+        def set_languages(self):
+            calls.append(('languages',))
     t = tray_mod.Tray(Ctl())
     texts = [a.text() for a in t.menu.actions()]
     assert {'Translation', 'Live voice', 'Settings…', 'Setup wizard…', 'Quit'} <= set(texts)
+    t.message = lambda text: calls.append(('said', text))
     cloud = next(a for a in t.engines['them_to_me'].actions() if a.data()[1] == 'cloud')
+    cloud.trigger()  # no Gemini key: not changed, said
+    assert config.load().them_to_me == 'local' and 'no Gemini key' in calls.pop()[1]
+    (tmp_path / 'gemini-key').write_text('a-key')
     cloud.trigger()
-    assert config.load().them_to_me == 'cloud'
+    assert config.load().them_to_me == 'cloud' and calls.pop() == ('languages',)  # the sides are made again for it
     t.set_state('translating (them: local)')
     assert t.translation.isChecked() and calls == []  # the state shows, it does not switch anything
     t.reload_hotkey = lambda combo: calls.append(('hotkey', combo)) or ''
@@ -604,3 +630,178 @@ def test_overlay_is_click_through_for_real():
     o.close()
     under.close()
     assert clicks == ['under']
+
+
+def test_settings_forget_the_key(tmp_path, monkeypatch):
+    """M-25: the Gemini key can be removed from the app (an empty field keeps it): its file goes."""
+    from peresmeshnik.ui import tray as tray_mod
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    monkeypatch.setattr(config, 'config_dir', lambda: tmp_path)
+    tray_mod.save_key('secret-key')
+    t = tray_mod.Tray(type('Ctl', (), {'live': False, 'on': False})())
+    monkeypatch.delenv('GEMINI_API_KEY', raising=False)
+    d = tray_mod.SettingsDialog(t)
+    assert d.key.placeholderText() == 'saved' and d.forget.isEnabled()
+    d.forget.click()
+    assert (tmp_path / 'gemini-key').exists() and not d.forget.isEnabled()  # FIXES-b 6: on Save, Cancel keeps it
+    d.reject()
+    assert (tmp_path / 'gemini-key').exists()
+    d = tray_mod.SettingsDialog(t)
+    d.forget.click()
+    d.save()
+    assert not (tmp_path / 'gemini-key').exists()
+    assert 'Gemini API key' in tray_mod.SettingsDialog(t).key.placeholderText()
+
+
+@pytest.mark.skipif(sys.platform != 'linux', reason='the lowercase folder is another one only where names are case-sensitive')
+def test_settings_says_a_key_in_the_old_folder(tmp_path, monkeypatch):
+    """FIXES-b r2 5: a key in the lowercase ~/.config/peresmeshnik (cloud.api_key reads it) is said, as $GEMINI_API_KEY
+    is: the field does not claim there is none, and the button, off, says where to remove it."""
+    from peresmeshnik.ui import tray as tray_mod
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    monkeypatch.delenv('GEMINI_API_KEY', raising=False)
+    monkeypatch.setattr(config, 'config_dir', lambda: tmp_path / 'Peresmeshnik')
+    (tmp_path / 'peresmeshnik').mkdir()
+    (tmp_path / 'peresmeshnik' / 'gemini-key').write_text('old-key\n')
+    d = tray_mod.SettingsDialog(tray_mod.Tray(type('Ctl', (), {'live': False, 'on': False})()))
+    old = str(tmp_path / 'peresmeshnik' / 'gemini-key')
+    assert not d.forget.isEnabled() and old in d.forget.toolTip() and old in d.key.placeholderText()
+
+
+def test_settings_forgets_only_the_apps_own_key(tmp_path, monkeypatch):
+    """FIXES-b 6: a key from $GEMINI_API_KEY or from one's own `cloud.key_file` is not the app's to forget: the button
+    is off and says where the key comes from; the user's file stays."""
+    from peresmeshnik.ui import tray as tray_mod
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    monkeypatch.setattr(config, 'config_dir', lambda: tmp_path)
+    tray_mod.save_key('secret-key')
+    t = tray_mod.Tray(type('Ctl', (), {'live': False, 'on': False})())
+    monkeypatch.setenv('GEMINI_API_KEY', 'env-key')
+    d = tray_mod.SettingsDialog(t)
+    assert not d.forget.isEnabled() and 'GEMINI_API_KEY' in d.forget.toolTip() + d.key.placeholderText()
+    monkeypatch.delenv('GEMINI_API_KEY')
+    s = config.Settings()
+    s.cloud.key_file = str(tmp_path / 'my-own-key')
+    tray_mod.save_key('mine', s.cloud)
+    config.save(s)
+    d = tray_mod.SettingsDialog(t)
+    assert not d.forget.isEnabled() and 'my-own-key' in d.forget.toolTip()
+    d.forget.click()  # off: nothing
+    d.save()
+    assert (tmp_path / 'my-own-key').exists() and (tmp_path / 'gemini-key').exists()
+
+
+@pytest.mark.parametrize('name', ['Speakers (Realtek(R) Audio)', 'Динамики (Realtek(R) Audio)', 'Динаміки (Realtek(R) Audio)',
+                                  'Lautsprecher (Realtek(R) Audio)', 'Haut-parleurs (Realtek(R) Audio)',
+                                  'Altavoces (Realtek(R) Audio)', 'Altoparlanti (Realtek(R) Audio)',
+                                  'Alto-falantes (Realtek(R) Audio)', 'Głośniki (Realtek(R) Audio)',
+                                  'Hoparlörler (Realtek(R) Audio)', '扬声器 (Realtek(R) Audio)', '揚聲器 (Realtek(R) Audio)',
+                                  'スピーカー (Realtek(R) Audio)', '스피커 (Realtek(R) Audio)', 'مكبرات الصوت (Realtek(R) Audio)',
+                                  'MacBook Pro Speakers', 'Built-in Audio Analog Stereo'])
+def test_loudspeakers_are_told_in_the_14_languages(name):
+    """L-27: the devices page warns about loudspeakers by the device's name in the 14 languages of the app (Windows
+    names its endpoints in the display language), not only in English and Russian; headphones are no loudspeakers."""
+    from peresmeshnik.ui import wizard
+    assert wizard.loudspeakers(name)
+    assert not wizard.loudspeakers('Kopfhörer (WH-1000XM4)') and not wizard.loudspeakers('Headphones (USB Audio)')
+
+
+def test_no_reason_is_said_twice(monkeypatch):
+    """L-30: "No global hotkey now: no global hotkey: …" and "… for this pair: … cannot speak X: a stock voice speaks
+    instead" said a part twice."""
+    from peresmeshnik.ui import hotkey, wizard
+    from peresmeshnik.ui.hotkey import HotkeyError
+
+    def broken():
+        raise HotkeyError('libX11 not found')
+    monkeypatch.setattr(hotkey, 'X11Hotkey', broken)
+    monkeypatch.setattr(hotkey, 'wayland', lambda: False)
+    monkeypatch.setattr(hotkey.sys, 'platform', 'linux')
+    monkeypatch.setenv('DISPLAY', ':0')
+    _, why = hotkey.make()
+    monkeypatch.undo()
+    assert 'no global hotkey' not in why.lower()  # the wizard and the tray put it before
+    s = config.Settings(my_lang='ru', their_lang='uk', me_to_them='local')  # the clone has no Ukrainian
+    page = wizard.VoicePage(type('W', (), {'s': s})())
+    page.initializePage()
+    assert page.subTitle().count('stock voice') == 1, page.subTitle()
+
+
+def test_overlay_rows_go_after_the_last_phrase():
+    """L-46: the subtitles go a while after the last caption, not when translation goes off; a phrase still being said
+    keeps them, so does its voice (FIXES-b 10), and a partial that never gets its final goes too. One single-shot timer:
+    nothing polls."""
+    from peresmeshnik.engines import Latency
+    o = SubtitleOverlay()
+    o.fade.setInterval(150)
+    them = o.side('them')
+    them.show(Caption('Hello.', 'Привет.', final=True, clause=0))
+    settle(0.05)
+    assert o.isVisible()
+    for _ in range(4):  # someone speaks: they stay
+        them.show(Caption('and', clause=1))
+        settle(0.1)
+    assert o.isVisible()
+    them.show(Caption('And more.', 'И ещё.', final=True, clause=1))
+    settle(0.1)
+    them.latency(Latency(1, 'voice', 1.2))  # FIXES-b 10: its voice starts: the rows stay while it plays
+    settle(0.1)
+    assert o.isVisible()
+    settle(0.3)
+    assert not o.isVisible() and not o._rows
+    them.show(Caption('a partial that never gets its final', clause=2))  # FIXES-b 10: it does not hang
+    settle(0.05)
+    assert o.isVisible()
+    settle(0.3)
+    assert not o.isVisible()
+
+
+def _fake_tray(on=False):
+    class Overlay:
+        clear = type('S', (), {'emit': lambda self: None})()
+    ctl = type('Ctl', (), {'on': on, 'live': False, 'overlay': Overlay()})()
+    return type('Tray', (), {'ctl': ctl, 'hotkey_why': '', 'sync': lambda self: None, 'restart': lambda self: None,
+                             'reload_hotkey': lambda self, combo: ''})()
+
+
+def test_wizard_keeps_what_changed_elsewhere_meanwhile(tmp_path, monkeypatch):
+    """L-39: the wizard writes what its pages changed, onto the settings as they are when it finishes: a change made in
+    the tray or the settings window while it was open stays."""
+    from peresmeshnik.ui import wizard
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    config.save(config.Settings())
+    w = wizard.SetupWizard(_fake_tray())
+    saved = config.load()
+    saved.local.threads, saved.ui.show_latency = 5, True  # the tray, meanwhile
+    config.save(saved)
+    w.s.their_lang = 'de'  # a page's change
+    w.finish()
+    got = config.load()
+    assert (got.their_lang, got.local.threads, got.ui.show_latency) == ('de', 5, True)
+
+
+def test_wizard_test_phrase_waits_for_translation_off(monkeypatch):
+    """L-40: "Test" while translating would load a second set of models beside the running ones: it says so instead."""
+    from peresmeshnik import app as app_mod
+    from peresmeshnik.ui import wizard
+    monkeypatch.setattr(app_mod, 'Controller', lambda *a, **k: pytest.fail('a second controller'))
+    page = wizard.HotkeyPage(type('W', (), {'s': config.Settings(), 'tray': _fake_tray(on=True)})())
+    page.test('them')
+    assert page.out.text().startswith('Turn translation off first') and not page.running
+    page.deleteLater()  # its key editor must go before the application does (a crash at exit otherwise)
+    settle()
+
+
+def test_settings_window_chooses_the_devices_on_every_os(tmp_path, monkeypatch):
+    """L-41: macOS and Windows have the microphone and headphones in the settings window too (the errors send people
+    there), from the same device list as the wizard."""
+    from peresmeshnik.ui import selftest
+    from peresmeshnik.ui import tray as tray_mod
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    monkeypatch.setattr(config, 'config_dir', lambda: tmp_path)
+    monkeypatch.setattr(selftest, 'devices', lambda kind: [('uid-1', 'My headset'), ('uid-2', 'Desk mic')])
+    t = tray_mod.Tray(type('Ctl', (), {'live': False, 'on': False})())
+    monkeypatch.setattr(tray_mod.sys, 'platform', 'darwin')
+    d = tray_mod.SettingsDialog(t)
+    monkeypatch.undo()
+    assert d.mic.count() == 3 and d.headphones.findData('uid-1') == 1

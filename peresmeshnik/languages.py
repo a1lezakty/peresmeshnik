@@ -6,12 +6,18 @@ and the tests all ask this module.
     languages.LANGS                              # ('en', 'ru', 'uk', 'de', ...)
     languages.label('de')                        # 'Deutsch (German)'
     d = languages.direction(s, 'me_to_them')     # Direction: d.local, d.why, d.notes, d.asr/mt/tts, d.voice
+    languages.clone_why(s.local.clone, 'de')     # '' = the clone of my voice speaks German live here, else why not
     languages.needed_models(s)                   # registry ids the chosen engines need, nothing more
+    languages.optional_models(s)                 # cloud sides' fallback voices under a license to accept (asked)
 """
 from __future__ import annotations
 
 import shutil
+import subprocess
+import sys
+import time
 from dataclasses import dataclass
+from typing import NamedTuple
 
 # code: (English name, its own name)
 NAMES = {
@@ -104,6 +110,98 @@ def needs_gpu(model_id: str) -> bool:
 ENGINE = {'asr': 'onnxruntime', 'mt': 'CTranslate2'}
 
 
+# --- the clone's NVIDIA GPU (nvidia-smi, no torch): memory, driver, compute capability
+
+MIN_VRAM_GB = 5.5  # the clone (XTTS-v2 ~2 GB) next to them -> me on CUDA (~0.6 GB): a 6 GB card (6144 MiB, some report less)
+
+
+MIN_DRIVER = (570, 65)  # Windows: CUDA 12.8 GA's driver (the pack's torch 2.8.0+cu128; NVIDIA's CUDA 12.8.0 notes)
+MIN_DRIVER_COMPAT = (528, 33)  # CUDA 12.x minor version compatibility on Windows: below 570.65 not checked, may work
+MIN_CC = 6.1  # the pack's Windows torch is built for sm_61 .. sm_120 (its _cuda_getArchFlags, the voice-pack job)
+
+
+class Gpu(NamedTuple):
+    vram: float = 0.0  # GB
+    driver: tuple[int, ...] = ()
+    cc: float = 0.0  # compute capability; 0: not known (a driver too old to say)
+    why: str = ''  # nvidia-smi is there but fails: the driver's own words
+
+    @property
+    def driver_text(self) -> str:
+        return version_text(self.driver)
+
+
+def _smi(exe: str, fields: str) -> list[list[str]] | str:
+    try:
+        r = subprocess.run([exe, f'--query-gpu={fields}', '--format=csv,noheader,nounits'], capture_output=True, text=True,
+                           timeout=10, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    except (OSError, subprocess.SubprocessError) as e:
+        return str(e)
+    rows = [[x.strip() for x in ln.split(',')] for ln in (r.stdout or '').splitlines() if ln.strip()]
+    if rows and all(len(row) == fields.count(',') + 1 and row[0].replace('.', '', 1).isdigit() for row in rows):
+        return rows
+    return ' '.join((r.stdout or '').split())[:200] or f'nvidia-smi exited with {getattr(r, "returncode", "?")}'
+
+
+def nvidia() -> Gpu:
+    """The biggest NVIDIA GPU by nvidia-smi (no torch, ~0.1 s): memory, driver, compute capability; Gpu() without one.
+    A driver that does not answer is not "no GPU": `why` says what nvidia-smi said."""
+    exe = shutil.which('nvidia-smi')
+    if not exe:
+        return Gpu()
+    rows = _smi(exe, 'memory.total,driver_version,compute_cap')
+    if isinstance(rows, str):  # a driver before compute_cap (R510) does not know the field
+        rows = old if not isinstance(old := _smi(exe, 'memory.total,driver_version'), str) else rows
+    if isinstance(rows, str):
+        return Gpu(why=rows)
+    best = max(rows, key=lambda row: float(row[0]))
+
+    def num(x: str, kind=float):
+        try:
+            return kind(x)
+        except ValueError:
+            return kind()
+    return Gpu(float(best[0]) / 1024, tuple(num(x, int) for x in best[1].split('.')), num(best[2]) if len(best) > 2 else 0.0)
+
+
+def gpu_text(vram: float) -> str:
+    return f'an NVIDIA GPU with {vram:.0f} GB' if vram else 'no NVIDIA GPU'
+
+
+def version_text(v: tuple[int, ...]) -> str:
+    return '.'.join(f'{x:02d}' if i else str(x) for i, x in enumerate(v))
+
+
+_PROBED: dict = {}  # nvidia-smi's path -> (its answer, when): the card does not change while the app runs
+FAILED_TTL_S = 60.0  # a driver that did not answer is asked again after this long (updated meanwhile), not at every call
+
+
+def nvidia_once() -> Gpu:
+    """nvidia() once per process (up to 2 x 10 s with a driver that hangs: the wizard's tier and every direction() share
+    it); a driver that did not answer (`why`) is asked again after FAILED_TTL_S: "update it, then open this page again"."""
+    exe = shutil.which('nvidia-smi')
+    g, at = _PROBED.get(exe, (None, 0.0))
+    if g is None or g.why and time.monotonic() - at > FAILED_TTL_S:
+        g, at = _PROBED[exe] = nvidia(), time.monotonic()
+    return g
+
+
+def gpu_why(g: Gpu, windows: bool = True) -> str:
+    """Why the clone cannot run on this NVIDIA GPU ('' = it can): its memory, and for the Windows voice pack's torch the
+    driver and the compute capability."""
+    if g.why:
+        return f'the NVIDIA driver does not answer ({g.why})'
+    if g.vram < MIN_VRAM_GB:
+        return f'the clone of your voice needs an NVIDIA GPU with at least 6 GB of memory; this computer has {gpu_text(g.vram)}'
+    if windows and g.driver < MIN_DRIVER_COMPAT:
+        return (f'the clone of your voice needs NVIDIA driver {version_text(MIN_DRIVER)} or newer; this computer has '
+                f'{g.driver_text or "an older one"}')
+    if windows and g.cc and g.cc < MIN_CC:
+        return (f'this NVIDIA GPU is too old for the voice pack (compute capability {g.cc:g}; it needs {MIN_CC:g} or newer: '
+                'GeForce GTX 10xx and later)')
+    return ''
+
+
 def gpu(engine: str = '') -> bool:
     """An NVIDIA GPU (nvidia-smi). With `engine` ('asr': onnxruntime, 'mt': CTranslate2) also that this engine runs on it
     inside the app: the built .exe and a from-source install have a CPU-only onnxruntime (local/device.py)."""
@@ -113,11 +211,30 @@ def gpu(engine: str = '') -> bool:
     return {'asr': device.onnx_cuda, 'mt': device.ct2_cuda}.get(engine, lambda: True)()
 
 
+def clone_why(model_id: str, lang: str = '', has_gpu: bool | Gpu | None = None) -> str:
+    """Why the clone `model_id` cannot speak `lang` live on this computer ('' = it can): the one answer the wizard, the
+    tray, the app and the cloud's fallback get (through `direction` or directly). It reads the registry — the model's
+    `langs` and `needs = "gpu"` (XTTS-v2 keeps up only on an NVIDIA GPU, BENCH stage 6) — and for such a model the GPU
+    (`gpu_why`: memory; on Windows also the voice pack's driver and compute capability), so another clone engine is a
+    registry row, not a change here. `has_gpu`: None looks (nvidia-smi, once per run), a `Gpu` is that card, True / False
+    say there is a suitable one or none."""
+    if lang and not covers(model_id, lang):
+        return f'your cloned voice cannot speak {name(lang)}'
+    if not needs_gpu(model_id) or has_gpu is True:
+        return ''
+    g = has_gpu if isinstance(has_gpu, Gpu) else nvidia_once() if has_gpu is None and gpu() else Gpu()
+    if has_gpu is None and gpu() and not (g.vram or g.why):  # nvidia-smi said nothing (a stand-in): taken as able
+        return ''
+    if not (g.vram or g.why):
+        return 'no clone of your voice keeps up on a Mac' if sys.platform == 'darwin' else 'your cloned voice needs an NVIDIA GPU'
+    return gpu_why(g, windows=sys.platform == 'win32')
+
+
 def direction(s, side: str, has_gpu: bool | None = None) -> Direction:
     """What `side` of the pair in settings `s` runs on locally, and why not. A model with `needs = "gpu"` in the
     registry is not offered without an NVIDIA GPU (`has_gpu` None: look for nvidia-smi, and for the ASR and the MT also for
     CUDA in their engine in the app): for the ASR, the MT and a stock voice the side is then not local (`why`); for the
-    clone the stock voice speaks instead (`notes`), if there is one."""
+    clone (`clone_why`) the stock voice speaks instead (`notes`), if there is one."""
     from peresmeshnik.voice import STOCK
     src, tgt = (s.their_lang, s.my_lang) if side == 'them_to_me' else (s.my_lang, s.their_lang)
     loc, why, notes = s.local, [], []
@@ -140,17 +257,15 @@ def direction(s, side: str, has_gpu: bool | None = None) -> Direction:
         stock, no_voice = '', f'the voice for {name(tgt)} needs an NVIDIA GPU ({stock})'
     tts, voice = stock, 'stock' if stock else ''
     if side == 'me_to_them' and loc.clone != STOCK:
-        if not covers(loc.clone, tgt):
-            instead = f'your cloned voice cannot speak {name(tgt)}'
-        elif needs_gpu(loc.clone) and not has_gpu:
-            instead = no_voice = 'your cloned voice needs an NVIDIA GPU'
+        if instead := clone_why(loc.clone, tgt, asked):  # None: it looks at the card itself
+            if stock:
+                notes.append(f'{instead}: a stock voice speaks instead')
+            else:
+                no_voice = f'{instead}; {no_voice}'
         else:
-            instead, tts, voice = '', loc.clone, 'clone'
-            if not has_gpu:
-                notes.append('your cloned voice falls behind the conversation without an NVIDIA GPU: '
-                             'the cloud or a stock voice keeps up')
-        if instead and stock:
-            notes.append(f'{instead}: a stock voice speaks instead')
+            tts, voice = loc.clone, 'clone'
+            if not stock:  # the clone's fallback (app.py) is the stock voice
+                notes.append(f'no stock voice for {name(tgt)} takes over if your cloned voice fails')
     if not tts:
         why.append(no_voice)
     return Direction(side, src, tgt, asr, mt, tts, voice, tuple(why), tuple(notes), src in CLOUD and tgt in CLOUD)
@@ -161,9 +276,24 @@ def cloud_subtitles(s, side: str) -> bool:
     return s.cloud.subtitles or not direction(s, side).subtitles
 
 
+def fallback_voice(s, side: str) -> str:
+    """A cloud side's stock voice for when the cloud fails ('' = none: its subtitles come from the cloud, so there is no
+    local ASR + MT to go on with, or its language has no stock voice)."""
+    if getattr(s, side) != 'cloud' or cloud_subtitles(s, side):
+        return ''
+    d = direction(s, side)
+    return d.tts if d.voice == 'stock' else pick(s.local.tts, d.tgt)
+
+
+def _consent(model_id: str) -> bool:
+    from peresmeshnik import models
+    return models.get(model_id).consent
+
+
 def needed_models(s) -> list[str]:
     """Registry ids the chosen setup runs on (ARCHITECTURE §6): a local side its ASR, MT and voice; a cloud side its
-    local subtitles (unless they come from the cloud). Silero VAD is always there: it gates the cloud too."""
+    local subtitles (unless they come from the cloud) and its fallback voice when that needs no consent (else it is
+    optional: `optional_models`). Silero VAD is always there: it gates the cloud too."""
     ids = ['silero-vad']
     for side in SIDES:
         d = direction(s, side)
@@ -171,9 +301,16 @@ def needed_models(s) -> list[str]:
             ids += d.models
             if d.voice == 'clone':  # the clone's fallback (~60 MB): the stock voice when the clone cannot speak (S2)
                 ids += [i for i in [pick(s.local.tts, d.tgt)] if i]
-        elif not cloud_subtitles(s, side):
-            ids += [d.asr, d.mt]
+        elif not cloud_subtitles(s, side):  # local subtitles, and with its stock voice the side's way when the cloud fails
+            ids += [d.asr, d.mt] + [i for i in [fallback_voice(s, side)] if i and not _consent(i)]
     return list(dict.fromkeys(ids))
+
+
+def optional_models(s) -> list[str]:
+    """Cloud sides' fallback voices under a license to accept (tr, ko, ja: noncommercial): downloaded only when it is
+    accepted; without one that side stops while the cloud is down. Nobody chose them, so nothing waits for them."""
+    need = set(needed_models(s))
+    return list(dict.fromkeys(v for side in SIDES if (v := fallback_voice(s, side)) and _consent(v) and v not in need))
 
 
 def table(s=None) -> str:
@@ -185,10 +322,13 @@ def table(s=None) -> str:
 
     def cell(i: str) -> str:
         return f'{i} (NVIDIA GPU)' if needs_gpu(i) else i or '— (cloud)'
+
+    def asr(i: str) -> str:  # the apps' onnxruntime runs on the CPU only (gpu('asr')): such a model is never theirs
+        return f'— (cloud; {i} from source with onnxruntime-gpu on an NVIDIA GPU)' if needs_gpu(i) else cell(i)
     rows = ['| Language | Speech recognition | Stock voice | Your cloned voice | Cloud (Gemini Live) |', '|---|---|---|---|---|']
     for c in LANGS:
         clone = loc.clone if covers(loc.clone, c) and reg[loc.clone].role == 'clone' else ''
-        rows.append(f'| {label(c)} | {cell(pick(loc.asr, c))} | {cell(pick(loc.tts, c))} | '
+        rows.append(f'| {label(c)} | {asr(pick(loc.asr, c))} | {cell(pick(loc.tts, c))} | '
                     f'{clone + " (NVIDIA GPU)" if clone else "— (cloud or a stock voice)"} | {"✔" if c in CLOUD else "—"} |')
     gpu_mark = {True: ' (NVIDIA GPU)', False: ''}
     pairs = [k.replace('-', ' → ') + gpu_mark[needs_gpu(loc.mt[k])] for k in sorted(loc.mt) if k != '*' and pick(loc.mt, k)]

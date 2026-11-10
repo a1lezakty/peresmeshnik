@@ -329,4 +329,4 @@ def make() -> tuple[object | None, str]:
             return X11Hotkey(), ''
         return None, 'no X11 display and no Wayland session: use the tray menu'
     except HotkeyError as e:
-        return None, f'no global hotkey: {e}. Use {MENU} item "Live voice"'
+        return None, f'{e}. Use {MENU} item "Live voice"'  # "No global hotkey:" is the tray's and the wizard's

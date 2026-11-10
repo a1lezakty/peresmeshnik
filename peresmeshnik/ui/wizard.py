@@ -11,13 +11,10 @@ import copy
 import json
 import logging
 import os
-import shutil
-import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
-from typing import NamedTuple
 
 import psutil
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -39,7 +36,15 @@ from PySide6.QtWidgets import (
 )
 
 from peresmeshnik import config, languages, models
-from peresmeshnik.languages import needed_models  # noqa: F401 (the models page asks it; tests patch it here)
+from peresmeshnik.languages import (
+    MIN_DRIVER,
+    MIN_DRIVER_COMPAT,
+    Gpu,
+    gpu_text,
+    needed_models,  # noqa: F401 (the models page asks it; tests patch it here)
+    version_text,
+)
+from peresmeshnik.languages import nvidia as gpu  # tests patch it here
 from peresmeshnik.local import voicepack
 from peresmeshnik.ui.overlay import font_note
 from peresmeshnik.ui.tray import LANGS, MIC_LABEL, SIDES, device_combo, save_key
@@ -50,6 +55,15 @@ MACOS = sys.platform == 'darwin'
 WINDOWS = sys.platform == 'win32'
 VMIC = 'BlackHole 2ch' if MACOS else 'CABLE Output' if WINDOWS else 'Peresmeshnik Mic'  # the call app's microphone
 SAMPLES = Path(__file__).parent / 'samples'
+# "loudspeakers" in a device's name in the app's 14 languages (Windows names its endpoints in the display language;
+# macOS "MacBook Pro Speakers", PipeWire "Built-in Audio"); lowercase
+SPEAKERS = ('speaker', 'built-in', 'встроен', 'динамик', 'динамік', 'lautsprecher', 'haut-parleur', 'altavo', 'altoparlant',
+            'alto-falant', 'altifalant', 'głośnik', 'hoparlör', '扬声器', '揚聲器', 'スピーカー', '스피커', 'مكبر', 'سماع')
+
+
+def loudspeakers(name: str) -> bool:
+    """The device's name says loudspeakers (the microphone would hear the translation)."""
+    return any(k in name.lower() for k in SPEAKERS)
 
 
 def has_key(s: config.Settings) -> bool:
@@ -60,102 +74,35 @@ def has_key(s: config.Settings) -> bool:
         return False
 
 
-MIN_VRAM_GB = 5.5  # the clone (XTTS-v2 ~2 GB) next to them -> me on CUDA (~0.6 GB): a 6 GB card (6144 MiB, some report less)
-
-
-PACK_CONSENT = ('I accept the licenses of the voice pack: PyTorch (BSD-3-Clause), coqui-tts (MPL-2.0), and of the XTTS-v2 '
-                'voice model it runs, the Coqui Public Model License (huggingface.co/coqui/XTTS-v2): noncommercial use '
-                'only, it binds me as the user')
-
-
-MIN_DRIVER = (570, 65)  # Windows: CUDA 12.8 GA's driver (the pack's torch 2.8.0+cu128; NVIDIA's CUDA 12.8.0 notes)
-MIN_DRIVER_COMPAT = (528, 33)  # CUDA 12.x minor version compatibility on Windows: below 570.65 not checked, may work
-MIN_CC = 6.1  # the pack's Windows torch is built for sm_61 .. sm_120 (its _cuda_getArchFlags, the voice-pack job)
-
-
-class Gpu(NamedTuple):
-    vram: float = 0.0  # GB
-    driver: tuple[int, ...] = ()
-    cc: float = 0.0  # compute capability; 0: not known (a driver too old to say)
-    why: str = ''  # nvidia-smi is there but fails: the driver's own words
-
-    @property
-    def driver_text(self) -> str:
-        return _version(self.driver)
-
-
-def _smi(exe: str, fields: str) -> list[list[str]] | str:
-    try:
-        r = subprocess.run([exe, f'--query-gpu={fields}', '--format=csv,noheader,nounits'], capture_output=True, text=True,
-                           timeout=10, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-    except (OSError, subprocess.SubprocessError) as e:
-        return str(e)
-    rows = [[x.strip() for x in ln.split(',')] for ln in (r.stdout or '').splitlines() if ln.strip()]
-    if rows and all(len(row) == fields.count(',') + 1 and row[0].replace('.', '', 1).isdigit() for row in rows):
-        return rows
-    return ' '.join((r.stdout or '').split())[:200] or f'nvidia-smi exited with {getattr(r, "returncode", "?")}'
-
-
-def gpu() -> Gpu:
-    """The biggest NVIDIA GPU by nvidia-smi (no torch, ~0.1 s): memory, driver, compute capability; Gpu() without one.
-    A driver that does not answer is not "no GPU": `why` says what nvidia-smi said."""
-    exe = shutil.which('nvidia-smi')
-    if not exe:
-        return Gpu()
-    rows = _smi(exe, 'memory.total,driver_version,compute_cap')
-    if isinstance(rows, str):  # a driver before compute_cap (R510) does not know the field
-        rows = old if not isinstance(old := _smi(exe, 'memory.total,driver_version'), str) else rows
-    if isinstance(rows, str):
-        return Gpu(why=rows)
-    best = max(rows, key=lambda row: float(row[0]))
-
-    def num(x: str, kind=float):
-        try:
-            return kind(x)
-        except ValueError:
-            return kind()
-    return Gpu(float(best[0]) / 1024, tuple(num(x, int) for x in best[1].split('.')), num(best[2]) if len(best) > 2 else 0.0)
-
-
-def gpu_text(vram: float) -> str:
-    return f'an NVIDIA GPU with {vram:.0f} GB' if vram else 'no NVIDIA GPU'
-
-
-def _version(v: tuple[int, ...]) -> str:
-    return '.'.join(f'{x:02d}' if i else str(x) for i, x in enumerate(v))
+PACK_CONSENT = ('I accept the licenses of the voice pack: PyTorch (BSD-3-Clause) with the NVIDIA CUDA and cuDNN libraries '
+                'inside it (NVIDIA\'s license terms: docs.nvidia.com/cuda/eula, most of the download), coqui-tts '
+                '(MPL-2.0), and of the XTTS-v2 voice model it runs, the Coqui Public Model License '
+                '(huggingface.co/coqui/XTTS-v2): noncommercial use only, it binds me as the user')
 
 
 def gpu_note(g: Gpu) -> str:
     """A driver between CUDA 12.x's compatibility floor and CUDA 12.8's own: not refused, not checked either."""
     if not g.why and MIN_DRIVER_COMPAT <= g.driver < MIN_DRIVER:
-        return (f'Your NVIDIA driver {g.driver_text} is older than {_version(MIN_DRIVER)} (CUDA 12.8\'s): not checked, it '
+        return (f'Your NVIDIA driver {g.driver_text} is older than {version_text(MIN_DRIVER)} (CUDA 12.8\'s): not checked, it '
                 'may work; if the clone does not start, update it from nvidia.com/drivers.')
     return ''
 
 
 def gpu_refusal(g: Gpu) -> str:
-    """Why the voice pack (Windows) would not run the clone on this GPU, said before its 3.7 GB download; '' if it would."""
-    if g.why:
-        return (f'The NVIDIA driver does not answer ({g.why}): reinstall or update it from nvidia.com/drivers, then open '
-                'this page again.')
-    if g.vram < MIN_VRAM_GB:
-        return (f'The clone of your voice needs an NVIDIA GPU with at least 6 GB of memory; this computer has '
-                f'{gpu_text(g.vram)}.')
-    if g.driver < MIN_DRIVER_COMPAT:
-        return (f'The clone of your voice needs NVIDIA driver {_version(MIN_DRIVER)} or newer; this computer has '
-                f'{g.driver_text or "an older one"}: update it from nvidia.com/drivers (or the NVIDIA app), then open this '
-                'page again.')
-    if g.cc and g.cc < MIN_CC:
-        return (f'This NVIDIA GPU is too old for the voice pack (compute capability {g.cc:g}; it needs {MIN_CC:g} or newer: '
-                'GeForce GTX 10xx and later).')
-    return ''
+    """Why the voice pack (Windows) would not run the clone on this GPU, said before its 3.7 GB download, with what to do;
+    '' if it would. The reason is languages.gpu_why's, the one clone_why gives."""
+    if not (why := languages.gpu_why(g)):
+        return ''
+    tail = (': reinstall or update it from nvidia.com/drivers, then open this page again.' if g.why else
+            ': update it from nvidia.com/drivers (or the NVIDIA app), then open this page again.' if 'driver' in why else '.')
+    return why[0].upper() + why[1:] + tail
 
 
 def tier() -> tuple[str, str]:
-    """(what this machine is, the recommended me -> them engine)."""
-    gb, vram = psutil.virtual_memory().total / 2 ** 30, gpu().vram
-    rec = 'local' if vram >= MIN_VRAM_GB else 'cloud'  # the clone keeps up only on an NVIDIA GPU with room for it (BENCH)
-    return f'{gb:.0f} GB RAM, {gpu_text(vram)}: recommended them → me local, me → them {rec}', rec
+    """(what this machine is, the recommended me -> them engine): local where the clone speaks here (clone_why)."""
+    gb, g = psutil.virtual_memory().total / 2 ** 30, languages.nvidia_once()  # the probe direction() asks too: once
+    rec = 'cloud' if languages.clone_why(config.Local().clone, has_gpu=g) else 'local'
+    return f'{gb:.0f} GB RAM, {gpu_text(g.vram)}: recommended them → me local, me → them {rec}', rec
 
 
 class LanguagesPage(QWizardPage):
@@ -186,8 +133,8 @@ class LanguagesPage(QWizardPage):
             self.why[key].setWordWrap(True)
             f.addRow(title, c)
             f.addRow('', self.why[key])
-        self.subtitles = QCheckBox('Subtitles from the cloud (else from the local ASR: faster, needs 0.7–2.2 GB of models; '
-                                   'this pair\'s below)')
+        self.subtitles = QCheckBox('Subtitles from the cloud (else local: faster, and the cloud\'s fallback; their models '
+                                   'are below)')
         self.subtitles.setChecked(s.cloud.subtitles)
         f.addRow('Cloud', self.subtitles)
         self.download = QLabel()
@@ -207,6 +154,9 @@ class LanguagesPage(QWizardPage):
         f.addRow(note)
         self.err = QLabel()
         f.addRow(self.err)
+        self.forced = set(s.forced_cloud)  # sides moved to the cloud for a pair they cannot run: a pair they can brings them back
+        for key, c in self.engine.items():  # a programmatic change blocks the signal: this is the user's own choice
+            c.currentIndexChanged.connect(lambda _, key=key: self.forced.discard(key))
         for c in (self.my_lang, self.their_lang, *self.engine.values()):
             c.currentIndexChanged.connect(self.refresh)
         self.subtitles.toggled.connect(self.refresh)
@@ -229,11 +179,12 @@ class LanguagesPage(QWizardPage):
             d = languages.direction(s, key)
             item = c.model().item(config.ENGINES.index('local'))
             item.setEnabled(d.local)
-            if not d.local and c.currentText() == 'local':
+            if (move := not d.local and c.currentText() == 'local') or d.local and key in self.forced and c.currentText() == 'cloud':
                 c.blockSignals(True)
-                c.setCurrentText('cloud')
+                c.setCurrentText('cloud' if move else 'local')
                 c.blockSignals(False)
-                setattr(s, key, 'cloud')
+                setattr(s, key, c.currentText())
+                (self.forced.add if move else self.forced.discard)(key)
             if not d.local:
                 text = f'✘ Not on this computer: {"; ".join(d.why)}. The cloud translates {languages.name(d.src)} → ' \
                        f'{languages.name(d.tgt)}.'
@@ -241,12 +192,13 @@ class LanguagesPage(QWizardPage):
                 text = '✔ Both on this computer and in the cloud.' + ''.join(f' ⚠ {n}.' for n in d.notes if c.currentText() == 'local')
             if c.currentText() == 'cloud' and languages.cloud_subtitles(s, key) and not s.cloud.subtitles:
                 text += ' Its subtitles come from the cloud too.'
+            if c.currentText() == 'cloud' and not (d.local and not languages.cloud_subtitles(s, key)):
+                text += ' If the cloud fails, it stops until it is back.'  # else it goes on here (needed_models: its voice)
+            elif c.currentText() == 'cloud' and (v := languages.fallback_voice(s, key)) and models.get(v).consent:
+                text += ' Its fallback voice is noncommercial: asked on the models page.'
             if d.src == 'ar' and c.currentText() == 'cloud' and languages.cloud_subtitles(s, key):
                 text += ' Arabic subtitles from the cloud are Egyptian Arabic (Gemini has no other): other dialects come out ' \
                         'worse.'
-            if MACOS and key == 'me_to_them':  # BENCH stage 6: no clone keeps up on an M1's CPU (XTTS, LuxTTS measured)
-                text += ' On a Mac your voice goes to the call through the cloud (or a stock voice): no local clone of it ' \
-                        'keeps up here.'
             self.why[key].setText(text)
         ms, base = [models.get(i) for i in needed_models(s)], models.root()
         todo = [m for m in ms if not models.is_fetched(m, base)]
@@ -274,6 +226,7 @@ class LanguagesPage(QWizardPage):
         self.w.s.my_lang, self.w.s.their_lang, self.w.s.cloud.subtitles = s.my_lang, s.their_lang, s.cloud.subtitles
         for k in languages.SIDES:
             setattr(self.w.s, k, getattr(s, k))
+        self.w.s.forced_cloud = [k for k in languages.SIDES if k in self.forced]
         if self.w.key:
             save_key(self.w.key, s.cloud)  # the test phrase on a later page already needs it
         return True
@@ -388,10 +341,9 @@ class DevicesPage(QWizardPage):
         return ok
 
     def _echo(self) -> None:
-        name = self.headphones.currentText().lower()
-        speakers = any(k in name for k in ('speaker', 'built-in', 'встроен', 'динамик'))
         self.warn.setText('⚠ This looks like loudspeakers: the microphone would hear the translation and translate it back. '
-                          'Use headphones.' if speakers else 'Use headphones, not loudspeakers (echo).')
+                          'Use headphones.' if loudspeakers(self.headphones.currentText()) else
+                          'Use headphones, not loudspeakers (echo).')
 
     def validatePage(self) -> bool:  # noqa: N802
         self.w.s.ui.headphones, self.w.s.ui.mic = self.headphones.currentData(), self.mic.currentData()
@@ -512,7 +464,7 @@ class CallSoundPage(QWizardPage):
 
 
 class ModelsPage(QWizardPage):
-    progress = Signal(int, int, str)  # done bytes, total bytes, current model
+    progress = Signal(float, float, str)  # done bytes, total bytes, current model: past 2 GB a Qt int overflows
     finished = Signal(str)  # '' or the error
 
     def __init__(self, w: SetupWizard):
@@ -525,7 +477,7 @@ class ModelsPage(QWizardPage):
         self.list.setWordWrap(True)
         self.list.setOpenExternalLinks(True)
         self.consent = QCheckBox()
-        self.consent.toggled.connect(self.completeChanged)
+        self.consent.toggled.connect(lambda: self.busy or self._finished(''))  # an optional voice to download, or not
         self.button = QPushButton('Download')
         self.button.clicked.connect(self.download)
         self.bar = QProgressBar()
@@ -539,27 +491,35 @@ class ModelsPage(QWizardPage):
 
     def initializePage(self) -> None:  # noqa: N802
         self.ms = [models.get(i) for i in needed_models(self.w.s)]
+        self.optional = [models.get(i) for i in languages.optional_models(self.w.s)]  # with its license only
         base = models.root()
-        lic = {m.id: ' + '.join(f'<a href="{p.license_url}">{p.license}</a>' for p in models.parts(m)) for m in self.ms}
-        rows = [f'<tr><td>{"✔" if models.is_fetched(m, base) else "·"}</td><td>{m.id}</td>'
-                f'<td align=right>{models.size(m) / 1e6:.0f} MB</td><td>{lic[m.id]}</td></tr>' for m in self.ms]
+        lic = {m.id: ' + '.join(f'<a href="{p.license_url}">{p.license}</a>' for p in models.parts(m))
+               for m in self.ms + self.optional}
+        rows = [f'<tr><td>{"✔" if models.is_fetched(m, base) else "·"}</td><td>{m.id}'
+                f'{" (optional: a cloud direction falls back on it)" if m in self.optional else ""}</td>'
+                f'<td align=right>{models.size(m) / 1e6:.0f} MB</td><td>{lic[m.id]}</td></tr>' for m in self.ms + self.optional]
         self.list.setText(f'<table cellspacing=6>{"".join(rows)}</table><p>Folder: {base}</p>')
-        restricted = [m for m in self.ms if m.consent and not models.is_fetched(m, base)]
+        restricted = [m for m in self.ms + self.optional if m.consent and not models.is_fetched(m, base)]
         self.consent.setVisible(bool(restricted))
         self.consent.setText('I accept the restricted licenses (noncommercial use only, they bind me as the user): '
-                             + ', '.join(f'{m.id} ({m.license})' for m in restricted))
+                             + ', '.join(f'{m.id} ({m.license}{", optional" if m in self.optional else ""})' for m in restricted))
         self._finished('')
 
     def missing(self) -> list:
         base = models.root()
         return [m for m in self.ms if not models.is_fetched(m, base)]
 
+    def extra(self) -> list:
+        """The optional voices not here yet: downloaded with the rest when their license is accepted."""
+        base = models.root()
+        return [m for m in getattr(self, 'optional', []) if not models.is_fetched(m, base)]
+
     def isComplete(self) -> bool:  # noqa: N802
         return not self.busy and not self.missing()
 
     def download(self) -> None:
-        todo = self.missing()
-        if any(m.consent for m in todo) and not self.consent.isChecked():
+        todo = self.missing() + (self.extra() if self.consent.isChecked() else [])
+        if any(m.consent for m in self.missing()) and not self.consent.isChecked():
             self.state.setText('Accept the restricted licenses first, or choose cloud for that direction.')
             return
         self.busy = True
@@ -580,18 +540,21 @@ class ModelsPage(QWizardPage):
                 self.finished.emit(str(e))
         threading.Thread(target=run, name='models-fetch', daemon=True).start()
 
-    def _progress(self, done: int, total: int, mid: str) -> None:
-        self.bar.setMaximum(max(total // 1024, 1))
-        self.bar.setValue(done // 1024)
+    def _progress(self, done: float, total: float, mid: str) -> None:
+        self.bar.setMaximum(max(int(total) // 1024, 1))
+        self.bar.setValue(int(done) // 1024)
         self.state.setText(f'{mid}: {done / 1e6:.0f} of {total / 1e6:.0f} MB')
 
     def _finished(self, err: str) -> None:
         self.busy = False
-        todo = self.missing()
-        self.button.setEnabled(bool(todo))
+        todo, extra = self.missing(), self.extra()
+        self.button.setEnabled(bool(todo) or bool(extra) and self.consent.isChecked())
         self.bar.setVisible(bool(todo) or bool(err))
         self.state.setText(f'Download failed: {err}. Press Download again to resume.' if err else
                            f'{len(todo)} to download, {sum(map(models.size, todo)) / 1e6:.0f} MB.' if todo else 'All models are here.')
+        if extra and not err and not self.consent.isChecked():  # nobody chose it: without it that side has nothing to go local with
+            self.state.setText(self.state.text() + f' Without {", ".join(m.id for m in extra)} (its license unticked) '
+                               'that cloud direction stops until the cloud is back when the cloud fails.')
         self.completeChanged.emit()
 
 
@@ -681,6 +644,8 @@ class VoicePage(QWizardPage):
         self.record_button.clicked.connect(self.record)
         self.import_button = QPushButton('Import a recording…')
         self.import_button.clicked.connect(lambda: self.import_file())
+        self.own = QCheckBox('This is my own voice: I record or import only myself, nobody else')  # README's promise
+        self.own.toggled.connect(self._buttons)
         self.stock = QCheckBox('Speak with a stock voice (Piper), not mine: it keeps up on this computer')
         self.stock.toggled.connect(self._stock)
         self.check_button = QPushButton('Check the clone')
@@ -710,6 +675,7 @@ class VoicePage(QWizardPage):
         lay.addLayout(prow)
         lay.addWidget(self.pack_bar)
         lay.addWidget(self.prompt)
+        lay.addWidget(self.own)
         lay.addLayout(row)
         for x in (self.bar, self.out, self.clone_out):
             lay.addWidget(x)
@@ -733,8 +699,9 @@ class VoicePage(QWizardPage):
         speak their language, or needs an NVIDIA GPU here (languages.direction)."""
         from peresmeshnik.voice import STOCK
         s = self.w.s
-        d = languages.direction(s, 'me_to_them')
-        return '; '.join(d.notes) if self.local() and s.local.clone != STOCK and d.voice == 'stock' else ''
+        if not self.local() or s.local.clone == STOCK or languages.direction(s, 'me_to_them').voice != 'stock':
+            return ''
+        return languages.clone_why(s.local.clone, s.their_lang)
 
     def initializePage(self) -> None:  # noqa: N802
         from peresmeshnik import voice
@@ -744,11 +711,10 @@ class VoicePage(QWizardPage):
                          'voice. The recording stays on this computer.' if self.local() else
                          'Optional: "me → them" runs in the cloud, in Gemini\'s voice. Your recording is only needed for the '
                          'local clone.')
-        if self.local() and MACOS:  # no Apple GPU for torch in CI: the clone ran on the CPU there (BENCH)
-            self.setSubTitle(self.subTitle() + ' On this Mac the clone of your voice runs on the CPU and falls behind the '
-                             'conversation: choose cloud for "me → them", or a stock voice.')
         self.prompt.setText(voice.PROMPTS.get(s.my_lang, 'Read any text in your language aloud, at your normal pace.'))
-        self.stock.setVisible(self.local())
+        self.stock.setVisible(self.local() and bool(languages.pick(s.local.tts, s.their_lang)))  # none for zh, ar
+        for x in (self.own, self.prompt, self.record_button, self.import_button):  # Back and here again: shown anew
+            x.setVisible(True)
         self.stock.setChecked(s.local.clone == voice.STOCK)
         self.check_button.setVisible(self.local() and not self.stock.isChecked())
         if not WINDOWS:
@@ -758,7 +724,10 @@ class VoicePage(QWizardPage):
             threading.Thread(target=lambda: self.gpu_found.emit(gpu()), name='gpu', daemon=True).start()
         if why := self.clone_off():  # nothing to record for it: said, and the page can be left
             self.setSubTitle(f'"Me → them" speaks in a stock voice for this pair: {why}. No recording is needed.')
-            for x in (self.stock, self.prompt, self.record_button, self.import_button, self.check_button):
+        elif not self.local() and s.local.clone != voice.STOCK and (why := languages.clone_why(s.local.clone, s.their_lang)):
+            self.setSubTitle(f'"Me → them" runs in the cloud, in Gemini\'s voice, and {why}: no recording is needed.')
+        if why:
+            for x in (self.stock, self.prompt, self.own, self.record_button, self.import_button, self.check_button):
                 x.setVisible(False)
         if self.voice is None and s.local.voice and (voice.voices_dir() / s.local.voice / 'voice.json').exists():
             self.voice = voice.load(s.local.voice)
@@ -769,8 +738,8 @@ class VoicePage(QWizardPage):
         self._buttons()
 
     def isComplete(self) -> bool:  # noqa: N802
-        return not self.running and not self.packing and (not self.local() or self.stock.isChecked() or self.voice is not None
-                                                          or bool(self.clone_off()))
+        return not self.running and not self.packing and (not self.local() or self.stock.isChecked() or bool(self.clone_off())
+                                                          or self.voice is not None and self.pack() != 'gpu')
 
     def pack(self) -> str:
         """The clone's voice pack here: '' where it is not this page's business (not Windows, cloud, the stock voice, a
@@ -805,7 +774,8 @@ class VoicePage(QWizardPage):
             self.pack_out.setText('Checking the NVIDIA GPU…')
             return
         if st == 'gpu':
-            text = gpu_refusal(self.gpu) + ' Choose a stock voice above, or cloud for "me → them" on the first page.'
+            text = gpu_refusal(self.gpu) + (' Choose a stock voice above, or' if not self.stock.isHidden() else ' Choose') \
+                + ' cloud for "me → them" on the first page.'  # no stock voice for zh, ar: the first page is the way out
         elif st == 'ready':
             text = 'The voice pack is installed.'
         else:
@@ -878,7 +848,7 @@ class VoicePage(QWizardPage):
 
     def _buttons(self) -> None:
         for b in (self.record_button, self.import_button):
-            b.setEnabled(not self.running)
+            b.setEnabled(not self.running and self.own.isChecked())
         why = ('Turn translation off first: the check loads a second clone (~3 GB)' if self.translating() else
                self.no_check())
         self.check_button.setEnabled(not self.running and self.voice is not None and not why and self.pack() in ('', 'ready'))
@@ -1025,6 +995,10 @@ class HotkeyPage(QWizardPage):
 
     def test(self, side: str) -> None:
         from peresmeshnik.app import Controller
+        if self.w.tray.ctl.on:  # its own engines would load beside the running ones: a second set of models (GBs)
+            self.out.setText('Turn translation off first: the test loads its own engines, a second set of models beside '
+                             'the ones translating now.')
+            return
         s = self.w.s
         lang = s.their_lang if side == 'them' else s.my_lang
         sample = str(SAMPLES / f'{lang}.ogg')
@@ -1106,10 +1080,23 @@ DONE_LINUX = ('In your call app (Meet, Zoom, Telegram) choose the microphone <b>
               'Settings and this wizard are in the tray menu.')
 
 
+def changed(base, mine, now):
+    """`now` (the settings saved by now) with what differs between `base` and `mine`, field by field."""
+    from dataclasses import fields, is_dataclass
+    for f in fields(mine):
+        a, b = getattr(base, f.name), getattr(mine, f.name)
+        if is_dataclass(b):
+            changed(a, b, getattr(now, f.name))
+        elif a != b:
+            setattr(now, f.name, b)
+    return now
+
+
 class SetupWizard(QWizard):
     def __init__(self, tray):
         super().__init__()
         self.tray, self.s, self.key = tray, config.load(), ''
+        self.base = copy.deepcopy(self.s)  # as it opened: finish() writes only what its pages changed since
         self.setWindowTitle('Peresmeshnik setup')
         routed = LINUX or MACOS or WINDOWS
         self.pages = [LanguagesPage(self)] + ([DevicesPage(self)] if routed else []) + ([CallSoundPage(self)] if MACOS or WINDOWS else []) \
@@ -1146,6 +1133,6 @@ class SetupWizard(QWizard):
 
     def finish(self) -> None:
         self.voice_page.commit()  # before saving: the settings name the profile, not the draft
-        config.save(self.s)
+        config.save(changed(self.base, self.s, config.load()))  # a change in the tray meanwhile stays
         self.tray.sync()
         self.tray.restart()

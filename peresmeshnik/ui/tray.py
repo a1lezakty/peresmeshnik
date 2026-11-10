@@ -7,6 +7,7 @@ the state does.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import threading
 from pathlib import Path
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QHBoxLayout,
     QKeySequenceEdit,
     QLabel,
     QLineEdit,
@@ -38,6 +40,7 @@ ICONS = Path(__file__).resolve().parents[2] / 'assets' / 'icons'  # ponytail: re
 LANGS = {c: languages.label(c) for c in languages.LANGS}
 MIC_LABEL = 'Microphone'  # me -> them and the loopback while translation is off
 SIDES = {'them_to_me': 'Them → me', 'me_to_them': 'Me → them'}
+SENT = {'them_to_me': "the call's sound (the other person's voice)", 'me_to_them': 'your voice'}  # what a cloud side sends
 MAC, WIN = sys.platform == 'darwin', sys.platform == 'win32'
 BROWSER_NOTE = (f'A browser {"is taken" if MAC or WIN else "moves"} with all of its sound: YouTube in another tab is translated too. '
                 'For calls a separate browser is better.')
@@ -70,6 +73,7 @@ def capture():
 class Tray(QObject):
     call_apps = Signal(object)  # (apps playing, error): listed on a thread of its own
     pair_ready = Signal(object, str)  # (the settings with the new pair, '' or the error): its models, fetched on a thread
+    told = Signal(str)  # a tray message from that thread
 
     def __init__(self, ctl):
         super().__init__()
@@ -111,6 +115,7 @@ class Tray(QObject):
                 group.addAction(a)
             group.triggered.connect(self._lang_chosen)
         self.pair_ready.connect(self._pair_ready)
+        self.told.connect(self._told)
         self._pair = None  # the pair being fetched now: a later choice wins
         self._call_group = None
         self.call_menu = m.addMenu('Call app')
@@ -170,7 +175,7 @@ class Tray(QObject):
         self.live.setToolTip(why)
         self.hotkey_why = why
         if why and announce:
-            self.message(why)
+            self.message(f'No global hotkey: {why}')
 
     def message(self, text: str) -> None:
         if self.icon.isVisible():
@@ -268,11 +273,10 @@ class Tray(QObject):
             self.message(BROWSER_NOTE)
 
     def _engine_chosen(self, action) -> None:
+        """A side's engine from the menu: through switch_pair, so "local" downloads its models first (M-07)."""
         key, engine = action.data()
-        s = config.load()
-        setattr(s, key, engine)
-        config.save(s)
-        self.restart()
+        base, chosen = (self._pair[0], self._pair[3]) if self._pair else (config.load(), {})  # a change on its way: further
+        self.switch_pair(base.my_lang, base.their_lang, {**chosen, key: engine})
 
     def _lang_chosen(self, action) -> None:
         key, code = action.data()
@@ -283,40 +287,84 @@ class Tray(QObject):
         pair[key] = code
         if (pair['my_lang'], pair['their_lang']) == (base.my_lang, base.their_lang):  # the language it has: nothing to do
             return
-        self.switch_pair(pair['my_lang'], pair['their_lang'])
+        self.switch_pair(pair['my_lang'], pair['their_lang'], self._pair[3] if self._pair else None)
 
     def confirm(self, text: str) -> bool:
+        """Yes / No, in front: a tray app is not active by itself, its question would open behind the other windows."""
         from PySide6.QtWidgets import QMessageBox
-        return QMessageBox.question(None, 'Peresmeshnik', text) == QMessageBox.Yes
+        box = QMessageBox(QMessageBox.Question, 'Peresmeshnik', text, QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.No)
+        box.show()
+        box.raise_()
+        box.activateWindow()
+        if sys.platform == 'darwin':
+            from peresmeshnik.ui import macos
+            macos.front(int(box.winId()))
+        return box.exec() == QMessageBox.Yes
 
-    def switch_pair(self, my: str, their: str) -> None:
-        """Another pair without restarting the app: a local side that cannot run for it goes to the cloud (said), what a
-        local side does differently is said (a stock voice instead of the clone); its missing models are fetched first
-        (size and licenses said, restricted ones asked) while translation goes on with the old pair; then it is saved
-        and the sides are made again for it (Controller.set_languages)."""
+    def switch_pair(self, my: str, their: str, engines: dict[str, str] | None = None) -> None:
+        """Another pair, or another engine for a side (`engines`, the user's choice; 'subtitles': 'cloud' or 'local' is
+        Settings…' "Subtitles from the cloud", whose local ASR and MT may be missing), without restarting the app: a local
+        side that cannot run for the pair goes to the cloud only when the user says yes (its sound goes to Google), and
+        is remembered as moved (`forced_cloud`): a later pair it can run brings it back to local; a side the user sets to
+        local where it cannot run is said why and nothing changes. What a local side does differently is said (a stock
+        voice instead of the clone); the missing models are fetched first (size and licenses said, restricted ones asked)
+        while translation goes on as it is; then it is saved and the sides are made again (Controller.set_languages)."""
         from peresmeshnik import models
         from peresmeshnik.ui.overlay import font_note
         from peresmeshnik.ui.wizard import has_key
         s = config.load()
-        if (my, their) == (s.my_lang, s.their_lang):  # back to the pair it runs in: another's download is let go (unused)
+        chosen = dict(engines or {})
+        subs = chosen.pop('subtitles', None)
+        subs = None if subs is None or (subs == 'cloud') == s.cloud.subtitles else subs  # only a change
+        # "cloud" chosen for a side the app moved there: the user's own from now on (no move back). Saved with the rest,
+        # after the questions: a No keeps the mark
+        kept = [k for k, v in chosen.items() if v == getattr(s, k) and k in s.forced_cloud]
+        engines = {k: v for k, v in chosen.items() if v != getattr(s, k)}
+        if (my, their) == (s.my_lang, s.their_lang) and not engines and not subs:  # back to what runs: another's download is let go
+            if kept:  # nothing else changes: nothing to ask
+                s.forced_cloud = [k for k in s.forced_cloud if k not in kept]
+                config.save(s)
             self._pair = None
             self.status.setText(self.icon.toolTip().removeprefix('Peresmeshnik: ')[:120])  # the last state, as before it
             self.sync()
             return
+        pair = f'{languages.name(my)} ⇄ {languages.name(their)}'
+        name = ', '.join(([pair] if (my, their) != (s.my_lang, s.their_lang) else []) + [f'{SIDES[k]}: {v}' for k, v in engines.items()]
+                         + ([f'{subs} subtitles'] if subs else []))
         s.my_lang, s.their_lang = my, their
-        name = f'{languages.name(my)} ⇄ {languages.name(their)}'
-        notes, moved = [], []
+        if subs:
+            s.cloud.subtitles = subs == 'cloud'
+        for key, engine in engines.items():
+            setattr(s, key, engine)
+        s.forced_cloud = [k for k in s.forced_cloud if k not in [*engines, *kept]]  # the user's own: no move back
+        notes, moved, back, why = [], [], [], {}
         for key in languages.SIDES:
             d = languages.direction(s, key)
+            if getattr(s, key) == 'local' and not d.local and key in engines:
+                self.message(f'{SIDES[key]} cannot run on this computer for {pair} ({"; ".join(d.why)}): not changed')
+                self.sync()
+                return
             if getattr(s, key) == 'local' and not d.local:
                 setattr(s, key, 'cloud')
                 moved.append(key)
-                notes.append(f'{SIDES[key]} goes to the cloud ({"; ".join(d.why)})')
-            elif getattr(s, key) == 'local':
+                why[key] = '; '.join(d.why)
+                notes.append(f'{SIDES[key]} goes to the cloud ({why[key]})')
+            elif getattr(s, key) == 'cloud' and key in s.forced_cloud and d.local:  # the app moved it: this pair runs here
+                setattr(s, key, 'local')
+                back.append(key)
+                notes.append(f'{SIDES[key]} is back on this computer')
+            if getattr(s, key) == 'local':
                 notes += [f'{SIDES[key]}: {n}' for n in d.notes]
         if 'cloud' in (s.them_to_me, s.me_to_them) and not has_key(s):
             self.message(f'{name}: not changed — it needs the cloud ({"; ".join(notes) or "chosen"}) and no Gemini key is '
                          'set (Settings…)')
+            self.sync()
+            return
+        if moved and not self.confirm(
+                f'{name}: ' + ' '.join(f'{SIDES[k]} cannot run on this computer ({why[k]}).' for k in moved)
+                + f' In the cloud {" and ".join(SENT[k] for k in moved)} {"go" if len(moved) > 1 else "goes"} to Google '
+                '(Gemini Live). Switch to the cloud for this pair? A pair that runs here brings it back.'):
             self.sync()
             return
         todo = [m for m in map(models.get, languages.needed_models(s)) if not models.is_fetched(m)]
@@ -327,39 +375,59 @@ class Tray(QObject):
                                            f'you as the user): {", ".join(restricted)}. Download and accept them?'):
             self.sync()
             return
+        extra = [m for m in map(models.get, languages.optional_models(s)) if not models.is_fetched(m)]
+        if extra and not self.confirm(  # a cloud side's fallback voice nobody chose: asked apart, a No changes nothing else
+                f'{name}: when the cloud fails, a cloud direction goes on with the stock voice '
+                f'{", ".join(f"{m.id} ({m.license}, {m.license_url})" for m in extra)}, under a restricted license '
+                '(noncommercial use only, it binds you as the user). Download and accept it? No: that direction stops '
+                'until the cloud is back.'):
+            extra = []
+        lic = ', '.join(dict.fromkeys(p.license for m in todo + extra for p in models.parts(m)))
         if note := font_note([my, their]):
             notes.append(note)
-        self._pair = s, moved
-        if not todo:
+        self._pair = s, moved, back, {**engines, **{k: getattr(s, k) for k in kept}, **({'subtitles': subs} if subs else {})}
+        if not todo and not extra:
             if notes:
                 self.message(f'{name}: ' + '. '.join(notes))
             return self._pair_ready(s, '')
-        self.message(f'{name}: downloading {sum(map(models.size, todo)) / 1e6:,.0f} MB ({lic}); translation goes on with the '
-                     'old pair meanwhile' + ''.join(f'. {n}' for n in notes))
+        self.message(f'{name}: downloading {sum(map(models.size, todo + extra)) / 1e6:,.0f} MB ({lic}); translation goes on as it is '
+                     'meanwhile' + ''.join(f'. {n}' for n in notes))
         self.status.setText(f'downloading the models for {name}')  # the Translation check stays as it is
 
         def work():
             try:
                 for m in todo:
                     models.fetch(m.id)  # one download per model at a time (the wizard may fetch it too)
-                self.pair_ready.emit(s, '')
-            except Exception as e:  # the network: the .part files stay, choosing the pair again resumes them
-                self.pair_ready.emit(s, str(e))
+            except Exception as e:  # the network: the .part files stay, choosing it again resumes them
+                return self.pair_ready.emit(s, str(e))
+            for m in extra:  # optional: its failure does not hold the pair back
+                try:
+                    models.fetch(m.id)
+                except Exception as e:
+                    self.told.emit(f'{name}: the fallback voice {m.id} did not download ({e}): when the cloud fails, that '
+                                   'direction stops until it is back; choosing the pair again resumes the download')
+            self.pair_ready.emit(s, '')
         threading.Thread(target=work, name='pair-fetch', daemon=True).start()
+
+    def _told(self, text: str) -> None:
+        self.message(text)
 
     def _pair_ready(self, s: config.Settings, err: str) -> None:
         if not self._pair or s is not self._pair[0]:  # another pair was chosen since
             return
-        moved, self._pair = self._pair[1], None
+        (_, moved, back, engines), self._pair = self._pair, None
         name = f'{languages.name(s.my_lang)} ⇄ {languages.name(s.their_lang)}'
         if err:
             self.set_state(f'error: {name} not changed: the download failed ({err}); choose it again to resume')
             self.sync()
             return
-        saved = config.load()  # the pair, and the sides it moved to the cloud; the rest as saved now (changed meanwhile)
+        saved = config.load()  # the pair, and the sides it or the user moved; the rest as saved now (changed meanwhile)
         saved.my_lang, saved.their_lang = s.my_lang, s.their_lang
-        for key in moved:
-            setattr(saved, key, 'cloud')
+        for key in moved + back + [k for k in engines if k in languages.SIDES]:
+            setattr(saved, key, getattr(s, key))
+        if 'subtitles' in engines:
+            saved.cloud.subtitles = s.cloud.subtitles
+        saved.forced_cloud = [k for k in languages.SIDES if k in moved or (k in saved.forced_cloud and k not in back + list(engines))]
         config.save(saved)
         self.sync()
         self.ctl.set_languages()  # its control thread knows whether translation is on (a start may be under way)
@@ -494,8 +562,16 @@ class SettingsDialog(QDialog):
         f.addRow('Cloud', self.subtitles)
         self.key = QLineEdit()
         self.key.setEchoMode(QLineEdit.Password)
-        self.key.setPlaceholderText('saved' if key_file(s.cloud).exists() else 'Gemini API key (aistudio.google.com)')
-        f.addRow('Gemini key', self.key)
+        self.forget = QPushButton('Forget the key')  # an empty field keeps it: this removes the app's own file, on Save
+        self.forget.clicked.connect(self.forget_key)
+        self.forgotten = False
+        self._key_state()
+        row = QWidget()
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.key)
+        lay.addWidget(self.forget)
+        f.addRow('Gemini key', row)
         self.threads = QSpinBox()
         self.threads.setRange(1, 8)
         self.threads.setValue(s.local.threads)
@@ -510,11 +586,10 @@ class SettingsDialog(QDialog):
         f.addRow('My voice (local clone)', self.voice)
         self.hotkey = QKeySequenceEdit(QKeySequence(s.ui.hotkey))
         f.addRow('Hotkey: translation ⇄ live', self.hotkey)
-        if sys.platform.startswith('linux'):
-            self.headphones = device_combo('sinks', s.ui.headphones)
-            self.mic = device_combo('sources', s.ui.mic)
-            f.addRow('Headphones', self.headphones)
-            f.addRow(MIC_LABEL, self.mic)
+        self.headphones = device_combo('sinks', s.ui.headphones)  # every OS: the wizard's list (selftest.devices)
+        self.mic = device_combo('sources', s.ui.mic)
+        f.addRow('Headphones', self.headphones)
+        f.addRow(MIC_LABEL, self.mic)
         self.note = QLabel()
         self.note.setWordWrap(True)
         f.addRow(self.note)
@@ -523,15 +598,33 @@ class SettingsDialog(QDialog):
         b.rejected.connect(self.reject)
         f.addRow(b)
 
+    def _key_state(self) -> None:
+        env, mine = os.environ.get('GEMINI_API_KEY', '').strip(), not self.s.cloud.key_file  # cloud.api_key's order
+        saved = key_file(self.s.cloud).exists()
+        d = config.config_dir()
+        old = d.with_name(d.name.lower()) / 'gemini-key'  # the lowercase folder api_key reads too (Linux)
+        old = old if mine and not saved and old.is_file() else None
+        self.key.setPlaceholderText('from $GEMINI_API_KEY' if env else f'from {old}' if old else 'forgotten on Save'
+                                    if self.forgotten else 'saved' if saved else 'Gemini API key (aistudio.google.com)')
+        self.forget.setEnabled(saved and mine and not env and not self.forgotten)
+        self.forget.setToolTip('The key comes from the environment ($GEMINI_API_KEY): unset it there.' if env else
+                               f'The key is read from the old folder: remove {old} there.' if old else '' if mine else
+                               f'The key is read from your own file {self.s.cloud.key_file}: not removed here.')
+
+    def forget_key(self) -> None:
+        self.forgotten = True  # Cancel keeps it
+        self._key_state()
+
     def save(self) -> None:
         s = self.s
         pair = self.my_lang.currentData(), self.their_lang.currentData()
         if pair[0] == pair[1]:
             self.note.setText('Choose two different languages.')
             return
-        for key, c in self.engine.items():
-            setattr(s, key, c.currentText())
-        s.cloud.subtitles = self.subtitles.isChecked()
+        # only what the user changed (a side the app moved shows "cloud": not a choice), saved with the pair by switch_pair
+        engines = {key: c.currentText() for key, c in self.engine.items() if c.currentText() != getattr(s, key)}
+        if self.subtitles.isChecked() != s.cloud.subtitles:  # local subtitles need the local ASR and MT: fetched first
+            engines['subtitles'] = 'cloud' if self.subtitles.isChecked() else 'local'
         s.local.threads = self.threads.value()
         s.local.voice = self.voice.currentData()
         combo = self.hotkey.keySequence().toString(QKeySequence.PortableText)
@@ -540,14 +633,15 @@ class SettingsDialog(QDialog):
                 self.note.setText(f'Hotkey not changed: {why}')
                 return
             s.ui.hotkey = combo
-        if hasattr(self, 'headphones'):
-            s.ui.headphones, s.ui.mic = self.headphones.currentData(), self.mic.currentData()
+        s.ui.headphones, s.ui.mic = self.headphones.currentData(), self.mic.currentData()
         if new_key := bool(self.key.text().strip()):
             save_key(self.key.text(), s.cloud)
-        if new_key or s != config.load():  # the pair as it was: a new one is saved once its models are here (switch_pair)
+        elif self.forgotten:
+            key_file().unlink(missing_ok=True)  # the app's own file only (its button is off for one's own key_file, env)
+        if new_key or self.forgotten or s != config.load():  # the pair and the engines as they were: switch_pair saves them, models first
             config.save(s)
             self.tray.sync()
             self.tray.restart()
-        if pair != (s.my_lang, s.their_lang):
-            self.tray.switch_pair(*pair)
+        if pair != (s.my_lang, s.their_lang) or engines:
+            self.tray.switch_pair(*pair, engines)
         self.accept()

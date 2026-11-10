@@ -33,14 +33,14 @@ class TextTts:
 
 
 class Run:
-    def __init__(self, fake: FakeGemini, after_s: float = 6.0, make_tts=TextTts, subtitles=False):
+    def __init__(self, fake: FakeGemini, after_s: float = 6.0, make_tts=TextTts, subtitles=False, voice_note='', **cloud):
         self.fake, self.states, self.got = fake, [], []
         self.fb = Fallback(
             'them', 'ru', subtitles,
-            make_cloud=lambda: GeminiDirection('en', 'ru', cfg=Cloud(fallback_after_s=after_s), client=fake.client(),
+            make_cloud=lambda: GeminiDirection('en', 'ru', cfg=Cloud(fallback_after_s=after_s, **cloud), client=fake.client(),
                                                gate=_Gate(), fail_fast=True),
             make_local=lambda tts: LocalDirection(EnergyVad(), WordAsr(), UpperMt(), tts, 'en', 'ru'),
-            make_tts=make_tts, preload=True, on_state=self.states.append)
+            make_tts=make_tts, preload=True, on_state=self.states.append, voice_note=voice_note)
         assert self.fb.cloud.ready.wait(10)
         self.t = threading.Thread(target=self._consume, daemon=True)
         self.t.start()
@@ -96,6 +96,37 @@ def test_dropped_connection_goes_local_without_repeating(fake):
         r.fb.close()
         assert len(r.states) == n  # closing says nothing
         assert TextTts.said == ['W0 W1 W2'], TextTts.said  # B (its three words) locally; A not again
+    finally:
+        r.close()
+
+
+def test_the_stock_voice_instead_of_the_clone_says_why(fake, monkeypatch):
+    """H-09 (review of PR #22): me -> them falls back to a stock voice because the clone is not ready: the first fallback
+    says why the voice is not the user's own (once)."""
+    from pathlib import Path
+
+    from peresmeshnik import config, languages, models
+    from peresmeshnik.local import clone
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
+    monkeypatch.setattr(models, 'path', lambda i: Path('/models') / i)
+    monkeypatch.setattr(clone, 'voice_cmd', lambda: ['voice-runner'])
+    s, made = config.Settings(), {}
+    s.me_to_them, s.my_lang, s.their_lang = 'cloud', 'ru', 'en'  # the clone chosen, no voice enrolled
+    monkeypatch.setattr(fallback, 'Fallback', lambda *a, **k: made.update(k))
+    fallback.make('me', s, 'key')
+    note = made['voice_note']
+    assert 'a stock voice speaks for you' in note and 'enrolled' in note and made['preload'], made
+    s.local.voice = 'mine'  # ready: the clone itself, nothing to say
+    fallback.make('me', s, 'key')
+    assert made['voice_note'] == ''
+    r = Run(fake, voice_note=note)  # the real Fallback (imported above)
+    try:
+        r.say(np.concatenate([tone(1.2), silence(1.0)]))
+        fake.down = True
+        fake.drop()
+        r.say(np.concatenate([tone(0.6), silence(1.5)]))
+        notes = [x for x in r.states if x.startswith('note')]
+        assert len(notes) == 1 and notes[0].endswith('; ' + note), r.states
     finally:
         r.close()
 
@@ -395,6 +426,36 @@ def test_a_cloud_that_closes_each_session_at_once_goes_local(monkeypatch):
         r.say(silence(3.0))
         assert r.fb.mode == 'local' and f.connections - n0 <= 4, (f.connections - n0, r.states)
         assert 'quota' in r.states[-1] and r.fb.switched[0][1] - t0 < 2.0, r.states
+    finally:
+        r.close()
+
+
+def test_short_sessions_not_in_a_row_keep_the_cloud():
+    """M-11 (review of PR #22): a session lost right after it opened now and then, with sessions that lived their
+    time (a planned switch, reconnect_s) in between, is not "3 in a row": the side stays in the cloud."""
+    import asyncio
+    import json
+
+    class ClosesSome(FakeGemini):
+        closes: set = set()
+
+        async def _serve(self, ws):
+            if self.connections + 1 not in self.closes:
+                return await super()._serve(ws)
+            json.loads(await ws.recv())
+            self.connections += 1
+            await ws.send(json.dumps({'setupComplete': {}}))
+            await asyncio.sleep(0.05)
+            await ws.close(1011, 'Internal error')
+    f = ClosesSome(lag=0.3)
+    r = Run(f, reconnect_s=1.0)
+    try:
+        r.say(silence(0.5))
+        f.closes = {f.connections + 1, f.connections + 3, f.connections + 5}  # lost at once, lives, lost, lives...
+        n0 = f.connections
+        f.drop()
+        r.say(silence(5.0))
+        assert f.connections - n0 >= 6 and r.fb.mode == 'cloud', (f.connections - n0, r.states)
     finally:
         r.close()
 

@@ -124,17 +124,18 @@ class _Noted:
 class Fallback:
     """`make_cloud()`: a fail_fast GeminiDirection (opens its session); `make_local(tts)`: a LocalDirection speaking
     through `tts` (raises when its models are missing); `make_tts()`: the side's local voice; `voice_why`: why there is
-    none here ('' = there is); `preload`: make it now (Piper), not at the first fallback (the clone, ~4 GB)."""
+    none here ('' = there is); `voice_note`: why it is not the user's own (said at the first fallback); `preload`: make
+    it now (Piper), not at the first fallback (the clone, ~4 GB)."""
     supports_live = False
 
     def __init__(self, name: str, tgt: str, cloud_subtitles: bool, make_cloud, make_local, make_tts, voice=None,
-                 voice_why: str = '', preload: bool = False, on_state=lambda text: None):
+                 voice_why: str = '', preload: bool = False, on_state=lambda text: None, voice_note: str = ''):
         self.name, self.tgt, self.voice, self.on_state = name, tgt, voice, on_state
         self.cloud_subtitles, self.make_cloud, self.make_local = cloud_subtitles, make_cloud, make_local
         self.muted = Muted(make_tts)
         self.muted.want = self._want
         self.muted.on_error = lambda e: self._q.put((self, e))
-        self.voice_why = voice_why
+        self.voice_why, self.voice_note = voice_why, voice_note
         self.mode = 'cloud'  # 'cloud' | 'local' (the local voice speaks) | 'down' (no local voice here)
         self._lock = threading.Lock()  # mode, notes, input, targets: feed (capture), the local MT and speech, events
         self._made: collections.deque = collections.deque(maxlen=64)  # [translation, time, say it] not spoken yet
@@ -337,7 +338,9 @@ class Fallback:
                 local.close()
             return
         self._say(again)  # releases the lock
-        self.on_state(f'note: {ARROW[self.name]}: the cloud failed ({why}); translating locally until it answers again')
+        note, self.voice_note = self.voice_note, ''  # once
+        self.on_state(f'note: {ARROW[self.name]}: the cloud failed ({why}); translating locally until it answers again'
+                      + (f'; {note}' if note else ''))
 
     def _down(self, reason: str, what: str) -> None:
         self.mode = 'down'
@@ -484,6 +487,7 @@ def make(name: str, s, key: str, on_state=lambda text: None, on_respawn=lambda e
     src, tgt = d.src, d.tgt
     tts_id, why = local_voice(name, s)
     voice, piper = None, bool(tts_id) and tts_id != s.local.clone
+    note = _clone_not_ready(s, tgt) if piper and d.voice == 'clone' else ''  # a stock voice instead of the clone: why
     if tts_id == s.local.clone:
         from peresmeshnik import voice as profiles
         try:
@@ -511,4 +515,5 @@ def make(name: str, s, key: str, on_state=lambda text: None, on_respawn=lambda e
         name, tgt, languages.cloud_subtitles(s, d.side),
         make_cloud=lambda: GeminiDirection(src, tgt, key, s.cloud, fail_fast=True),
         make_local=local,
-        make_tts=tts, voice=voice, voice_why=why, preload=piper, on_state=on_state)
+        make_tts=tts, voice=voice, voice_why=why, preload=piper, on_state=on_state,
+        voice_note=f'your voice is not ready ({note}), a stock voice speaks for you' if note else '')

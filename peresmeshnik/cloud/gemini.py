@@ -258,6 +258,8 @@ class _Link:
                         if self.d.fail_fast:
                             raise CloudDown(f'{self.kind}: {self.lost(old)}, {self.short} times right after it opened')
                         self.retry_at = time.monotonic() + min(30, 2 ** self.short)  # not 5 new sessions a second
+                else:  # a planned switch (reconnect_s, GoAway): the old one lived its time, the losses are not in a row
+                    self.short = 0
         c = self.conn
         self.backlog.append((t, blk))
         if c.task.done() or c.failed:  # dropped: keep the audio (up to 30 s) for the next connection

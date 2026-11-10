@@ -310,11 +310,15 @@ class Tray(QObject):
         from peresmeshnik.ui.overlay import font_note
         from peresmeshnik.ui.wizard import has_key
         s = config.load()
-        if kept := [k for k, v in (engines or {}).items() if v == getattr(s, k) and k in s.forced_cloud]:
-            s.forced_cloud = [k for k in s.forced_cloud if k not in kept]  # the cloud the app chose, now the user's too
-            config.save(s)
-        engines = {k: v for k, v in (engines or {}).items() if v != getattr(s, k)}
+        chosen = dict(engines or {})
+        # "cloud" chosen for a side the app moved there: the user's own from now on (no move back). Saved with the rest,
+        # after the questions: a No keeps the mark
+        kept = [k for k, v in chosen.items() if v == getattr(s, k) and k in s.forced_cloud]
+        engines = {k: v for k, v in chosen.items() if v != getattr(s, k)}
         if (my, their) == (s.my_lang, s.their_lang) and not engines:  # back to what runs: another's download is let go
+            if kept:  # nothing else changes: nothing to ask
+                s.forced_cloud = [k for k in s.forced_cloud if k not in kept]
+                config.save(s)
             self._pair = None
             self.status.setText(self.icon.toolTip().removeprefix('Peresmeshnik: ')[:120])  # the last state, as before it
             self.sync()
@@ -324,7 +328,7 @@ class Tray(QObject):
         s.my_lang, s.their_lang = my, their
         for key, engine in engines.items():
             setattr(s, key, engine)
-            s.forced_cloud = [k for k in s.forced_cloud if k != key]  # the user's own choice: a pair does not move it back
+        s.forced_cloud = [k for k in s.forced_cloud if k not in [*engines, *kept]]  # the user's own: no move back
         notes, moved, back, why = [], [], [], {}
         for key in languages.SIDES:
             d = languages.direction(s, key)
@@ -364,7 +368,7 @@ class Tray(QObject):
             return
         if note := font_note([my, their]):
             notes.append(note)
-        self._pair = s, moved, back, engines
+        self._pair = s, moved, back, {**engines, **{k: getattr(s, k) for k in kept}}
         if not todo:
             if notes:
                 self.message(f'{name}: ' + '. '.join(notes))
@@ -580,7 +584,8 @@ class SettingsDialog(QDialog):
         if pair[0] == pair[1]:
             self.note.setText('Choose two different languages.')
             return
-        engines = {key: c.currentText() for key, c in self.engine.items()}  # saved with the pair, once its models are here
+        # only what the user changed (a side the app moved shows "cloud": not a choice), saved with the pair by switch_pair
+        engines = {key: c.currentText() for key, c in self.engine.items() if c.currentText() != getattr(s, key)}
         s.cloud.subtitles = self.subtitles.isChecked()
         s.local.threads = self.threads.value()
         s.local.voice = self.voice.currentData()
@@ -597,6 +602,6 @@ class SettingsDialog(QDialog):
             config.save(s)
             self.tray.sync()
             self.tray.restart()
-        if pair != (s.my_lang, s.their_lang) or any(v != getattr(s, k) for k, v in engines.items()):
+        if pair != (s.my_lang, s.their_lang) or engines:
             self.tray.switch_pair(*pair, engines)
         self.accept()

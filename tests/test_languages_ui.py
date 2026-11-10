@@ -733,3 +733,40 @@ def test_languages_page_says_what_a_cloud_side_falls_back_on(tmp_path, monkeypat
     assert 'If the cloud fails' not in page.why['them_to_me'].text()  # it goes on here: nothing to warn about
     page.subtitles.setChecked(True)
     assert 'If the cloud fails, it stops until it is back' in page.why['them_to_me'].text()
+
+
+def test_settings_window_keeps_the_mark_of_a_side_the_app_moved(tmp_path, monkeypatch):
+    """FIXES-b 1 (H-02 through Settings…): the settings window hands switch_pair only the engines the user changed. Its
+    combo showing "cloud" for a side the app moved is not the user's choice: the pair it runs again brings it back; the
+    other side's engine changed keeps the mark; a question answered No leaves the mark as it was."""
+    from peresmeshnik.ui import tray as tray_mod
+    s = wire(config.Settings(my_lang='de', their_lang='ja', them_to_me='local', me_to_them='local'))
+    s.local.clone = 'piper'
+    t, calls = tray_with(monkeypatch, tmp_path, s)
+    t.switch_pair('de', 'fr')  # both sides moved (the question answered Yes)
+    assert wait_for(lambda: calls) and sorted(config.load().forced_cloud) == ['me_to_them', 'them_to_me']
+    d = tray_mod.SettingsDialog(t)
+    d.their_lang.setCurrentIndex(d.their_lang.findData('ja'))
+    d.save()
+    assert wait_for(lambda: len(calls) == 2)
+    got = config.load()
+    assert (got.their_lang, got.them_to_me, got.me_to_them, got.forced_cloud) == ('ja', 'local', 'local', [])
+
+    t.switch_pair('de', 'fr')
+    assert wait_for(lambda: len(calls) == 3) and len(config.load().forced_cloud) == 2
+    got = config.load()
+    got.cloud.subtitles = True  # nothing local to download for a cloud side
+    config.save(got)
+    d = tray_mod.SettingsDialog(t)
+    d.engine['me_to_them'].setCurrentText('local')  # not possible for de -> fr: said, nothing changes
+    d.save()
+    settle(0.1)
+    assert sorted(config.load().forced_cloud) == ['me_to_them', 'them_to_me']
+
+    asked = []
+    t.confirm = lambda text: asked.append(text) or False
+    got = wire(config.load())
+    got.my_lang, got.their_lang, got.them_to_me, got.me_to_them, got.forced_cloud = 'de', 'ja', 'cloud', 'local', ['them_to_me']
+    config.save(got)
+    t.switch_pair('de', 'fr', {'them_to_me': 'cloud'})  # the user's "cloud" for the moved side, and a pair that asks: No
+    assert asked and config.load().forced_cloud == ['them_to_me'] and config.load().their_lang == 'ja'

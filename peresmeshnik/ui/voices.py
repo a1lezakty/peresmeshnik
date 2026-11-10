@@ -136,9 +136,10 @@ class ConfirmBox(QWidget):
 
 class VoicesDialog(QDialog):
     """The tray's "Voices…": the list, Delete, Delete all voices of people you talk to, Confirm my voice.
-    `on_change()`: after a delete or a confirmation (the tray restarts translation if my voice changed)."""
+    `on_change(mine)`: after a delete or a confirmation, `mine` when it was my voice (the tray saves the settings'
+    voice and restarts translation)."""
 
-    def __init__(self, s: config.Settings, on_change=lambda: None, root=None):
+    def __init__(self, s: config.Settings, on_change=lambda mine: None, root=None):
         super().__init__()
         self.s, self.on_change, self.root = s, on_change, root
         self.setWindowTitle('Peresmeshnik: voices')
@@ -198,7 +199,7 @@ class VoicesDialog(QDialog):
         if v.meta['kind'] == 'me' and self.s.local.voice == v.name:
             self.s.local.voice = ''  # the me side says "record your voice" instead of failing on a missing folder
         self.refresh()
-        self.on_change()
+        self.on_change(v.meta['kind'] == 'me')
 
     def delete_all_theirs(self) -> None:
         theirs = [v for v in self.voices if v.meta['kind'] == 'them']
@@ -206,14 +207,14 @@ class VoicesDialog(QDialog):
             for v in theirs:
                 voice.discard(v.name, self.root)
             self.refresh()
-            self.on_change()
+            self.on_change(False)
 
     def start_confirm(self) -> None:
         v = self.selected()
         if v is None or self.confirm is not None:
             return
         self.confirm = ConfirmBox(self.s, v.name, voice.how_to_confirm(v.meta), self.root, self)
-        self.confirm.confirmed.connect(lambda c: (self.refresh(), self.on_change()))
+        self.confirm.confirmed.connect(lambda c: (self.refresh(), self.on_change(True)))
         self.lay.insertWidget(self.lay.count() - 1, self.confirm)
 
 

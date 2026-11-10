@@ -32,17 +32,17 @@ def root(tmp_path, monkeypatch):
 def test_list_and_delete(root):
     s, changed = config.Settings(), []
     s.local.voice = 'me'
-    d = voices.VoicesDialog(s, lambda: changed.append(1))
+    d = voices.VoicesDialog(s, changed.append)
     rows = [d.list.item(i).text() for i in range(d.list.count())]
     assert len(rows) == 3 and rows[0].startswith('Your voice: ru, 40 s, not confirmed yet'), rows
     assert any(r.startswith('Анна: someone you talk to, en, 9 s') for r in rows)
     d.list.setCurrentRow(0)
     assert d.confirm_button.isEnabled() and d.delete_theirs.isEnabled()
     d.delete_all_theirs()
-    assert [v.meta['kind'] for v in voice.profiles()] == ['me'] and changed == [1] and not d.delete_theirs.isEnabled()
+    assert [v.meta['kind'] for v in voice.profiles()] == ['me'] and changed == [False] and not d.delete_theirs.isEnabled()
     d.list.setCurrentRow(0)
     d.delete()
-    assert voice.profiles() == [] and s.local.voice == '' and changed == [1, 1]
+    assert voice.profiles() == [] and s.local.voice == '' and changed == [False, True]
     assert d.list.item(0).text().startswith('No voices yet')
 
 
@@ -108,3 +108,43 @@ def test_wizard_voice_page_confirms_the_take(tmp_path, monkeypatch):
     assert page.isComplete() and voice.mine('me.new')
     page.commit()
     assert voice.mine('me').meta['consent']['how'] == 'import+mic-match' and s.local.voice == 'me'
+
+
+def test_tray_voices_and_keeping_a_contacts_voice(tmp_path, monkeypatch):
+    """The tray: "Voices…" opens the window (my voice deleted there: the settings forget it); "Keep the voice of the
+    person in this call…" only while translating with S2's them_voice(), and only through the agreement dialog."""
+    from peresmeshnik.ui import tray as tray_mod
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    monkeypatch.setattr(config, 'config_dir', lambda: tmp_path)
+    monkeypatch.setattr(voice, 'voices_dir', lambda: tmp_path / 'voices')
+    monkeypatch.setattr(QMessageBox, 'question', lambda *a, **k: QMessageBox.StandardButton.Yes)
+    s = config.Settings()
+    s.local.voice = voice.save(*speech(), 'me', 'ru', 'text').name
+    config.save(s)
+    live = [None]
+    ctl = type('Ctl', (), {'live': False, 'on': True, 'them_voice': lambda self: live[0]})()
+    t = tray_mod.Tray(ctl)
+    t.restart = lambda: None
+    said = []
+    t.message = said.append
+    assert t.remember.isVisible() and [a.text() for a in t.menu.actions()].count('Voices…') == 1
+    t.open_voices()
+    d = t.windows[-1]
+    d.list.setCurrentRow(0)
+    d.delete()
+    assert config.load().local.voice == '' and voice.profiles() == []
+    t.remember_voice()
+    assert said == ['Their voice is not ready yet: it takes a few seconds of their speech.']
+    live[0] = ({'pocket-tts-en': (np.ones(4, np.float32), 'sha')}, 'en', 12.0)
+
+    def agree(dialog):
+        dialog.name.setText('Bob')
+        dialog.agreed.setChecked(True)
+        return True
+    monkeypatch.setattr(voices.RememberDialog, 'exec', agree)
+    t.remember_voice()
+    (v,) = voice.profiles()
+    assert v.meta['kind'] == 'them' and v.meta['name'] == 'Bob' and said[-1].startswith('Kept')
+    t.ctl = type('Ctl', (), {'live': False, 'on': False})()  # no S2 hook, translation off: not offered
+    t.sync()
+    assert not t.remember.isVisible()

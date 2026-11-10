@@ -541,6 +541,9 @@ class Side:
         else:  # Gemini speaks; the local path makes the subtitles and speaks when the cloud fails (cloud/fallback.py)
             self.directions.append((self._cloud(s), True, True))
         d, captions, speech = self.directions[0]
+        if getattr(out, 'to_call', False) and getattr(getattr(d, 'tts', None), 'them', False):  # RESEARCH-clone 6.2
+            d.close()
+            raise RuntimeError("the other person's cloned voice is heard only in your headphones, never in the call")
         if name == 'me' and not getattr(d, 'supports_live', False):  # "translation <-> live voice" crossfaded (S2)
             from peresmeshnik.audio.mic import LiveSwitch
             self.directions[0] = (LiveSwitch(d), captions, speech)
@@ -554,7 +557,9 @@ class Side:
         kw = {'asr': pair.asr, 'mt': pair.mt, 'settings': s}  # languages.direction's ids: its '*' and NVIDIA GPU rules
         if self.name == 'them':
             from peresmeshnik.pipeline import MAX_LAG_S
+            from peresmeshnik.voices import live
             d = make_local(self.src, self.tgt, tts=pair.tts, max_lag_s=MAX_LAG_S, **kw)  # the queue policy: subtitles keep the rest
+            return live.attach(self._stock(d, s), s, self.echo)  # in their own voice once it is made (S2)
         elif pair.voice == 'stock':  # a stock voice: chosen where the clone falls behind (an 8 GB Mac, BENCH), or the
             d = make_local(self.src, self.tgt, tts=pair.tts, **kw)  # clone cannot speak the language
         else:
@@ -889,6 +894,14 @@ class Controller:
             from peresmeshnik.audio.virtual_mic_windows import VirtualMic
             self._vmic = VirtualMic()
         return self._vmic
+
+    def them_voice(self):
+        """The voice of the person in this call for the tray's "keep their voice" (voices/live.LiveVoice.them()): None
+        while there is none."""
+        for x in list(self.sides):
+            if (live := getattr(getattr(x.directions[0][0], 'tts', None), 'live', None)) is not None:
+                return live.them()
+        return None
 
     def set_translation(self, on: bool) -> concurrent.futures.Future:
         self.wanted = on  # the user's choice: a sound server back does not undo an "off" made while it was gone

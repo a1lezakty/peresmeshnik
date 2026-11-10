@@ -17,6 +17,7 @@ NAME = macos.BLACKHOLE
 
 class VirtualMic(_VirtualMic):
     """AudioOut into BlackHole 2ch; BlackHoleMissing (with how to install it) when it is not there."""
+    to_call = True  # what plays here goes into the call (app.Side: never the other person's cloned voice)
     name = NAME
     reopen = (7,)  # the helper ends with 7 when BlackHole 2ch changes its rate: the next one plays at the new rate
 

@@ -19,6 +19,7 @@ NAME = windows.CABLE_IN
 class VirtualMic(_VirtualMic):
     """AudioOut into CABLE Input; CableMissing (with how to install it) when VB-Cable is not there. `call_mic` is the
     endpoint the call app records (CABLE Output)."""
+    to_call = True  # what plays here goes into the call (app.Side: never the other person's cloned voice)
     name = NAME
     reopen = (7,)  # the helper ends with 7 when Windows resets the stream (a format change of the cable): play again
 

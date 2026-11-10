@@ -40,6 +40,7 @@ def _remove_stale() -> None:
 
 class VirtualMic:
     """AudioOut into "Peresmeshnik Mic"."""
+    to_call = True  # what plays here goes into the call (app.Side: never the other person's cloned voice)
     name = NAME
     reopen: tuple[int, ...] = ()  # exit codes after which the next play() just opens a new stream (macOS: the rate changed)
 

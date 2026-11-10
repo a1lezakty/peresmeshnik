@@ -80,6 +80,9 @@ class Local:
         'tr': 'piper-tr_TR-dfki-medium', 'ko': 'piper-ko_KR-kss-medium', 'ja': 'piper-ja_JP-hi_fi_captain-medium'})
     clone: str = 'xtts-v2'  # clone TTS for me -> them
     voice: str = ''  # enrolled voice name ('' = none yet)
+    # them -> me speaks in the voice of the person talking, made from their first seconds of speech, only in my
+    # headphones (voices/live.py); off: the stock voice
+    their_voice: bool = True
     # them -> me: a long clause's stable words get a translated subtitle while it is still said (BENCH stage 5)
     partial_mt: bool = True
     # the echo gates look for our own speech coming back this late, s (a call's round trip; up to 2.8: the reference

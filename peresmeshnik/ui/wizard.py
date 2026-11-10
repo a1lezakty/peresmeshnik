@@ -47,6 +47,7 @@ from peresmeshnik.languages import (
 )
 from peresmeshnik.languages import nvidia as gpu  # tests patch it here
 from peresmeshnik.local import voicepack
+from peresmeshnik.remote import pairing
 from peresmeshnik.ui.overlay import font_note
 from peresmeshnik.ui.tray import LANGS, MIC_LABEL, SIDES, device_combo, save_key
 
@@ -153,6 +154,10 @@ class LanguagesPage(QWizardPage):
                       'use a paid key for real calls. Local engines keep everything on this computer.')
         note.setWordWrap(True)
         f.addRow(note)
+        from peresmeshnik.ui.server import PairBox
+        self.server = PairBox()  # shown while a side runs on the user's own server (remote)
+        self.server.paired.connect(lambda _: self.refresh())
+        f.addRow('Server', self.server)
         self.err = QLabel()
         f.addRow(self.err)
         self.forced = set(s.forced_cloud)  # sides moved to the cloud for a pair they cannot run: a pair they can brings them back
@@ -186,6 +191,12 @@ class LanguagesPage(QWizardPage):
                 c.blockSignals(False)
                 setattr(s, key, c.currentText())
                 (self.forced.add if move else self.forced.discard)(key)
+            if c.currentText() == 'remote':
+                at = f' at {p["address"]}' if (p := pairing.load()) else ': pair it below'
+                self.why[key].setText(f'✔ On your own server{at}. If it fails: on this computer when it has the models, else '
+                                      f'{"you hear the call" if key == "them_to_me" else "the call hears your own voice"} '
+                                      'as it is until the server is back.')
+                continue
             if not d.local:
                 text = f'✘ Not on this computer: {"; ".join(d.why)}. The cloud translates {languages.name(d.src)} → ' \
                        f'{languages.name(d.tgt)}.'
@@ -211,6 +222,7 @@ class LanguagesPage(QWizardPage):
                                'not here yet)' if todo else 'Nothing: every model of this pair is here') +
                               '. Licenses: ' + ', '.join(lic.values()) + '.')
         self.fonts.setText(f'⚠ Subtitles: {note}' if (note := font_note([s.my_lang, s.their_lang])) else '')
+        self.server.setVisible('remote' in (s.them_to_me, s.me_to_them))
 
     def validatePage(self) -> bool:  # noqa: N802 (Qt name)
         s = self.chosen()
@@ -220,6 +232,9 @@ class LanguagesPage(QWizardPage):
             return False
         if 'cloud' in (s.them_to_me, s.me_to_them) and not (self.w.key or has_key(s)):
             self.err.setText('The cloud needs a Gemini API key.')
+            return False
+        if 'remote' in (s.them_to_me, s.me_to_them) and pairing.load() is None:
+            self.err.setText('Pair with your server first (the box above), or choose local or cloud.')
             return False
         if bad := [SIDES[k] for k in languages.SIDES if getattr(s, k) == 'local' and not languages.direction(s, k).local]:
             self.err.setText(f'{", ".join(bad)}: not on this computer for this pair; choose cloud.')
@@ -760,9 +775,12 @@ class VoicePage(QWizardPage):
     def initializePage(self) -> None:  # noqa: N802
         from peresmeshnik import voice
         s = self.w.s
+        remote = s.me_to_them == 'remote'  # the server checks the clone: its GPU, not this computer's
         self.setSubTitle('"Me → them" on this computer speaks the translation in your voice. Read the text below aloud for '
                          f'about {self.seconds:.0f} s, at your normal pace, in a quiet room — or import 30-60 s of your own '
                          'voice. The recording stays on this computer.' if self.local() else
+                         'Optional: "me → them" runs on your server, in your voice when you record it here (it goes to the '
+                         'server for each session only); without it the server\'s stock voice speaks.' if remote else
                          'Optional: "me → them" runs in the cloud, in Gemini\'s voice. Your recording is only needed for the '
                          'local clone.')
         self.prompt.setText(voice.PROMPTS.get(s.my_lang, 'Read any text in your language aloud, at your normal pace.'))
@@ -778,7 +796,8 @@ class VoicePage(QWizardPage):
             threading.Thread(target=lambda: self.gpu_found.emit(gpu()), name='gpu', daemon=True).start()
         if why := self.clone_off():  # nothing to record for it: said, and the page can be left
             self.setSubTitle(f'"Me → them" speaks in a stock voice for this pair: {why}. No recording is needed.')
-        elif not self.local() and s.local.clone != voice.STOCK and (why := languages.clone_why(s.local.clone, s.their_lang)):
+        elif not self.local() and not remote and s.local.clone != voice.STOCK and (why := languages.clone_why(s.local.clone,
+                                                                                                           s.their_lang)):
             self.setSubTitle(f'"Me → them" runs in the cloud, in Gemini\'s voice, and {why}: no recording is needed.')
         if why:
             for x in (self.stock, self.prompt, self.own, self.record_button, self.import_button, self.check_button):

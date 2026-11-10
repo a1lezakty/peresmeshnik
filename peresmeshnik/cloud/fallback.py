@@ -16,6 +16,11 @@ starts and the session is up, the input goes to the cloud again from the phrase'
 input are kept for that), the local voice is muted from that clause on, one message. With no local path at all there are
 no phrases to wait for: the next input after the pause tries, and a session that is up is used at once.
 
+The same for a side on the user's own server (`make(..., remote=...)`, remote/client.py): the server's voice and
+subtitles while it works, the local path (when this computer has its models) while it does not; tried again after
+`[remote] retry_s`. `on_mode(mode)` hears every switch: the app gives the user the call's own sound while a side is
+'down' (nothing translates it: the call app is muted, the other side would hear nothing), and takes it back after.
+
 Threads: `feed()` (the capture's thread) only hands on; one thread per inner direction pumps its events into one queue;
 `events()` (the side's thread) makes every decision.
 """
@@ -42,8 +47,10 @@ LAG_S = 3.5  # the cloud's voice behind the speech until this session measured i
 KEEP_S = 15.0  # input kept: for a new local path, and for the first syllables of a phrase going back to the cloud
 PRE_S = 1.0  # back to the cloud: the input from this long before the phrase's first partial subtitle
 RETRY_S, RETRY_MAX_S = 30.0, 900.0
+READY_GRACE_S = 1.0  # the primary path not ready this long after the side starts (the server loads its models): 'down'
 ARROW = {'them': 'them → me', 'me': 'me → them'}
 _END, _SAY = object(), object()
+NO_MORE = 'no new try until translation is turned on again'  # a refusal retrying does not cure
 
 
 class Muted:
@@ -130,8 +137,15 @@ class Fallback:
     supports_live = False
 
     def __init__(self, name: str, tgt: str, cloud_subtitles: bool, make_cloud, make_local, make_tts, voice=None,
-                 voice_why: str = '', preload: bool = False, on_state=lambda text: None, voice_note: str = ''):
+                 voice_why: str = '', preload: bool = False, on_state=lambda text: None, voice_note: str = '',
+                 label: tuple[str, str] = ('the cloud', 'in the cloud'), retry_s: float | None = None, on_mode=None,
+                 wait_ready: bool = False):
+        """`label`: what the tray calls the primary path, and where the side is back ('the server', 'on the server');
+        `on_mode(mode)`: 'cloud' (the primary path again), 'local', 'down'; `wait_ready`: the primary path may take long
+        to be ready (a server loading its models): 'down' for the app meanwhile (not the cloud: it connects in ~1 s)."""
         self.name, self.tgt, self.voice, self.on_state = name, tgt, voice, on_state
+        self.label, self.retry_base, self.on_mode = label, RETRY_S if retry_s is None else retry_s, on_mode
+        self.retry_max = RETRY_MAX_S if retry_s is None else 30 * retry_s  # the server: a try is a TCP connect, cheap
         self.cloud_subtitles, self.make_cloud, self.make_local = cloud_subtitles, make_cloud, make_local
         self.muted = Muted(make_tts)
         self.muted.want = self._want
@@ -146,7 +160,7 @@ class Fallback:
         self._q: queue.Queue = queue.Queue()
         self._closing = False
         self.heard_at = 0.0  # when the cloud's last voiced chunk came
-        self.retry_s, self.retry_at = RETRY_S, 0.0
+        self.retry_s, self.retry_at = self.retry_base, 0.0
         self.back_at = 0.0  # when the side last went back to the cloud
         self.probe = None
         self.clause, self.final_at = None, 0.0  # the local path's last clause seen, and its last final subtitle's time
@@ -174,6 +188,8 @@ class Fallback:
         for d in (self.cloud, self.local):
             if d:
                 self._pump(d)
+        if on_mode and wait_ready:
+            threading.Thread(target=self._await_ready, args=(self.cloud,), name=f'{name}-ready', daemon=True).start()
 
     # Direction --------------------------------------------------------------------------------------
     def feed(self, pcm) -> None:
@@ -241,6 +257,8 @@ class Fallback:
     def interrupt(self) -> None:
         if self.local:
             self.local.interrupt()
+        if self.mode == 'cloud' and hasattr(self.cloud, 'interrupt'):  # the server drops the voice it has not sent
+            self.cloud.interrupt()
 
     def close(self) -> None:
         with self._lock:  # a probe or a local path being made now sees `_closing` and closes itself (_try, _cloud_failed)
@@ -295,15 +313,18 @@ class Fallback:
         old, self.cloud = self.cloud, None
         threading.Thread(target=old.close, daemon=True).start()
         why = str(e) if isinstance(e, CloudDown) else f'{type(e).__name__}: {e}'
-        log.warning('%s: the cloud failed: %s', self.name, why)
+        log.warning('%s: %s failed: %s', self.name, self.label[0], why)
         if self.heard_at < self.back_at:  # back in the cloud, and no voice from it since: the next try waits longer
-            self.retry_s = min(self.retry_s * 2, RETRY_MAX_S)
-        else:  # it spoke since (or this is its first fault): RETRY_S again
-            self.retry_s = RETRY_S
+            self.retry_s = min(self.retry_s * 2, self.retry_max)
+        else:  # it spoke since (or this is its first fault): retry_s again
+            self.retry_s = self.retry_base
         self.retry_at = time.monotonic() + self.retry_s
+        permanent = self._stop_trying(e)  # said below, with why
         self.switched.append(('down', time.monotonic()))
         lags = [s for k, s in getattr(old, 'latency', ()) if k == 'cloud.translate.done_after_end']
         cut = self.heard_at - (statistics.median(lags) if lags else LAG_S) + MARGIN_S  # speech that ended later: unsaid
+        if said := getattr(old, 'said_until', 0.0):  # the server knows its clauses: the end of the last one it voiced
+            cut = said
         reason, local = self.voice_why or self.local_why or (str(self.muted.error) if self.muted.error else ''), None
         if not reason and self.local is None:  # cloud subtitles: the local path is made now
             try:
@@ -311,7 +332,7 @@ class Fallback:
             except Exception as ex:
                 reason = self.local_why = str(ex)
         if reason:
-            self._down(reason, f'the cloud failed ({why})')
+            self._down(reason, f'{self.label[0]} failed ({why})', permanent)
             return
         self.muted.lock.acquire()  # before a clause is marked to be said: the muted ones the cloud had not said go first
         try:
@@ -340,13 +361,41 @@ class Fallback:
             return
         self._say(again)  # releases the lock
         note, self.voice_note = self.voice_note, ''  # once
-        self.on_state(f'note: {ARROW[self.name]}: the cloud failed ({why}); translating locally until it answers again'
+        until = f'; {NO_MORE}' if permanent else ' until it answers again'
+        self.on_state(f'note: {ARROW[self.name]}: {self.label[0]} failed ({why}); translating locally{until}'
                       + (f'; {note}' if note else ''))
+        self._mode()
 
-    def _down(self, reason: str, what: str) -> None:
+    def _down(self, reason: str, what: str, permanent: bool = False) -> None:
         self.mode = 'down'
-        live = '; the hotkey gives the call your own voice' if self.name == 'me' else ''
+        if self.on_mode:  # the app passes the call's own sound meanwhile
+            live = f'; {self._live_text()}' + (f'; {NO_MORE}' if permanent else f' until {self.label[0]} answers again')
+        else:
+            live = '; the hotkey gives the call your own voice' if self.name == 'me' else ''
         self.on_state(f'error: {ARROW[self.name]}: {what} and there is no local path here: {reason}{live}')
+        self._mode()
+
+    def _live_text(self) -> str:
+        return {'them': 'you hear the call as it is', 'me': 'the call hears your own voice'}[self.name] + \
+            ' (the hotkey changes nothing)'
+
+    def _await_ready(self, cloud) -> None:
+        """The side starts and its primary path is not ready (the server loads its models: up to ~30 s): nothing would
+        translate meanwhile, with the call app muted - 'down' for the app (the call's own sound) until it is."""
+        if cloud.ready.wait(READY_GRACE_S) or self._closing or self.cloud is not cloud:
+            return
+        self.on_mode('down')
+        self.on_state(f'note: {ARROW[self.name]}: {self.label[0]} is getting ready (it loads its models); '
+                      f'{self._live_text()} meanwhile')
+        while not cloud.ready.wait(1.0):
+            if self._closing or self.cloud is not cloud:  # failed meanwhile: _cloud_failed said where the side went
+                return
+        if self.mode == 'cloud' and self.cloud is cloud and not self._closing:
+            self.on_mode('cloud')
+
+    def _mode(self) -> None:
+        if self.on_mode:
+            self.on_mode(self.mode)
 
     def _say(self, texts: list[str]) -> None:
         """Muted clauses the cloud had not said, before the next one the pipeline speaks: called with `muted.lock`
@@ -393,8 +442,18 @@ class Fallback:
         old, self.probe = self.probe, None
         if old is not None:
             threading.Thread(target=old.close, daemon=True).start()
-        self.retry_at, self.retry_s = time.monotonic() + self.retry_s, min(self.retry_s * 2, RETRY_MAX_S)
+        self.retry_at, self.retry_s = time.monotonic() + self.retry_s, min(self.retry_s * 2, self.retry_max)
         log.info('%s: the cloud is still down (%s); the next try in %.0f s or later', self.name, e, self.retry_s / 2)
+        if self._stop_trying(e):
+            self.on_state(f'error: {ARROW[self.name]}: {e}; {NO_MORE}')
+
+    def _stop_trying(self, e) -> bool:
+        """A refusal that trying again does not cure (the server: an unknown token, another protocol version, a pair
+        it has no models for: remote/client.ServerError.permanent): no more tries until translation goes on again."""
+        if getattr(e, 'permanent', False):
+            self.retry_at = float('inf')
+            return True
+        return False
 
     def _back(self, cloud, since: float) -> None:
         with self._lock:
@@ -420,7 +479,8 @@ class Fallback:
                 if mine:
                     old.close()
             threading.Thread(target=leave, name=f'{self.name}-local-leaves', daemon=True).start()
-        self.on_state(f'note: {ARROW[self.name]}: back in the cloud')
+        self.on_state(f'note: {ARROW[self.name]}: back {self.label[1]}')
+        self._mode()
 
 
 def _direction(name: str, s):
@@ -483,8 +543,32 @@ def voice_why(name: str, s) -> str:
     return local_voice(name, s)[1]
 
 
-def make(name: str, s, key: str, on_state=lambda text: None, on_respawn=lambda e: None) -> Fallback:
-    """The side's cloud direction with its local fallback, from the settings."""
+def my_voice(s) -> tuple[bytes | None, str]:
+    """What me -> them on the user's server speaks with: (the enrolled profile zipped (protocol.pack_voice), '') only when
+    `voice.mine()` lets it speak as me (M-20: my own voice confirmed at the microphone, its recording unchanged since); else
+    (None, why): the server's stock voice speaks and the side goes on. The stock setting ([local] clone = piper) is this
+    computer's and does not hold the user's voice back from the server."""
+    from peresmeshnik import voice as profiles
+    from peresmeshnik.remote import protocol
+    if not s.local.voice:
+        return None, ''
+    try:
+        v = profiles.mine(s.local.voice)
+    except profiles.NotMine as e:
+        return None, str(e)
+    except (OSError, ValueError):  # no folder, not JSON, or JSON but not an object
+        return None, 'your voice profile is not there or cannot be read: record it again (Voices…)'
+    try:
+        return protocol.pack_voice(v.path), ''
+    except (OSError, ValueError) as e:
+        return None, f'your voice profile cannot be sent ({e})'
+
+
+def make(name: str, s, key: str, on_state=lambda text: None, on_respawn=lambda e: None, remote: dict | None = None,
+         on_mode=None) -> Fallback:
+    """The side's cloud direction with its local fallback, from the settings. `remote`: the pairing with the user's own
+    server (remote/pairing.py: address, fp, token), which then takes the cloud's place: its subtitles and voice, the
+    local path only when it fails (and this computer has the models), never the cloud."""
     from peresmeshnik import languages
     from peresmeshnik.cloud.gemini import GeminiDirection
     from peresmeshnik.pipeline import MAX_LAG_S, make_local
@@ -516,9 +600,20 @@ def make(name: str, s, key: str, on_state=lambda text: None, on_respawn=lambda e
             raise RuntimeError('; '.join(d.why))
         return make_local(src, tgt, asr=d.asr, mt=d.mt, tts=t, settings=s, voice=voice,  # languages.direction's ids
                           max_lag_s=MAX_LAG_S if name == 'them' else None)
+    note = f'your voice is not ready ({note}), a stock voice speaks for you' if note else ''
+    if remote is not None:
+        from peresmeshnik.remote.client import RemoteDirection
+        up, up_why = my_voice(s) if name == 'me' else (None, '')
+        if up_why:
+            on_state(f'note: {ARROW[name]}: {up_why}; the server speaks with its stock voice meanwhile')
+        return Fallback(
+            name, tgt, True,
+            make_cloud=lambda: RemoteDirection(remote['address'], name, src, tgt, remote['token'], remote['fp'], voice=up,
+                                               jitter_ms=s.remote.jitter_ms, stall_s=s.remote.slow_s, on_state=on_state),
+            make_local=local, make_tts=tts, voice=voice, voice_why=why, on_state=on_state, voice_note=note,
+            label=('the server', 'on the server'), retry_s=s.remote.retry_s, on_mode=on_mode, wait_ready=True)
     return Fallback(
         name, tgt, languages.cloud_subtitles(s, d.side),
         make_cloud=lambda: GeminiDirection(src, tgt, key, s.cloud, fail_fast=True),
         make_local=local,
-        make_tts=tts, voice=voice, voice_why=why, preload=piper, on_state=on_state,
-        voice_note=f'your voice is not ready ({note}), a stock voice speaks for you' if note else '')
+        make_tts=tts, voice=voice, voice_why=why, preload=piper, on_state=on_state, voice_note=note, on_mode=on_mode)

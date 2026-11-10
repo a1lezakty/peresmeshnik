@@ -20,6 +20,8 @@ dependencies = [
     "psutil>=6",
     "PySide6-Essentials>=6.8",
     "jeepney>=0.8; sys_platform == 'linux'",
+    "websockets>=15",  # the remote server (peresmeshnik/remote): its WebSocket, client and server
+    "cryptography>=43",  # the remote server's self-signed certificate
 ]
 
 [project.scripts]

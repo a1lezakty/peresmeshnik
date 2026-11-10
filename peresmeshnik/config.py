@@ -23,7 +23,7 @@ from pathlib import Path
 import platformdirs
 
 APP = 'Peresmeshnik'
-ENGINES = ('local', 'cloud')
+ENGINES = ('local', 'cloud', 'remote')  # remote: your own server, `peresmeshnik serve` on a stronger computer
 
 
 def config_dir() -> Path:  # ~/.config/Peresmeshnik, ~/Library/Application Support/Peresmeshnik, %LOCALAPPDATA%\Peresmeshnik
@@ -34,7 +34,7 @@ def cache_dir() -> Path:  # ~/.cache/Peresmeshnik, ~/Library/Caches/Peresmeshnik
     return platformdirs.user_cache_path(APP, appauthor=False)
 
 
-def data_dir() -> Path:  # voice profiles live here and are never uploaded
+def data_dir() -> Path:  # voice profiles live here; they leave this computer only to your own paired server (remote), for a session
     return platformdirs.user_data_path(APP, appauthor=False)
 
 
@@ -105,6 +105,29 @@ class Cloud:
 
 
 @dataclass
+class Remote:
+    """A side translated on your own server (engine 'remote'). Its address, certificate and token come from pairing and are
+    kept apart (<config dir>/remote, 0600), not here."""
+    # the voice's first piece after a pause waits this long against the next one being late (BENCH remote-0: no underruns
+    # at 0-200 ms on a LAN, Wi-Fi and a far server)
+    jitter_ms: int = 40
+    retry_s: float = 5.0  # the server failed: the next try this long after, doubling to 30 times that while it stays down
+    # too slow: a phrase is open and the server has sent nothing this long, or the call's audio reaches it half this late
+    # -> the side goes local (or says why it cannot) until the server is back
+    slow_s: float = 6.0
+
+
+@dataclass
+class Server:
+    """`peresmeshnik serve`: this computer translates for a weak one."""
+    host: str = ''  # '' = this computer's private addresses (LAN, Tailscale); a public one only with public = true
+    port: int = 47000
+    public: bool = False
+    log_text: bool = False  # the log keeps numbers only; true: what was said and its translation too (debugging)
+    warm_s: float = 600.0  # a session's engines stay loaded this long after its client left (same languages and voice)
+
+
+@dataclass
 class Ui:
     hotkey: str = 'Ctrl+Shift+Space' if sys.platform == 'darwin' else 'Ctrl+Alt+Space'  # translation <-> live voice (Qt text; mac ⇧⌘Space)
     mic: str = ''  # me -> them input ('' = system default)
@@ -117,7 +140,7 @@ class Ui:
 class Settings:
     my_lang: str = 'ru'
     their_lang: str = 'en'
-    them_to_me: str = 'local'  # 'local' | 'cloud'
+    them_to_me: str = 'local'  # 'local' | 'cloud' | 'remote'
     me_to_them: str = 'cloud'  # default for an 8 GB Mac (ARCHITECTURE §6): no live local clone there
     # the sides ('them_to_me', 'me_to_them') the app itself moved to the cloud, for a pair they cannot run locally: they
     # go back to 'local' with a pair that can (a side the user set to 'cloud' is not here)
@@ -125,6 +148,8 @@ class Settings:
     models_dir: str = ''  # '' = <cache dir>/models; $PERESMESHNIK_MODELS wins
     local: Local = field(default_factory=Local)
     cloud: Cloud = field(default_factory=Cloud)
+    remote: Remote = field(default_factory=Remote)
+    server: Server = field(default_factory=Server)
     ui: Ui = field(default_factory=Ui)
 
 
@@ -192,6 +217,11 @@ def load(path: Path | None = None) -> Settings:
     if wrong := set(s.forced_cloud) - {'them_to_me', 'me_to_them'}:
         bad.append(f'forced_cloud may hold only them_to_me, me_to_them, got {sorted(wrong)}')
         s.forced_cloud = []
+    r = s.remote  # nonsense from a hand edit: the nearest sane value, said on stderr
+    for k, lo, hi in (('jitter_ms', 0, 500), ('retry_s', 1.0, 300.0), ('slow_s', 2.0, 60.0)):
+        if not lo <= (v := getattr(r, k)) <= hi:
+            setattr(r, k, type(v)(min(max(v, lo), hi)))
+            print(f'settings: remote.{k} {v} is outside {lo}..{hi}, {getattr(r, k)} used', file=sys.stderr)
     if not 0.2 <= (r := s.local.mic_echo_rho_on) <= 0.8:  # near 0 it zeroes my speech, near 1 lets every echo through
         s.local.mic_echo_rho_on = min(max(r, 0.2), 0.8)
         print(f'settings: local.mic_echo_rho_on {r} is outside 0.2..0.8, {s.local.mic_echo_rho_on} used', file=sys.stderr)

@@ -106,17 +106,34 @@ def q(v: list[float]) -> dict:
             'max': round(v[-1], 2), 'n': len(v)} if v else {}
 
 
+def up(address: str, wait_s: float = 30.0) -> None:
+    """Until the tunnel takes connections on `address` (ssh logs in first: seconds)."""
+    import socket
+    host, port = address.rsplit(':', 1)
+    end = time.monotonic() + wait_s
+    while True:
+        try:
+            socket.create_connection((host.strip('[]'), int(port)), 1).close()
+            return
+        except OSError:
+            if time.monotonic() > end:
+                raise
+            time.sleep(0.2)
+
+
 def remote(fault: str, at: float, rec: str, s, side: str, paired: dict, tunnel: str, cmd: str = '') -> dict:
     import shlex
     import signal
     import subprocess
     proc = subprocess.Popen(shlex.split(tunnel)) if tunnel else None
     try:
-        time.sleep(2 if proc else 0)  # the tunnel up
+        if proc:
+            up(paired['address'])
         states, got = [], []
         t0 = time.monotonic()
         fb = fallback.make(side, s, '', on_state=lambda x: states.append(x), remote=paired)
-        fb.cloud.ready.wait(120)  # client.READY_S: a cold server loads its models
+        while not fb.cloud.ready.wait(0.2) and time.monotonic() - t0 < 120:  # client.READY_S: a cold server loads its
+            pass  # models; fb.cloud: a new one if the first failed
         ready_s = time.monotonic() - t0
         consumer = threading.Thread(target=lambda: [got.append((time.monotonic(), e)) for e in fb.events()], daemon=True)
         consumer.start()

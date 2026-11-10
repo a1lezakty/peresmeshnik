@@ -59,7 +59,8 @@ Filename: "{app}\Peresmeshnik.exe"; Description: "Start Peresmeshnik"; Flags: no
 [Code]
 { A running Peresmeshnik is asked to quit (WM_CLOSE from outside, as taskkill does, to its hidden window: the title is
   HOST_TITLE in peresmeshnik/ui/windows.py), so it gives the call app its sound back first; then its files can be
-  replaced or removed. }
+  replaced or removed. A `keep` helper it left (peresmeshnik-loopback.exe waiting to give a call app its volume back,
+  audio/capture_windows.py) outlives it and holds that file: it is ended too (the next start watches again). }
 const
   HostTitle = 'Peresmeshnik F900FAE6';
 
@@ -73,19 +74,28 @@ begin
   for I := 1 to 75 do begin  { up to 15 s }
     Sleep(200);
     if FindWindowByWindowName(HostTitle) = 0 then
-      Exit;
+      Break;
   end;
+end;
+
+procedure EndHelpers();
+var
+  Code: Integer;
+begin
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM peresmeshnik-loopback.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   CloseApp();
+  EndHelpers();
   Result := '';
 end;
 
-{ The names of the call apps whose sound Peresmeshnik turned down to 0 and did not give back (it quit before it could):
-  the keys of muted-session.json (audio/capture_windows.py: a JSON object of the call app's exe name and its volume, as
-  "Zoom.exe": 0.8), that is every quoted string ending in .exe, joined with ", "; '' when there is none. }
+{ The names of the call apps whose sound Peresmeshnik turned almost all the way down and did not give back yet: the
+  keys of muted-session.json (audio/capture_windows.py: a JSON object of the call app's exe name and its state, as
+  "Zoom.exe": {"level": 0.8, "devices": ["{0.0.0.00000000}.{...}"], "keeper": 1234}), that is every quoted string
+  ending in .exe (the device ids do not), joined with ", "; '' when there is none. }
 function MutedApps(const FileName: String): String;
 var
   Raw: AnsiString;
@@ -128,14 +138,17 @@ var
   Dir, Pack, Apps: String;
   F: TFindRec;
 begin
-  if CurUninstallStep = usUninstall then  { after the user confirmed the removal }
+  if CurUninstallStep = usUninstall then begin  { after the user confirmed the removal }
     CloseApp();
+    EndHelpers();
+  end;
   if (CurUninstallStep = usPostUninstall) and not UninstallSilent() then begin
     Dir := ExpandConstant('{localappdata}\Peresmeshnik');
     Apps := MutedApps(Dir + '\muted-session.json');
     if Apps <> '' then
-      MsgBox('Peresmeshnik turned the sound of ' + Apps + ' down to 0 while translating and could not turn it back up. '
-             + 'Raise it in the Windows Volume mixer (right-click the speaker icon on the taskbar, then Volume mixer).',
+      MsgBox('Peresmeshnik turned the sound of ' + Apps + ' almost all the way down while translating and could not '
+             + 'turn it back up yet. Raise it in the Windows Volume mixer (right-click the speaker icon on the taskbar, '
+             + 'then Volume mixer).',
              mbInformation, MB_OK);
     Pack := Dir + '\voice-pack';
     if FindFirst(Pack + '*', F) then begin  { voice-pack itself or voice-pack.<leftover> }

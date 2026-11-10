@@ -277,8 +277,14 @@ def test_mute_helper_ducks_and_the_loopback_keeps_the_sound(monkeypatch):
         frames.got.clear()
         time.sleep(1.5)
         ducked = rms(frames.audio())
-        print(f'\nloopback rms at volume 1 {full:.4f}, ducked to {cw.DUCK} and brought back up {ducked:.4f}')
+        set_volume(player.pid, 1.0)  # FIXES 1: raised by hand (or by the app) while translating: not 200 times into a clip
+        frames.got.clear()
+        time.sleep(1.5)
+        raised = rms(frames.audio())
+        print(f'\nloopback rms at volume 1 {full:.4f}, ducked to {cw.DUCK} and brought back up {ducked:.4f}, '
+              f'raised to 1 meanwhile {raised:.4f}')
         assert abs(20 * np.log10(ducked / full)) < 0.5, (full, ducked)
+        assert abs(20 * np.log10(raised / full)) < 0.5, ('a session raised to 1 was brought up into a clip', full, raised)
     finally:
         if muter:
             muter.stdin.close()
@@ -397,18 +403,24 @@ def test_volume_and_mute_name_the_device():
         player.wait()
 
 
-def keeper(helper_path: str, exe: str, level: float, devices=()) -> tuple[subprocess.Popen, list]:
-    """A `keep` helper and the list its "restored" lines go to (a reader thread)."""
+def keeper(helper_path: str, exe: str, level: float, devices=(), seconds: int = 60) -> tuple[subprocess.Popen, list]:
+    """A `keep` helper (no stdin, as the app starts it: it outlives the app) and the list its "restored" lines go to."""
     from peresmeshnik.audio.capture_windows import CREATE_NO_WINDOW
-    args = [helper_path, 'keep', '--exe', exe, '--level', str(level)]
+    args = [helper_path, 'keep', '--exe', exe, '--level', str(level), '--for', str(seconds)]
     for d in devices:
         args += ['--device', d]
-    proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                             creationflags=CREATE_NO_WINDOW)
     events = []
     threading.Thread(target=lambda: [events.append(json.loads(x)) for x in proc.stdout if x.startswith(b'{')],
                      daemon=True).start()
     return proc, events
+
+
+def end(proc: subprocess.Popen) -> None:
+    if proc.poll() is None:
+        proc.kill()
+    proc.wait(5)
 
 
 @pytest.mark.usefixtures('helper_ok', 'cable')
@@ -433,43 +445,55 @@ def test_keep_gives_a_session_at_0_its_level_back():
         assert vols and all(abs(v - 0.7) < 0.02 for v in vols), vols
     finally:
         if proc:
-            proc.stdin.close()
-            proc.wait(5)
+            end(proc)
         subprocess.run([helper(), 'volume', '--pid', str(player.pid), '--tree', '--set', '1'], capture_output=True)
         player.kill()
         player.wait()
 
 
+def ps_player(wav) -> subprocess.Popen:
+    """A call app that is not python.exe (this test process and its tone players are): Windows PowerShell 5 playing a
+    wav on the default output (CABLE Input on the runner) in a loop. The CI step runs in pwsh, not powershell.exe."""
+    return subprocess.Popen(['powershell.exe', '-NoProfile', '-Command',
+                             f"$p = New-Object Media.SoundPlayer '{wav}'; $p.PlayLooping(); Start-Sleep 60"])
+
+
 @pytest.mark.usefixtures('helper_ok', 'cable')
-def test_keep_catches_the_apps_next_session():
-    """The call app starts again after it was left at 0: its new session is caught as it appears. Windows may or may
-    not open it at the persisted 0 (printed: the runner's answer); either way it is not left at 0."""
-    import psutil
+def test_keep_catches_the_apps_next_session_and_ends_when_done(tmp_path):
+    """H-06: the call app left ducked starts again (Peresmeshnik may be gone by then: the helper reads no stdin). Its
+    new session is caught as it appears (the runner opens it at the persisted 0: printed), given its level back, and
+    the helper ends by itself once that device is done."""
+    import soundfile as sf
 
     from peresmeshnik.audio.capture_windows import helper
-    first = play_tone(CABLE_IN, 440.0)
-    assert until(lambda: player_sessions(helper(), first), 8), 'the player has no session'
-    exe = psutil.Process(player_sessions(helper(), first)[0]['pid']).name()
-    subprocess.run([helper(), 'volume', '--pid', str(first.pid), '--tree', '--set', '0'], capture_output=True, check=True)
-    first.kill()
-    first.wait()
-    proc, events = keeper(helper(), exe, 0.6)
-    player = None
+    wav = tmp_path / 'tone.wav'
+    sf.write(wav, (0.3 * np.sin(2 * np.pi * 440 * np.arange(48000 * 2) / 48000)).astype(np.float32), 48000)
+    first = ps_player(wav)
+    player = proc = None
     try:
-        time.sleep(1.0)  # let it register its session notifications
-        player = play_tone(CABLE_IN, 440.0)  # a new session, after the helper started
-        mine = lambda: [e for e in events if in_tree(e['pid'], player.pid)]  # noqa: E731
-        assert until(mine, 8), f'no "restored" for the new session: {events}'
-        print(f'the new session opened at {mine()[0]["was"]:.2f} (a persisted 0: {mine()[0]["was"] < 0.01})')
+        assert until(lambda: player_sessions(helper(), first), 15), 'powershell.exe has no session'
+        device = player_sessions(helper(), first)[0]['device']
+        subprocess.run([helper(), 'volume', '--pid', str(first.pid), '--tree', '--set', '0'], capture_output=True, check=True)
+        first.kill()
+        first.wait()
+        proc, events = keeper(helper(), 'powershell.exe', 0.6, [device])
+        time.sleep(1.5)
+        assert proc.poll() is None, 'the helper ended with nothing done (no stdin is no reason to go)'
+        player = ps_player(wav)  # a new session, after the helper started
+        assert until(lambda: [e for e in events if e['pid'] == player.pid], 15), f'no "restored" for the new session: {events}'
+        ev = next(e for e in events if e['pid'] == player.pid)
+        print(f'\nthe new session opened at {ev["was"]:.2f} (a persisted 0: {ev["was"] < 0.01})')
+        assert until(lambda: proc.poll() is not None, 5), 'the helper did not end once its device was done'
         vols = [x['volume'] for x in player_sessions(helper(), player)]
         assert vols and min(vols) >= 0.01, vols
     finally:
-        proc.stdin.close()
-        proc.wait(5)
-        if player:
-            subprocess.run([helper(), 'volume', '--pid', str(player.pid), '--tree', '--set', '1'], capture_output=True)
-            player.kill()
-            player.wait()
+        if proc:
+            end(proc)
+        for p in (first, player):
+            if p:
+                subprocess.run([helper(), 'volume', '--pid', str(p.pid), '--tree', '--set', '1'], capture_output=True)
+                p.kill()
+                p.wait()
 
 
 @pytest.mark.skipif(os.environ.get('PERESMESHNIK_AUDIOSRV_RESTART') != '1',

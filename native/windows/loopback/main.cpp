@@ -10,10 +10,12 @@
 //   peresmeshnik-loopback mute --pid N [--tree] [--level L]   hold pid's (tree's) sessions at L (0), new ones too, on
 //                                          every device
 //                                          (mute-only; the app restores): {"event":"muted","pid","level","device"}
-//   peresmeshnik-loopback keep --exe NAME --level L [--device ID]...   give an app its level back: each session of
-//                                          a process named NAME (or of its tree) at 0 on one of the devices (any
-//                                          without --device), now or as it appears, is set to L:
-//                                          {"event":"restored","pid","device"} (also for one found not at 0)
+//   peresmeshnik-loopback keep --exe NAME --level L [--device ID]... [--for S]   give an app its level back: each
+//                                          session of a process named NAME (or of its tree) at 0 on one of the devices
+//                                          (any without --device), now or as it appears, is set to L:
+//                                          {"event":"restored","pid","device"} (also for one found not at 0). It does
+//                                          not read stdin: it outlives the app (a call app's next call without
+//                                          Peresmeshnik), and ends once every device is done, or after S seconds
 //   peresmeshnik-loopback watch            device-change notifications, one JSON line each (default-device change)
 //
 // tap: a WASAPI loopback that captures only what process `pid` (with --tree, it and its children) plays, mixed to
@@ -310,7 +312,12 @@ static int run_tap(DWORD pid, DWORD rate) {
             BYTE* data = nullptr; UINT32 frames = 0; DWORD pkflags = 0;
             hr = capture->GetBuffer(&data, &frames, &pkflags, nullptr, nullptr);
             if (hr == AUDCLNT_S_BUFFER_EMPTY) break;
-            if (FAILED(hr)) { say("GetBuffer: 0x%08lx", (unsigned long)hr); code = WASAPI; g_stdin_open = false; break; }
+            if (FAILED(hr)) {  // invalidated between GetNextPacketSize and here (a driver reset): start again, as below
+                say("GetBuffer: 0x%08lx", (unsigned long)hr);
+                code = hr == AUDCLNT_E_DEVICE_INVALIDATED ? RESTART : WASAPI;
+                g_stdin_open = false;
+                break;
+            }
             size_t bytes = (size_t)frames * fmt.nBlockAlign;
             if (frames) {
                 if (pkflags & AUDCLNT_BUFFERFLAGS_SILENT) {
@@ -521,7 +528,9 @@ static void watch_endpoints(IMMDeviceEnumerator* en, std::map<std::wstring, Watc
     }
 }
 
-static int watch_sessions(void (*on)(ComPtr<IAudioSessionControl2>&, const std::wstring&)) {
+// Ends when stdin closes, or (keep) when `done` is set or `lifetime_ms` has passed.
+static int watch_sessions(void (*on)(ComPtr<IAudioSessionControl2>&, const std::wstring&), HANDLE done = nullptr,
+                          ULONGLONG lifetime_ms = 0) {
     g_on_session = on;
     ComPtr<IMMDeviceEnumerator> en;
     if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&en))))
@@ -530,10 +539,19 @@ static int watch_sessions(void (*on)(ComPtr<IAudioSessionControl2>&, const std::
     bool endpoints_ok = SUCCEEDED(en->RegisterEndpointNotificationCallback(endpoints.Get()));
     std::map<std::wstring, Watched> watched;  // kept alive: notifications stop if the manager is released
     watch_endpoints(en.Get(), watched);
-    CreateThread(nullptr, 0, watch_stdin, nullptr, 0, nullptr);
-    HANDLE w[2] = { g_stdin_event, g_devices_event };
-    while (WaitForMultipleObjects(2, w, FALSE, INFINITE) == WAIT_OBJECT_0 + 1)  // an endpoint came or went
-        watch_endpoints(en.Get(), watched);
+    if (!done) CreateThread(nullptr, 0, watch_stdin, nullptr, 0, nullptr);
+    HANDLE w[2] = { done ? done : g_stdin_event, g_devices_event };
+    ULONGLONG end = lifetime_ms ? GetTickCount64() + lifetime_ms : 0;
+    while (true) {
+        DWORD left = INFINITE;
+        if (end) {
+            ULONGLONG now = GetTickCount64();
+            if (now >= end) break;
+            left = (DWORD)(end - now < 0x7fffffff ? end - now : 0x7fffffff);
+        }
+        if (WaitForMultipleObjects(2, w, FALSE, left) != WAIT_OBJECT_0 + 1) break;  // ended, done or out of time
+        watch_endpoints(en.Get(), watched);  // an endpoint came or went
+    }
     { std::lock_guard<std::mutex> lk(g_watch_lock); g_watch_stopping = true; }  // stop acting first, then unregister
     if (endpoints_ok) en->UnregisterEndpointNotificationCallback(endpoints.Get());
     for (auto& kv : watched) kv.second.mgr->UnregisterSessionNotification(kv.second.nc.Get());
@@ -571,9 +589,14 @@ static void mute_session(ComPtr<IAudioSessionControl2>& ctl2, const std::wstring
             g_mute_seen.insert(key);
         }
     }
-    vol->SetMasterVolume(g_mute_level, nullptr);
-    printf("{\"event\": \"muted\", \"pid\": %lu, \"level\": %.4f, \"device\": \"%s\"}\n", (unsigned long)spid, original,
-           json_escape(wide_to_utf8(device.c_str())).c_str());
+    HRESULT hr = vol->SetMasterVolume(g_mute_level, nullptr);
+    if (FAILED(hr)) {  // not ducked: the app must not bring this sound up (it would clip)
+        printf("{\"event\": \"failed\", \"pid\": %lu, \"device\": \"%s\", \"hr\": %lu}\n", (unsigned long)spid,
+               json_escape(wide_to_utf8(device.c_str())).c_str(), (unsigned long)hr);
+    } else {
+        printf("{\"event\": \"muted\", \"pid\": %lu, \"level\": %.4f, \"device\": \"%s\"}\n", (unsigned long)spid,
+               original, json_escape(wide_to_utf8(device.c_str())).c_str());
+    }
     fflush(stdout);
 }
 
@@ -593,7 +616,8 @@ static int run_mute(DWORD pid, bool tree, float level) {
 
 static std::wstring g_keep_exe;
 static float g_keep_level = 1.0f;
-static std::set<std::wstring> g_keep_devices;
+static std::set<std::wstring> g_keep_devices, g_keep_left;  // the devices asked for; those not done yet
+static HANDLE g_keep_done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 
 static void keep_session(ComPtr<IAudioSessionControl2>& ctl2, const std::wstring& device) {
     if (!g_keep_devices.empty() && !g_keep_devices.count(device)) return;
@@ -606,13 +630,17 @@ static void keep_session(ComPtr<IAudioSessionControl2>& ctl2, const std::wstring
     if (v < 0.01f && FAILED(vol->SetMasterVolume(g_keep_level, nullptr))) return;
     printf("{\"event\": \"restored\", \"pid\": %lu, \"device\": \"%s\", \"was\": %.4f}\n", (unsigned long)spid,
            json_escape(wide_to_utf8(device.c_str())).c_str(), v);
-    fflush(stdout);
+    fflush(stdout);  // fails without a reader (the app quit): the volume is set all the same
+    std::lock_guard<std::mutex> lk(g_watch_lock);
+    g_keep_left.erase(device);
+    if (g_keep_devices.empty() || g_keep_left.empty()) SetEvent(g_keep_done);  // every device done (any: the first)
 }
 
-static int run_keep(const std::wstring& exe, float level, const std::set<std::wstring>& devices) {
-    g_keep_exe = exe; g_keep_level = level; g_keep_devices = devices;
-    say("giving %ls its volume back (%.2f) on %zu device(s), 0 = any", exe.c_str(), level, devices.size());
-    return watch_sessions(keep_session);
+static int run_keep(const std::wstring& exe, float level, const std::set<std::wstring>& devices, DWORD seconds) {
+    g_keep_exe = exe; g_keep_level = level; g_keep_devices = g_keep_left = devices;
+    say("giving %ls its volume back (%.2f) on %zu device(s), 0 = any, for %lu s at most", exe.c_str(), level,
+        devices.size(), (unsigned long)seconds);
+    return watch_sessions(keep_session, g_keep_done, (ULONGLONG)seconds * 1000);
 }
 
 // ---- device-change notifications (watch) --------------------------------------------------------
@@ -707,14 +735,15 @@ int wmain(int argc, wchar_t** argv) {
         if (level < 0.0f || level >= 0.01f) quit(USAGE, "mute --level must be below 0.01 (a near silence)");
         code = run_mute(pid, has_flag(argc, argv, L"--tree"), level);
     } else if (cmd == L"keep") {
-        std::wstring exe; float level = -1.0f; std::set<std::wstring> devices;
+        std::wstring exe; float level = -1.0f; std::set<std::wstring> devices; DWORD seconds = 14 * 24 * 3600;
         for (int i = 2; i + 1 < argc; i++) {
             if (!wcscmp(argv[i], L"--exe")) exe = argv[++i];
             else if (!wcscmp(argv[i], L"--level")) level = (float)wcstod(argv[++i], nullptr);
             else if (!wcscmp(argv[i], L"--device")) devices.insert(argv[++i]);
+            else if (!wcscmp(argv[i], L"--for")) seconds = wcstoul(argv[++i], nullptr, 10);
         }
-        if (exe.empty() || level < 0.01f || level > 1.0f) quit(USAGE, "keep needs --exe NAME --level L (0.01..1)");
-        code = run_keep(exe, level, devices);
+        if (exe.empty() || level < 0.01f || level > 1.0f || !seconds) quit(USAGE, "keep needs --exe NAME --level L (0.01..1)");
+        code = run_keep(exe, level, devices, seconds);
     } else {
         say("unknown command");
     }

@@ -5,7 +5,9 @@ and Windows persists it), other apps keep their own entries, restore_call clears
 every device it was muted on, and a `keep` helper puts the rest back on the app's next session there. mute_call
 restores a leftover first. Pure Python (the helpers are fakes): runs on every OS.
 """
+import io
 import json
+import subprocess
 import threading
 import time
 
@@ -24,9 +26,12 @@ def state(tmp_path, monkeypatch):
     return f
 
 
-def saved(state) -> dict:
-    with cw._state_lock:  # as the app reads it: the helpers' pumps write it meanwhile (Windows: no replace while open)
-        return json.loads(state.read_text())
+def saved(state, keeper: bool = False) -> dict:
+    """The file as the app reads it (under its lock: the helpers' pumps write it meanwhile; Windows: no replace while
+    it is open); without the keep helpers' pids unless asked."""
+    with cw._state_lock:
+        d = json.loads(state.read_text())
+    return d if keeper else {app: {k: v for k, v in e.items() if k != 'keeper'} for app, e in d.items()}
 
 
 def test_remember_never_overwrites_a_nonzero_with_near_zero(state):
@@ -106,15 +111,17 @@ def test_mute_restores_a_leftover_before_muting(state, monkeypatch):
 # ---- the keep helper: a level not given back yet goes back on the app's next session ------------------------------
 
 class FakeKeeper:
-    """A `keep` helper: its args are recorded; it says "restored" for each device in `events` once started."""
+    """A `keep` helper: its args are recorded; it says "restored" for each device in `events` once started; ended by
+    kill() (it reads no stdin: it outlives the app)."""
     spawned: list = []
     events: list = []
 
     def __init__(self, args, **kw):
         FakeKeeper.spawned.append(self)
-        self.args = args
+        self.args, self.kw = args, kw
+        self.pid = 4000 + len(FakeKeeper.spawned)
         self.closed = threading.Event()
-        self.stdin = self
+        self.stdin = None
         self.stdout = self._lines(list(FakeKeeper.events))
         self.returncode = None
 
@@ -123,14 +130,11 @@ class FakeKeeper:
             yield json.dumps({'event': 'restored', 'pid': 7, 'device': d}).encode() + b'\n'
         self.closed.wait(10)  # a live helper: its stdout ends when it is stopped
 
-    def close(self):  # stdin closed: the helper's sign to stop
-        self.closed.set()
-
     def wait(self, *a):
         return 0
 
     def kill(self):
-        pass
+        self.closed.set()
 
 
 @pytest.fixture
@@ -162,7 +166,8 @@ def test_a_level_not_given_back_is_watched_for_and_cleared_when_the_app_plays_ag
     cw.restore_call()
     assert len(keeper.spawned) == 1
     args = keeper.spawned[0].args
-    assert args[1:] == ['keep', '--exe', 'Zoom.exe', '--level', '0.8000', '--device', 'HEADSET'], args
+    assert args[1:] == ['keep', '--exe', 'Zoom.exe', '--level', '0.8000', '--for', str(cw.KEEP_S), '--device', 'HEADSET'], args
+    assert keeper.spawned[0].kw['stdin'] is subprocess.DEVNULL, 'a keep helper on our stdin dies with the app'
     assert until(lambda: not state.exists()), 'the entry was not cleared by the helper saying "restored"'
     assert until(keeper.spawned[0].closed.is_set), 'the keep helper was not stopped after it was done'
 
@@ -188,3 +193,112 @@ def test_muting_the_app_again_stops_its_keep_helper(state, keeper, monkeypatch):
     cw.mute_call('Zoom.exe')
     assert keeper.spawned[0].closed.is_set()
     assert len(keeper.spawned) == 1, 'a new keep helper was started for the app being muted'
+
+
+def test_the_keep_helper_outlives_the_app_and_the_next_run_ends_it(state, keeper, monkeypatch):
+    """H-06: the user quits before the call app plays again: the keep helper (no stdin) goes on and gives the level
+    back without Peresmeshnik. Its pid is in the file; the next run ends it first (it would undo the next duck), only
+    if that pid is still our helper (a pid can be reused)."""
+    cw._remember('Zoom.exe', 0.8, 'HEADSET')
+    monkeypatch.setattr(cw, 'set_session_volume', lambda app, level: [])
+    cw.restore_call()
+    pid = keeper.spawned[0].pid
+    assert saved(state, keeper=True)['Zoom.exe']['keeper'] == pid
+    killed = []
+
+    class Proc:
+        def __init__(self, p):
+            self.p = p
+
+        def name(self):
+            return 'peresmeshnik-loopback.exe' if self.p == pid else 'notepad.exe'
+
+        def kill(self):
+            killed.append(self.p)
+    import psutil
+    monkeypatch.setattr(psutil, 'Process', Proc)
+    monkeypatch.setattr(cw, '_keepers', {})  # a new run: it knows the helper only from the file
+    monkeypatch.setattr(cw, 'tree_root', lambda app: None)  # the app is not running: mute_call stops after its restore
+    cw.mute_call('Zoom.exe')
+    assert killed == [pid]
+    with cw._state_lock:
+        state.write_text(json.dumps({'Zoom.exe': {'level': 0.8, 'devices': ['HEADSET'], 'keeper': 77}}))
+    cw.restore_call()
+    assert killed == [pid], 'killed a reused pid that is not our helper'
+
+
+class FakeMuter:
+    """The `mute` helper: prints `lines`, then waits for its stdin to close."""
+    def __init__(self, lines):
+        self.closed = threading.Event()
+        self.stdin = self
+        self.stdout = self._out(lines)
+
+    def _out(self, lines):
+        yield from (json.dumps(x).encode() + b'\n' for x in lines)
+        self.closed.wait(10)
+
+    def close(self):
+        self.closed.set()
+
+    def wait(self, *a):
+        return 0
+
+    def kill(self):
+        self.closed.set()
+
+
+@pytest.mark.parametrize('lines, gain', [
+    ([{'event': 'muted', 'pid': 1, 'level': 0.8, 'device': 'A'}], 1 / cw.DUCK),  # ducked: brought back up
+    ([{'event': 'failed', 'pid': 1, 'device': 'A', 'hr': 5}], 1.0),           # SetMasterVolume failed: as it is
+    ([], 1.0)])                                                                 # nothing ducked yet
+def test_the_loopback_is_brought_back_up_only_once_a_session_is_ducked(state, monkeypatch, lines, gain):
+    """FIXES 1: the gain follows the helper's word that a session is ducked, not its start; translation off (and
+    the helper's end) takes it back."""
+    muter = FakeMuter(lines)
+    monkeypatch.setattr(cw, 'helper', lambda: 'helper.exe')
+    monkeypatch.setattr(cw, 'tree_root', lambda app: 123)
+    monkeypatch.setattr(cw, 'set_session_volume', lambda app, level: [])
+    monkeypatch.setattr(cw.subprocess, 'Popen', lambda *a, **k: muter)
+    monkeypatch.setattr(cw, '_gain', 1.0)
+    cw.mute_call('Zoom.exe')
+    time.sleep(0.2)
+    assert cw._gain == gain
+    cw.restore_call()
+    assert cw._gain == 1.0
+
+
+def test_a_mute_helper_that_dies_takes_the_gain_back(state, monkeypatch):
+    muter = FakeMuter([{'event': 'muted', 'pid': 1, 'level': 0.8, 'device': 'A'}])
+    monkeypatch.setattr(cw, 'helper', lambda: 'helper.exe')
+    monkeypatch.setattr(cw, 'tree_root', lambda app: 123)
+    monkeypatch.setattr(cw, 'set_session_volume', lambda app, level: [])
+    monkeypatch.setattr(cw.subprocess, 'Popen', lambda *a, **k: muter)
+    cw.mute_call('Zoom.exe')
+    assert until(lambda: cw._gain != 1.0)
+    muter.closed.set()  # its stdout ends: it died
+    assert until(lambda: cw._gain == 1.0), 'a dead helper ducks nothing, the sound must not be brought up'
+    monkeypatch.setattr(cw, '_muter', None)
+
+
+def test_only_a_block_as_quiet_as_a_ducked_one_is_brought_up(monkeypatch):
+    """FIXES 1: a block louder than 2*DUCK is not ducked (the duck not taken yet, raised by hand, a helper gone):
+    passed as it is, not clipped."""
+    import numpy as np
+    monkeypatch.setattr(cw, '_gain', 1 / cw.DUCK)
+    sr = 48000
+    t = np.arange(sr // 4) / sr
+    quiet = (cw.DUCK * 0.8 * np.sin(2 * np.pi * 440 * t)).astype('<f4')
+    loud = (0.3 * np.sin(2 * np.pi * 440 * t)).astype('<f4')
+    head = b'peresmeshnik-loopback 1 rate=48000 channels=1 format=f32le\n'
+    proc = type('P', (), {'stdout': io.BytesIO(head + quiet.tobytes() + loud.tobytes()), 'wait': lambda *a: 0,
+                          'returncode': 0})()
+    got = []
+    cap = cw.ProcessLoopback(pid=1, on_end=lambda why: None)
+    cap._proc = proc
+    cap._read(proc, got.append)
+    x = np.concatenate(got)
+    n = len(x) // 2
+    first, second = float(np.abs(x[n // 4:n - n // 4]).max()), float(np.abs(x[n + n // 4:-n // 4]).max())
+    assert 0.7 < first < 0.9, first   # 0.004 brought up to ~0.8
+    assert 0.25 < second < 0.35, second  # 0.3 left as it is, not 60 clipped to 1

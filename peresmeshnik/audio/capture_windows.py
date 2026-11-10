@@ -44,7 +44,8 @@ EXIT = {2: 'bad arguments to the loopback helper', 3: 'the call app is not runni
 RESTART = 7
 RESTART_S, RESTARTS = 1.0, 5
 DUCK = 0.005  # the call app's session volume while translating; below 0.01, so a saved level never takes it for one
-_gain = 1.0  # 1/DUCK while the call app is ducked (mute_call .. restore_call): the loopback's sound at its level again
+_gain = 1.0  # 1/DUCK once the mute helper said a session is ducked, until restore_call or the helper's end
+KEEP_S = 14 * 24 * 3600  # how long a keep helper waits for the call app's next sound, the app quit or not
 
 
 def helper() -> str:
@@ -214,7 +215,9 @@ class ProcessLoopback:
             rs, n = Resampler(self.rate, SAMPLE_RATE), self.rate * 32 // 1000 * 4  # 32 ms, as the Linux capture
             while len(b := proc.stdout.read(n)) == n:
                 x = np.frombuffer(b, '<f4')
-                if _gain != 1.0:  # ducked: the sound before the duck (a few ms) would clip, so it is bounded
+                # ducked: brought back up. A block louder than a ducked one can be (before the duck took, a session
+                # raised by hand or by the app, a helper gone) is not ducked: as it is, not 200 times into a clip
+                if _gain != 1.0 and float(np.abs(x).max(initial=0.0)) <= 2 * DUCK:
                     x = np.clip(x * _gain, -1.0, 1.0)
                 on_frames(rs(x))
         proc.wait()
@@ -281,10 +284,13 @@ def _mute_state() -> Path:
 
 
 def _entry(v) -> dict:
-    """An app's saved state {'level': its original, 'devices': endpoint ids still at 0}. A file of 0.3.0 has the bare
-    level: no devices, so any session given back clears it."""
+    """An app's saved state {'level': its original, 'devices': endpoint ids still at 0, 'keeper': the pid of its keep
+    helper, which outlives the app}. An older file has the bare level: no devices, any session given back clears it."""
     if isinstance(v, dict):
-        return {'level': float(v.get('level', 0.0)), 'devices': [str(x) for x in v.get('devices', [])]}
+        e = {'level': float(v.get('level', 0.0)), 'devices': [str(x) for x in v.get('devices', [])]}
+        if isinstance(v.get('keeper'), int):
+            e['keeper'] = v['keeper']
+        return e
     return {'level': float(v), 'devices': []}
 
 
@@ -310,7 +316,14 @@ def _write_state(d: dict) -> None:
             _mute_state().parent.mkdir(parents=True, exist_ok=True)
             tmp = _mute_state().with_suffix('.tmp')
             tmp.write_text(json.dumps(d))
-            os.replace(tmp, _mute_state())
+            for i in range(3):  # Windows: an antivirus or the indexer may hold the file a moment
+                try:
+                    os.replace(tmp, _mute_state())
+                    break
+                except PermissionError:
+                    if i == 2:
+                        raise
+                    time.sleep(0.05)
         elif _mute_state().exists():
             _mute_state().unlink()
     except OSError as e:
@@ -359,10 +372,30 @@ def set_session_volume(app: str, level: float) -> list[str]:
 
 def _stop(proc: subprocess.Popen) -> None:
     try:
-        proc.stdin.close()  # a helper's sign to stop (neither mute nor keep restores anything on its way out)
+        proc.stdin.close()  # the mute helper's sign to stop (it restores nothing on its way out)
         proc.wait(5)
     except Exception:
         proc.kill()
+
+
+def _kill(proc: subprocess.Popen) -> None:
+    """A keep helper reads no stdin (it outlives the app): it is ended. It holds nothing to clean up."""
+    try:
+        proc.kill()
+        proc.wait(5)
+    except Exception:
+        pass
+
+
+def _kill_orphan(pid: int) -> None:
+    """The keep helper a previous run left (the app quit or crashed while it waited): it would undo the next duck."""
+    import psutil
+    try:
+        p = psutil.Process(pid)
+        if p.name().lower().startswith('peresmeshnik-loopback'):  # the pid may have been reused by another program
+            p.kill()
+    except psutil.Error:
+        pass
 
 
 def mute_call(app: str) -> None:
@@ -378,17 +411,23 @@ def mute_call(app: str) -> None:
     proc = subprocess.Popen([helper(), 'mute', '--pid', str(pid), '--tree', '--level', f'{DUCK:.4f}'],
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                             creationflags=CREATE_NO_WINDOW)
-    _gain = 1 / DUCK
 
     def pump() -> None:
-        for line in proc.stdout:  # one {"event":"muted","pid","level","device"} per session, as they are muted
+        global _gain
+        for line in proc.stdout:  # one {"event":"muted","pid","level","device"} per session, as they are ducked
             try:
                 ev = json.loads(line.decode('utf-8', 'replace'))
             except ValueError:
                 continue
             if ev.get('event') == 'muted':
                 _remember(app, float(ev['level']), ev.get('device', ''))
-                log.info('mute: %s session %s volume %.2f -> 0', app, ev.get('pid'), ev['level'])
+                _gain = 1 / DUCK  # a session is ducked now: its sound is brought back up
+                log.info('mute: %s session %s volume %.2f -> %g', app, ev.get('pid'), ev['level'], DUCK)
+            elif ev.get('event') == 'failed':
+                log.warning('mute: %s session %s could not be ducked (0x%x)', app, ev.get('pid'), ev.get('hr', 0))
+        with _muter_lock:  # the helper ended (stopped, or died): nothing ducks any more
+            if _muter is proc or _muter is None:
+                _gain = 1.0
 
     with _muter_lock:
         _muter = proc
@@ -406,11 +445,15 @@ def restore_call(muting: str = '') -> None:
         proc, _muter = _muter, None
         keepers = list(_keepers.values())
         _keepers.clear()
-    for p in ([proc] if proc is not None else []) + keepers:
-        _stop(p)
+    if proc is not None:
+        _stop(proc)
+    for p in keepers:
+        _kill(p)
     with _state_lock:
         d = _load_state()
         for app, e in list(d.items()):
+            if 'keeper' in e:  # a previous run's keep helper, if it still waits
+                _kill_orphan(e.pop('keeper'))
             if e['level'] < 0.01:  # nothing known to put back
                 d.pop(app)
                 continue
@@ -428,16 +471,21 @@ def restore_call(muting: str = '') -> None:
 def _keep(app: str, e: dict) -> None:
     """A keep helper for the level of `app` not given back yet: on the app's next session on one of e['devices'] (any
     device for an entry of 0.3.0) it sets the level if the session is at 0, and says "restored" per device."""
-    args = [helper(), 'keep', '--exe', app, '--level', f'{e["level"]:.4f}']
+    args = [helper(), 'keep', '--exe', app, '--level', f'{e["level"]:.4f}', '--for', str(KEEP_S)]
     for dev in e['devices']:
         args += ['--device', dev]
-    try:
-        proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    try:  # no stdin: it outlives the app (the call app's next call without Peresmeshnik) and ends when done
+        proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                 creationflags=CREATE_NO_WINDOW)
     except (OSError, RuntimeError) as ex:
         log.warning('mute: cannot watch for %s to give its volume back: %s', app, ex)
         return
-    log.info('mute: %s is still at 0 on %s: its volume goes back when it plays there', app, e['devices'] or 'a device')
+    with _state_lock:  # its pid: the next run ends it before it ducks or gives back anything itself
+        d = _load_state()
+        if app in d:
+            d[app]['keeper'] = proc.pid
+            _write_state(d)
+    log.info('mute: %s is still down on %s: its volume goes back when it plays there', app, e['devices'] or 'a device')
 
     def pump() -> None:
         for line in proc.stdout:  # {"event":"restored","pid","device"} per session given back (or found not at 0)
@@ -450,7 +498,7 @@ def _keep(app: str, e: dict) -> None:
         with _muter_lock:
             if _keepers.get(app) is proc:
                 _keepers.pop(app)
-        _stop(proc)
+        _kill(proc)  # done (it ends by itself too)
 
     with _muter_lock:
         _keepers[app] = proc

@@ -337,12 +337,37 @@ def test_translation_turned_off_while_the_sound_server_is_gone_stays_off(devices
         for m in reversed(pactl('list', 'short', 'modules').splitlines()):  # the server went: none of ours
             if 'peresmeshnik_' in m:
                 pactl('unload-module', m.split('\t')[0])
-        assert ctl._down.acquire(blocking=False)  # as _sound_gone does, translation on (was_on)
+        assert ctl._down.acquire(blocking=False)  # as _sound_gone does
         ctl.set_translation(False).result(10)  # the user, meanwhile
-        ctl.submit(ctl._sound_back, True).result(10)  # the server is back
+        ctl.submit(ctl._sound_back).result(10)  # the server is back
         assert not ctl.on and not ctl.sides and 'peresmeshnik_mic' in pactl('list', 'short', 'sources'), states
         ctl.set_translation(True).result(10)  # and on again by the user: on the devices made again
         assert ctl.on and [x.vmic for x in ctl.sides] == [ctl._vmic, ctl._vmic]
+    finally:
+        ctl.quit()
+    assert not ours()
+
+
+def test_translation_turned_on_while_the_sound_server_is_gone_goes_on_when_it_is_back(devices):
+    """M-01 (review of PR #22, round 2): translation off, the sound server goes, the user turns translation on (it
+    cannot start: no server); when the server is back, translation goes on."""
+    from peresmeshnik import app, config
+    s = config.Settings()
+    s.ui.mic = devices['mic']
+    overlay_side, states = type('S', (), {'hide': lambda self: None})(), []
+    ctl = app.Controller(type('O', (), {'side': lambda self, name: overlay_side})(), states.append, settings=s)
+    ctl.startup()
+    ctl._route = lambda s: ''
+
+    def no_server(name, s):
+        raise RuntimeError('Connection refused')
+    ctl._side = no_server
+    try:
+        ctl.set_translation(True).result(10)  # the user, while the server is gone: nothing starts
+        assert not ctl.on, states
+        ctl._side = lambda name, s: FakeSide(name, ctl._vmic)
+        ctl._events.p.kill()  # the server's event (it went and is back): translation off at that moment
+        assert wait_for(lambda: ctl.on, 10), states
     finally:
         ctl.quit()
     assert not ours()

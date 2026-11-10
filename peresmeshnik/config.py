@@ -139,6 +139,7 @@ OLD_DEFAULTS = {'local.mt': {'en-ru': 'opus-mt-en-ru'}}
 
 
 problem = ''  # what the last load() could not use, for the user ('' = nothing)
+on_unsaved: list = []  # callbacks(why): a save() refused (its settings came from a file that could not be read)
 
 
 def _fill(obj, data: dict, bad: list[str], where: str = ''):
@@ -171,8 +172,9 @@ def load(path: Path | None = None) -> Settings:
     s, path, bad = Settings(), path or settings_path(), []
     try:
         _fill(s, tomllib.loads(path.read_text('utf-8-sig')), bad)  # -sig: Notepad's BOM
-    except FileNotFoundError:  # none yet (the wizard writes it)
-        pass
+    except FileNotFoundError:  # none yet (the wizard writes it); or kept aside as .bad: local till a new one is saved
+        if (keep := path.with_name(path.name + '.bad')).exists():
+            bad.append(f'it did not parse and is kept as {keep.name}')
     except ValueError as e:  # TOML or UTF-8: kept aside, not overwritten by the next save
         keep = path.with_name(path.name + '.bad')
         try:
@@ -180,8 +182,9 @@ def load(path: Path | None = None) -> Settings:
             bad.append(f'it does not parse ({e}), it is kept as {keep.name}')
         except OSError as e2:  # held by an antivirus, or gone meanwhile
             bad.append(f'it does not parse ({e}) and could not be kept aside ({e2})')
-    except OSError as e:  # cannot be opened now (an antivirus holds it): not broken, not moved
+    except OSError as e:  # cannot be opened now (an antivirus holds it): not broken, not moved, not saved over
         bad.append(f'it cannot be opened ({e})')
+        s._unread = path  # save() refuses these: the user's settings are in that file, these are defaults
     for k in ('them_to_me', 'me_to_them'):
         if getattr(s, k) not in ENGINES:  # local, not the default: a typo must not send the voice to Google unasked
             bad.append(f'{k} must be one of {ENGINES}, got {getattr(s, k)!r}: local is used')
@@ -222,6 +225,12 @@ def _changed(v, default):
 
 def save(s: Settings, path: Path | None = None) -> Path:
     path = path or settings_path()
+    if getattr(s, '_unread', None) == path:  # a click in the tray after a load that could not open the file
+        why = f'{path.name} cannot be read now, nothing saved'
+        print(f'settings: {why}', file=sys.stderr)
+        for cb in on_unsaved:
+            cb(why)
+        return path
     top, tables = [], []
     for f in fields(s):
         v = getattr(s, f.name)

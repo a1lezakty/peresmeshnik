@@ -146,8 +146,13 @@ def test_a_broken_settings_file_does_not_stop_the_app(tmp_path, monkeypatch):
         s = config.load(p)
         assert (s.them_to_me, s.me_to_them) == ('local', 'local') and 'both directions are local' in config.problem, \
             (broken, config.problem)
-        if not p.exists():  # did not parse: kept aside
+        if not p.exists():  # did not parse: kept aside, and local still at the next load (no file, its .bad there)
             assert (tmp_path / 'settings.toml.bad').read_bytes() == (broken if isinstance(broken, bytes) else broken.encode())
+            s = config.load(p)
+            assert (s.them_to_me, s.me_to_them) == ('local', 'local') and 'settings.toml.bad' in config.problem, broken
+            config.save(s, p)  # what the wizard or the tray saves next: a file again, as the user sets it from here
+            assert config.load(p).me_to_them == 'local' and not config.problem
+            (tmp_path / 'settings.toml.bad').unlink()
     p.write_bytes(b'\xef\xbb\xbf' + cloud.encode())  # Notepad's BOM: read as it is, nothing lost
     assert config.load(p).them_to_me == 'cloud' and not config.problem and p.exists()
     real = config.Path.read_text
@@ -159,6 +164,11 @@ def test_a_broken_settings_file_does_not_stop_the_app(tmp_path, monkeypatch):
     monkeypatch.setattr(config.Path, 'read_text', locked)
     s = config.load(p)
     assert (s.them_to_me, s.me_to_them) == ('local', 'local') and 'in use' in config.problem and p.exists()
+    before, refused = p.read_bytes(), []
+    monkeypatch.setattr(config, 'on_unsaved', [refused.append])
+    s.ui.show_latency = True  # a click in the tray: load, change, save
+    config.save(s, p)  # not over the file it could not read: the user's settings are in it, these are defaults
+    assert p.read_bytes() == before and refused == ['settings.toml cannot be read now, nothing saved'], refused
 
 
 def test_settings_are_written_whole_or_not_at_all(tmp_path, monkeypatch):

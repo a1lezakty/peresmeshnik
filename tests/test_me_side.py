@@ -217,6 +217,11 @@ def test_settings_broken_while_running_are_said_when_translation_goes_on(monkeyp
         ctl.set_translation(True).result(10)
         assert got == [('them', 'local', 'local'), ('me', 'local', 'local')], got
         assert any(x.startswith('error: settings') and 'both directions are local' in x for x in states), states
+        states.clear()
+        ctl.set_translation(False).result(10)
+        ctl.set_translation(True).result(10)  # the file is settings.toml.bad now: still local, still said
+        assert got[2:] == [('them', 'local', 'local'), ('me', 'local', 'local')], got
+        assert any(x.startswith('error: settings') and 'settings.toml.bad' in x for x in states), states
     finally:
         ctl.quit()
 

@@ -888,20 +888,20 @@ class Controller:
 
     def _sound_gone(self) -> None:
         """The events' thread: the sound server went away (`systemctl --user restart pipewire`, an update, a crash) and
-        our devices with it. Once it is back they are made again, and translation goes on if it was on (M-01)."""
+        our devices with it. Once it is back they are made again, and translation goes on if the user has it on (M-01)."""
         if not self._down.acquire(blocking=False):  # waiting already
             return
-        was_on, wait = self.on, 0.5
+        wait = 0.5
         log.warning('the sound server went away: waiting for it')
         self.on_state('error: the sound server is gone, waiting for it')  # not a silent "translating" meanwhile
         while not self._quitting:  # ponytail: a short poll only while there is no sound server; none while it runs
             if sound_server():
-                self.submit(self._sound_back, was_on)
+                self.submit(self._sound_back)
                 return
             time.sleep(wait)
             wait = min(wait * 2, 5.0)
 
-    def _sound_back(self, was_on: bool) -> None:
+    def _sound_back(self) -> None:
         self._down.release()
         self._ensure_devices()
         try:
@@ -910,7 +910,8 @@ class Controller:
             self._events = self._watch_sound()
         except Exception as e:
             log.warning('sound events: %s', e)
-        if self.on and self._sides_n != self._devices_n or was_on and self.wanted and not self.on:  # their streams went
+        # on: its streams went with the server; off but wanted (the user's choice): it could not start meanwhile
+        if self.on and self._sides_n != self._devices_n or self.wanted and not self.on:
             self._off()
             self._on()
         self.on_state('note: the sound server restarted: "Peresmeshnik Mic" and "Peresmeshnik Call" are there again'
@@ -1638,6 +1639,7 @@ def cli(argv=None) -> int:
     tray = Tray(ctl)
     bridge.state.connect(tray.set_state)
     bridge.report.connect(tray.report_ready)
+    config.on_unsaved.append(lambda why: bridge.state.emit(f'error: {why}'))  # a tray click after an unreadable load
     crash.on_report.append(lambda p, quiet: bridge.report.emit(str(p), quiet))
     bridge.state.connect(lambda st: print(st, flush=True))  # tests and the idle watchdog read these lines
 

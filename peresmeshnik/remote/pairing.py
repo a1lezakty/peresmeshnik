@@ -65,10 +65,23 @@ def _write(path: Path, data: bytes) -> None:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        _windows_retry(lambda: os.replace(tmp, path))
     except BaseException:
         os.unlink(tmp)
         raise
+
+
+def _windows_retry(fn, wait_s: float = 2.0):
+    """Windows: a file another process (or thread) holds open for a moment cannot be replaced, nor opened while it is
+    being replaced (PermissionError): `serve --revoke` against the running server's `check`. Tried again for `wait_s`."""
+    end = time.monotonic() + wait_s
+    while True:
+        try:
+            return fn()
+        except PermissionError:
+            if os.name != 'nt' or time.monotonic() > end:
+                raise
+            time.sleep(0.01)
 
 
 def _hex(pattern: re.Pattern, s: object) -> bool:
@@ -147,7 +160,7 @@ class Pairing:
 
     def _read(self) -> list[dict]:
         try:
-            return json.loads(self.path.read_text('utf-8'))
+            return json.loads(_windows_retry(lambda: self.path.read_text('utf-8')))
         except FileNotFoundError:
             return []
 

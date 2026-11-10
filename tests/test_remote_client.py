@@ -1,6 +1,7 @@
 """RemoteDirection (peresmeshnik/remote/client.py) against a fake server (tests/fake_remote.py: the real protocol over a real
 TLS WebSocket on 127.0.0.1): the session, the voice upload and a warm session, a certificate that is not the paired one,
 refusals, a reset and a dead link (one new connection, the cut clause heard again), too slow, barge-in, close."""
+import contextlib
 import os
 import queue
 import threading
@@ -251,7 +252,8 @@ def test_a_flood_the_app_does_not_take(server, monkeypatch):
     monkeypatch.setattr(client, 'EVENTS_MAX', 20)
     d = direction(server)  # nobody reads its events
     assert d.ready.wait(5)
-    server.send(*[protocol.event(Caption(str(i))) for i in range(50)])
+    with contextlib.suppress(Exception):  # the client cuts the connection once its queue is full: sending may fail
+        server.send(*[protocol.event(Caption(str(i))) for i in range(50)])
     until(lambda: d._events.full())
     got = []
     with pytest.raises(CloudDown, match='does not keep up'):

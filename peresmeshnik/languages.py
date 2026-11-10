@@ -317,6 +317,11 @@ def fallback_voice(s, side: str) -> str:
     return d.tts if d.voice == 'stock' else pick(s.local.tts, d.tgt)
 
 
+def _fallback_engine(model_id: str) -> str:
+    from peresmeshnik import models
+    return models.get(model_id).fallback
+
+
 def _consent(model_id: str) -> bool:
     from peresmeshnik import models
     return models.get(model_id).consent
@@ -333,6 +338,7 @@ def needed_models(s) -> list[str]:
             ids += d.models
             if d.voice == 'clone':  # the clone's fallback (~60 MB): the stock voice when the clone cannot speak (S2)
                 ids += [i for i in [pick(s.local.tts, d.tgt)] if i]
+                ids += [i for i in [_fallback_engine(d.tts)] if i]  # its own fallback engine (Qwen3: Chatterbox)
         elif getattr(s, side) == 'cloud' and not cloud_subtitles(s, side):  # local subtitles, and with its stock voice
             ids += [d.asr, d.mt] + [i for i in [fallback_voice(s, side)] if i and not _consent(i)]  # the side's way when
             # the cloud fails; remote: all of it on the server

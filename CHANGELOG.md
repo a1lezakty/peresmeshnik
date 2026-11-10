@@ -14,8 +14,12 @@ version is the top of its GitHub release notes (`.github/workflows/release.yml`)
   no torch) speaks English, French, German, Spanish, Portuguese and Italian in your voice, and Russian
   (Shtorm-PocketTTS-RU, with stress marks). Your voice starts about 2 s after you finish a phrase, and with both
   directions cloned at once 4 cores keep up. Its English to Italian weights download with your Hugging Face token, of
-  an account that accepted Kyutai's conditions. On an NVIDIA GPU XTTS-v2 as before; Polish, Turkish, Chinese, Japanese,
-  Korean and Arabic without one: a stock voice, and the wizard says why.
+  an account that accepted Kyutai's conditions. Polish, Turkish, Chinese, Japanese, Korean and Arabic without an NVIDIA
+  GPU: a stock voice, and the wizard says why.
+- **On an NVIDIA GPU the voice pack clones with Qwen3-TTS** (English, Russian, German, French, Spanish, Italian,
+  Portuguese, Chinese, Japanese, Korean): it streams, the first sound in ~0.1 s. A clause it does not stop on is cut at
+  its length budget and said again by Chatterbox Multilingual, and so is the rest of the call in that voice. XTTS-v2
+  for Polish, Turkish and Arabic.
 
 ## 0.3.0
 

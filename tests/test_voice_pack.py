@@ -283,11 +283,11 @@ def me_side(monkeypatch, tmp_path, clone_error=None, key=True, meta=None):
         return FakeDirection(tts, voice)
     monkeypatch.setattr(pipeline, 'make_local', make_local)
 
-    def make(model_dir, threads=2):
+    def make(model_id, model_dir, threads=2):
         if isinstance(clone_error, Exception):
             raise clone_error
         return clone_error or 'clone'
-    monkeypatch.setattr(clone, 'make_clone', make)
+    monkeypatch.setattr(clone, 'make_engine', make)
     side = app.Side.__new__(app.Side)
     side.name, side.src, side.tgt, side.engine, side.settings, side.live = 'me', s.my_lang, s.their_lang, 'local', s, False
     side._lock, side.directions, side.errors = threading.Lock(), [], []

@@ -93,7 +93,8 @@ def test_installed_files_shortcut_and_uninstall_entry(installed):
               'licenses/PySide6_Essentials/LGPL-3.0.txt', 'licenses/PySide6_Essentials/GPL-3.0.txt',  # Qt: its wheel has
               'licenses/shiboken6/LGPL-3.0.txt',  # only the commercial option's text
               'licenses/ctranslate2/libiomp5md-LICENSE.txt', 'licenses/sounddevice/PortAudio-LICENSE.txt',
-              *(f'_internal/voice-runner/{f}' for f in ('voice_runner.py', 'pack-windows.json', 'xtts.py'))):  # voicepack.runner_dir
+              *(f'_internal/voice-runner/{f}'  # voicepack.runner_dir
+                for f in ('voice_runner.py', 'pack-windows.json', 'xtts.py', 'qwen3.py'))):
         assert (installed / f).exists(), f
     if os.environ.get('REQUIRE_LOOPBACK') == '1':  # a release: the sound helpers (test_zip_holds_the_same_folder: the .zip too)
         for f in ('peresmeshnik-loopback.exe', 'peresmeshnik-audio.exe'):

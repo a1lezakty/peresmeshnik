@@ -64,6 +64,7 @@ class Model:
     needs: str = ''  # 'gpu': runs live only with an NVIDIA GPU; without one languages.direction() does not offer it
     pivot: bool = False  # mt: the model of its language to or from English for a pair through English
     token: str = ''  # 'hf': a gated Hugging Face repo: the download needs the user's token (hf_token) and its conditions
+    fallback: str = ''  # clone: the model that takes over a voice when this one breaks down; downloaded with it
 
     @property
     def size(self) -> int:

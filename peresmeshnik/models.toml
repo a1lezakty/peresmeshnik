@@ -1118,6 +1118,28 @@ url = "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109
 "ja_JP-hi_fi_captain-medium.onnx.json" = { sha256 = "fe9aeda38318607ba114926d1d7ee7d56295f9af3774a99a42b36f4354cabf27", size = 5301 }
 "MODEL_CARD" = { sha256 = "26dcad3474c39c7fc394c1e57e60121c90832afa9f43e7942faa7c51e1e81905", size = 361 }
 
+[qwen3-tts]  # Qwen3-TTS 0.6B Base through faster-qwen3-tts in the voice pack (local/qwen3.py): streams, the voice is one vector
+role = "clone"
+langs = ["en", "ru", "de", "fr", "es", "it", "pt", "zh", "ja", "ko"]
+license = "Apache-2.0"
+license_url = "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+note = "Qwen3-TTS by Alibaba Qwen; Chatterbox Multilingual takes over a voice whose clause breaks down"
+needs = "gpu"  # first audio 0.08-0.12 s on an RTX A4000, about half real time on a CPU (RESEARCH-clone 3.2): languages.clone_why
+fallback = "chatterbox-mtl"
+url = "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base/resolve/5d83992436eae1d760afd27aff78a71d676296fc/"
+[qwen3-tts.files]
+"config.json" = { sha256 = "2e714c787c8edb98b05432685cddb634add2de4d4e645f653d68251ef72ba011", size = 4494 }
+"generation_config.json" = { sha256 = "f1b90b4513f3b34c62851049e2492d7b4c5940daf1276f89c82b8ef04127f3aa", size = 245 }
+"merges.txt" = { sha256 = "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3", size = 1671839 }
+"model.safetensors" = { sha256 = "180b3b10eb1c9f1b4db7806d5475bae3071c0243c299d49926bab1da3b6946f6", size = 1829344272 }
+"preprocessor_config.json" = { sha256 = "efdde1022ea9d76928bf7a9cd53139138f5ba2e466e837f08f6105ab1af1c119", size = 127 }
+"speech_tokenizer/config.json" = { sha256 = "ee65bb901c876664ab8707c487157aa1a6ee57c65969b28fb5ec9dc211e68167", size = 2336 }
+"speech_tokenizer/configuration.json" = { sha256 = "6bc26d64eb5024b4d1dab5a52371958b429256d6c9d59787f1f5294a54e0cebd", size = 76 }
+"speech_tokenizer/model.safetensors" = { sha256 = "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258", size = 682293092 }
+"speech_tokenizer/preprocessor_config.json" = { sha256 = "fcb3805e597e786d4067706e602f6688524640f8d3396790e2e09b5942fcbdfb", size = 234 }
+"tokenizer_config.json" = { sha256 = "dc3c31c3bdaedd5016382bb3cbe07323026775ad51f5a4fb564505992ae4a670", size = 7344 }
+"vocab.json" = { sha256 = "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910", size = 2776833 }
+
 [xtts-v2]  # voice clone (coqui-tts); needs the optional voice pack with torch
 role = "clone"
 langs = ["en", "ru", "de", "fr", "es", "it", "pt", "pl", "tr", "zh", "ja", "ko", "ar"]  # all of the 14 but uk; and nl cs hu hi
@@ -1133,6 +1155,22 @@ url = "https://huggingface.co/coqui/XTTS-v2/resolve/6c2b0d75eae4b7047358e3b6bd93
 "vocab.json" = { sha256 = "928260878a59da8a72a2a5b7687fea29d5106137669d90945430fe17e415304a", size = 361219 }
 "speakers_xtts.pth" = { sha256 = "f0f6137c19a4eab0cbbe4c99b5babacf68b1746e50da90807708c10e645b943b", size = 7754818 }
 "LICENSE.txt" = { sha256 = "190f6d7c19b8984f91b97712b94ce92d2b2e640fc677dacab966e955ece9d043", size = 4014 }
+
+[chatterbox-mtl]  # Chatterbox Multilingual (chatterbox-tts) in the voice pack: qwen3-tts's fallback, no streaming (+2-3 s)
+role = "clone"
+langs = ["en", "ru", "de", "fr", "es", "it", "pt", "pl", "tr", "zh", "ja", "ko", "ar"]  # and da el fi he hi ms nl no sv sw
+license = "MIT"
+license_url = "https://huggingface.co/ResembleAI/chatterbox"
+note = "Chatterbox Multilingual by Resemble AI: an inaudible watermark (Perth) in every output"
+needs = "gpu"  # 2.2x slower than speech on a CPU (RESEARCH-clone 11.2)
+url = "https://huggingface.co/ResembleAI/chatterbox/resolve/5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18/"
+[chatterbox-mtl.files]
+"Cangjie5_TC.json" = { sha256 = "7073fd9de919443ae88e0bd2449917a65fe54898a4413ed1edcc4b67f28bce8c", size = 1920163 }
+"conds.pt" = { sha256 = "6552d70568833628ba019c6b03459e77fe71ca197d5c560cef9411bee9d87f4e", size = 107374 }
+"grapheme_mtl_merged_expanded_v1.json" = { sha256 = "69632f47220a788a52ce2661d096453c5655e9bf25289d89a8d832c46ee07dbf", size = 69989 }
+"s3gen.pt" = { sha256 = "9b9ff07e60b20c136e2b1b3d7563a24604e8d2c4c267888d1ee929dd0151d2a3", size = 1057165844 }
+"t3_mtl23ls_v2.safetensors" = { sha256 = "b1237586127ce98e7800a68e49938eb5092846862aabcb6e17b2fda7889a6c75", size = 2143989752 }
+"ve.pt" = { sha256 = "4b16d836bc598509860f6fa068165a8bb5e9ac84f05582dfcf278a5a372879f1", size = 5698626 }
 
 # Kyutai Pocket TTS (100M): a cloned voice live on any CPU, Mac too (local/pocket.py, onnxruntime: our graph, these
 # weights). A model per language; the weights with voice cloning are in a gated repo: the user accepts its conditions

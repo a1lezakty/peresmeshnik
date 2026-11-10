@@ -109,6 +109,12 @@ def make_engine(model_id: str, model_dir: Path | str, threads: int = 2):
             return PocketTts(model_dir, threads=threads, model_id=model_id, int8=True)
         except (OSError, ValueError) as e:  # onnxruntime cannot load it, a broken weights file
             raise CloneUnavailable(f'Pocket TTS did not start: {e}') from e
+    if model_id == 'qwen3-tts':  # the voice pack's runner with Qwen3, Chatterbox taking over a voice that breaks down
+        from peresmeshnik import models
+        if not (cmd := voice_cmd()):
+            raise CloneUnavailable('Qwen3-TTS needs the voice pack: install it in the setup wizard (Your voice)')
+        return VoicePackClone(model_dir, threads, [*cmd, '--kind', 'qwen3', '--fallback-dir',
+                                                   str(models.path(models.get(model_id).fallback))])
     return make_clone(model_dir, threads)
 
 

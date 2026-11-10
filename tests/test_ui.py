@@ -209,8 +209,8 @@ def test_wizard_asks_for_the_right_models(monkeypatch):
     assert needed_models(s) == ['silero-vad', 'gigaam-v3-e2e-ctc', 'opus-mt-ru-en', 'pocket-tts-en',
                                 s.local.tts[s.their_lang]]
     monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
-    assert needed_models(s) == ['silero-vad', 'gigaam-v3-e2e-ctc', 'opus-mt-ru-en', 'xtts-v2',
-                                s.local.tts[s.their_lang]]  # the stock voice: the clone's fallback
+    assert needed_models(s) == ['silero-vad', 'gigaam-v3-e2e-ctc', 'opus-mt-ru-en', 'qwen3-tts',
+                                s.local.tts[s.their_lang], 'chatterbox-mtl']  # the stock voice: the clone's fallback
 
 
 def test_hotkey_combos():

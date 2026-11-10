@@ -1,0 +1,10 @@
+# the build context is the repository (BuildKit reads this file next to its Dockerfile): only what the image needs
+.git
+.venv
+.github
+dist
+build
+bench
+docs
+tests
+**/__pycache__

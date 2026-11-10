@@ -197,6 +197,36 @@ cache folder above (macOS `~/Library/Caches/Peresmeshnik/models`, Windows `%LOCA
 Linux `~/.cache/Peresmeshnik/models`), one folder per model. Delete the ones you no longer need; choosing a pair again
 downloads them again.
 
+## Your own server: a weak laptop, a strong computer
+
+The translation (speech recognition, translation, the voice and your cloned voice) can run on another computer of yours
+or on a rented NVIDIA server, while the laptop only records and plays: it needs no models and little CPU. On the strong
+computer, from source as above (Linux or Windows, Python 3.11+, `uv`):
+
+    uv run peresmeshnik serve --fetch en-ru     # the first time: the models of your pair, after their licenses
+    uv run peresmeshnik serve
+
+It prints a line like `https://192.168.1.20:47000/#K7QM-2XPA-9DFE` and its certificate's fingerprint. On the laptop:
+tray → **Server…** → paste that line: the two computers prove to each other that they know the code (one use, 10
+minutes), the laptop keeps the server's certificate and a token of its own. Then choose the server for *Them → me*
+and *Me → them* in Settings; when it is down or too slow, a side goes local if the laptop has its models, else the
+original is heard meanwhile (the call app's sound for you, your own voice for the call), and the tray says so. `serve --list` shows the paired
+laptops, `serve --revoke NAME` unpairs one, `serve --code` makes a new code. One laptop at a time; its sides stay
+warm on the server for 10 minutes after it leaves (`[server] warm_s`), so a reconnect does not load the models again.
+
+- **Where it listens.** Only on this computer's private addresses (home network, Tailscale), never on a public one
+  unless you start it with `--public`. Through the internet: Tailscale on both computers, or an ssh tunnel with a
+  terminal, `ssh -tt -L 47000:127.0.0.1:47000 <server> sleep infinity`, and pair with `https://127.0.0.1:47000/#<code>`
+  (`ssh -N` delays small messages; the network adds one round trip to the voice either way, BENCH "Remote").
+- **A rented NVIDIA server:** `packaging/server/Dockerfile` (build it yourself: no image is published, it would ship
+  the models' and Piper's licenses with it). Your cloned voice runs on its GPU.
+- **What goes there:** the call's sound and your microphone while a side is on the server, and your own confirmed
+  voice profile for the session (in a folder only the server's user can read, deleted when the session ends). The
+  server's log keeps times only, no words (`--log` for debugging). Your Gemini key never goes there. The provider of a
+  rented server can technically see its memory and disk.
+- **For yourself only:** a server for your own laptops is fine; running it as a service for others is not (the voice
+  models' licenses are non-commercial).
+
 ## When something goes wrong
 
 - **The cloud fails.** A side set to the cloud (Gemini) goes local by itself when the connection drops, Google answers

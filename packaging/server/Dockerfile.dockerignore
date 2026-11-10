@@ -1,0 +1,12 @@
+# the build context is the repository (BuildKit reads this file next to its Dockerfile): only what the image needs, so
+# nothing else in a checkout (an .env, scratch files, recordings) is baked into it
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!peresmeshnik
+!piper-runner
+!voice-runner
+!packaging/piper-requirements.txt
+**/__pycache__

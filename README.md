@@ -197,6 +197,52 @@ cache folder above (macOS `~/Library/Caches/Peresmeshnik/models`, Windows `%LOCA
 Linux `~/.cache/Peresmeshnik/models`), one folder per model. Delete the ones you no longer need; choosing a pair again
 downloads them again.
 
+## Your own server: a weak laptop, a strong computer
+
+The translation (speech recognition, translation, the voice and your cloned voice) can run on another computer of yours
+or on a rented NVIDIA server, while the laptop only records and plays: it needs no models and little CPU. On the strong
+computer, from source as above (Linux or Windows, Python 3.11+, `uv`):
+
+    uv run peresmeshnik serve --fetch en-ru     # the first time: the models of your pair, after their licenses
+    uv run peresmeshnik serve
+
+Its first start (and a start with `--code` later) prints a line like `https://192.168.1.20:47000/#K7QM-2XPA-4DFE` and the
+certificate's fingerprint. On the laptop: tray → **Server…** → paste that line: the two computers prove to each other
+that they know the code (one use, 10 minutes), the laptop keeps the server's certificate and a token of its own. Then
+choose the server for *Them → me* and *Me → them* in Settings; when it is down or too slow, a side goes local if the
+laptop has its models, else the original is heard meanwhile (the call app's sound for you, your own voice for the call),
+and the tray says so. `serve --list` shows the paired laptops, `serve --revoke NAME` unpairs one; for a new code stop the
+server and start it with `--code`. One laptop at a time; its sides stay warm on the server for 10 minutes after it
+leaves (`[server] warm_s`), so a reconnect does not load the models again.
+
+- **Where it listens.** Only on this computer's private addresses (home network, Tailscale) and 127.0.0.1. `--public`
+  only *allows* a public `--host`, it does not pick one: `--host 0.0.0.0 --public` listens on every address. `--host`
+  takes an IP address, not a name. Give the server a fixed address in your router (a DHCP reservation), or the line you
+  paired with stops working when it changes; allow the port in the server's own firewall (ufw, firewalld; on Windows the
+  network must be "Private", not "Public").
+- **Through the internet, or a rented server:** Tailscale on both computers, or an ssh tunnel with a terminal,
+  `ssh -tt -L 47000:127.0.0.1:47000 <server> sleep infinity`, and pair with `https://127.0.0.1:47000/#<code>` (`ssh -N`
+  delays small messages; the network adds one round trip to the voice either way, BENCH "Remote"). Keep port 47000
+  closed in the provider's firewall: a cloud VM's "private" address is often reachable from the internet through its
+  provider's 1:1 NAT, and Docker's `-p 47000:47000` (without `127.0.0.1:`) opens the port to everyone.
+- **A rented NVIDIA server:** `packaging/server/Dockerfile` (build it yourself: no image is published, it would ship
+  the models' and Piper's licenses with it). Your cloned voice runs on its GPU. Run it as the file's head shows: the
+  port on 127.0.0.1 only, `--stop-timeout 60`, and the voices in memory (`--tmpfs`); its pairing line names the
+  container's own address, pair with the `127.0.0.1` one through the ssh tunnel.
+- **Pairing.** While a code is open (10 minutes, or until it is used), anyone on the same network can burn it with five
+  wrong tries: then start the server again with `--code`. A paired laptop is trusted: the server checks that a voice
+  for *Me → them* is marked as your own confirmed voice, which stops an honest laptop's mistake, not a paired laptop
+  that lies (`serve --revoke` it).
+- **What goes there:** the call's sound and your microphone while a side is on the server, and your own voice
+  profile for the session, only once it is confirmed as yours at the microphone and only when the server speaks with
+  it (no NVIDIA GPU there: a stock voice, nothing is sent; any other voice sent for *Me → them*: a stock voice). It is
+  kept in a folder only the server's user can read while the laptop's session is warm, up to 10 minutes after it
+  leaves (`[server] warm_s`, 0: at once), and deleted then, first thing when the server stops, or at its next start
+  after a crash. The server's log keeps times only, no words (`--log` for debugging). Your Gemini key never goes there.
+  The provider of a rented server can technically see its memory and disk.
+- **For yourself only:** a server for your own laptops is fine; running it as a service for others is not (the voice
+  models' licenses are non-commercial).
+
 ## When something goes wrong
 
 - **The cloud fails.** A side set to the cloud (Gemini) goes local by itself when the connection drops, Google answers

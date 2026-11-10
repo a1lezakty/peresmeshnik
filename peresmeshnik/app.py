@@ -48,6 +48,7 @@ MAX_CLONE_RTF = 1.0  # seconds of synthesis per second of speech, warm: above, t
 #                      is not measured
 OURS = 'peresmeshnik_'  # every PipeWire device the app makes starts with this
 MIC_SINK = 'peresmeshnik_mic_sink'  # = audio/virtual_mic_linux.SINK, without importing it on other OSes
+MIC_SOURCE = 'peresmeshnik_mic'  # = audio/virtual_mic_linux.SOURCE ("Peresmeshnik Mic")
 BARGE_IN_WORDS = 3  # my clause has this many words: I talk over their voice (fewer: "yeah", "ага" while listening)
 
 
@@ -420,6 +421,31 @@ class Microphone:
             mic.stop()
 
 
+class PulseEvents:
+    """Linux: one `pactl subscribe` for the app's run, no polling: `on_record()` when a recording starts or ends anywhere
+    (the microphone loop follows "Peresmeshnik Mic" being recorded, M-16); `on_gone()` on its thread when the sound
+    server went away (restarted, crashed: our devices went with it, M-01)."""
+
+    def __init__(self, on_record, on_gone):
+        self.on_record, self.on_gone, self.stopped = on_record, on_gone, False
+        self.p = subprocess.Popen(['pactl', 'subscribe'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                                  env=c_locale())
+        threading.Thread(target=self._read, name='sound-events', daemon=True).start()
+
+    def _read(self) -> None:
+        for line in self.p.stdout:  # "Event 'new' on source-output #93"
+            if ' on source-output ' in line and not line.startswith("Event 'change'"):
+                self.on_record()
+        self.p.wait()
+        if not self.stopped:
+            self.on_gone()
+
+    def stop(self) -> None:
+        self.stopped = True
+        self.p.terminate()
+        self.p.wait()
+
+
 class CallSink:
     """"Peresmeshnik Call": the null sink the call's sound is moved into while translating, kept for the app's run."""
 
@@ -431,6 +457,14 @@ class CallSink:
 
     def remove(self) -> None:
         subprocess.run(['pactl', 'unload-module', self.module], capture_output=True, timeout=10)
+
+
+def sound_server() -> bool:
+    """Linux: the sound server answers now."""
+    try:
+        return subprocess.run(['pactl', 'info'], capture_output=True, timeout=10, env=c_locale()).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def remove_stale() -> None:
@@ -746,6 +780,8 @@ class Controller:
         self.stuck = False  # quit() did not wait for a side still loading: the process exits without its thread
         self._pool = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix='control')  # no thread until first use
         self._vmic = self._call = self._router = self._loop = self._call_watch = None
+        self._events = None  # Linux: PulseEvents
+        self._loop_on = False  # Linux: the microphone loop is wanted (translation off); loaded while the call app records
         self._through = self._through_arrival = None  # macOS < 14.4, translation off: the call app's speaker on to the headphones
         self._mic = ''  # the default input as it was before our devices existed
         self._restarts: dict[str, list[float]] = {}  # side -> times of its restarts in the last minute
@@ -811,8 +847,65 @@ class Controller:
             if back := step('call streams', lambda: return_strays(self._call.name)):
                 log.warning('gave the call sound back to the default output: %s', ', '.join(back))
         step('virtual mic', self.virtual_mic)
+        self._events = step('sound events', self._watch_sound)
         self._loopback(True)
         self.startup_error = '; '.join(errors)
+
+    def _watch_sound(self) -> PulseEvents:
+        return PulseEvents(lambda: self.submit(self._mic_loop), self._sound_gone)
+
+    def _sound_gone(self) -> None:
+        """The events' thread: the sound server went away (`systemctl --user restart pipewire`, an update, a crash) and
+        our devices with it. Once it is back they are made again, and translation goes on if it was on (M-01)."""
+        was_on, wait = self.on, 0.5
+        log.warning('the sound server went away: waiting for it')
+        while not self._quitting:  # ponytail: a short poll only while there is no sound server; none while it runs
+            if sound_server():
+                self.submit(self._sound_back, was_on)
+                return
+            time.sleep(wait)
+            wait = min(wait * 2, 5.0)
+
+    def _sound_back(self, was_on: bool) -> None:
+        made = self._ensure_devices()
+        try:
+            self._events = self._watch_sound()
+        except Exception as e:
+            log.warning('sound events: %s', e)
+        if made and self.on or was_on and not self.on:  # the sides' streams went with the old devices
+            self._off()
+            self._on()
+        self.on_state('note: the sound server restarted: "Peresmeshnik Mic" and "Peresmeshnik Call" are there again'
+                      + ('; translation is on again' if self.on else ''))
+
+    def _ensure_devices(self) -> bool:
+        """Linux: our call sink and virtual mic are on the sound server (a restart takes them away, M-01): else they are
+        made again (True). Before a side starts, and when the sound server is back."""
+        if not (self.devices and sys.platform.startswith('linux')):
+            return False
+        try:
+            mods = pactl('list', 'short', 'modules')
+        except Exception as e:  # no sound server now: the side says why
+            log.warning('devices: %s', e)
+            return False
+        if f'sink_name={MIC_SINK}' in mods and (self._call is None or f'sink_name={self._call.name}' in mods):
+            return False
+        log.warning('our devices are gone from the sound server: making them again')
+        old, self._vmic = self._vmic, None
+        if old:
+            old.remove()  # its writer thread and its stream; its modules are gone already
+        for what, make in (('call sink', CallSink), ('virtual mic', self.virtual_mic)):
+            try:
+                if what == 'call sink':
+                    remove_stale()
+                    self._call = make()
+                else:
+                    make()
+            except Exception as e:
+                log.warning('%s: %s', what, e)
+                self.on_state(f'error: {what}: {e}')
+        self._mic_loop()
+        return True
 
     def _startup_call_macos(self) -> None:
         """macOS, the call's sound (S1): 14.4+ asks the tap helper about the permission now, not at the first call;
@@ -862,7 +955,22 @@ class Controller:
             return
         if sys.platform in ('darwin', 'win32'):
             return self._loop_helper(on)
+        self._loop_on = on
+        self._mic_loop()
+
+    def _recorded(self) -> bool:
+        """Linux: something (the call app) records "Peresmeshnik Mic" now."""
+        src = [ln.split('\t')[0] for ln in pactl('list', 'short', 'sources').splitlines() if ln.split('\t')[1:2] == [MIC_SOURCE]]
+        return bool(src) and any(ln.split('\t')[1:2] == src for ln in pactl('list', 'short', 'source-outputs').splitlines())
+
+    def _mic_loop(self) -> None:
+        """Linux: the loop "microphone -> Peresmeshnik Mic" is there while translation is off and a call app records
+        Peresmeshnik Mic (PulseEvents says when): no open microphone outside a call (M-16), as on macOS and Windows."""
+        if not self.devices or self._vmic is None:
+            return
+        on = self._loop_on and not self._quitting
         try:  # found by its arguments, not a kept id: it goes away with its microphone, and PipeWire reuses ids
+            on = on and self._recorded()
             loops = [m.split('\t')[0] for m in pactl('list', 'short', 'modules').splitlines()
                      if '\tmodule-loopback\t' in m and f'sink={MIC_SINK}' in m]
             for m in loops if not on else ():
@@ -941,6 +1049,7 @@ class Controller:
         if self.on:
             return
         self.on_state('warming up')
+        self._ensure_devices()  # Linux: a sound server restarted since took them (M-01)
         self._refresh_devices()  # macOS: devices plugged in since (AirPods back) become visible to PortAudio
         s = self.settings or config.load()
         self._pair_to_overlay(s)
@@ -1034,6 +1143,9 @@ class Controller:
         report without the user's data; after RESTARTS within a minute it stays off and says why."""
         if side not in self.sides or not self.on:
             return
+        if self._events and not sound_server():  # it went with the sound server: _sound_back makes it all again (M-01)
+            log.info('%s: %s; the sound server is gone, waiting for it', side.name, why)
+            return
         crash.report(f'{ARROW[side.name]}: {why}', e, self.settings, quiet=True)  # the message below names it
         self._drop(side)
         now = time.monotonic()
@@ -1077,6 +1189,7 @@ class Controller:
             self._through_start()  # after its input let BlackHole 16ch go
 
     def _make(self, name: str, s: config.Settings) -> Side:
+        self._ensure_devices()  # a side restarted because the sound server went (M-01)
         new = self._side(name, s)  # raises: the caller says why (the loop / the pass-through then stay)
         new.set_live(self.live)
         try:
@@ -1360,6 +1473,8 @@ class Controller:
 
     def quit(self) -> None:
         self._quitting = True
+        if self._events:
+            self._events.stop()
         try:
             if f := self.submit(self._off):
                 f.result(QUIT_S)

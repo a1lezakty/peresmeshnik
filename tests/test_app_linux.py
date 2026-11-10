@@ -144,12 +144,16 @@ def test_hotkey_switches_live_voice(tmp_path, devices):
 
 @pytest.mark.skipif(not (DISPLAY and shutil.which('xdotool')), reason='needs an X display and xdotool')
 def test_devices_live_with_the_app_and_the_mic_is_looped_while_off(tmp_path, devices):
-    """Call sink, virtual mic and the microphone loopback exist from the start (stale ones from a killed run
-    replaced), a second instance leaves them alone, SIGHUP removes them."""
+    """Call sink and virtual mic exist from the start (stale ones from a killed run replaced), the microphone loopback
+    while a call app records Peresmeshnik Mic; a second instance leaves them alone, SIGHUP removes them."""
     from peresmeshnik.ui.selftest import pactl
     pactl('load-module', 'module-null-sink', 'sink_name=peresmeshnik_call')  # as left by a SIGKILL
     p = start_app(tmp_path, settings='[ui]\nmic = "test_mic"\n')
+    call_app = None
     try:
+        wait_for(lambda: any('source_name=peresmeshnik_mic ' in m for m in ours()), 20)
+        call_app = record_peresmeshnik_mic()
+        assert wait_for(lambda: any(m.startswith('module-loopback') for m in ours()), 5), ours()
         mods = ours()
         calls = [m for m in mods if 'sink_name=peresmeshnik_call' in m]
         assert len(calls) == 1 and 'priority.session=-10' in calls[0]  # the app's own sink (module ids get reused)
@@ -162,8 +166,82 @@ def test_devices_live_with_the_app_and_the_mic_is_looped_while_off(tmp_path, dev
         p.send_signal(signal.SIGHUP)  # the terminal closed
         assert p.wait(20) == 0
     finally:
+        if call_app:
+            call_app.kill()
         if p.poll() is None:
             stop_app(p)
+    assert not ours()
+
+
+def record_peresmeshnik_mic() -> subprocess.Popen:
+    """A call app recording "Peresmeshnik Mic"."""
+    return subprocess.Popen(['parec', '--device=peresmeshnik_mic', '--raw', '--format=float32le', '--rate=16000',
+                             '--channels=1'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def wait_for(cond, timeout: float) -> bool:
+    end = time.monotonic() + timeout
+    while not cond() and time.monotonic() < end:
+        time.sleep(0.1)
+    return cond()
+
+
+def mic_state(name: str) -> str:
+    from peresmeshnik.ui.selftest import pactl
+    return next((ln.split('\t')[-1] for ln in pactl('list', 'short', 'sources').splitlines() if ln.split('\t')[1] == name), '')
+
+
+def test_the_microphone_is_open_only_while_a_call_app_records(devices):
+    """M-16: translation off and no call: the real microphone is not held open (no indicator, a Bluetooth headset keeps
+    its music profile), as on macOS and Windows; a call app recording Peresmeshnik Mic gets it looped in at once."""
+    from peresmeshnik import app, config
+    s = config.Settings()
+    s.ui.mic = devices['mic']
+    side = type('S', (), {'hide': lambda self: None})()
+    ctl = app.Controller(type('O', (), {'side': lambda self, name: side})(), lambda state: None, settings=s)
+    ctl.startup()
+    call_app = None
+    try:
+        loops = lambda: [m for m in ours() if m.startswith('module-loopback') and 'source=test_mic' in m]  # noqa: E731
+        assert ctl.startup_error == '' and not loops(), ours()
+        call_app = record_peresmeshnik_mic()
+        assert wait_for(lambda: loops(), 3), ours()
+        call_app.kill()
+        call_app.wait()
+        assert wait_for(lambda: not loops(), 3), ours()
+    finally:
+        if call_app:
+            call_app.kill()
+        ctl.quit()
+    assert not ours()
+
+
+def test_our_devices_come_back_when_the_sound_server_does(devices):
+    """M-01: the sound server restarted (its events end, our modules are gone): Peresmeshnik Mic and Call are made
+    again, without polling while it runs; a side starting finds them there."""
+    from peresmeshnik import app, config
+    from peresmeshnik.ui.selftest import pactl
+    s = config.Settings()
+    s.ui.mic = devices['mic']
+    side, states = type('S', (), {'hide': lambda self: None})(), []
+    ctl = app.Controller(type('O', (), {'side': lambda self, name: side})(), states.append, settings=s)
+    ctl.startup()
+    try:
+        names = lambda: sorted(m.split()[1] for m in ours())  # noqa: E731
+        before = names()
+        assert any('peresmeshnik_call' in m for m in before) and any('peresmeshnik_mic ' in m for m in ours())
+        for m in reversed(pactl('list', 'short', 'modules').splitlines()):  # what a restart leaves: none of ours
+            if 'peresmeshnik_' in m:
+                pactl('unload-module', m.split('\t')[0])
+        ctl._events.p.kill()  # ... and the end of the event stream
+        assert wait_for(lambda: names() == before, 10), (names(), before)
+        assert wait_for(lambda: any('sound server restarted' in x for x in states), 5), states
+        for m in reversed(pactl('list', 'short', 'modules').splitlines()):  # gone again while the app idles
+            if 'peresmeshnik_' in m:
+                pactl('unload-module', m.split('\t')[0])
+        assert ctl._ensure_devices() and names() == before  # what _on and a restarting side ask first
+    finally:
+        ctl.quit()
     assert not ours()
 
 
@@ -182,7 +260,11 @@ def test_one_device_failing_leaves_the_others(devices, monkeypatch):
         assert ctl.startup_error == 'call sink: no call sink here'
         mods = ours()
         assert any('source_name=peresmeshnik_mic ' in m for m in mods), mods  # the virtual mic is still made
-        assert any(m.startswith('module-loopback') and 'source=test_mic' in m for m in mods), mods  # and fed
+        call_app = record_peresmeshnik_mic()
+        try:  # and fed while a call app records it
+            assert wait_for(lambda: any(m.startswith('module-loopback') and 'source=test_mic' in m for m in ours()), 3), ours()
+        finally:
+            call_app.kill()
     finally:
         ctl.quit()
     assert not ours()

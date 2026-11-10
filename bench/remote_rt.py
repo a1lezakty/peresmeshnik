@@ -192,7 +192,12 @@ def serve(a):
             def pump():
                 try:
                     for e in d.events():
-                        put(encode(e))
+                        if isinstance(e, Speech) and a.speech_ms:  # the voice in short pieces: playback starts on the first
+                            n = e.sample_rate * a.speech_ms // 1000
+                            for i in range(0, len(e.pcm), n):
+                                put(encode(Speech(e.pcm[i:i + n], e.sample_rate)))
+                        else:
+                            put(encode(e))
                 finally:
                     put(None)
             pumper = threading.Thread(target=pump, daemon=True)
@@ -203,7 +208,7 @@ def serve(a):
                     await ws.send(m)
             down = asyncio.create_task(sender())
             await ws.send(json.dumps({'type': 'ready', 'load_s': round(load_s, 2), 'stub': a.stub, 'threads': a.threads,
-                                      'max_lag': a.max_lag, 'nodelay': nodelay(ws.transport), **devices(d)}))
+                                      'max_lag': a.max_lag, 'speech_ms': a.speech_ms, 'nodelay': nodelay(ws.transport), **devices(d)}))
             arrived = []
             try:
                 async for m in ws:
@@ -454,6 +459,8 @@ def main():
     s = sub.add_parser('serve')
     s.add_argument('--host', default='127.0.0.1', help='listen address (default loopback: reach it through ssh -L)')
     s.add_argument('--port', type=int, default=47000)
+    s.add_argument('--speech-ms', type=int, default=0,
+                   help='send the voice in pieces of this many ms (0: each chunk as the TTS yields it, Piper: a sentence)')
     for p in (s, sub.add_parser('local')):
         p.add_argument('--stub', action='store_true', help='no models: fixed delays, the transport alone')
         p.add_argument('--threads', type=int, default=2, help='threads per engine, as [local] threads')

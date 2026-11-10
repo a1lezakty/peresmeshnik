@@ -98,6 +98,20 @@ def test_installed_files_shortcut_and_uninstall_entry(installed):
             assert (installed / f).exists(), f'no {f}'
     assert 'espeak-ng' in (installed / 'licenses' / 'piper-runner-SOURCE.txt').read_text()
     assert not list(installed.rglob('torch')), 'torch in the base app'
+    # stage 7 (C3): the LGPL source offer, the notices inside Qt, hts_engine, the Unicode data, the Required Notice
+    for f in ('licenses/LGPL-SOURCE.txt', 'licenses/PySide6_Essentials/Qt-third-party.txt',
+              'licenses/pyopenjtalk-plus/hts_engine-COPYING.txt', 'licenses/piper-tts/espeak-ng-COPYING.UCD.txt'):
+        assert (installed / f).exists(), f
+    assert 'Written offer' in (installed / 'licenses' / 'LGPL-SOURCE.txt').read_text()
+    assert 'Required Notice: Copyright' in (installed / 'licenses' / 'Peresmeshnik-LICENSE.txt').read_text()
+    assert 'Apache License' in (installed / 'licenses' / 'OpenSSL-LICENSE.txt').read_text()
+    left_out = ('qjpeg.dll', 'qtiff.dll', 'qwebp.dll', 'nakdimon.onnx',  # unused (Peresmeshnik.spec drops them)
+                'qopensslbackend.dll', 'libssl-3-x64.dll', 'libcrypto-3-x64.dll')
+    assert not [f for f in installed.rglob('*') if f.name in left_out]
+    for exe in ('Peresmeshnik.exe', 'piper-runner.exe'):  # a version resource (Properties -> Details)
+        v = subprocess.run(['powershell', '-NoProfile', '-Command', f"(Get-Item '{installed / exe}').VersionInfo.FileVersion"],
+                           capture_output=True, text=True).stdout.strip()
+        assert v.startswith(peresmeshnik.__version__), (exe, v)
     dropped = [f.name for f in installed.rglob('*.dll') if f.name.lower() == 'opengl32sw.dll' or '-asio' in f.name.lower()]
     assert not dropped, dropped  # Mesa's software OpenGL, PortAudio with ASIO: not shipped (Peresmeshnik.spec)
     assert SHORTCUT.exists(), 'no Start menu shortcut'

@@ -56,6 +56,10 @@ def test_bundle_contents(app):
     assert info['LSUIElement'] is True and info['CFBundleIdentifier'] == 'io.github.a1lezakty.peresmeshnik'
     assert info['NSMicrophoneUsageDescription'] and info['NSAudioCaptureUsageDescription']
     assert Path(exe(app, 'piper-runner')).exists()
+    tap = exe(app, 'peresmeshnik-tap')  # them -> me on macOS 14.4+ (the call's sound): a build without it is no release
+    assert os.access(tap, os.X_OK), 'no peresmeshnik-tap in Contents/MacOS'
+    subprocess.run(['codesign', '--verify', '--strict', tap], check=True)
+    assert 'tap=' in subprocess.run([tap, 'check'], capture_output=True, text=True, timeout=20).stdout
     audio = exe(app, 'peresmeshnik-audio')  # me -> them on macOS (BlackHole 2ch, the microphone): signed with the app
     assert os.access(audio, os.X_OK), 'no peresmeshnik-audio in Contents/MacOS'
     subprocess.run(['codesign', '--verify', '--strict', audio], check=True)
@@ -63,6 +67,24 @@ def test_bundle_contents(app):
     lic = app / 'Contents' / 'Resources' / 'licenses'
     assert (lic / 'piper-runner-LICENSE.txt').exists() and (lic / 'Peresmeshnik-LICENSE.txt').exists()
     assert 'espeak-ng' in (lic / 'piper-runner-SOURCE.txt').read_text()  # where the GPL program's sources are
+    assert 'Written offer' in (lic / 'LGPL-SOURCE.txt').read_text()  # and those of the LGPL libraries (Qt, libsndfile)
+    assert 'Required Notice: Copyright' in (lic / 'Peresmeshnik-LICENSE.txt').read_text()
+    for notice in ('PySide6_Essentials/Qt-third-party.txt', 'pyopenjtalk-plus/hts_engine-COPYING.txt',
+                   'piper-tts/espeak-ng-COPYING.UCD.txt'):
+        assert (lic / notice).is_file(), f'no {notice}'
+    left_out = ('nakdimon.onnx', 'libqjpeg.dylib', 'libqtiff.dylib', 'libqwebp.dylib')  # the spec drops them
+    assert not [p for p in app.rglob('*') if p.name in left_out or p.parts[-2:] == ('tashkeel', 'model.onnx')]
+    # the hardened runtime on every program in Contents/MacOS, with the entitlements of packaging/macos/entitlements.plist
+    for prog in (p for p in (app / 'Contents' / 'MacOS').iterdir() if os.access(p, os.X_OK)):
+        flags = subprocess.run(['codesign', '-dv', str(prog)], capture_output=True, text=True).stderr
+        assert re.search(r'flags=0x\w+\([^)]*runtime', flags), f'{prog.name}: no hardened runtime: {flags}'
+    ent = plistlib.loads(subprocess.run(['codesign', '-d', '--entitlements', '-', '--xml', exe(app)],
+                                        capture_output=True, check=True).stdout)
+    print('entitlements:', ent)
+    assert ent.get('com.apple.security.device.audio-input') is True, 'no microphone under the hardened runtime'
+    assert 'com.apple.security.cs.allow-dyld-environment-variables' not in ent
+    version = subprocess.run([exe(app), '--version'], capture_output=True, text=True, timeout=60)
+    assert version.returncode == 0 and re.fullmatch(r'\d+\.\d+\.\d+\S*', version.stdout.strip()), version
     assert not list(app.rglob('torch')), 'torch in the base app'
     size = sum(f.stat().st_size for f in app.rglob('*') if f.is_file() and not f.is_symlink())
     print(f'bundle: {size / 1e6:.0f} MB in the .app, {Path(DMG).stat().st_size / 1e6:.0f} MB .dmg, '

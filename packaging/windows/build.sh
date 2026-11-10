@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR GPL-3.0-or-later
+# (GPL too: it builds the GPL program piper-runner, and GPL-3.0 counts its build scripts in its source)
 # Peresmeshnik for Windows (x64): the one-folder app, its .zip and the Inno Setup installer. From the repo root in Git
 # Bash, after `uv sync --locked --group build`, with Inno Setup 6 installed:  packaging/windows/build.sh
 #   -> dist/Peresmeshnik/, dist/Peresmeshnik-<version>-windows-x64.zip, dist/Peresmeshnik-<version>-windows-x64-setup.exe

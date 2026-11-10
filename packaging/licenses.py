@@ -8,10 +8,13 @@
 - OUT_DIR gets the license files of every package in this environment that the app ships, ours, the runner's, and
   where the runner's sources are (RUNNER: its path in the build, e.g. Contents/MacOS/piper-runner). A package that
   only names its license gets the full text from packaging/licenses/; an unknown one fails the build. So do the
-  libraries a wheel carries under their own terms (BUNDLED) and Python's own license (with OpenSSL, libffi, sqlite...).
+  libraries a wheel carries under their own terms (BUNDLED) and Python's own license (with OpenSSL, libffi, sqlite...);
+- and LGPL-SOURCE.txt: where the source of each LGPL library in the build is (Qt, PySide6, libsndfile with mpg123 and
+  LAME), at the versions in this build, with the written offer of that source.
 """
 import re
 import shutil
+import ssl
 import sys
 import sysconfig
 from importlib import metadata
@@ -28,6 +31,11 @@ BUNDLED = {  # file name start -> its texts: libraries inside a wheel that its o
     'libportaudio': ['PortAudio-LICENSE.txt'],  # in sounddevice (PortAudio v19.7.0 LICENSE.txt)
     'sys.dic': ['OpenJTalk-dictionary-COPYING.txt'],  # pyopenjtalk-plus's dictionary: mecab-naist-jdic and UniDic words
     # (BSD-3-Clause; pyopenjtalk/dictionary/COPYING of the 0.4.1.post10 wheel)
+    'htsengine': ['hts_engine-COPYING.txt'],  # hts_engine API (BSD-3-Clause) compiled into pyopenjtalk-plus: src/COPYING of
+    # github.com/syoyo/hts_engine_API at 2821c7a, the submodule of pyopenjtalk-plus v0.4.1-post10
+    'espeakbridge': ['espeak-ng-COPYING.UCD.txt'],  # piper's espeak-ng links ucd-tools, whose tables are generated from the
+    # Unicode Character Database: src/ucd-tools/COPYING.UCD of github.com/espeak-ng/espeak-ng at 724808c (piper1-gpl v1.8.0)
+    'qtcore': ['Qt-third-party.txt'],  # the third-party code inside Qt (PCRE2, FreeType, HarfBuzz...): packaging/qt_notices.py
 }
 
 out, warn, runner = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
@@ -36,6 +44,10 @@ if not warn.is_file() or not warn.stat().st_size:
 if re.search(r'excluded module named piper( |\.)', warn.read_text('utf-8', 'replace')):  # piper and piper.voice, not piper_x
     sys.exit('the app imports piper (GPL): it must only talk to piper-runner over the pipe')
 version = re.search(r"__version__ = '([^']+)'", (ROOT / 'peresmeshnik' / '__init__.py').read_text())[1]
+pyside = metadata.version('PySide6_Essentials')
+qt = '.'.join(pyside.split('.')[:3])  # PySide6 6.12.0 (or a repackaging, 6.12.0.1) ships Qt 6.12.0
+if not (TEXTS / 'Qt-third-party.txt').read_text('utf-8').startswith(f'Third-party code in Qt {qt}\n'):
+    sys.exit(f'licenses: packaging/licenses/Qt-third-party.txt is not of Qt {qt}: python packaging/qt_notices.py {qt}')
 
 out.mkdir(parents=True, exist_ok=True)
 missing = []
@@ -75,6 +87,11 @@ python_license = next((p for p in (Path(sysconfig.get_paths()['stdlib']) / 'LICE
 if not python_license:
     sys.exit(f"licenses: no LICENSE.txt of Python in {sysconfig.get_paths()['stdlib']} or {sys.base_prefix}")
 shutil.copyfile(python_license, out / 'Python-LICENSE.txt')
+# Python's ssl module ships OpenSSL (libssl / libcrypto): Apache-2.0 since 3.0, and the LICENSE.txt of a uv Python does
+# not name it, so its own text goes along
+(out / 'OpenSSL-LICENSE.txt').write_text(f'{ssl.OPENSSL_VERSION} (libssl and libcrypto of Python\'s ssl module, '
+                                         'https://www.openssl.org) is under the Apache License 2.0:\n\n'
+                                         + (TEXTS / 'Apache-2.0.txt').read_text())
 if missing:
     sys.exit('licenses: no license text for ' + '; '.join(missing))
 
@@ -83,11 +100,46 @@ shutil.copyfile(ROOT / 'piper-runner' / 'LICENSE', out / 'piper-runner-LICENSE.t
 (out / 'piper-runner-SOURCE.txt').write_text(f'''\
 {runner} is a separate program under GPL-3.0-or-later, built with PyInstaller from:
 - piper-runner/piper_runner.py (on Windows with its entry packaging/windows/piper_entry.py) of
-  https://github.com/a1lezakty/peresmeshnik (version {version}, tag v{version});
+  https://github.com/a1lezakty/peresmeshnik (version {version}, tag v{version}), by the build scripts there, which are
+  under GPL-3.0-or-later too (their SPDX line): packaging/{{macos,windows}}/Peresmeshnik.spec, packaging/{{macos,windows}}/build.sh,
+  packaging/piper-requirements.txt and the installer's packaging/windows/Peresmeshnik.iss;
 - piper-tts 1.8.0: https://github.com/OHF-Voice/piper1-gpl, tag v1.8.0 (its PyPI sdist has no C sources);
 - espeak-ng, built statically into piper's espeakbridge module: https://github.com/espeak-ng/espeak-ng, commit 724808c
   (the GIT_TAG in piper1-gpl v1.8.0's CMakeLists.txt);
 - for the Japanese voice, pyopenjtalk-plus 0.4.1.post10 (MIT, with OpenJTalk and its dictionary) and sudachipy 0.7.0;
 - onnxruntime and numpy, whose licenses are in this folder (and those of the packages above).
 Peresmeshnik itself never imports it; it talks to it over stdin/stdout.
+''')
+
+# LGPL: the source of each LGPL library, at the version this build ships, and the written offer of it
+sf = metadata.distribution('soundfile')
+lib = next((f.locate() for f in sf.files if f.name.startswith('libsndfile')), None)  # _soundfile_data/libsndfile_x64.dll...
+sndfile, lame = (re.search(p, Path(lib).read_bytes()) if lib else None for p in (rb'libsndfile-(\d+\.\d+\.\d+)', rb'LAME(\d+\.\d+)'))
+if not sndfile:
+    sys.exit(f'licenses: no libsndfile version in {lib}')
+(out / 'LGPL-SOURCE.txt').write_text(f'''\
+Libraries in Peresmeshnik {version} under the GNU Lesser General Public License, and where their source is.
+Their license texts are in this folder: PySide6_Essentials and shiboken6 (LGPL-3.0, with the GPL-3.0 it builds on),
+soundfile (COPYING: LGPL-2.1; license_notes.md: the copyrights of the codecs). Each is a separate library file in the
+app (the _internal folder on Windows, Contents/Frameworks on macOS): you may replace it with your own build of the same
+version and interface (on macOS, sign the app again after that, as packaging/macos/build.sh does).
+
+- Qt {qt} (Qt Core, Gui, Widgets, Network, Svg and their plugins; LGPL-3.0-only):
+  https://download.qt.io/archive/qt/{qt.rsplit('.', 1)[0]}/{qt}/single/qt-everywhere-src-{qt}.tar.xz
+  (also the tags v{qt} of https://code.qt.io/cgit/qt/qtbase.git, qtsvg.git and qtimageformats.git there);
+  its third-party parts: PySide6_Essentials/Qt-third-party.txt.
+- PySide6 {pyside} and shiboken6 {metadata.version('shiboken6')} (LGPL-3.0-only):
+  https://download.qt.io/official_releases/QtForPython/pyside6/PySide6-{pyside}-src/pyside-setup-everywhere-src-{pyside}.tar.xz
+  (also the tag v{pyside} of https://code.qt.io/cgit/pyside/pyside-setup.git).
+- libsndfile {sndfile[1].decode()} (LGPL-2.1-or-later) in the soundfile {sf.version} package, built with libmpg123 (LGPL-2.1)
+  and libmp3lame{f" {lame[1].decode()}" if lame else ""} (LAME, LGPL-2.0-or-later), and libFLAC, libogg, libvorbis, libopus (BSD-3-Clause):
+  https://github.com/libsndfile/libsndfile/releases/tag/{sndfile[1].decode()}, https://www.mpg123.de/download/,
+  https://sourceforge.net/projects/lame/files/lame/. The build recipe with the exact versions of each:
+  https://github.com/bastibe/libsndfile-binaries at the commit that https://github.com/bastibe/python-soundfile
+  tag {sf.version} pins as its _soundfile_data submodule (mac_build.sh; on Windows, vcpkg's libsndfile).
+
+Written offer: for at least three years after we last distribute this version, Akty (https://github.com/a1lezakty)
+will give anyone who asks a complete machine-readable copy of the source code of the libraries above, at the exact
+versions in this build, by download at no charge or on a physical medium for no more than the cost of making and
+sending it. Ask at https://github.com/a1lezakty/peresmeshnik/issues.
 ''')

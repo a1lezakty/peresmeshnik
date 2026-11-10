@@ -28,7 +28,7 @@ MPG123 = {  # Windows: vcpkg's source folder of mpg123 in libsndfile (buildtrees
     # and vcpkg's commit of the port. The hash: the first 10 hex of SHA-512 over the hex SHA-512 of the archive (the
     # portfile's SHA512) and of each of its PATCHES, which only that commit of ports/mpg123 gives
     b'-66150af195': ('1.32.9', 'b7601ed37e1e1ce11a4f61b4b94a23e39d465f1d'),
-}
+}  # packaging/sources.sh attaches that source to a release: change both together
 ROOT = Path(__file__).resolve().parents[1]
 TEXTS = ROOT / 'packaging' / 'licenses'  # full texts for packages that only name their license
 BUNDLED = {  # file name start -> its texts: libraries inside a wheel that its own license file does not cover
@@ -131,7 +131,9 @@ shutil.copyfile(ROOT / 'piper-runner' / 'LICENSE', out / 'piper-runner-LICENSE.t
 - CPython {platform.python_version()} (this build: {sys.version}): https://www.python.org/downloads/source/
   (https://www.python.org/ftp/python/{platform.python_version()}/Python-{platform.python_version()}.tar.xz);
 the licenses of all of these are in this folder.
-Peresmeshnik itself never imports it; it talks to it over stdin/stdout.
+Peresmeshnik itself never imports it; it talks to it over stdin/stdout. The runner's source with its build scripts,
+piper1-gpl and espeak-ng are attached to the GitHub release of this version, Peresmeshnik-{version}-sources.tar
+(https://github.com/a1lezakty/peresmeshnik/releases/tag/v{version}; packaging/sources.sh).
 
 Written offer: {OFFER.format(what=f'{runner} (its Corresponding Source: all of the above)')}''')
 
@@ -146,7 +148,9 @@ vcpkg = re.search(rb'buildtrees\\mpg123\\src\\([^\\]*)\.clean', data)  # Windows
 if vcpkg and vcpkg[1] not in MPG123:
     sys.exit(f'licenses: mpg123 of vcpkg {vcpkg[1].decode()} in {lib} is unknown: add its version to MPG123')
 mpg123, port = MPG123[vcpkg[1]] if vcpkg else ('', '')
-mpg123, port = mpg123 and f' {mpg123}', port and f': mpg123 by https://github.com/microsoft/vcpkg/tree/{port}/ports/mpg123'
+mpg123, port = mpg123 and f' {mpg123}', port and (f': mpg123 by https://github.com/microsoft/vcpkg/tree/{port}/ports/mpg123;'
+                                                  f' its source and that port are attached to the GitHub release of this'
+                                                  f' version, Peresmeshnik-{version}-sources.tar')
 (out / 'LGPL-SOURCE.txt').write_text(f'''\
 Libraries in Peresmeshnik {version} under the GNU Lesser General Public License, and where their source is.
 Their license texts are in this folder: PySide6_Essentials and shiboken6 (LGPL-3.0, with the GPL-3.0 it builds on),

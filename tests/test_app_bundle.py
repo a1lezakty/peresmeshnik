@@ -76,6 +76,7 @@ def test_bundle_contents(app):
     # the LGPL libraries may be changed and debugged whatever Peresmeshnik's own license says (FIXES 15)
     runner_src = (lic / 'piper-runner-SOURCE.txt').read_text()
     assert re.search(r'onnxruntime \d', runner_src) and 'CPython 3.' in runner_src and 'Written offer' in runner_src
+    assert 'sources.tar' in runner_src  # attached to the release (packaging/sources.sh)
     assert 'reverse' in (lic / 'LGPL-SOURCE.txt').read_text() and 'reverse' in (lic / 'Peresmeshnik-LICENSE.txt').read_text()
     left_out = ('nakdimon.onnx', 'libqjpeg.dylib', 'libqtiff.dylib', 'libqwebp.dylib')  # the spec drops them
     assert not [p for p in app.rglob('*') if p.name in left_out or p.parts[-2:] == ('tashkeel', 'model.onnx')]

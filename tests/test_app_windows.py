@@ -109,6 +109,7 @@ def test_installed_files_shortcut_and_uninstall_entry(installed):
     assert re.search(r'libmpg123 \d+\.\d+\.\d+ ', lgpl) and 'libmp3lame 3.' in lgpl, lgpl  # the exact versions of vcpkg's
     runner_src = (installed / 'licenses' / 'piper-runner-SOURCE.txt').read_text()  # FIXES 16: the runner's Corresponding Source
     assert re.search(r'onnxruntime \d', runner_src) and 'CPython 3.' in runner_src and 'Written offer' in runner_src
+    assert 'sources.tar' in runner_src and 'sources.tar' in lgpl  # attached to the release (packaging/sources.sh)
     # no MinGW runtime DLLs (Git's, from the runner's PATH): no notice of theirs is shipped
     mingw = ('zlib1.dll', 'libwinpthread-1.dll', 'libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libiconv-2.dll', 'libintl-8.dll')
     assert not [f for f in installed.rglob('*.dll') if f.name.lower() in mingw]

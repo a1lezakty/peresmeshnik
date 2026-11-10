@@ -1,7 +1,9 @@
 name: release
 
 # A tag v* builds the macOS .dmg and the Windows installer and .zip, checks them and makes a DRAFT GitHub release
-# with the files and their SHA-256 (published by hand after a live check). The draft is made only for a commit on main
+# with the files and their SHA-256 (published by hand after a live check), and the sources the builds owe next to them
+# (Peresmeshnik-<version>-sources.tar: the GPL runner's Corresponding Source, the Windows build's LGPL mpg123;
+# packaging/sources.sh checks each download by its SHA-256). The draft is made only for a commit on main
 # with a green `ci` and a green `voice-pack` (the real clone in 13 languages) on that very commit, and no release of
 # that tag yet. workflow_dispatch and pull requests run the same builds and checks without a release: the files are
 # workflow artifacts. workflow_dispatch with dry_run runs everything a tag runs (the version against v<version>, the
@@ -186,8 +188,23 @@ jobs:
             dist/*-setup.exe*
           retention-days: 14
 
+  sources:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - name: The sources the builds owe (GPL piper-runner, LGPL mpg123), each download checked by its SHA-256
+        run: |
+          packaging/sources.sh "$(sed -n "s/^__version__ = '\(.*\)'/\1/p" peresmeshnik/__init__.py)" dist
+          cd dist && sha256sum *.tar | tee "$(ls *.tar).sha256"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: Peresmeshnik-sources
+          path: dist/*.tar*
+          retention-days: 14
+
   release:
-    needs: [macos, windows]
+    needs: [macos, windows, sources]
     if: startsWith(github.ref, 'refs/tags/v') || inputs.dry_run
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -241,8 +258,10 @@ jobs:
           asks once, "More info → Run anyway" (README, "Installation on Windows"). VB-Audio Virtual Cable is needed for
           the voice to the call.
 
-          The models are downloaded by the setup wizard. The bundled Piper runner is GPL-3.0: its sources are listed in
-          piper-runner-SOURCE.txt of the licenses folder (Contents/Resources/licenses on macOS, licenses on Windows).
+          The models are downloaded by the setup wizard. The bundled Piper runner is GPL-3.0, and the Windows build's
+          libsndfile carries mpg123 (LGPL-2.1): their sources are attached here (\`Peresmeshnik-${TAG#v}-sources.tar\`)
+          and listed in piper-runner-SOURCE.txt and LGPL-SOURCE.txt of the licenses folder (Contents/Resources/licenses
+          on macOS, licenses on Windows).
 
           Checked on this commit by CI: the tests ($CI_RUN) and the voice clone in 13 languages ($VOICE_RUN). The real
           cloud (Gemini Live) is checked by hand before a release is published.

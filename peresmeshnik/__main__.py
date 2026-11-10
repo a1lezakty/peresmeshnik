@@ -17,6 +17,7 @@ COMMANDS = {
     'models': ('peresmeshnik.models', 'list and download models (license screen, SHA-256)'),
     'cloud': ('peresmeshnik.cloud', 'Gemini Live direction on a file or a raw PCM pipe'),
     'run': ('peresmeshnik.pipeline', 'local direction on a file'),
+    'serve': ('peresmeshnik.remote.server', 'translate for a weaker computer: it pairs with this one, its sides run here'),
 }
 
 

@@ -80,9 +80,9 @@ end;
 
 procedure EndHelpers();
 var
-  Code: Integer;
+  ResultCode: Integer;
 begin
-  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM peresmeshnik-loopback.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM peresmeshnik-loopback.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
@@ -92,10 +92,11 @@ begin
   Result := '';
 end;
 
-{ The names of the call apps whose sound Peresmeshnik turned almost all the way down and did not give back yet: the
+(* The names of the call apps whose sound Peresmeshnik turned almost all the way down and did not give back yet: the
   keys of muted-session.json (audio/capture_windows.py: a JSON object of the call app's exe name and its state, as
   "Zoom.exe": {"level": 0.8, "devices": ["{0.0.0.00000000}.{...}"], "keeper": 1234}), that is every quoted string
-  ending in .exe (the device ids do not), joined with ", "; '' when there is none. }
+  ending in .exe (the device ids do not), joined with ", "; '' when there is none. In
+  parentheses and stars, not braces: the JSON's closing braces would end the comment. *)
 function MutedApps(const FileName: String): String;
 var
   Raw: AnsiString;

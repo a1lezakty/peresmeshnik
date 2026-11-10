@@ -254,3 +254,14 @@ def test_the_voice_state_follows_the_weights_and_survives_a_broken_file(model, t
     eng.forget(v)
     eng.state(v)
     assert len(calls) == 5
+
+
+def test_a_voice_with_its_own_state_is_spoken_from_it():
+    """COMMON 20:28 (S2): the other person's voice, conditioned live, carries its state and has no profile folder: state()
+    returns it as it is, reads no file, computes nothing."""
+    import types
+
+    from peresmeshnik.local.pocket import PocketTts
+    own = np.zeros((2, 3), np.float32)
+    assert PocketTts.state(types.SimpleNamespace(), types.SimpleNamespace(state=own, path='/no/such/folder')) is own
+

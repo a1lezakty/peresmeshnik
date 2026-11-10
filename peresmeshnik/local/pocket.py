@@ -273,8 +273,11 @@ class PocketTts:
 
     # ---- voices
     def state(self, voice) -> np.ndarray:
-        """The voice's state (the KV cache after its prompt): in memory, else `pocket-<model id>.npz` in the profile if
-        it was made from this recording, else computed now and written there."""
+        """The voice's state (the KV cache after its prompt): its own if it has one (the other person's voice,
+        conditioned live: no profile folder), else in memory, else `pocket-<model id>.npz` in the profile if it was made
+        from this recording, else computed now and written there."""
+        if (s := getattr(voice, 'state', None)) is not None:
+            return s
         folder = Path(getattr(voice, 'path', voice))
         ref = folder / 'reference.wav'
         st = ref.stat()

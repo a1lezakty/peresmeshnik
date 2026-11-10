@@ -57,21 +57,31 @@ jobs:
       COQUI_TOS_AGREED: '1'
       HF_HUB_DISABLE_PROGRESS_BARS: '1'
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
         with:
+          version: '0.13.7'  # uv itself pinned, not the latest; setup-uv v6.8.0 knows no checksum past 0.8.20, so ours:
+          # the SHA-256 of the release's uv-<target> archive (its .sha256 file) for Windows and Linux x64, macOS arm64 and
+          # x64; another runner gets a sum that fails
+          checksum: ${{ runner.os == 'Windows' && '0cdc5b38fe5a8168ed6a25814f5ba43c21d313dd3187314fccb37b7cec46e021'
+            || runner.os == 'Linux' && 'c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83'
+            || runner.arch == 'ARM64' && '81b811b57e4624df7ed3aac148e0359100d9962f3d9dce00aec533dc2e086731'
+            || '20c47e4c1f630b8abaff8c291fa9b9aa300fef92c4fbff95adf198b55287cda7' }}
           python-version: '3.12'
       - name: Machine
         run: |
           uname -a; sysctl -n machdep.cpu.brand_string hw.memsize hw.ncpu 2>/dev/null || nproc; df -h .
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
         with:
           path: bench-data
           key: bench-data-${{ hashFiles('bench/data.py') }}
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
         with:
           path: models
-          key: models-${{ matrix.suite }}-${{ runner.os }}-${{ hashFiles('bench/*.py', 'bench/requirements*.txt') }}
+          # this file in the key: the GGUF revisions and sums live below, so a new one makes a new key, restore-keys
+          # brings the old cache, the step fetches the changed file once and the new key saves it (a key without it hits
+          # the old cache every run, never saves, and the step fetches ~5.8 GB each time)
+          key: models-${{ matrix.suite }}-${{ runner.os }}-${{ hashFiles('bench/*.py', 'bench/requirements*.txt', '.github/workflows/bench.yml') }}
           restore-keys: models-${{ matrix.suite }}-${{ runner.os }}-
       - name: Bench venv
         if: matrix.suite != 'clone'
@@ -84,12 +94,20 @@ jobs:
       - name: llama.cpp + HY-MT1.5 GGUF
         if: matrix.suite == 'mt' && runner.os == 'macOS'
         run: |
-          curl -sL https://github.com/ggml-org/llama.cpp/releases/download/b12189/llama-b12189-bin-macos-arm64.tar.gz | tar xz
+          # the archive is run here and the weights make BENCH's numbers: each checked by SHA-256, at a fixed commit
+          curl -sL -o llama.tgz https://github.com/ggml-org/llama.cpp/releases/download/b12189/llama-b12189-bin-macos-arm64.tar.gz
+          echo 'f30e2f3032df30a0c37c9fbd43125253dcd4cb96d6a879aa81e464944bc20aee  llama.tgz' | shasum -a 256 -c
+          tar xzf llama.tgz
           echo "LLAMA_SERVER=$(find $PWD -name llama-server -type f | head -1)" >> $GITHUB_ENV
           mkdir -p models/gguf
-          for m in 1.8B 7B; do
-            f=models/gguf/HY-MT1.5-$m-Q4_K_M.gguf
-            [ -f $f ] || curl -sL -o $f https://huggingface.co/tencent/HY-MT1.5-$m-GGUF/resolve/main/HY-MT1.5-$m-Q4_K_M.gguf
+          for m in 1.8B:265b2e615a7dc9b06c435dc878829ad99a512ba2:4383ac0c3c8e476de98ff979c2a3f069f8c4fb385e7860cf2d28da896cc477c7 \
+                   7B:126325496bc8e3575f1d8615b8ca951d8483f206:fc87637e4dd29547811a28170770c2ac17725fb7690b7c4aafa4f463c3e77568; do
+            IFS=: read -r size rev sum <<< "$m"
+            f=models/gguf/HY-MT1.5-$size-Q4_K_M.gguf
+            url=https://huggingface.co/tencent/HY-MT1.5-$size-GGUF/resolve/$rev/HY-MT1.5-$size-Q4_K_M.gguf
+            [ -f $f ] || curl -sfL -o $f $url
+            # a cache of an older revision (restore-keys) has another file: fetched once again, else it fails for good
+            echo "$sum  $f" | shasum -a 256 -c || { rm -f $f; curl -sfL -o $f $url; echo "$sum  $f" | shasum -a 256 -c; }
           done
           echo "GGUF=$PWD/models/gguf/HY-MT1.5-1.8B-Q4_K_M.gguf $PWD/models/gguf/HY-MT1.5-7B-Q4_K_M.gguf" >> $GITHUB_ENV
       - name: Run ${{ matrix.suite }}
@@ -102,7 +120,7 @@ jobs:
       - name: Voice clone
         if: matrix.suite == 'clone'
         run: bench/clone_ci.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:
           name: bench-${{ matrix.suite }}-${{ github.event.inputs.os || 'macos-15' }}

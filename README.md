@@ -113,8 +113,12 @@ Windows 10 version 2004 or later, or Windows 11 (x64).
 4. Start Peresmeshnik from the Start menu: its icon is in the notification area (Windows may put it behind the
    ^ arrow at first; drag it out to keep it in view). The setup wizard downloads the models (they are not in the
    app, 0.5–2 GB depending on the choice). Use headphones: through speakers the microphone hears the translation.
-5. While translation is on, the app records the call app's own sound and mutes it on your speakers (you hear the
-   translation instead), and gives it back when translation is off. Telegram, Zoom, Discord and the like are found
+5. While translation is on, the app records the call app's own sound and turns it almost all the way down on your
+   speakers (you hear the translation instead), and gives it back when translation is off. If the call app closes
+   first, or its headset is off, it gets its volume back the next time it plays there, also after you quit
+   Peresmeshnik (a small helper, `peresmeshnik-loopback.exe`, waits for that and then ends; the tray says which app).
+   A sign-out or an update of Peresmeshnik ends that helper: start Peresmeshnik once. After a removal (a silent one
+   does not say which app it was), raise the app in the Windows Volume mixer. Telegram, Zoom, Discord and the like are found
    by themselves; otherwise choose the app in the tray menu **Call app** while the call plays. A browser (Meet) is
    taken with all of its sound, other tabs too.
 6. Without an NVIDIA GPU, what you say is translated and spoken to the other side by the cloud (Gemini); a local
@@ -143,7 +147,9 @@ are found by themselves, otherwise choose the app in the tray menu "Call app" wh
 browser (Meet) moves with all of its sound, other tabs too. One instance runs per user:
 while yours is open, the app instances that the tests start exit with code 3 ("already running").
 Your cloned voice runs in a venv of its own (PyTorch and coqui-tts, ~7 GB with CUDA): `uv venv -p 3.12 ~/.local/share/Peresmeshnik/clone-venv`,
-`uv pip install -p ~/.local/share/Peresmeshnik/clone-venv/bin/python -r voice-runner/requirements-linux.in`, then start the
+`uv pip install -p ~/.local/share/Peresmeshnik/clone-venv/bin/python --require-hashes -r voice-runner/requirements-linux-cuda.txt --build-constraints voice-runner/requirements-linux-cuda.txt`
+(every package pinned and checked by its SHA-256, and so is the setuptools that builds the two packages that come as source,
+docopt and unidic-lite; with CPU-only PyTorch: `requirements-linux.txt` in both places and `--index-strategy unsafe-best-match`), then start the
 app with `PERESMESHNIK_VOICE_CMD="$HOME/.local/share/Peresmeshnik/clone-venv/bin/python voice-runner/voice_runner.py"`.
 
 ## When something goes wrong

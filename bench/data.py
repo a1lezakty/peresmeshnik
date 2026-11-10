@@ -18,10 +18,12 @@ import numpy as np
 import soundfile as sf
 
 HF = 'https://huggingface.co/datasets'
-FLEURS = HF + '/google/fleurs/resolve/main/data/{code}/{f}'
+# each dataset at a fixed commit, not `main`: BENCH's numbers come from these very bytes
+FLEURS = HF + '/google/fleurs/resolve/70bb2e84b976b7e960aa89f1c648e09c59f894dd/data/{code}/{f}'
 REFS = {
-    'en': HF + '/openslr/librispeech_asr/resolve/main/all/test.clean/0000.parquet',
-    'ru': HF + '/bond005/rulibrispeech/resolve/main/data/test-00000-of-00001-0e9859b3235b0392.parquet',
+    'en': HF + '/openslr/librispeech_asr/resolve/71cacbfb7e2354c4226d01e70d77d5fca3d04ba1/all/test.clean/0000.parquet',
+    'ru': HF + '/bond005/rulibrispeech/resolve/b15916bc0ee9a35dc8cb83e6c83d242ddb9e453c/data/'
+               'test-00000-of-00001-0e9859b3235b0392.parquet',
 }
 SR = 16000
 ROOT = Path(os.environ.get('BENCH_DATA', 'bench-data'))

@@ -30,14 +30,15 @@ def utterances(name):
 OURS, THEIRS = utterances('call-ru.ogg'), utterances('call-en.ogg')
 
 
-def scenario(delay, gain_db, echo_path=True, double_talk=False):
+def scenario(delay, gain_db, echo_path=True, double_talk=False, overlap_s=1.0, their_db=0.0):
+    """`double_talk`: they begin `overlap_s` before our echo ends; `their_db`: their level against ours."""
     rng = np.random.default_rng(0)
     sc, t = Scenario(80), 0.5
     for x, y in zip(OURS, THEIRS):
         sc.add('ours', x, t, '', far_end(x, delay, gain_db, rng) if echo_path else None, delay)
         t += len(x) / SR + delay
-        t = t - 1.0 if double_talk else t + 0.8
-        sc.add('them', y, t, '')
+        t = t - overlap_s if double_talk else t + 0.8
+        sc.add('them', y * 10 ** (their_db / 20), t, '')
         t += len(y) / SR + 0.8
     return sc.trim()
 
@@ -98,6 +99,15 @@ def test_double_talk_keeps_their_speech(gain_db):
     print(gain_db, s)
     assert s['their_blocks_zeroed'] <= 0.01, s
 
+
+
+@pytest.mark.parametrize('below_db, most', [(6, 0.07), (10, 0.11)])
+def test_double_talk_keeps_their_quiet_speech(below_db, most):
+    """They answer quietly, 6-10 dB under our echo, over its last 2 s: where the echo drowns them the gate zeroes the
+    block, the rest of their speech passes (bounds: measured ~0.05 and ~0.09, a gate three times as eager ~0.10, ~0.13)."""
+    _, s = gate(scenario(0.15, -6, double_talk=True, overlap_s=2.0, their_db=-6 - below_db))
+    print(below_db, s)
+    assert s['their_blocks_zeroed'] <= most, s
 
 def test_the_clock_resyncs_after_a_gap_in_the_capture():
     """A capture that stops for a while (its helper restarted) and goes on: the gate's time of the audio follows,

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR GPL-3.0-or-later
+# (GPL too: it builds the GPL program piper-runner, and GPL-3.0 counts its build scripts in its source)
 # The Piper runner's own packages (GPL-3.0 piper-tts and its one extra dependency), hash-pinned:
 # build.sh installs them with --no-deps (onnxruntime and numpy come from uv.lock).
 # pyopenjtalk-plus (MIT) is Piper's [ja] extra, for the Japanese voice; it imports sudachipy (Apache-2.0) but the runner

@@ -424,6 +424,24 @@ def test_tray_menu_and_settings_window(tmp_path, monkeypatch):
 
 
 
+def test_a_notice_is_said_and_switches_nothing(tmp_path, monkeypatch):
+    """Stage 7 C, circle 2, 3: the call app still quiet after translation off is said in the tray ("notice: "); the
+    translation stays off (a "note: " ticks it: translation goes on) and the state line keeps what it showed."""
+    from peresmeshnik.ui import tray as tray_mod
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    monkeypatch.setattr(config, 'config_dir', lambda: tmp_path)
+
+    class Ctl:
+        live, on = False, False
+    t = tray_mod.Tray(Ctl())
+    said = []
+    monkeypatch.setattr(t, 'message', said.append)
+    t.set_state('idle, translation off')
+    t.set_state('notice: Telegram stays quiet where it played during translation')
+    assert said == ['Telegram stays quiet where it played during translation']
+    assert not t.translation.isChecked() and t.status.text() == 'idle, translation off'
+
+
 @pytest.mark.skipif(not sys.platform.startswith('linux'), reason='the Call app menu is Linux only')
 def test_tray_call_menu_lists_the_apps_off_the_gui_thread(tmp_path, monkeypatch):
     """Opening "Call app" lists the playing apps on a thread (pactl may take seconds): the GUI thread does not wait."""

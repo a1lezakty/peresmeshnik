@@ -5,7 +5,8 @@ name: voice-pack
 # (voice-runner/pack-windows.json, ~3.7 GB of downloads, ~8 GB installed) installed by local/voicepack.py as the wizard
 # does, into this runner's fresh data folder. No GPU here: torch sees no CUDA, which is expected. Then the clone with the
 # real XTTS-v2 on that pack's Python (CPU): every language's text tools and a de -> ja pair (tests/test_clone_langs.py).
-# The job linux: the same test in the Linux clone's venv (voice-runner/requirements-linux.in, CPU torch). The model
+# The job linux: the same test in the Linux clone's venv (voice-runner/requirements-linux.txt: CPU torch, every
+# package pinned with its hashes, and the setuptools that builds the sdists docopt and unidic-lite too). The model
 # (1.9 GB) is cached.
 on:
   workflow_dispatch:
@@ -18,13 +19,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
         with:
+          version: '0.13.7'  # uv itself pinned, not the latest; setup-uv v6.8.0 knows no checksum past 0.8.20, so ours:
+          # the SHA-256 of the release's uv-<target> archive (its .sha256 file) for Windows and Linux x64, macOS arm64 and
+          # x64; another runner gets a sum that fails
+          checksum: ${{ runner.os == 'Windows' && '0cdc5b38fe5a8168ed6a25814f5ba43c21d313dd3187314fccb37b7cec46e021'
+            || runner.os == 'Linux' && 'c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83'
+            || runner.arch == 'ARM64' && '81b811b57e4624df7ed3aac148e0359100d9962f3d9dce00aec533dc2e086731'
+            || '20c47e4c1f630b8abaff8c291fa9b9aa300fef92c4fbff95adf198b55287cda7' }}
           python-version: '3.12'
           enable-cache: true
       - run: uv sync --locked
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
         with:
           path: ${{ runner.temp }}/models
           key: xtts-v2-${{ hashFiles('peresmeshnik/models.toml') }}
@@ -33,11 +41,11 @@ jobs:
         env:
           PERESMESHNIK_MODELS: ${{ runner.temp }}/models
         run: uv run python -m peresmeshnik models fetch xtts-v2 --accept-licenses
-      - name: The clone's venv (voice-runner/requirements-linux.in, CPU torch)
+      - name: The clone's venv (voice-runner/requirements-linux.txt, CPU torch, hashes required)
         run: |
           uv venv -q -p 3.12 "$RUNNER_TEMP/clone"
-          uv pip install -q -p "$RUNNER_TEMP/clone/bin/python" --extra-index-url https://download.pytorch.org/whl/cpu \
-            --index-strategy unsafe-best-match -r voice-runner/requirements-linux.in
+          uv pip install -q -p "$RUNNER_TEMP/clone/bin/python" --index-strategy unsafe-best-match \
+            --require-hashes -r voice-runner/requirements-linux.txt --build-constraints voice-runner/requirements-linux.txt
       - name: The clone in the new languages (text tools of each, a de -> ja pair through the runner)
         env:
           PERESMESHNIK_CLONE_MODEL: ${{ runner.temp }}/models/xtts-v2
@@ -50,9 +58,16 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
         with:
+          version: '0.13.7'  # uv itself pinned, not the latest; setup-uv v6.8.0 knows no checksum past 0.8.20, so ours:
+          # the SHA-256 of the release's uv-<target> archive (its .sha256 file) for Windows and Linux x64, macOS arm64 and
+          # x64; another runner gets a sum that fails
+          checksum: ${{ runner.os == 'Windows' && '0cdc5b38fe5a8168ed6a25814f5ba43c21d313dd3187314fccb37b7cec46e021'
+            || runner.os == 'Linux' && 'c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83'
+            || runner.arch == 'ARM64' && '81b811b57e4624df7ed3aac148e0359100d9962f3d9dce00aec533dc2e086731'
+            || '20c47e4c1f630b8abaff8c291fa9b9aa300fef92c4fbff95adf198b55287cda7' }}
           python-version: '3.12'
           enable-cache: true
       - run: uv sync --locked
@@ -126,7 +141,7 @@ jobs:
           print('state:', st)
           assert st == 'ready', st
           EOF
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
         with:
           path: ${{ runner.temp }}/models
           key: xtts-v2-${{ hashFiles('peresmeshnik/models.toml') }}

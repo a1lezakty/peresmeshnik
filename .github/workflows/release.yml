@@ -1,14 +1,26 @@
 name: release
 
 # A tag v* builds the macOS .dmg and the Windows installer and .zip, checks them and makes a DRAFT GitHub release
-# with the files and their SHA-256 (published by hand after a live check). workflow_dispatch and pull requests run
-# the same builds and checks without a release: the files are workflow artifacts.
+# with the files and their SHA-256 (published by hand after a live check), and the sources the builds owe next to them
+# (Peresmeshnik-<version>-sources.tar: the GPL runner's Corresponding Source, the Windows build's LGPL mpg123;
+# packaging/sources.sh checks each download by its SHA-256). The draft is made only for a commit on main
+# with a green `ci` and a green `voice-pack` (the real clone in 13 languages) on that very commit, and no release of
+# that tag yet. workflow_dispatch and pull requests run the same builds and checks without a release: the files are
+# workflow artifacts. workflow_dispatch with dry_run runs everything a tag runs (the version against v<version>, the
+# REQUIRE_* guards, those checks as warnings, the notes; not the build attestations) and keeps the notes as an artifact
+# instead of a release:
+#   gh workflow run release.yml --ref main -f dry_run=true
 on:
   push:
     tags: ['v*']
   pull_request:
     paths-ignore: ['docs/**', '**.md']
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'The tag path without a tag: no release, the notes as an artifact'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -17,30 +29,45 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false  # a newer push waits: a half-built .dmg tells nothing
 
+env:  # '1' on a tag and on a dry run: what a release needs is required
+  RELEASE: ${{ (startsWith(github.ref, 'refs/tags/v') || inputs.dry_run) && '1' || '' }}
+
 jobs:
   macos:
     runs-on: macos-15
     timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write  # the build attestation (a tag only: a dry run's would sit in the public log for good)
+      attestations: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
         with:
+          version: '0.13.7'  # uv itself pinned, not the latest; setup-uv v6.8.0 knows no checksum past 0.8.20, so ours:
+          # the SHA-256 of the release's uv-<target> archive (its .sha256 file) for Windows and Linux x64, macOS arm64 and
+          # x64; another runner gets a sum that fails
+          checksum: ${{ runner.os == 'Windows' && '0cdc5b38fe5a8168ed6a25814f5ba43c21d313dd3187314fccb37b7cec46e021'
+            || runner.os == 'Linux' && 'c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83'
+            || runner.arch == 'ARM64' && '81b811b57e4624df7ed3aac148e0359100d9962f3d9dce00aec533dc2e086731'
+            || '20c47e4c1f630b8abaff8c291fa9b9aa300fef92c4fbff95adf198b55287cda7' }}
           python-version: '3.12'
           enable-cache: true
-      - name: Version matches the tag
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Version matches the tag (on a dry run, the tag it would be)
+        if: env.RELEASE == '1'
         run: |
           v=$(sed -n "s/^__version__ = '\(.*\)'/\1/p" peresmeshnik/__init__.py)
           p=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
-          test "v$v" = "$GITHUB_REF_NAME" && test "$p" = "$v" || { echo "tag $GITHUB_REF_NAME, __init__ $v, pyproject $p"; exit 1; }
+          tag=$([ "$GITHUB_REF_TYPE" = tag ] && echo "$GITHUB_REF_NAME" || echo "v$v")
+          test -n "$v" && test "v$v" = "$tag" && test "$p" = "$v" || { echo "tag $tag, __init__ $v, pyproject $p"; exit 1; }
       - run: uv sync --locked --group dev --group build
       - name: Build Peresmeshnik.app and the .dmg (PyInstaller, Swift tap helper, ad-hoc signature)
         env:
-          REQUIRE_TAP: ${{ startsWith(github.ref, 'refs/tags/v') && '1' || '' }}  # a release needs the call's sound
+          REQUIRE_TAP: ${{ env.RELEASE }}  # a release needs the call's sound
         run: packaging/macos/build.sh
       - name: The built runner speaks Japanese (pyopenjtalk and its dictionary in the build)
         run: dist/Peresmeshnik.app/Contents/MacOS/piper-runner --self-check
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
         with:
           path: ${{ runner.temp }}/models
           key: models-${{ runner.os }}-${{ hashFiles('peresmeshnik/models.toml') }}
@@ -60,7 +87,7 @@ jobs:
           mkdir -p "$SCREENSHOTS"
           uv run --no-sync pytest -q -s -rs tests/test_app_bundle.py | tee "$RUNNER_TEMP/bundle.log"
           if grep -q SKIPPED "$RUNNER_TEMP/bundle.log"; then echo 'a check of the .dmg was skipped' >&2; exit 1; fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:
           name: screens
@@ -68,7 +95,13 @@ jobs:
           retention-days: 7
       - name: SHA-256
         run: cd dist && shasum -a 256 *.dmg | tee "$(ls *.dmg).sha256"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        if: startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run  # a signed record that this file was built here,
+        # from this tag (gh attestation verify ... --source-ref refs/tags/<tag>); not on a dry run, even one started on a
+        # tag (--ref v<version>): its files are no release
+        with:
+          subject-path: dist/*.dmg
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: Peresmeshnik-macos-arm64
           path: dist/*.dmg*
@@ -77,23 +110,35 @@ jobs:
   windows:
     runs-on: windows-latest
     timeout-minutes: 50
+    permissions:
+      contents: read
+      id-token: write  # the build attestation (a tag only: a dry run's would sit in the public log for good)
+      attestations: write
     defaults:
       run:
         shell: bash  # Git Bash, -eo pipefail
     env:  # the build fails without the loopback helper, the check wants it in the folder, the .zip and the install
-      REQUIRE_LOOPBACK: ${{ startsWith(github.ref, 'refs/tags/v') && '1' || '' }}  # a release needs the call's sound
+      REQUIRE_LOOPBACK: ${{ (startsWith(github.ref, 'refs/tags/v') || inputs.dry_run) && '1' || '' }}  # a release needs the call's sound
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
         with:
+          version: '0.13.7'  # uv itself pinned, not the latest; setup-uv v6.8.0 knows no checksum past 0.8.20, so ours:
+          # the SHA-256 of the release's uv-<target> archive (its .sha256 file) for Windows and Linux x64, macOS arm64 and
+          # x64; another runner gets a sum that fails
+          checksum: ${{ runner.os == 'Windows' && '0cdc5b38fe5a8168ed6a25814f5ba43c21d313dd3187314fccb37b7cec46e021'
+            || runner.os == 'Linux' && 'c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83'
+            || runner.arch == 'ARM64' && '81b811b57e4624df7ed3aac148e0359100d9962f3d9dce00aec533dc2e086731'
+            || '20c47e4c1f630b8abaff8c291fa9b9aa300fef92c4fbff95adf198b55287cda7' }}
           python-version: '3.12'
           enable-cache: true
-      - name: Version matches the tag
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Version matches the tag (on a dry run, the tag it would be)
+        if: env.RELEASE == '1'
         run: |
           v=$(sed -n "s/^__version__ = '\(.*\)'/\1/p" peresmeshnik/__init__.py)
           p=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
-          test "v$v" = "$GITHUB_REF_NAME" && test "$p" = "$v" || { echo "tag $GITHUB_REF_NAME, __init__ $v, pyproject $p"; exit 1; }
+          tag=$([ "$GITHUB_REF_TYPE" = tag ] && echo "$GITHUB_REF_NAME" || echo "v$v")
+          test -n "$v" && test "v$v" = "$tag" && test "$p" = "$v" || { echo "tag $tag, __init__ $v, pyproject $p"; exit 1; }
       - run: uv sync --locked --group dev --group build
       - name: Inno Setup 6
         run: test -x "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" || choco install innosetup --version=6.7.1 -y --no-progress
@@ -101,7 +146,7 @@ jobs:
         run: packaging/windows/build.sh
       - name: The built runner speaks Japanese (pyopenjtalk and its dictionary in the build)
         run: dist/Peresmeshnik/piper-runner.exe --self-check
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
         with:
           path: ${{ runner.temp }}/models
           key: models-${{ runner.os }}-${{ hashFiles('peresmeshnik/models.toml') }}
@@ -122,7 +167,7 @@ jobs:
           mkdir -p "$SCREENSHOTS"
           uv run --no-sync pytest -q -s -rs tests/test_app_windows.py | tee "$RUNNER_TEMP/bundle.log"
           if grep -q SKIPPED "$RUNNER_TEMP/bundle.log"; then echo 'a check of the installer was skipped' >&2; exit 1; fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:
           name: screens-windows
@@ -130,7 +175,13 @@ jobs:
           retention-days: 7
       - name: SHA-256
         run: cd dist && for f in *.zip *-setup.exe; do sha256sum "$f" | sed 's/ \*/  /' | tee "$f.sha256"; done  # as shasum on macOS
-      - uses: actions/upload-artifact@v4
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        if: startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run  # as on macOS
+        with:
+          subject-path: |
+            dist/*.zip
+            dist/*-setup.exe
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: Peresmeshnik-windows-x64
           path: |
@@ -138,31 +189,67 @@ jobs:
             dist/*-setup.exe*
           retention-days: 14
 
+  sources:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - name: The sources the builds owe (GPL piper-runner, LGPL mpg123), each download checked by its SHA-256
+        run: |
+          packaging/sources.sh "$(sed -n "s/^__version__ = '\(.*\)'/\1/p" peresmeshnik/__init__.py)" dist
+          cd dist && sha256sum *.tar | tee "$(ls *.tar).sha256"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: Peresmeshnik-sources
+          path: dist/*.tar*
+          retention-days: 14
+
   release:
-    needs: [macos, windows]
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, windows, sources]
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.dry_run
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
+      actions: read  # the runs of ci and voice-pack on this commit
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           sparse-checkout: CHANGELOG.md
           sparse-checkout-cone-mode: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           pattern: Peresmeshnik-*
           path: dist
           merge-multiple: true
-      - name: Draft release (published by hand)
+      - name: On main, ci and voice-pack green on this commit, no release of the tag yet (warnings on a dry run)
         env:
           GH_TOKEN: ${{ github.token }}
+          DRY: ${{ inputs.dry_run && '1' || '' }}
+        run: |
+          repo=$GITHUB_REPOSITORY sha=$GITHUB_SHA
+          v=$(sed -n "s/^__version__ = '\(.*\)'/\1/p" <(gh api "repos/$repo/contents/peresmeshnik/__init__.py?ref=$sha" --jq .content | base64 -d))
+          tag=$([ "$GITHUB_REF_TYPE" = tag ] && echo "$GITHUB_REF_NAME" || echo "v$v")
+          bad=0
+          no() { if [ -n "$DRY" ]; then echo "::warning::$1"; else echo "::error::$1"; bad=1; fi; }
+          on=$(gh api "repos/$repo/compare/main...$sha" --jq .status)  # behind / identical: main has the commit
+          case $on in behind|identical) ;; *) no "$sha is not on main ($on)";; esac
+          green() { gh api "repos/$repo/actions/workflows/$1/runs?head_sha=$sha&status=success&per_page=1" --jq '.workflow_runs[0].html_url // empty'; }
+          ci=$(green ci.yml); vp=$(green voice-pack.yml)
+          [ -n "$ci" ] || no "no green ci run on $sha"
+          [ -n "$vp" ] || no "no green voice-pack run on $sha (the real clone in 13 languages): Actions -> voice-pack -> Run workflow on main"
+          if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then no "a release $tag exists already (a re-run?): delete that draft first"; fi
+          { echo "TAG=$tag"; echo "CI_RUN=${ci:-none}"; echo "VOICE_RUN=${vp:-none}"; } >> "$GITHUB_ENV"
+          exit $bad
+      - name: Draft release (published by hand); a dry run keeps the notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY: ${{ inputs.dry_run && '1' || '' }}
         run: |
           sums=$(cat dist/*.sha256 | sed 's/^/    /')
           # this version's CHANGELOG section first (its heading line dropped), then how to install
-          awk -v v="## ${GITHUB_REF_NAME#v}" '/^## / {p = index($0, v " ") == 1 || $0 == v; next} p' CHANGELOG.md > notes.md
-          grep -q . notes.md || { echo "CHANGELOG.md has no section for ${GITHUB_REF_NAME#v}"; exit 1; }
+          awk -v v="## ${TAG#v}" '/^## / {p = index($0, v " ") == 1 || $0 == v; next} p' CHANGELOG.md > notes.md
+          grep -q . notes.md || { echo "CHANGELOG.md has no section for ${TAG#v}"; exit 1; }
           cat >> notes.md <<EOF
           **macOS** 14+ on Apple Silicon (\`.dmg\`). Ad-hoc signed, not notarized: after the first blocked start use
           System Settings → Privacy & Security → "Open Anyway" (README, "Installation on macOS"). BlackHole 2ch
@@ -172,12 +259,29 @@ jobs:
           asks once, "More info → Run anyway" (README, "Installation on Windows"). VB-Audio Virtual Cable is needed for
           the voice to the call.
 
-          The models are downloaded by the setup wizard. The bundled Piper runner is GPL-3.0: its sources are listed in
-          piper-runner-SOURCE.txt of the licenses folder (Contents/Resources/licenses on macOS, licenses on Windows).
+          The models are downloaded by the setup wizard. The bundled Piper runner is GPL-3.0, and the Windows build's
+          libsndfile carries mpg123 (LGPL-2.1): their sources are attached here (\`Peresmeshnik-${TAG#v}-sources.tar\`)
+          and listed in piper-runner-SOURCE.txt and LGPL-SOURCE.txt of the licenses folder (Contents/Resources/licenses
+          on macOS, licenses on Windows).
 
-          SHA-256:
+          Checked on this commit by CI: the tests ($CI_RUN) and the voice clone in 13 languages ($VOICE_RUN). The real
+          cloud (Gemini Live) is checked by hand before a release is published.
+
+          SHA-256 (and that each file was built here from this tag:
+          \`gh attestation verify <file> --repo $GITHUB_REPOSITORY --source-ref refs/tags/$TAG\`):
 
           $sums
           EOF
-          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
-            --title "Peresmeshnik ${GITHUB_REF_NAME#v}" --notes-file notes.md
+          if [ -n "$DRY" ]; then
+            echo "dry run: would make the draft $TAG with: $(ls dist | tr '\n' ' ')"
+            cat notes.md
+            exit 0
+          fi
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+            --title "Peresmeshnik ${TAG#v}" --notes-file notes.md
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        if: inputs.dry_run
+        with:
+          name: release-notes
+          path: notes.md
+          retention-days: 7

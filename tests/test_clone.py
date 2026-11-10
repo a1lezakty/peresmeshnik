@@ -14,7 +14,7 @@ from peresmeshnik import voice
 from peresmeshnik.local.clone import SR, XttsClone, budget_samples, cap_pauses, guard, split_text
 from peresmeshnik.local.xtts import FADE_IN, SENTENCE_END, SENTENCE_PAUSE_S, closed, ending, normalize, shape
 
-REF_RU = Path(os.environ.get('BENCH_DATA', 'bench-data')) / 'set' / 'ref_ru.wav'  # LibriVox reader (bench/data.py), if present
+READER = Path(__file__).parent / 'data' / 'reader-ru.ogg'  # a LibriVox reader, bench/data.py's ref_ru (tests/data/README.md)
 
 
 def speech_like(seconds, level=0.1, noise=0.001, sr=16_000, talk=0.8, seed=0):
@@ -151,10 +151,28 @@ def test_save_normalises_and_loads(tmp_path):
     assert w.meta['transcript'] == 'привет' and w.meta['quality']['seconds'] == pytest.approx(40)
 
 
-@pytest.mark.skipif(not REF_RU.exists(), reason='bench data not here')
 def test_real_reference_passes():
-    r = voice.check(*voice.read_audio(REF_RU))
+    """A real reader, not noise: passes, speech 24 dB above the floor and 32 s of speech of 42 s once the recording's DC
+    offset is taken out (with it, 14 dB and 20 s: the offset was counted as noise). The thresholds themselves are pinned
+    by test_recordings_at_the_thresholds."""
+    r = voice.check(*voice.read_audio(READER))
     assert r.ok, r.errors
+    assert r.snr_db == pytest.approx(24.1, abs=1) and r.speech_s == pytest.approx(32.3, abs=1.5), r
+
+
+@pytest.mark.parametrize('kw, problem', [
+    ({'noise': 0.02}, None),  # speech 14 dB above the background: passes, with a warning
+    ({'noise': 0.032}, 'above the background'),  # 10 dB
+    ({'talk': 0.34}, None),  # 16 s of speech
+    ({'talk': 0.3}, 'of speech'),  # 14 s
+])
+def test_recordings_at_the_thresholds(kw, problem):
+    r = voice.check(speech_like(45, **kw), 16_000)
+    print(kw, voice.summary(r))
+    if problem:
+        assert not r.ok and any(problem in e for e in r.errors), r.errors
+    else:
+        assert r.ok and bool(r.warnings) == ('noise' in kw), r  # 14 dB: under FAIR_DB, a caveat
 
 
 def test_cli_import_and_list(tmp_path, capsys):

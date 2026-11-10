@@ -13,3 +13,11 @@ FLEURS: Conneau et al., 2022, https://huggingface.co/datasets/google/fleurs, lic
 
 `pack-tiny.json` (from `requirements-tiny.in` by `voice-runner/lock.py --dir tests/data tiny`): a real voice pack of
 numpy and soundfile on the embeddable CPython 3.12, for the Windows CI test `test_voice_pack_windows.py`.
+
+`reader-ru.ogg`: 42 s, 16 kHz mono Ogg Vorbis, the voice reference `ref_ru.wav` of `bench/data.py`: the first six
+utterances of chapter `poemi_01_pushkin` of the Russian LibriSpeech test split (OpenSLR 96, via
+https://huggingface.co/datasets/bond005/rulibrispeech) with 0.3 s of silence between them, written with soundfile
+(`compression_level=0.9`). A real reader for `voice.check` (tests/test_clone.py). Vorbis, not Opus: Opus drops the
+recording's DC offset (-40 dBFS, its floor in the check), and the check's numbers would no longer be the recording's.
+The recording: A. S. Pushkin, "Ruslan and Ludmila" (section 1: the dedication and the prologue), read by Foreign Girl
+for LibriVox (https://librivox.org/poemi-alexander-pushkin/), public domain.

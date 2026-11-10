@@ -11,8 +11,10 @@
 
     PERESMESHNIK_SETUP=dist\\Peresmeshnik-0.2.0-windows-x64-setup.exe PERESMESHNIK_ZIP=dist\\...zip pytest -s tests/test_app_windows.py
 """
+import fnmatch
 import json
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -98,6 +100,44 @@ def test_installed_files_shortcut_and_uninstall_entry(installed):
             assert (installed / f).exists(), f'no {f}'
     assert 'espeak-ng' in (installed / 'licenses' / 'piper-runner-SOURCE.txt').read_text()
     assert not list(installed.rglob('torch')), 'torch in the base app'
+    # stage 7 (C3): the LGPL source offer, the notices inside Qt, hts_engine, the Unicode data, the Required Notice
+    for f in ('licenses/LGPL-SOURCE.txt', 'licenses/PySide6_Essentials/Qt-third-party.txt',
+              'licenses/pyopenjtalk-plus/hts_engine-COPYING.txt', 'licenses/piper-tts/espeak-ng-COPYING.UCD.txt',
+              'licenses/pyopenjtalk-plus/OpenJTalk-COPYING.txt',  # FIXES 12: Open JTalk with its MeCab
+              'licenses/protobuf/mingw-w64-runtime-COPYING.txt', 'licenses/numpy/mingw-w64-runtime-COPYING.txt'):  # MinGW builds
+        assert (installed / f).exists(), f
+    lgpl = (installed / 'licenses' / 'LGPL-SOURCE.txt').read_text()
+    assert 'Written offer' in lgpl and 'reverse' in lgpl  # FIXES 15: the LGPL libraries may be changed and debugged
+    assert re.search(r'libmpg123 \d+\.\d+\.\d+ ', lgpl) and 'libmp3lame 3.' in lgpl, lgpl  # the exact versions of vcpkg's
+    runner_src = (installed / 'licenses' / 'piper-runner-SOURCE.txt').read_text()  # FIXES 16: the runner's Corresponding Source
+    assert re.search(r'onnxruntime \d', runner_src) and 'CPython 3.' in runner_src and 'Written offer' in runner_src
+    assert 'sources.tar' in runner_src and 'sources.tar' in lgpl  # attached to the release (packaging/sources.sh)
+    # the build's CPython by name (FIXES C r2 10): built from this interpreter (release.yml tests in the build's env), so
+    # uv's python-build-standalone with its release (uv's BUILD file), else python.org's; its source tarball either way
+    py, pbs = platform.python_version(), Path(sys.base_prefix) / 'BUILD'
+    if pbs.is_file():
+        tag = pbs.read_text().strip()
+        assert f'python-build-standalone, release {tag}' in runner_src, runner_src
+        assert f'https://github.com/astral-sh/python-build-standalone/releases/tag/{tag}' in runner_src
+    else:
+        assert 'python-build-standalone' not in runner_src, runner_src
+    assert f'https://www.python.org/ftp/python/{py}/Python-{py}.tar.xz' in runner_src, runner_src
+    # no MinGW runtime DLLs (Git's, from the runner's PATH): no notice of theirs is shipped
+    mingw = ('libgcc*', 'libstdc++*', 'libwinpthread*', 'libgfortran*', 'libquadmath*', 'libgomp*', 'libiconv*', 'libintl*',
+             'zlib1.dll')  # by pattern: libgcc_s_seh-1, libgcc_s_dw2-1, libgfortran-5... whatever the GCC
+    assert not [f for f in installed.rglob('*.dll') if any(fnmatch.fnmatch(f.name.lower(), m) for m in mingw)]
+    assert 'Required Notice: Copyright' in (installed / 'licenses' / 'Peresmeshnik-LICENSE.txt').read_text()
+    ossl = (installed / 'licenses' / 'OpenSSL-LICENSE.txt').read_text()
+    assert 'Apache License' in ossl
+    if [f for f in installed.rglob('_rust*.pyd') if f.parent.name == 'bindings']:  # cryptography's own OpenSSL, built in
+        assert re.search(r'OpenSSL \d+\.\d+\.\d+ .*, built statically into the _rust module of cryptography \d', ossl), ossl[:300]
+    left_out = ('qjpeg.dll', 'qtiff.dll', 'qwebp.dll', 'nakdimon.onnx',  # unused (Peresmeshnik.spec drops them)
+                'qopensslbackend.dll', 'libssl-3-x64.dll', 'libcrypto-3-x64.dll')
+    assert not [f for f in installed.rglob('*') if f.name in left_out]
+    for exe in ('Peresmeshnik.exe', 'piper-runner.exe'):  # a version resource (Properties -> Details)
+        v = subprocess.run(['powershell', '-NoProfile', '-Command', f"(Get-Item '{installed / exe}').VersionInfo.FileVersion"],
+                           capture_output=True, text=True).stdout.strip()
+        assert v.startswith(peresmeshnik.__version__), (exe, v)
     dropped = [f.name for f in installed.rglob('*.dll') if f.name.lower() == 'opengl32sw.dll' or '-asio' in f.name.lower()]
     assert not dropped, dropped  # Mesa's software OpenGL, PortAudio with ASIO: not shipped (Peresmeshnik.spec)
     assert SHORTCUT.exists(), 'no Start menu shortcut'

@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR GPL-3.0-or-later
+# (GPL too: it builds the GPL program piper-runner, and GPL-3.0 counts its build scripts in its source)
 # Peresmeshnik.app and its .dmg on macOS (arm64), ad-hoc signed. From the repo root, after
 # `uv sync --locked --group build`:  packaging/macos/build.sh
 #   -> dist/Peresmeshnik.app, dist/Peresmeshnik-<version>-macos-arm64.dmg
@@ -33,7 +35,12 @@ fi
 # the GPL check (the app's own Analysis must not import piper; the spec copies its warnings before piper's) and the licenses
 $PY packaging/licenses.py "$APP/Contents/Resources/licenses" build/pyinstaller/Peresmeshnik/warn-app.txt Contents/MacOS/piper-runner
 
-codesign --force --deep --sign - "$APP"  # ad-hoc: no Apple ID; macOS asks to "Open Anyway" once (README)
+# ad-hoc (no Apple ID; macOS asks to "Open Anyway" once, README), with the hardened runtime: macOS then ignores
+# DYLD_INSERT_LIBRARIES, so no other program can run its code inside the app under its microphone and call-sound
+# permissions. entitlements.plist, for every program in the bundle: audio-input (else the microphone gives silence) and
+# disable-library-validation (an ad-hoc signature has no Team ID, so the bundle's own ad-hoc libraries would be refused);
+# never allow-dyld-environment-variables, no JIT
+codesign --force --deep --options runtime --entitlements packaging/macos/entitlements.plist --sign - "$APP"
 codesign --verify --deep --strict --verbose=1 "$APP"
 
 STAGE=dist/dmg  # the .dmg's contents; kept, and brought up to date by the next build

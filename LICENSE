@@ -71,3 +71,7 @@ The **licensor** is the individual or entity offering these terms, and the **sof
 **Your licenses** are all the licenses granted to you for the software under these terms.
 
 **Use** means anything you do with the software requiring one of your licenses.
+
+Required Notice: Copyright (c) 2026 Akty (https://github.com/a1lezakty)
+
+Additional permission for the LGPL libraries in builds of the software (Qt, PySide6, shiboken6, libsndfile with its codecs): nothing in these terms restricts you from modifying those libraries for your own use, or from reverse engineering the software to debug such modifications, whatever the purpose (GNU LGPL-2.1 section 6, LGPL-3.0 section 4). Those libraries stay under their own licenses; where their source is: LGPL-SOURCE.txt in the licenses folder of a build.

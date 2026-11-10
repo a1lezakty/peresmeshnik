@@ -15,8 +15,12 @@
 // rate change of the device reopens it. record and loop end when stdin closes (the app is gone: no microphone stays
 // open). Events on stderr, a line each: "using <uid>\t<name>", "lost <uid>\t<name>", "none"; loop also "idle" (nobody
 // records DEV: the microphone is closed, no orange dot, AirPods keep their music profile) and "call" (somebody does).
-// Exit codes: 0 done, 2 usage, 3 no such device, 4 the device went away, 5 Core Audio error, 6 no microphone permission,
-// 7 (play) the output's sample rate changed: start it again (it reads the new rate). loop follows a rate change itself.
+// Exit codes: 0 done, 2 usage, 3 no such device, 4 the device went away (or Core Audio restarted: `sudo killall
+// coreaudiod` ends every IOProc without a device event), 5 Core Audio error, 6 no microphone permission, 7 (play) the
+// output's sample rate changed: start it again (it reads the new rate). loop follows a rate change itself; record
+// (and the loop's microphone) opens its microphone again after a coreaudiod restart. A
+// microphone that does not open (busy, a Bluetooth headset switching profile) is "none" and tried again every 2 s; a
+// loop whose output does not open exits 5 (the app starts it again).
 // SIGTERM / SIGINT / SIGHUP end it cleanly: every IOProc is stopped before the exit. A process that just dies (SIGKILL)
 // with its IOProc running can leave its last IO buffer in coreaudiod's mix, repeated: seen on the CI runner, a 10.7 ms
 // buffer looping in BlackHole with no process left. So the app stops helpers with SIGTERM, never SIGKILL.
@@ -181,6 +185,13 @@ func setCycle(_ dev: AudioObjectID, _ frames: UInt32) {
     AudioObjectSetPropertyData(dev, &a, 0, nil, UInt32(MemoryLayout<UInt32>.size), &n)
 }
 
+/// coreaudiod restarted (`sudo killall coreaudiod`, which the README suggests for a muted call app): our IOProcs are
+/// gone and no device event comes, so a play would wait for an IO cycle forever and a loop would stay silent. Exit 4:
+/// the app starts the helper again.
+func exitOnServiceRestart() {
+    listen(system, kAudioHardwarePropertyServiceRestarted, DispatchQueue(label: "restarted")) { die(4, "Core Audio restarted") }
+}
+
 /// Exit when stdin closes: the app ended (or died), nothing may keep the microphone open.
 func exitOnStdinEOF() {
     Thread {
@@ -203,6 +214,12 @@ final class Ring {
         self.cap = cap
         buf = .allocate(capacity: cap)
         lock.initialize(to: os_unfair_lock())
+    }
+
+    deinit {  // a loop makes new rings on every call and device change: they must not pile up
+        buf.deallocate()
+        lock.deinitialize(count: 1)
+        lock.deallocate()
     }
 
     var count: Int {
@@ -280,13 +297,14 @@ let maxFrames = 16384
 final class Capture {
     let dev: Device
     let ring: Ring
+    private let mono = UnsafeMutablePointer<Float>.allocate(capacity: maxFrames)
     private var proc: AudioDeviceIOProcID?
 
-    init?(_ dev: Device, wake: DispatchSemaphore, cycle: UInt32 = 0) {
+    /// nil when it cannot open; `why` says why (each caller its own: no shared state across threads).
+    init?(_ dev: Device, wake: DispatchSemaphore, cycle: UInt32 = 0, why: inout String) {
         self.dev = dev
         ring = Ring(Int(max(dev.rate, 8000) * 2))
-        let mono = UnsafeMutablePointer<Float>.allocate(capacity: maxFrames)
-        let ring = ring
+        let mono = mono, ring = ring
         if cycle > 0 { setCycle(dev.id, cycle) }
         let st = AudioDeviceCreateIOProcIDWithBlock(&proc, dev.id, nil) { _, input, _, output, _ in
             if let b = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input)).first,
@@ -304,22 +322,27 @@ final class Capture {
             }
         }
         guard st == noErr, let proc else {
-            say("cannot open \(dev.name) (\(st))")
+            why = "cannot open \(dev.name) (\(st))"
             return nil
         }
         started(dev.id, proc)  // before it runs: a quit() meanwhile stops it too
         let go = AudioDeviceStart(dev.id, proc)
         guard go == noErr else {
             stopIO(dev.id, proc)  // and destroys its IOProcID
-            say("cannot start \(dev.name) (\(go))")
+            why = "cannot start \(dev.name) (\(go))"
             return nil
         }
     }
 
     func stop() {
         guard let proc else { return }
-        stopIO(dev.id, proc)
+        stopIO(dev.id, proc)  // stopped and destroyed: its block (which writes `mono`) runs no more
         self.proc = nil
+    }
+
+    deinit {
+        stop()
+        mono.deallocate()
     }
 }
 
@@ -333,12 +356,13 @@ final class Flag {
 final class Render {
     let dev: Device
     let drain = Flag()
+    private let mono = UnsafeMutablePointer<Float>.allocate(capacity: maxFrames)
     private var proc: AudioDeviceIOProcID?
 
-    init?(_ dev: Device, from ring: Ring, prime: Int = 0, pulled: DispatchSemaphore? = nil, cycle: UInt32 = 0) {
+    init?(_ dev: Device, from ring: Ring, prime: Int = 0, pulled: DispatchSemaphore? = nil, cycle: UInt32 = 0,
+          why: inout String) {
         self.dev = dev
-        let mono = UnsafeMutablePointer<Float>.allocate(capacity: maxFrames)
-        let drain = drain
+        let mono = mono, drain = drain
         var primed = prime == 0
         if cycle > 0 { setCycle(dev.id, cycle) }
         let st = AudioDeviceCreateIOProcIDWithBlock(&proc, dev.id, nil) { _, _, _, output, _ in
@@ -360,22 +384,27 @@ final class Render {
             pulled?.signal()
         }
         guard st == noErr, let proc else {
-            say("cannot open \(dev.name) (\(st))")
+            why = "cannot open \(dev.name) (\(st))"
             return nil
         }
         started(dev.id, proc)  // before it runs: a quit() meanwhile stops it too
         let go = AudioDeviceStart(dev.id, proc)
         guard go == noErr else {
             stopIO(dev.id, proc)  // and destroys its IOProcID
-            say("cannot start \(dev.name) (\(go))")
+            why = "cannot start \(dev.name) (\(go))"
             return nil
         }
     }
 
     func stop() {
         guard let proc else { return }
-        stopIO(dev.id, proc)
+        stopIO(dev.id, proc)  // stopped and destroyed: its block (which reads into `mono`) runs no more
         self.proc = nil
+    }
+
+    deinit {
+        stop()
+        mono.deallocate()
     }
 }
 
@@ -387,7 +416,8 @@ final class Input {
     private let q = DispatchQueue(label: "devices")
     private let lock = NSLock()
     private var cap: Capture?
-    private var said = ""
+    private var said = "", failed = ""
+    private var retrying = false  // one retry waits at a time (device events meanwhile do not start more)
     private var listeners: [Listener] = [], rateListener: Listener?
     private(set) var stopped = false
 
@@ -397,7 +427,8 @@ final class Input {
         self.exclude = exclude
         self.cycle = cycle
         listeners = [listen(system, kAudioHardwarePropertyDevices, q) { [weak self] in self?.update() },
-                     listen(system, kAudioHardwarePropertyDefaultInputDevice, q) { [weak self] in self?.update() }]
+                     listen(system, kAudioHardwarePropertyDefaultInputDevice, q) { [weak self] in self?.update() },
+                     listen(system, kAudioHardwarePropertyServiceRestarted, q) { [weak self] in self?.reopen() }]
         q.sync { update() }
     }
 
@@ -427,6 +458,14 @@ final class Input {
         return ins.first { $0.id == def && $0.real } ?? ins.first { $0.real }
     }
 
+    /// coreaudiod restarted: our IOProc is dead though the device may be the same (same id, same rate): open it anew.
+    private func reopen() {  // on q
+        cap?.stop()
+        setCap(nil)
+        said = ""  // "using" is said again: the app hears the microphone is back
+        update()
+    }
+
     private func update() {  // on q
         if stopped { return }
         let all = devices()
@@ -445,10 +484,22 @@ final class Input {
             event("none")
             return
         }
-        guard let c = Capture(d, wake: wake, cycle: cycle) else {
+        var why = ""
+        guard let c = Capture(d, wake: wake, cycle: cycle, why: &why) else {
+            if why != failed { say(why) }  // once, not every 2 s
+            failed = why
             event("none")
+            if !retrying {  // busy now, maybe free soon
+                retrying = true
+                q.asyncAfter(deadline: .now() + 2) { [weak self] in
+                    guard let self else { return }
+                    self.retrying = false
+                    self.update()
+                }
+            }
             return
         }
+        failed = ""
         rateListener?.remove()
         rateListener = listen(d.id, kAudioDevicePropertyNominalSampleRate, q) { [weak self] in self?.update() }
         setCap(c)
@@ -516,6 +567,7 @@ final class Readers {
 func pump(_ input: Input, rate: Double, _ emit: @escaping (UnsafePointer<Float>, Int) -> Void) {
     Thread {
         let tmp = UnsafeMutablePointer<Float>.allocate(capacity: 1 << 18)
+        defer { tmp.deallocate() }  // one thread per call of a loop: its 1 MiB goes with it
         var src: Capture?, rs: Resample?
         while true {
             input.wake.wait()
@@ -608,7 +660,7 @@ case "permission":
 case "record":
     let to = rate(16000)
     needMicrophone()
-    let input = Input(saved: opt("--from", "") ?? "", follow: flag("--follow"))
+    let input = Input(saved: opt("--from", "") ?? "", follow: flag("--follow"))  // it reopens after a restart itself
     exitOnStdinEOF()
     pump(input, rate: to) { p, n in
         if fwrite(p, 4, n, stdout) < n { quit(0) }  // the reader is gone
@@ -620,6 +672,7 @@ case "loop":
     var target = output(opt("--to"))
     needMicrophone()
     watchGone(target)
+    exitOnServiceRestart()
     let from = opt("--from", "") ?? ""
     var running: (Render, Input)?
     let runLock = NSLock()  // run() from the readers' queue, a rate change from its own
@@ -628,7 +681,10 @@ case "loop":
         target = device(target.id)  // its rate now: a call app or Audio MIDI Setup may have changed it meanwhile
         let ring = Ring(Int(target.rate / 2))
         let keep = Int(target.rate * 0.06)  // at most 60 ms queued: the mic and the target run on two clocks
-        guard let render = Render(target, from: ring, prime: Int(target.rate * 0.02), cycle: 1024) else { return }
+        var why = ""
+        guard let render = Render(target, from: ring, prime: Int(target.rate * 0.02), cycle: 1024, why: &why) else {
+            die(5, "cannot play into \(target.name): \(why)")  // silent all call else; the app starts the loop again
+        }
         let input = Input(saved: from, follow: true, exclude: target.uid, cycle: 1024)
         pump(input, rate: target.rate) { p, n in
             ring.write(p, n)
@@ -680,6 +736,7 @@ case "play":
     let from = rate(24000)
     guard let ms = Double(opt("--latency", "0")!), ms >= 0, ms < 1000 else { die(2, "bad --latency") }
     watchGone(target)
+    exitOnServiceRestart()
     listen(target.id, kAudioDevicePropertyNominalSampleRate, DispatchQueue(label: "rate")) {
         if device(target.id).rate != target.rate { die(7, "the rate of \(target.name) changed") }  // the app starts us again
     }
@@ -688,10 +745,12 @@ case "play":
     let pulled = DispatchSemaphore(value: 0)
     func nextCycle() {  // signalled on every IO cycle, waited on only now and then: the next one, not a backlog
         while pulled.wait(timeout: .now()) == .success {}
-        pulled.wait()
+        // a device that pulls nothing for 2 s has stopped under us (a restart missed, a driver gone): not a hang
+        if pulled.wait(timeout: .now() + 2) == .timedOut { die(4, "\(target.name) stopped playing") }
     }
-    guard let render = Render(target, from: ring, prime: Int(target.rate * ms / 1000), pulled: pulled) else {
-        die(5, "cannot play into \(target.name)")
+    var why = ""
+    guard let render = Render(target, from: ring, prime: Int(target.rate * ms / 1000), pulled: pulled, why: &why) else {
+        die(5, "cannot play into \(target.name): \(why)")
     }
     let rs = Resample(from, target.rate)
     var bytes = [UInt8](repeating: 0, count: 16384)

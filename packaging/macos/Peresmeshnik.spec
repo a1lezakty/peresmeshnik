@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 OR GPL-3.0-or-later
+# (GPL too: it builds the GPL program piper-runner, and GPL-3.0 counts its build scripts in its source)
 # PyInstaller spec: Peresmeshnik.app, one folder, with the Piper runner as a second program in Contents/MacOS.
 # PyInstaller: one tool for the .app now and the Windows / Linux folders of stages 4+ (ARCHITECTURE §10).
 # Build: packaging/macos/build.sh (it also adds the Swift tap helper, the licenses, the ad-hoc signature, the .dmg).
@@ -23,14 +25,19 @@ app = Analysis(
     excludes=EXCLUDES + ['piper'],  # GPL: only in piper-runner's own archive (build.sh fails if the app imports it)
 )
 shutil.copyfile(CONF['warnfile'], Path(CONF['warnfile']).with_name('warn-app.txt'))  # the next Analysis overwrites it
+# piper's Hebrew and Arabic diacritizers (nakdimon.onnx 21 MB, tashkeel 5 MB) are left out: no he/ar Piper voice in models.toml
+assert not re.search(r'^\["?piper-(he|ar)_', (ROOT / 'peresmeshnik' / 'models.toml').read_text(), re.M), 'a he/ar voice: ship them'
 piper = Analysis(
     [str(ROOT / 'piper-runner' / 'piper_runner.py')],
     # pyopenjtalk: its compiled OpenJTalk module imports pure-Python ones the analysis cannot see
     hiddenimports=collect_submodules('piper', filter=lambda n: '.train' not in n) + collect_submodules('pyopenjtalk'),
-    datas=[*collect_data_files('piper', excludes=['train/**', 'img/**', 'templates/**']),
+    datas=[*collect_data_files('piper', excludes=['train/**', 'img/**', 'templates/**', 'hebrew/**', 'tashkeel/**']),
            *collect_data_files('pyopenjtalk', excludes=['htsvoice/**'])],  # the Japanese voice: OpenJTalk's dictionary
     excludes=EXCLUDES + ['PySide6', 'peresmeshnik'],
 )
+# not shipped: Qt's JPEG, TIFF and WebP image plugins (libjpeg-turbo, libtiff, libwebp inside): the app loads only PNG
+DROP = ('libqjpeg', 'libqtiff', 'libqwebp')
+app.binaries, app.datas = ([e for e in toc if not Path(e[0]).name.lower().startswith(DROP)] for toc in (app.binaries, app.datas))
 app_exe = EXE(PYZ(app.pure), app.scripts, [], exclude_binaries=True, name='Peresmeshnik', console=False,
               target_arch='arm64', codesign_identity=None)
 piper_exe = EXE(PYZ(piper.pure), piper.scripts, [], exclude_binaries=True, name='piper-runner', console=True,

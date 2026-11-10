@@ -1,6 +1,9 @@
 # The voice clone from source on Linux: its own venv with the voice pack's runner (the Windows pins without +cu128:
 # PyPI's torch for Linux is the CUDA 12.8 build; CPU only: --extra-index-url https://download.pytorch.org/whl/cpu
 # --index-strategy unsafe-best-match). README "Trying it from source (Linux)"; CI: .github/workflows/voice-pack.yml.
+# Locked with hashes for CPython 3.12 x86_64 (install with --require-hashes): requirements-linux-cuda.txt (PyPI's CUDA
+# torch) and requirements-linux.txt (CPU torch, also --index-strategy unsafe-best-match); the command that rebuilds each
+# is in its first lines, run from the repository root after a change here.
 torch==2.8.0
 torchaudio==2.8.0
 coqui-tts==0.28.0

@@ -1,6 +1,7 @@
 # Architecture
 
-Status: stage 0 design. Numbers come from [BENCH.md](BENCH.md); where a decision rests on a
+Status: written as the stage 0 design and kept up to date with the code through 0.3.0; what was measured but not
+built says so. Numbers come from [BENCH.md](BENCH.md); where a decision rests on a
 measurement the table row is named. Engine interfaces live in
 [`peresmeshnik/engines.py`](../peresmeshnik/engines.py).
 
@@ -201,8 +202,8 @@ RAM = peak RSS of the model's own process):
 | Silero VAD | 1 | 0.003–0.01 (stage 1, BENCH `pipeline` vad_rtf) | ~50 MB | runs on every frame while a direction is on |
 | Microphone (`parec`) + live switch (me → them) | 1 reader + 1 events thread | 0.0096 + 0.012 while sound goes out (BENCH stage 2) | — | the switch is idle while the direction is silent |
 | ASR Parakeet v3 int8 | 2 | 0.10 / 0.18 | 1.4–1.8 GB | partials: re-running every 300 ms on a window growing to 3 s costs ~0.5 (M1) – 0.9 (x86) core while someone speaks; a 500 ms refresh halves it for +100 ms subtitle latency |
-| ASR GigaAM v3 e2e (RU, ≥ 16 GB) | 2 | 0.16 / 0.15 | 1.7–1.8 GB | fp32; int8 to try in stage 1 |
-| ASR T-one (RU partials, ≥ 16 GB) | 1 | 0.21 / 0.19 | 0.7 GB | 12–19 ms per 300 ms chunk |
+| ASR GigaAM v3 e2e (Russian, any RAM) | 2 | 0.16 / 0.15 | 1.7–1.8 GB | fp32 measured; the app runs its int8 |
+| ASR T-one (RU partials) | 1 | 0.21 / 0.19 | 0.7 GB | 12–19 ms per 300 ms chunk; measured, not used in 0.3.0 |
 | MT OPUS-MT (per direction) | 2 | a burst of ~60 ms per clause | 0.17 GB | load 0.3 s |
 | TTS Piper (own process, §10) | 2 | RTF 0.03–0.06 | 0.3–0.5 GB | |
 | Clone XTTS-v2 | GPU (+1 CPU) | CPU RTF 1.8 → not live | 3.6–4.5 GB RAM, 2.1 GB VRAM | |
@@ -216,9 +217,8 @@ one direction mostly alternate, and the two directions rarely talk at the same t
 
 | Tier | Idle | Working, them → me | Working, both directions |
 |---|---|---|---|
-| M1 8 GB | ~0 CPU; engines unloaded when translation is turned off ("free memory" default on), UI ~150 MB | ≈ 1 core while they speak, 0 in silence; ~2.5 GB | me → them through Gemini: +~0 CPU, +0.1 GB → ~2.6 GB |
-| M1 Pro 16 GB | ~0 CPU; engines may stay loaded (pools sleep: `idle_loaded` 0.0005–0.013 CPU s per 20 s with the flags above) | ~1 core, ~4.5 GB (GigaAM + T-one for RU) | local XTTS only if the machine's own check gives RTF < 0.7, else Gemini |
-| NVIDIA ≥ 6 GB VRAM | same | ~1 core | + XTTS on GPU: ~0.5 core, +4.5 GB RAM, 2.1 GB VRAM |
+| No NVIDIA GPU (any Mac, most laptops) | ~0 CPU; the engines are closed when translation is turned off, UI ~150 MB | ≈ 1 core while they speak, 0 in silence; ~2.5 GB | me → them through Gemini: +~0 CPU, +0.1 GB → ~2.6 GB; or a stock voice locally |
+| NVIDIA ≥ 6 GB VRAM | same | ~1 core | + XTTS on GPU: ~0.5 core, +4.5 GB RAM, 2.1 GB VRAM (the app measures the clone at its start: slower than real time, RTF ≥ 1.0, it gives way to the stock voice) |
 
 Measured with both directions at once (BENCH, stage 2): on the 7950X3D with an RTX 3060 Laptop
 (both local, XTTS on the GPU) 0.61–0.83 cores, 3.5–3.7 GB RAM, 2.2 GB VRAM; on a 4-core x86 box
@@ -251,10 +251,10 @@ it. Idle cost: none (no thread, no timer; a fault file left open).
 |---|---|---|---|
 | VAD | **Silero VAD** (ONNX) | tiny, MIT, 32 ms frames | — |
 | ASR, English | **Parakeet TDT 0.6B v3**, int8, via onnx-asr | WER 4.6–4.8 %, the same as Whisper large-v3-turbo, at 106–169 ms per 2 s window vs turbo's 5.4–10.4 s; RTF 0.04; also does Russian | Whisper: pads every window to 30 s, so a 2 s refresh costs 1.1 s (small) to 10 s (turbo) on CPU; on M1 CPU turbo is slower than real time (RTF 1.2). Whisper turbo stays for other languages on GPU (0.3 s per utterance). |
-| ASR, Russian | **GigaAM v3 e2e CTC** (WER 5.6 %, punctuation; streamed 6.6 % vs Parakeet's 10.8 %, 0.6 GB vs 1.7 GB; stage 1 default, since Parakeet has no language setting and drifts into Ukrainian on short windows — BENCH stage 1). Both directions on 8 GB: Parakeet (en) + GigaAM (ru) ≈ 2.3 GB. ≥ 16 GB: + **T-one** for partials (12–19 ms per 300 ms chunk) | memory vs accuracy | T-one alone: WER 13 % on FLEURS (it is an 8 kHz telephony model; real call audio may favour it — re-check in stage 2); Whisper medium/turbo: 3–10 s per window on CPU |
-| MT | **OPUS-MT** en-ru / ru-en, CTranslate2 int8 | chrF 59.5 / 59.9 at 57–67 ms per sentence, 0.17 GB, CC-BY | NLLB-600M: chrF 57.7 / 63.6 but 0.6–0.75 s and noncommercial. HY-MT1.5-1.8B: 54.8 / 62.2, 1.5–2 s on CPU. HY-MT1.5-7B: best ru-en (65.7) but 6–10 s on CPU, 0.5–1.1 s on GPU, 4.7 GB — optional "quality" MT on the NVIDIA tier for ru → en only. Gemini translate: 58–62. |
+| ASR, Russian | **GigaAM v3 e2e CTC** (WER 5.6 %, punctuation; streamed 6.6 % vs Parakeet's 10.8 %, 0.6 GB vs 1.7 GB; stage 1 default, since Parakeet has no language setting and drifts into Ukrainian on short windows — BENCH stage 1). Both directions on 8 GB: Parakeet (en) + GigaAM (ru) ≈ 2.3 GB. **T-one** for partials (12–19 ms per 300 ms chunk) was measured, not built | memory vs accuracy | T-one alone: WER 13 % on FLEURS (it is an 8 kHz telephony model; real call audio may favour it — re-check in stage 2); Whisper medium/turbo: 3–10 s per window on CPU |
+| MT | **OPUS-MT** en-ru / ru-en, CTranslate2 int8 (stage 1; since stage 6 en → ru is quickmt, see "Languages" below) | chrF 59.5 / 59.9 at 57–67 ms per sentence, 0.17 GB, CC-BY | NLLB-600M: chrF 57.7 / 63.6 but 0.6–0.75 s and noncommercial. HY-MT1.5-1.8B: 54.8 / 62.2, 1.5–2 s on CPU. HY-MT1.5-7B: best ru-en (65.7) but 6–10 s on CPU, 0.5–1.1 s on GPU, 4.7 GB — optional "quality" MT on the NVIDIA tier for ru → en only. Gemini translate: 58–62. |
 | TTS, stock voice (them → me) | **Piper** in its own process (§10); voices **`en_US-john`** (public domain) and **`ru_RU-dmitri`** (CC0), `en_US-joe` (CC0) as a second English voice | chosen voices on the dev server (4 cores): TTFA 0.21–0.27 s, RTF 0.05–0.06, back-transcription CER 1.8 % (john), 3.0 % (joe), 5.9 % (dmitri), 0.3–0.37 GB; on that host they are within ~30 % of `lessac`/`irina`, the voices measured on M1 (0.23–0.27 s) and on the x86 host (0.13–0.17 s) | `ru_RU-denis` (CC0): CER 10.3 %; `lessac`/`irina`: research-only or unknown data licenses; Silero: TTFA 0.2–0.4 s, 1–1.3 GB with torch, CC-BY-NC-SA |
-| Clone TTS (me → them) | NVIDIA: **XTTS-v2** streaming with a length/tail guard (TTFA 0.14 s, RTF 0.17); **Chatterbox** as the "better likeness" option (speaker similarity 0.52–0.78 vs XTTS 0.35–0.68, cross-lingual ru → en 0.68–0.70 vs 0.40–0.44, but RTF 0.4 without streaming). CPU / M1: no live local clone — Gemini translate (keeps pitch and gender, F0 correlation 0.92–0.95, not a true clone) until stage 3 measures MPS on a real M1 Pro | similarity baseline: two different speakers 0.085, same speaker 0.90–0.93 | CosyVoice3: 8.4–8.8 GB RAM, RTF 1.2–2 even on the A4000, truncates Russian |
+| Clone TTS (me → them) | NVIDIA: **XTTS-v2** streaming with a length/tail guard (TTFA 0.14 s, RTF 0.17); **Chatterbox** as the "better likeness" option (speaker similarity 0.52–0.78 vs XTTS 0.35–0.68, cross-lingual ru → en 0.68–0.70 vs 0.40–0.44, but RTF 0.4 without streaming). CPU / Mac: no live local clone (stage 6 measured XTTS and LuxTTS on an M1's CPU: both slower than real time) — Gemini translate (keeps pitch and gender, F0 correlation 0.92–0.95, not a true clone) or a stock voice; `languages.clone_why` is the one place that decides | similarity baseline: two different speakers 0.085, same speaker 0.90–0.93 | CosyVoice3: 8.4–8.8 GB RAM, RTF 1.2–2 even on the A4000, truncates Russian |
 | Cloud | **Gemini Live**: `gemini-3.5-live-translate-preview` per direction for voice; subtitles local (or `gemini-3.5-transcribe-live` when the machine is too weak) | see §4 | |
 
 Recommended default on M1 8 GB: **them → me local, me → them cloud**.
@@ -324,7 +324,7 @@ back to them and its partial subtitle from cutting what I hear (barge-in), with 
 `[local] mic_echo_rho_on` = 0.4, kept within 0.2…0.8 at load (a reverberant room smears the echo's spectrum; the call side keeps 0.5): BENCH, stage 5 S2.
 
 **Setup wizard (first run, re-runnable from the tray):**
-1. Language pair and mode (local / cloud), tier detected from the hardware (§9), model download
+1. Language pair and mode (local / cloud), recommended from the hardware (§9), model download
    with sizes and licenses (§8).
 2. Virtual mic: detect BlackHole / VB-Cable / PipeWire. Missing → one screen per OS with the
    install link (macOS: Homebrew command or pkg; Windows: VB-Cable page, "run as administrator",
@@ -491,7 +491,7 @@ runner so far (BENCH "Stage 3: me → them on macOS"); a real Mac, AirPods and a
 
 - Registry: [`peresmeshnik/models.toml`](../peresmeshnik/models.toml) lists every model: id, role,
   languages, license, a URL prefix pinned to a revision (Hugging Face `resolve/<sha>/` or a release
-  of this project), files with SHA-256 and size. The tier is picked by the setup wizard (stage 2).
+  of this project), files with SHA-256 and size. What is downloaded follows the setup wizard's choice per direction.
 - Cache: `platformdirs.user_cache_dir("Peresmeshnik")/models` (`~/Library/Caches/Peresmeshnik`,
   `%LOCALAPPDATA%\Peresmeshnik\Cache`, `~/.cache/Peresmeshnik`); overridable in settings.
 - Download over plain HTTPS with `urllib` (HTTP Range resume, no credentials sent), then SHA-256
@@ -510,16 +510,18 @@ runner so far (BENCH "Stage 3: me → them on macOS"); a real Mac, AirPods and a
 
 ## 9. Hardware tiers
 
-| Tier | Detected by | Them → me | Me → them | RAM while working | Expected |
+What 0.3.0 does (`ui/wizard.py` `tier()`): the wizard looks only at the NVIDIA GPU (nvidia-smi) and recommends; RAM is
+shown, not used. The user can choose otherwise for each direction.
+
+| Machine | Detected by | Them → me | Me → them, recommended | RAM while working | Expected |
 |---|---|---|---|---|---|
-| **1. Apple M1 8 GB** (or any 8 GB laptop) | RAM < 12 GB, no CUDA | local: Parakeet v3 + OPUS-MT + Piper | Gemini translate (cloud); local clone off | ~2.6 GB | subtitles 0.2–0.3 s, voice ≈ 2 s; me → them ≈ 3.2 s |
-| **2. M1 Pro 16 GB** (or 16 GB laptop) | RAM ≥ 12 GB | + GigaAM e2e + T-one for Russian | local XTTS if the self-check RTF < 0.7, else cloud | 4.5–9 GB | same; voice ≈ 2 s both ways if the clone is fast enough |
-| **3. NVIDIA ≥ 6 GB VRAM** | CUDA device | as tier 2 (optional HY-MT 7B for ru → en on GPU) | XTTS-v2 or Chatterbox on GPU | +4.5 GB RAM, 2–4 GB VRAM | voice ≈ 1.6–2.1 s both ways |
+| **No NVIDIA GPU** (any Mac, most laptops) | no nvidia-smi, or under 5.5 GB of VRAM | local: the pair's ASR + MT + Piper | Gemini translate (cloud); locally a stock voice, no clone (`languages.clone_why`) | ~2.6 GB | subtitles 0.2–0.3 s, voice ≈ 2 s; me → them ≈ 3.2 s |
+| **NVIDIA ≥ 6 GB VRAM** | nvidia-smi, 5.5 GB or more | as above (on CUDA only from source with onnxruntime-gpu; the apps' onnxruntime is CPU only) | local XTTS-v2 on the GPU (Windows: the voice pack) | +4.5 GB RAM, 2–4 GB VRAM | voice ≈ 1.6–2.1 s both ways |
 | **Cloud** | user's choice, any machine | Gemini translate + local subtitles | Gemini translate | ~0.5 GB + subtitles ASR | voice ≈ 3.2 s (up to 6 s in long en → ru monologues), ~$2.2/h per direction on the paid tier |
 
-Hardware alone does not decide: on first run (and at voice enrollment) the app times a short
-self-test of ASR, TTS and the clone on the actual machine and picks the tier from the measured
-RTF; the user can override it in settings.
+The one measurement the app makes is the clone's own speed at the start of "me → them" (`app.py` `MAX_CLONE_RTF`):
+slower than real time, the stock voice takes over. The self-test of the wizard checks the sound paths, not the
+engines. (The stage 0 plan to pick a tier by RAM and a timed self-test was not built.)
 
 ## 10. Packaging
 

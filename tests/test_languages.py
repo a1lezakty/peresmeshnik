@@ -80,6 +80,8 @@ def test_readme_table_is_the_generated_one():
     readme = (Path(__file__).parents[1] / 'README.md').read_text('utf-8')
     block = readme.split('<!-- languages:begin', 1)[1].split('\n', 1)[1].split('<!-- languages:end -->')[0].strip()
     assert block == languages.table(), 'README is stale: python -m peresmeshnik.languages, into README.md'
+    # H-07: the builds' onnxruntime has no CUDA: speech recognition that needs it is the cloud's there, said so
+    assert '| Türkçe (Turkish) | — (cloud; whisper-large-v3-turbo from source with onnxruntime-gpu on an NVIDIA GPU) |' in block
 
 
 def test_a_model_that_needs_a_gpu_is_not_offered_without_one(monkeypatch):
@@ -105,7 +107,7 @@ def test_a_model_that_needs_a_gpu_is_not_offered_without_one(monkeypatch):
     s.local.tts = {'de': 'tts-de'}  # and no stock voice for Japanese: no local voice, and why
     assert languages.direction(s, 'me_to_them', has_gpu=False).why == (
         f'{languages.clone_why("clone-big", has_gpu=False)}; no local voice for Japanese',)
-    assert '| 日本語 (Japanese) | asr-ja (NVIDIA GPU) |' in languages.table(s)
+    assert '| 日本語 (Japanese) | — (cloud; asr-ja from source with onnxruntime-gpu on an NVIDIA GPU) |' in languages.table(s)
     fake_registry(monkeypatch, stub('asr-de', 'asr', 'de'), stub('mt-many', 'mt', 'de', 'ja'), stub('tts-ja', 'tts', 'ja', needs='gpu'))
     s.local.clone, s.local.tts = 'piper', {'ja': 'tts-ja'}  # a stock voice that needs one: said so, not "no voice"
     assert languages.direction(s, 'me_to_them', has_gpu=False).why == ('the voice for Japanese needs an NVIDIA GPU (tts-ja)',)

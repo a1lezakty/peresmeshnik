@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QHBoxLayout,
     QKeySequenceEdit,
     QLabel,
     QLineEdit,
@@ -529,8 +530,15 @@ class SettingsDialog(QDialog):
         f.addRow('Cloud', self.subtitles)
         self.key = QLineEdit()
         self.key.setEchoMode(QLineEdit.Password)
-        self.key.setPlaceholderText('saved' if key_file(s.cloud).exists() else 'Gemini API key (aistudio.google.com)')
-        f.addRow('Gemini key', self.key)
+        self.forget = QPushButton('Forget the key')  # an empty field keeps it: this removes its file
+        self.forget.clicked.connect(self.forget_key)
+        self._key_state()
+        row = QWidget()
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.key)
+        lay.addWidget(self.forget)
+        f.addRow('Gemini key', row)
         self.threads = QSpinBox()
         self.threads.setRange(1, 8)
         self.threads.setValue(s.local.threads)
@@ -557,6 +565,15 @@ class SettingsDialog(QDialog):
         b.accepted.connect(self.save)
         b.rejected.connect(self.reject)
         f.addRow(b)
+
+    def _key_state(self) -> None:
+        saved = key_file(self.s.cloud).exists()
+        self.key.setPlaceholderText('saved' if saved else 'Gemini API key (aistudio.google.com)')
+        self.forget.setEnabled(saved)
+
+    def forget_key(self) -> None:
+        key_file(self.s.cloud).unlink(missing_ok=True)  # $GEMINI_API_KEY, if set, is the environment's: not ours to drop
+        self._key_state()
 
     def save(self) -> None:
         s = self.s

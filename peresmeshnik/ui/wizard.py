@@ -187,8 +187,8 @@ class LanguagesPage(QWizardPage):
             self.why[key].setWordWrap(True)
             f.addRow(title, c)
             f.addRow('', self.why[key])
-        self.subtitles = QCheckBox('Subtitles from the cloud (else from the local ASR: faster, needs 0.7–2.2 GB of models; '
-                                   'this pair\'s below)')
+        self.subtitles = QCheckBox('Subtitles from the cloud (else from the local ASR: faster, and a cloud direction can go '
+                                   'on locally when the cloud fails; its models are in the download below)')
         self.subtitles.setChecked(s.cloud.subtitles)
         f.addRow('Cloud', self.subtitles)
         self.download = QLabel()

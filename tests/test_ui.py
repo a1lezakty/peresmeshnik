@@ -630,3 +630,16 @@ def test_overlay_is_click_through_for_real():
     o.close()
     under.close()
     assert clicks == ['under']
+
+
+def test_settings_forget_the_key(tmp_path, monkeypatch):
+    """M-25: the Gemini key can be removed from the app (an empty field keeps it): its file goes."""
+    from peresmeshnik.ui import tray as tray_mod
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    monkeypatch.setattr(config, 'config_dir', lambda: tmp_path)
+    tray_mod.save_key('secret-key')
+    t = tray_mod.Tray(type('Ctl', (), {'live': False, 'on': False})())
+    d = tray_mod.SettingsDialog(t)
+    assert d.key.placeholderText() == 'saved' and d.forget.isEnabled()
+    d.forget.click()
+    assert not (tmp_path / 'gemini-key').exists() and not d.forget.isEnabled() and 'Gemini API key' in d.key.placeholderText()

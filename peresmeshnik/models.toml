@@ -969,6 +969,7 @@ role = "tts"
 langs = ["en"]
 license = "CC0-1.0"
 license_url = "https://huggingface.co/rhasspy/piper-voices/blob/main/en/en_US/joe/medium/MODEL_CARD"
+note = "fine-tuned from the en_US lessac voice, whose data has a research-only license (Blizzard 2013): docs/MODELS.md"
 url = "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/en/en_US/joe/medium/"
 [piper-en_US-joe-medium.files]
 "en_US-joe-medium.onnx" = { sha256 = "58afce0321b8d9c46d7cdf9c16500cc55a793b4220212dba6b70fb788b3baf06", size = 63201294 }
@@ -980,6 +981,7 @@ role = "tts"
 langs = ["ru"]
 license = "CC0-1.0"
 license_url = "https://huggingface.co/rhasspy/piper-voices/blob/main/ru/ru_RU/dmitri/medium/MODEL_CARD"
+note = "fine-tuned from the en_US lessac voice, whose data has a research-only license (Blizzard 2013): docs/MODELS.md"
 url = "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/ru/ru_RU/dmitri/medium/"
 [piper-ru_RU-dmitri-medium.files]
 "ru_RU-dmitri-medium.onnx" = { sha256 = "f073356ebc4bd0f80c5af58df2953a5988bd5bdab1eb38635ce960b071fbefcb", size = 63201294 }
@@ -1002,6 +1004,7 @@ role = "tts"
 langs = ["de"]
 license = "CC0-1.0"
 license_url = "https://huggingface.co/rhasspy/piper-voices/blob/main/de/de_DE/thorsten/medium/MODEL_CARD"
+note = "fine-tuned from the en_US lessac voice, whose data has a research-only license (Blizzard 2013): docs/MODELS.md"
 url = "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/de/de_DE/thorsten/medium/"
 [piper-de_DE-thorsten-medium.files]
 "de_DE-thorsten-medium.onnx" = { sha256 = "7e64762d8e5118bb578f2eea6207e1a35a8e0c30595010b666f983fc87bb7819", size = 63201294 }
@@ -1013,6 +1016,7 @@ role = "tts"
 langs = ["fr"]
 license = "CC-BY-4.0"
 license_url = "https://huggingface.co/rhasspy/piper-voices/blob/main/fr/fr_FR/siwis/medium/MODEL_CARD"
+note = "fine-tuned from the en_US lessac voice, whose data has a research-only license (Blizzard 2013): docs/MODELS.md"
 url = "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/fr/fr_FR/siwis/medium/"
 [piper-fr_FR-siwis-medium.files]
 "fr_FR-siwis-medium.onnx" = { sha256 = "641d1ab097da2b81128c076810edb052b385decc8be3381814802a64a73baf99", size = 63201294 }
@@ -1024,6 +1028,7 @@ role = "tts"
 langs = ["es"]
 license = "Unlicense"
 license_url = "https://huggingface.co/rhasspy/piper-voices/blob/main/es/es_MX/ald/medium/MODEL_CARD"
+note = "fine-tuned from davefx, itself from the en_US lessac voice, whose data has a research-only license (Blizzard 2013): docs/MODELS.md"
 url = "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/es/es_MX/ald/medium/"
 [piper-es_MX-ald-medium.files]
 "es_MX-ald-medium.onnx" = { sha256 = "019b3803293c93e34a206dd2e53a3889209a514e786fd7144f7b70196c579b63", size = 63201294 }
@@ -1035,6 +1040,7 @@ role = "tts"
 langs = ["it"]
 license = "CC0-1.0"
 license_url = "https://huggingface.co/rhasspy/piper-voices/blob/main/it/it_IT/paola/medium/MODEL_CARD"
+note = "fine-tuned from the en_US lessac voice, whose data has a research-only license (Blizzard 2013): docs/MODELS.md"
 url = "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/it/it_IT/paola/medium/"
 [piper-it_IT-paola-medium.files]
 "it_IT-paola-medium.onnx" = { sha256 = "6fc918b5a0ea6137382833dddfa567bffbe6a5060c02043c87192ee59c04210c", size = 63511038 }
@@ -1046,6 +1052,7 @@ role = "tts"
 langs = ["pt"]
 license = "CC0-1.0"
 license_url = "https://huggingface.co/rhasspy/piper-voices/blob/main/pt/pt_BR/faber/medium/MODEL_CARD"
+note = "fine-tuned from the en_US lessac voice, whose data has a research-only license (Blizzard 2013): docs/MODELS.md"
 url = "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/pt/pt_BR/faber/medium/"
 [piper-pt_BR-faber-medium.files]
 "pt_BR-faber-medium.onnx" = { sha256 = "858555e3a064209c57088fe6bd70c4c3dc54d03eaa00c45d5ecaf43a33f95aa7", size = 63201294 }
@@ -1057,6 +1064,7 @@ role = "tts"
 langs = ["pl"]
 license = "CC0-1.0"
 license_url = "https://huggingface.co/rhasspy/piper-voices/blob/main/pl/pl_PL/gosia/medium/MODEL_CARD"
+note = "fine-tuned from the en_US lessac voice, whose data has a research-only license (Blizzard 2013): docs/MODELS.md"
 url = "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/pl/pl_PL/gosia/medium/"
 [piper-pl_PL-gosia-medium.files]
 "pl_PL-gosia-medium.onnx" = { sha256 = "38f66464240ed74f186e6b7dc13c6e3b22e023426299f25c2b3cc9dfa9373fbc", size = 63201294 }
@@ -1068,6 +1076,7 @@ role = "tts"
 langs = ["tr"]
 license = "CC-BY-NC-SA-4.0"
 license_url = "https://huggingface.co/rhasspy/piper-voices/blob/main/tr/tr_TR/dfki/medium/MODEL_CARD"
+note = "fine-tuned from the en_US lessac voice, whose data has a research-only license (Blizzard 2013): docs/MODELS.md"
 consent = true
 url = "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/tr/tr_TR/dfki/medium/"
 [piper-tr_TR-dfki-medium.files]

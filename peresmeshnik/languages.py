@@ -197,10 +197,13 @@ def table(s=None) -> str:
 
     def cell(i: str) -> str:
         return f'{i} (NVIDIA GPU)' if needs_gpu(i) else i or '— (cloud)'
+
+    def asr(i: str) -> str:  # the apps' onnxruntime runs on the CPU only (gpu('asr')): such a model is never theirs
+        return f'— (cloud; {i} from source with onnxruntime-gpu on an NVIDIA GPU)' if needs_gpu(i) else cell(i)
     rows = ['| Language | Speech recognition | Stock voice | Your cloned voice | Cloud (Gemini Live) |', '|---|---|---|---|---|']
     for c in LANGS:
         clone = loc.clone if covers(loc.clone, c) and reg[loc.clone].role == 'clone' else ''
-        rows.append(f'| {label(c)} | {cell(pick(loc.asr, c))} | {cell(pick(loc.tts, c))} | '
+        rows.append(f'| {label(c)} | {asr(pick(loc.asr, c))} | {cell(pick(loc.tts, c))} | '
                     f'{clone + " (NVIDIA GPU)" if clone else "— (cloud or a stock voice)"} | {"✔" if c in CLOUD else "—"} |')
     gpu_mark = {True: ' (NVIDIA GPU)', False: ''}
     pairs = [k.replace('-', ' → ') + gpu_mark[needs_gpu(loc.mt[k])] for k in sorted(loc.mt) if k != '*' and pick(loc.mt, k)]

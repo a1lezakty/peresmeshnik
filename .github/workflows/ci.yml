@@ -228,7 +228,12 @@ jobs:
       - name: Models (registry, SHA-256 checked)
         env:
           PERESMESHNIK_MODELS: ${{ runner.temp }}/models
-        run: uv run peresmeshnik models fetch silero-vad parakeet-tdt-0.6b-v3 quickmt-en-ru piper-ru_RU-dmitri-medium
+        run: uv run peresmeshnik models fetch silero-vad parakeet-tdt-0.6b-v3 quickmt-en-ru piper-ru_RU-dmitri-medium wespeaker-resnet34
+      - name: My voice is confirmed by its speaker vector - the reader matches herself, not other people (M-20)
+        env:
+          PERESMESHNIK_WORK_GATE: '1'
+          PERESMESHNIK_MODELS: ${{ runner.temp }}/models
+        run: uv run pytest -q -s -rs tests/test_voice_profiles.py -k speaker
       - name: Working-mode CPU gate
         env:
           PERESMESHNIK_WORK_GATE: '1'

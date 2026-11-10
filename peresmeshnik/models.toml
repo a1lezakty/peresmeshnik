@@ -15,6 +15,16 @@ url = "https://huggingface.co/istupakov/silero-vad-onnx/resolve/b3e3ee3cce4c11ce
 "silero_vad.onnx" = { sha256 = "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3", size = 2327524 }
 "LICENSE.txt" = { sha256 = "2e63e9a38b6e8fc0c7bc37ce174caca1862870856c6daf5697cfb785e925520b", size = 1075 }
 
+[wespeaker-resnet34]  # the speaker vector (voice.Speaker): a voice is confirmed as mine by a live reading at the mic
+role = "speaker"
+langs = ["*"]
+license = "Apache-2.0"
+license_url = "https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34"
+note = "WeSpeaker ResNet34 by the WeSpeaker team, trained on VoxCeleb (CC-BY-4.0)"
+url = "https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34/resolve/ff1ac5bca8ef11e90662b879aa923979e0bd277b/"
+[wespeaker-resnet34.files]
+"voxceleb_resnet34.onnx" = { sha256 = "9fea6516d7ad6bf0a76c7689f5a49b65d330fad6dde96c91bb4435ffbfe056a1", size = 26534127 }
+
 ["parakeet-tdt-0.6b-v3"]  # int8 ONNX for onnx-asr ("nemo-parakeet-tdt-0.6b-v3", quantization="int8")
 role = "asr"
 langs = ["en", "ru", "uk", "de", "fr", "es", "it", "pt", "pl"]  # and 18 more European languages

@@ -438,6 +438,130 @@ def engine_state(v: Voice, model: str, sha: str) -> np.ndarray | None:
     return np.load(v.path / Path(e['file']).name, allow_pickle=False)
 
 
+# --- the live check: my voice is mine (M-20, RESEARCH-clone 6.1) ---
+
+LIVE_PHRASES = {  # read at the microphone to confirm a voice, two at random (a recording made before cannot say them);
+    # short everyday sentences written for the app, the same eight in every language
+    'en': ['The weather is nice today, let us go for a walk.', 'I usually drink tea in the morning and coffee after lunch.',
+           'Please close the window, it is getting cold in here.', 'My neighbour has a small dog that barks at every bird.',
+           'We bought fresh bread and cheese at the market.', 'The train was late again, so I took a taxi home.',
+           'She reads a book every evening before going to sleep.', "Could you send me the notes from yesterday's meeting?"],
+    'ru': ['Сегодня хорошая погода, давай пойдём гулять.', 'Утром я обычно пью чай, а после обеда кофе.',
+           'Закрой, пожалуйста, окно, здесь становится холодно.', 'У моего соседа маленькая собака, которая лает на птиц.',
+           'Мы купили на рынке свежий хлеб и сыр.', 'Поезд опять опоздал, и я поехал домой на такси.',
+           'Каждый вечер перед сном она читает книгу.', 'Пришлите мне, пожалуйста, заметки со вчерашней встречи.'],
+    'uk': ['Сьогодні гарна погода, ходімо на прогулянку.', "Вранці я зазвичай п'ю чай, а після обіду каву.",
+           'Зачиніть, будь ласка, вікно, тут стає холодно.', 'У мого сусіда є маленький пес, який гавкає на птахів.',
+           'Ми купили на ринку свіжий хліб і сир.', 'Потяг знову запізнився, тож я поїхав додому таксі.',
+           'Щовечора перед сном вона читає книжку.', 'Надішліть мені, будь ласка, нотатки з учорашньої зустрічі.'],
+    'de': ['Heute ist schönes Wetter, lass uns spazieren gehen.', 'Morgens trinke ich meistens Tee und nach dem Mittagessen Kaffee.',
+           'Mach bitte das Fenster zu, es wird hier kalt.', 'Mein Nachbar hat einen kleinen Hund, der jeden Vogel anbellt.',
+           'Wir haben auf dem Markt frisches Brot und Käse gekauft.', 'Der Zug hatte wieder Verspätung, also nahm ich ein Taxi.',
+           'Sie liest jeden Abend ein Buch, bevor sie schlafen geht.', 'Kannst du mir die Notizen von der gestrigen Besprechung schicken?'],
+    'fr': ["Il fait beau aujourd'hui, allons nous promener.", 'Le matin, je bois souvent du thé et du café après le déjeuner.',
+           "Ferme la fenêtre, s'il te plaît, il commence à faire froid.", 'Mon voisin a un petit chien qui aboie après chaque oiseau.',
+           'Nous avons acheté du pain frais et du fromage au marché.', "Le train était encore en retard, alors j'ai pris un taxi.",
+           'Elle lit un livre tous les soirs avant de dormir.', "Peux-tu m'envoyer les notes de la réunion d'hier ?"],
+    'es': ['Hoy hace buen tiempo, vamos a dar un paseo.', 'Por la mañana suelo tomar té y después de comer café.',
+           'Cierra la ventana, por favor, aquí empieza a hacer frío.', 'Mi vecino tiene un perro pequeño que le ladra a cada pájaro.',
+           'Compramos pan fresco y queso en el mercado.', 'El tren volvió a llegar tarde, así que tomé un taxi a casa.',
+           'Ella lee un libro todas las noches antes de dormir.', '¿Me puedes enviar las notas de la reunión de ayer?'],
+    'it': ['Oggi è una bella giornata, andiamo a fare una passeggiata.', 'La mattina di solito bevo tè e dopo pranzo un caffè.',
+           'Chiudi la finestra, per favore, qui comincia a fare freddo.', 'Il mio vicino ha un cagnolino che abbaia a ogni uccello.',
+           'Abbiamo comprato pane fresco e formaggio al mercato.', 'Il treno era di nuovo in ritardo, così ho preso un taxi.',
+           'Lei legge un libro ogni sera prima di dormire.', 'Mi puoi mandare gli appunti della riunione di ieri?'],
+    'pt': ['Hoje está um dia bonito, vamos dar um passeio.', 'De manhã costumo tomar chá e depois do almoço café.',
+           'Feche a janela, por favor, aqui está ficando frio.', 'O meu vizinho tem um cachorro pequeno que late para cada pássaro.',
+           'Compramos pão fresco e queijo na feira.', 'O trem atrasou de novo, então peguei um táxi para casa.',
+           'Ela lê um livro todas as noites antes de dormir.', 'Você pode me enviar as anotações da reunião de ontem?'],
+    'pl': ['Dzisiaj jest ładna pogoda, chodźmy na spacer.', 'Rano zwykle piję herbatę, a po obiedzie kawę.',
+           'Zamknij proszę okno, robi się tu zimno.', 'Mój sąsiad ma małego psa, który szczeka na każdego ptaka.',
+           'Kupiliśmy na targu świeży chleb i ser.', 'Pociąg znowu się spóźnił, więc wróciłem do domu taksówką.',
+           'Ona co wieczór czyta książkę przed snem.', 'Czy możesz mi wysłać notatki z wczorajszego spotkania?'],
+    'tr': ['Bugün hava çok güzel, hadi yürüyüşe çıkalım.', 'Sabahları genellikle çay, öğleden sonra kahve içerim.',
+           'Lütfen pencereyi kapat, burası soğumaya başladı.', 'Komşumun her kuşa havlayan küçük bir köpeği var.',
+           'Pazardan taze ekmek ve peynir aldık.', 'Tren yine gecikti, bu yüzden eve taksiyle döndüm.',
+           'Her akşam uyumadan önce kitap okur.', 'Dünkü toplantının notlarını bana gönderebilir misin?'],
+    'zh': ['今天天气很好，我们出去散散步吧。', '我早上一般喝茶，午饭以后喝咖啡。', '请把窗户关上，这里有点冷了。',
+           '我的邻居有一只小狗，看见鸟就叫。', '我们在市场上买了新鲜的面包和奶酪。', '火车又晚点了，所以我打车回家。',
+           '她每天晚上睡觉前都看书。', '你能把昨天开会的笔记发给我吗？'],
+    'ja': ['今日はいい天気なので、散歩に行きましょう。', '朝はたいていお茶を飲み、昼ご飯の後にコーヒーを飲みます。',
+           '寒くなってきたので、窓を閉めてください。', '隣の人は、鳥を見るとほえる小さな犬を飼っています。',
+           '市場で焼きたてのパンとチーズを買いました。', '電車がまた遅れたので、タクシーで帰りました。',
+           '彼女は毎晩寝る前に本を読みます。', '昨日の会議のメモを送ってもらえますか？'],
+    'ko': ['오늘은 날씨가 좋으니까 산책하러 가요.', '아침에는 보통 차를 마시고 점심 후에는 커피를 마셔요.',
+           '추워지니까 창문 좀 닫아 주세요.', '우리 이웃집에는 새만 보면 짖는 작은 개가 있어요.',
+           '시장에서 신선한 빵과 치즈를 샀어요.', '기차가 또 늦어서 택시를 타고 집에 갔어요.', '그녀는 매일 밤 자기 전에 책을 읽어요.',
+           '어제 회의 메모를 저에게 보내 줄 수 있어요?'],
+    'ar': ['الجو جميل اليوم، هيا نخرج في نزهة.', 'في الصباح أشرب الشاي عادة، وبعد الغداء أشرب القهوة.',
+           'أغلق النافذة من فضلك، بدأ الجو يبرد هنا.', 'عند جاري كلب صغير ينبح على كل طائر.', 'اشترينا خبزا طازجا وجبنا من السوق.',
+           'تأخر القطار مرة أخرى، فعدت إلى البيت بسيارة أجرة.', 'هي تقرأ كتابا كل مساء قبل النوم.',
+           'هل يمكنك أن ترسل لي ملاحظات اجتماع الأمس؟'],
+}
+LIVE_WER = 0.3  # the live reading: the app's ASR heard the screen text (RESEARCH-clone 6.1, as loose as check_clone's)
+SPEAKER = 'wespeaker-resnet34'  # registry id: the speaker vector ("the same voice"; S2: who is speaking now)
+# cosine of the speaker vectors, the live reading against the profile's recording: the same person in another session
+# passes, another person does not. ponytail: provisional, set from the stage 8 measurement (BENCH)
+MATCH = 0.5
+
+
+def live_phrases(lang: str, n: int = 2) -> list[str]:
+    """What the live check shows: `n` of the language's LIVE_PHRASES, a new pick each time."""
+    import random
+    return random.SystemRandom().sample(LIVE_PHRASES[lang], n)
+
+
+def _to(pcm: np.ndarray, sr: int, to: int) -> np.ndarray:
+    x = np.asarray(pcm, np.float32)
+    x = x.mean(axis=1) if x.ndim > 1 else x
+    return x if sr == to else np.interp(np.arange(0, len(x), sr / to), np.arange(len(x)), x).astype(np.float32)
+
+
+class Speaker:
+    """A voice -> its speaker vector (unit length): wespeaker ResNet34 VoxCeleb on onnxruntime, run as onnx-asr 0.12.0
+    (uv.lock) runs it: its numpy Kaldi fbank, mean over time removed, `feats` -> `embs`. No torch."""
+
+    def __init__(self, model_dir: Path, threads: int = 1):
+        import onnxruntime as rt
+        from onnx_asr.preprocessors.numpy_preprocessor import KaldiPreprocessorNumpy
+
+        from peresmeshnik.local.vad import ort_options
+        self._fbank = KaldiPreprocessorNumpy('wespeaker')
+        self._s = rt.InferenceSession(str(next(Path(model_dir).glob('*.onnx'))), ort_options(threads),
+                                      providers=['CPUExecutionProvider'])
+
+    def embed(self, pcm: np.ndarray, sr: int) -> np.ndarray:
+        x = _to(pcm, sr, 16_000)[None]
+        f, _ = self._fbank(x, np.array([x.shape[1]], np.int64))
+        e = self._s.run(['embs'], {'feats': (f - f.mean(axis=1, keepdims=True)).astype(np.float32)})[0][0]
+        return e / (np.linalg.norm(e) + 1e-12)
+
+
+def confirm_live(ref: Voice, pcm: np.ndarray, sr: int, said: list[str], asr, speaker: Speaker,
+                 how: str = 'mic-live') -> tuple[dict | None, str]:
+    """The live reading `pcm` of the shown `said` against my profile `ref`: (consent for voice.json, '') when the
+    app's ASR (local/asr.OnnxAsr of the profile's language) heard the words and the voice is the recording's; else
+    (None, why, for the user). `how`: 'mic-live' (recorded just now) or 'import+mic-match' (a file)."""
+    from peresmeshnik.engines import SAMPLE_RATE
+    heard = asr.recognize(_to(pcm, sr, SAMPLE_RATE), lang=ref.meta.get('lang')).text
+    err = wer(' '.join(said), heard)
+    sim = float(speaker.embed(*read_audio(ref.path / 'reference.wav')) @ speaker.embed(pcm, sr))
+    why = ([f'the words heard are not the ones on the screen ({err:.0%} differ): read them as written'] if err > LIVE_WER
+           else []) + ([f'this is not the voice of the recording (similarity {sim:.2f})'] if sim < MATCH else [])
+    if why:
+        return None, 'Not confirmed: ' + '; '.join(why) + '.'
+    return {'how': how, 'at': _now(), 'wer': round(err, 3), 'similarity': round(sim, 3)}, ''
+
+
+def set_consent(name: str, consent: dict | None, root: Path | None = None) -> Voice:
+    """Write how my profile `name` was confirmed (confirm_live) into its voice.json."""
+    v = load(name, root)
+    if consent and CONSENT.get(consent.get('how')) != v.meta['kind']:
+        raise ValueError(f'{consent.get("how")!r} does not confirm a {v.meta["kind"]!r} voice')
+    _write(v.path, v.meta | {'consent': consent})
+    return load(name, root)
+
+
 def save(pcm: np.ndarray, sr: int, name: str, lang: str, transcript: str | None = None,
          root: Path | None = None, consent: dict | None = None) -> Voice:
     """Write my voice `<root>/<name>/reference.wav` + `voice.json` (v2, kind 'me'; `consent`: how it was confirmed,

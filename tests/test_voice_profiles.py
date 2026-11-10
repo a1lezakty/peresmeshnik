@@ -1,5 +1,6 @@
 """voice.json v2: kinds, consent, the one "my confirmed voice" check, v1 profiles upgraded, a contact's voice kept."""
 import json
+import os
 
 import numpy as np
 import pytest
@@ -84,3 +85,62 @@ def test_cloud_fallback_never_speaks_a_contact_as_me(monkeypatch, tmp_path):
     assert fallback.stock('me', s) and 'headphones' in fallback._clone_not_ready(s, 'en')  # the stock voice, and why
     s.local.voice = voice.save(*speech(), 'me', 'ru', 'text', consent={'how': 'mic-live', 'at': '', 'wer': 0.0}).name
     assert not fallback.stock('me', s) and fallback._clone_not_ready(s, 'en') == ''  # my confirmed voice: the clone
+
+
+class Asr:
+    def __init__(self, text):
+        self.text, self.langs = text, []
+
+    def recognize(self, pcm, lead=True, lang=None):
+        self.langs.append(lang)
+        return type('R', (), {'text': self.text})()
+
+
+class Speaker:
+    """The recording's vector, then the live reading's: cosine `sim`."""
+    def __init__(self, sim):
+        self.vecs = [np.array([1.0, 0.0]), np.array([sim, (1 - sim ** 2) ** 0.5])]
+
+    def embed(self, pcm, sr):
+        return self.vecs.pop(0)
+
+
+@pytest.mark.parametrize('heard, sim, why', [
+    (None, 0.8, ''), ('совсем другие слова тут', 0.8, 'not the ones on the screen'),
+    (None, 0.1, 'not the voice of the recording'),
+    ('', 0.1, 'not the ones on the screen (100% differ): read them as written; this is not')])
+def test_confirm_live(tmp_path, heard, sim, why):
+    said = voice.live_phrases('ru')
+    assert len(said) == 2 and set(said) <= set(voice.LIVE_PHRASES['ru'])
+    v = voice.save(*speech(), 'me.new', 'ru', 'text', tmp_path)
+    asr = Asr(' '.join(said) if heard is None else heard)
+    consent, text = voice.confirm_live(v, *speech(6, 24_000), said, asr, Speaker(sim), 'import+mic-match')
+    assert asr.langs == ['ru'] and why in text and (consent is None) == bool(why), text
+    if consent:
+        assert consent['how'] == 'import+mic-match' and consent['wer'] == 0 and consent['similarity'] == pytest.approx(0.8)
+        assert voice.mine(voice.set_consent('me.new', consent, tmp_path).name, tmp_path)
+        with pytest.raises(ValueError):  # a contact's consent never confirms my voice
+            voice.set_consent('me.new', consent | {'how': 'call-saved'}, tmp_path)
+
+
+def test_live_phrases_every_language():
+    assert set(voice.LIVE_PHRASES) == set(voice.PROMPTS) and all(len(p) == 8 for p in voice.LIVE_PHRASES.values())
+    assert all(4 <= len(voice._words(x)) <= 26 for p in voice.LIVE_PHRASES.values() for x in p)
+
+
+@pytest.mark.skipif(os.environ.get('PERESMESHNIK_WORK_GATE') != '1', reason='needs the models: PERESMESHNIK_WORK_GATE=1')
+def test_speaker_tells_the_reader_from_other_people():
+    """The real speaker model: the reader's last 6 s match her first 30 s; FLEURS people (another language, other voices)
+    do not."""
+    from pathlib import Path
+
+    from peresmeshnik import models
+    data = Path(__file__).parent / 'data'
+    spk = voice.Speaker(models.path(voice.SPEAKER))
+    x, sr = voice.read_audio(data / 'reader-ru.ogg')
+    ref = spk.embed(x[:30 * sr], sr)
+    assert ref.shape == (256,) and float(ref @ ref) == pytest.approx(1, abs=1e-5)
+    same = float(ref @ spk.embed(x[-6 * sr:], sr))
+    others = [float(ref @ spk.embed(y[:6 * r], r)) for y, r in (voice.read_audio(data / f) for f in ('call-en.ogg', 'ours-en.ogg'))]
+    print(f'\nsame reader {same:.2f}, other people {others}')
+    assert same >= voice.MATCH > max(others)

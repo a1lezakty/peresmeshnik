@@ -18,7 +18,7 @@ def test_registry_pins():
             assert pair == f'{hops[0][0]}-{hops[-1][1]}' and all(a[1] == b[0] for a, b in zip(hops, hops[1:])), m.id
             assert m.consent == any(p.consent for p in parts) and m.size == sum(p.size for p in parts), m.id
             continue
-        assert m.role in ('vad', 'asr', 'mt', 'tts', 'clone') and m.files and m.license and m.license_url
+        assert m.role in ('vad', 'asr', 'mt', 'tts', 'clone', 'speaker') and m.files and m.license and m.license_url
         assert m.url.startswith('https://') and ('/resolve/' in m.url and len(m.url.split('/resolve/')[1].split('/')[0]) == 40
                                                  or '/releases/download/' in m.url), m.id  # revision pinned
         for f in m.files.values():

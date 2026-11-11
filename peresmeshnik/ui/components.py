@@ -33,9 +33,9 @@ PACK_CONSENT = ('I accept the licenses of the voice pack: PyTorch (BSD-3-Clause)
                 '(huggingface.co/coqui/XTTS-v2): noncommercial use only, it binds me as the user')
 
 HF_TEXT = ('Your cloned voice without an NVIDIA GPU speaks through Kyutai\'s Pocket TTS. Its weights are behind a '
-           'button on Hugging Face: open the page, sign in, accept the conditions, then make a read token (Settings → '
-           'Access Tokens) and paste it here. It is kept in the settings folder, readable only by you, and sent only to '
-           'huggingface.co.')
+           'button on Hugging Face: open the page, sign in, accept the conditions, then make a token of type Read '
+           '(Settings → Access Tokens) and paste it here. It is kept in the settings folder, readable only by you, and '
+           'sent only to huggingface.co.')
 
 
 def mb(n: int) -> str:
@@ -227,9 +227,15 @@ class ComponentsBox(QWidget):
         if not self.confirm(f'Remove {c.title} ({mb(c.on_disk)})?'
                             + (f' Without it {c.instead}; choosing it again downloads it again.' if c.instead else '')):
             return
-        c.remove()
+        try:
+            c.remove()
+            err = ''
+        except Exception as e:  # the voice pack's files still held (Windows): said, as a failed download is
+            err = f'Could not remove {c.title}: {e}'
         self.refresh()
         self.changed.emit()
+        if err:
+            self.state.setText(err)
 
     def confirm(self, text: str) -> bool:
         return QMessageBox.question(self, 'Remove', text) == QMessageBox.StandardButton.Yes

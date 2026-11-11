@@ -134,12 +134,22 @@ def _have(dl: Path, f: dict) -> int:
     return 0
 
 
-def _discard(p: Path) -> None:
-    """Out of the way at once (a rename), then deleted: a half-deleted folder never looks like a pack."""
-    if p.exists():
-        aside = p.with_name(f'{p.name}.old-{time.time_ns()}')
-        p.rename(aside)
-        shutil.rmtree(aside, ignore_errors=True)
+def _discard(p: Path, wait_s: float = 10.0) -> None:
+    """Out of the way at once (a rename), then deleted: a half-deleted folder never looks like a pack. Windows: a file in
+    it still open for a moment (the pip of a cancelled install, an antivirus scanning what it wrote) refuses the rename
+    (PermissionError): tried again for `wait_s`."""
+    if not p.exists():
+        return
+    aside, end = p.with_name(f'{p.name}.old-{time.time_ns()}'), time.monotonic() + wait_s
+    while True:
+        try:
+            p.rename(aside)
+            break
+        except PermissionError:
+            if os.name != 'nt' or time.monotonic() > end:
+                raise
+            time.sleep(0.05)
+    shutil.rmtree(aside, ignore_errors=True)
 
 
 def install(progress=lambda stage, done, total, text='': None, cancel: threading.Event | None = None,
@@ -165,13 +175,13 @@ def _install(progress, cancel: threading.Event, lock: Path, where: Path, run_pyt
     if state(lock, where) == 'ready':
         return where
     progress('cleaning', 0, 0)
-    try:
-        _discard(where)  # half installed or outdated: from scratch
-    except OSError as e:  # Windows: its runner still has files open
-        raise PackError(f'cannot move the old voice pack away ({e}): turn translation off first') from e
     tmp, pip_tmp = where.with_name('voice-pack.tmp'), where.with_name('voice-pack.pip-tmp')
-    for p in (tmp, pip_tmp):  # an earlier attempt's, up to ~8 GB: gone before the free space is counted
-        _discard(p)
+    try:  # half installed or outdated: from scratch; an earlier attempt's, up to ~8 GB: gone before the space is counted
+        for p in (where, tmp, pip_tmp):
+            _discard(p)
+    except OSError as e:  # Windows: its runner still has files open
+        raise PackError(f'cannot move the old voice pack away ({e}): turn translation off first, or try again in a '
+                        'minute') from e
     for old in where.parent.glob(f'{where.name}.old-*'):  # what an earlier cleanup did not finish
         shutil.rmtree(old, ignore_errors=True)
     dl = _dl(where)
@@ -209,7 +219,8 @@ def _install_addon(progress, cancel: threading.Event, lock: Path, where: Path, r
         for p in (lib / ADDON, tmp, pip_tmp):  # half installed or outdated: from scratch
             _discard(p)
     except OSError as e:
-        raise PackError(f'cannot move the old addon away ({e}): turn translation off first') from e
+        raise PackError(f'cannot move the old addon away ({e}): turn translation off first, or try again in a minute') \
+            from e
     for old in lib.glob(f'{ADDON}.old-*'):
         shutil.rmtree(old, ignore_errors=True)
     dl.mkdir(exist_ok=True)
@@ -243,10 +254,10 @@ def uninstall(addon: bool = False, lock: Path | None = None, where: Path | None 
         try:
             for p in [*([where / 'Lib' / ADDON, where / 'Lib' / f'{ADDON}.tmp'] if addon else [where]),
                       *(where.with_name(f'voice-pack.{n}') for n in names)]:
-                _discard(p)
+                _discard(p, 1.0)  # Components' Remove runs in the UI's thread: no 10 s of a frozen window
         except OSError as e:
             raise PackError(f'cannot remove {"the addon" if addon else "the voice pack"} ({e}): turn translation off '
-                            'first') from e
+                            'first, or try again in a minute') from e
     finally:
         _BUSY.release()
 

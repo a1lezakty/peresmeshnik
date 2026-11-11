@@ -180,6 +180,23 @@ def test_the_box_downloads_only_the_ticked_and_says_what_goes_without(monkeypatc
     assert 'old' not in here and asked and 'Row old' in asked[0]
 
 
+def test_a_removal_that_fails_says_why(monkeypatch):
+    """FIXES #38 2: Remove's error (a voice pack file still held open, Windows) is shown in the box, not lost in Qt."""
+    from peresmeshnik.ui.components import ComponentsBox
+
+    def held():
+        raise voicepack.PackError('cannot remove the voice pack (Access is denied): turn translation off first, or try '
+                                  'again in a minute')
+    monkeypatch.setattr(components, 'listing', lambda s: [components.Component(
+        'pack', 'Row pack', 0, 'MIT', 'https://x', 'for the pair', True, 2000, False, _remove=held)])
+    box = ComponentsBox(config.Settings())
+    box.confirm = lambda text: True
+    box.refresh()
+    box.remove(box.rows[0])
+    assert box.state.text().startswith('Could not remove Row pack: cannot remove the voice pack') and \
+        'try again in a minute' in box.state.text()
+
+
 def test_a_failed_optional_one_does_not_hold_the_pair(monkeypatch):
     from peresmeshnik.ui.components import ComponentsBox
     here = set()

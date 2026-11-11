@@ -3,6 +3,7 @@ it suits this computer and the chosen pair; nothing downloads before Download, a
 setup wizard's Components page and the tray's Components… window show this one box."""
 from __future__ import annotations
 
+import os
 import threading
 
 from PySide6.QtCore import Qt, QUrl, Signal
@@ -72,13 +73,24 @@ class HfTokenBox(QWidget):
         self.setVisible(bool(page))
         if page:
             self.page = page
-            self.token.setPlaceholderText('a token is saved (save it empty to forget it)' if models.hf_token() else 'hf_…')
+            self._hint()
+
+    def _hint(self) -> None:
+        self.token.setPlaceholderText('set by HF_TOKEN (the environment): it goes first' if os.environ.get('HF_TOKEN', '').strip()
+                                      else 'a token is saved (save it empty to forget it)' if models.hf_token() else 'hf_…')
 
     def _save(self) -> None:
-        models.save_hf_token(self.token.text().strip())  # '' forgets it
+        token = self.token.text().strip()
+        if not token and models.hf_token_file().is_file() and not self.confirm('Forget your Hugging Face token? Your cloned '
+                                                                               'voice through Pocket TTS needs it to download.'):
+            return
+        models.save_hf_token(token)  # '' forgets it
         self.token.clear()
-        self.token.setPlaceholderText('a token is saved (save it empty to forget it)' if models.hf_token() else 'hf_…')
+        self._hint()
         self.saved.emit()
+
+    def confirm(self, text: str) -> bool:
+        return QMessageBox.question(self, 'Hugging Face token', text) == QMessageBox.StandardButton.Yes
 
 
 class ComponentsBox(QWidget):
@@ -209,6 +221,7 @@ class ComponentsBox(QWidget):
                 try:
                     c.fetch(tick, self.cancel)
                     done[0] = start + c.size
+                    self.refused.pop(c.id, None)  # here now: Hugging Face let it through this time
                 except Exception as e:  # the network, the disk, a token refused (models.Gated): the others still go
                     errors.append(f'{c.title}: {e}')
                     if isinstance(e, getattr(models, 'Gated', ())):

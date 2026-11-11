@@ -359,6 +359,30 @@ def test_a_voice_kept_from_the_tray_is_theirs_from_the_first_clause_of_the_next_
     assert np.array_equal(w.voice().state, state) and eng.made == []
 
 
+def test_a_kept_voice_deleted_during_the_call_is_forgotten_at_once(tmp_path, monkeypatch):
+    """S3 tail: Voices… deletes a contact's kept voice during the call (the tray: Controller.their_voices_deleted): the
+    running them side forgets that person at once, their next clause is someone new's; another kept voice stays."""
+    from types import SimpleNamespace
+
+    from peresmeshnik import models, voice
+    monkeypatch.setattr(voice, 'voices_dir', lambda: tmp_path)
+    fp = models.get('pocket-tts-ru').fingerprint, models.get(voice.SPEAKER).fingerprint
+    anna, _ = (voice.save_them(n, 'en', 14.0, {'pocket-tts-ru': (np.full(3, k, np.float32), fp[0]),
+                                                voice.SPEAKER: (vec, fp[1])}, tmp_path)
+               for n, k, vec in (('Anna', 7.0, B), ('Bob', 8.0, C)))
+    v = live.LiveVoice(FakeClone, AmpSpeaker, 'pocket-tts-ru', 'en', live.kept('pocket-tts-ru'))
+    assert sorted(p.voice.state[0] for p in v.people) == [7, 8]
+    them = SimpleNamespace(name='them', engine='local',
+                           directions=[(SimpleNamespace(tts=live.TheirVoice(FakeStock(), v)), True, True)])
+    me = SimpleNamespace(name='me', engine='local', directions=[(SimpleNamespace(tts=FakeStock()), True, True)])
+    voice.discard(anna.name, tmp_path)
+    app.Controller.their_voices_deleted(SimpleNamespace(sides=[me, them]))
+    v.close()  # the worker has gone through its queue
+    assert [p.voice.state[0] for p in v.people] == [8] and len(v._known()) == 1  # a reset() does not bring Anna back
+    v._add(speech(1.2, 0.1))  # Anna (B) speaks: someone new, the stock voice until their voice is made in this call
+    assert not v.speaking.kept and v.voice() is None
+
+
 def test_a_voice_pack_voice_speaks_in_the_call_and_is_not_offered_to_keep():
     """NVIDIA (the voice pack's Qwen3-TTS / XTTS): their voice is an id in that call's runner, so the tray does not offer
     to keep it (COMMON-stage8 23:49); in the call it speaks as Pocket's does."""

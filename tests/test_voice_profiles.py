@@ -83,6 +83,18 @@ def test_contact_kept_without_recording(tmp_path):
     assert 'Анна' not in str(e.value)
 
 
+def test_a_contacts_voice_of_a_voice_pack_engine_is_not_kept(tmp_path):
+    """FIXES r2 2: the voice pack's engines (needs = "gpu": XTTS, Qwen3) keep no voice for the next call (COMMON 23:49):
+    save_them refuses their states whoever calls it, and leaves nothing on disk."""
+    root = tmp_path / 'v'
+    for model in ('xtts-v2', 'qwen3-tts'):
+        with pytest.raises(ValueError, match=model):
+            voice.save_them('Bob', 'en', 9.0, {'pocket-tts-en': (np.ones(3, np.float32), 'a'),
+                                               model: (np.ones(3, np.float32), 'b')}, root)
+    assert not root.exists() or list(root.iterdir()) == []
+    assert voice.save_them('Bob', 'en', 9.0, {'pocket-tts-en': (np.ones(3, np.float32), 'a')}, root).meta['engines']
+
+
 def test_a_failed_save_leaves_no_folder_and_no_temporary_file(tmp_path):
     """FIXES-s3 6: a contact's voice is made aside and renamed whole; voice.json's temporary file goes on a failure."""
     root = tmp_path / 'v'
@@ -202,6 +214,98 @@ def test_a_recording_spliced_from_someone_else_and_me_is_refused(tmp_path):
     v = voice.save(np.concatenate([me, me]), sr, 'me.new', 'ru', 'text', root)
     consent, _ = voice.confirm_live(v, *speech(6, 24_000), said, Asr(' '.join(said)), Pitch())
     assert consent and consent['similarity'] == 1.0 and consent['windows'] >= 4, consent
+
+
+class Blend:
+    """A speaker vector from how much of a window is 180 Hz (me) and how much 300 Hz (someone else): a window of half and
+    half scores 0.71 against my live reading."""
+    def embed(self, pcm, sr):
+        x = np.abs(np.fft.rfft(np.asarray(pcm, np.float64)))
+        band = lambda f: x[int((f - 20) * len(pcm) / sr):int((f + 20) * len(pcm) / sr)].sum()  # noqa: E731
+        v = np.array([band(180), band(300)])
+        return v / np.linalg.norm(v)
+
+
+def test_a_short_piece_of_someone_else_at_the_start_is_refused(tmp_path):
+    """Stage 8 tails: ~4 s of the speech of someone else, then me: an 8 s window of half and half scored as me, and the
+    clone takes its prompt from the start (XTTS 6 s, Pocket 10 s). The start's 4 s windows (HEAD_MATCH) refuse it; me alone
+    passes."""
+    root = tmp_path / 'v'
+    sr, said = 24_000, voice.LIVE_PHRASES['ru'][:2]
+    x = np.concatenate([speech(7, sr, f=300.0)[0], speech(40, sr)[0]])  # 7 s in syllables: ~4.2 s of their voice
+    live = Blend().embed(speech(6, sr)[0], sr)
+    assert Blend().embed(voice._start(x, sr)[:8 * sr], sr) @ live > voice.MATCH  # one 8 s window would let it through
+    v = voice.save(x, sr, 'me.new', 'ru', 'text', root)
+    consent, text = voice.confirm_live(v, *speech(6, sr), said, Asr(' '.join(said)), Blend())
+    assert consent is None and 'not the voice of the recording' in text, text
+    v = voice.save(speech(44, sr)[0], sr, 'me.new', 'ru', 'text', root)
+    consent, _ = voice.confirm_live(v, *speech(6, sr), said, Asr(' '.join(said)), Blend())
+    assert consent and consent['windows'] >= 5, consent  # 5 start windows of 4 s every 2 s, then 8 s ones
+
+
+def noisy(seconds, sr, level=0.005):
+    """Me in a room: steady noise in the pauses at -46 dBFS (about 30 dB under the voice)."""
+    x, _ = speech(seconds, sr)
+    return x + level * np.random.default_rng(7).standard_normal(len(x)).astype(np.float32)
+
+
+def test_a_voice_turned_down_to_the_noise_of_the_pauses_is_refused(tmp_path):
+    """FIXES-s3-tails r2 1: someone else first, denoised (digital silence in the pauses) and turned down 24 dB to just
+    above the noise of my pauses, then me: the relative trim of _speech took them for background, every window was mine
+    and the engines' prompt was theirs. The raw start with an absolute floor checks them: refused. Me in the same room,
+    noise in the pauses and all, passes."""
+    root = tmp_path / 'v'
+    sr, said = 24_000, voice.LIVE_PHRASES['ru'][:2]
+    t = np.arange(8 * sr) / sr
+    them = (0.2 * np.sin(2 * np.pi * 300 * t) * (np.sin(2 * np.pi * 2 * t) > -0.3)).astype(np.float32) * 10 ** (-24 / 20)
+    x = np.concatenate([them, noisy(40, sr)])
+    assert Blend().embed(voice._speech(x, sr)[:12 * sr], sr)[1] < 0.05  # the old trim: none of them left
+    v = voice.save(x, sr, 'me.new', 'ru', 'text', root)
+    consent, text = voice.confirm_live(v, *speech(6, sr), said, Asr(' '.join(said)), Blend())
+    assert consent is None and 'not the voice of the recording' in text, text
+    v = voice.save(noisy(48, sr), sr, 'me.new', 'ru', 'text', root)
+    consent, text = voice.confirm_live(v, *speech(6, sr), said, Asr(' '.join(said)), Blend())
+    assert consent, text
+
+
+def at_db(x, db):
+    """`x` with its sound (not its digital silence) at `db` dBFS RMS."""
+    return (x * 10 ** (db / 20) / np.sqrt(np.mean(x[x != 0] ** 2))).astype(np.float32)
+
+
+def test_what_the_check_does_not_hear_the_engines_do_not_get(tmp_path):
+    """FIXES-s3-tails r3 1: someone else's 10 s at -62 dBFS (pauses digital silence), then me: under the floor, the check
+    did not hear them, yet the engines took the raw start (Qwen3's vector hardly minds the level). save() writes it as
+    digital silence: the file's start is what was checked. A file put in the folder by hand, the quiet voice in it, is
+    checked whole: refused."""
+    import soundfile as sf
+    root = tmp_path / 'v'
+    sr, said = 24_000, voice.LIVE_PHRASES['ru'][:2]
+    x = np.concatenate([at_db(speech(10, sr, f=300.0)[0], -62), speech(40, sr)[0]])
+    v = voice.save(x, sr, 'me.new', 'ru', 'text', root)
+    y, _ = sf.read(v.path / 'reference.wav')
+    assert not y[:int(9.97 * sr)].any() and y[10 * sr:].any()  # all but the frame where my voice begins
+    consent, text = voice.confirm_live(v, *speech(6, sr), said, Asr(' '.join(said)), Blend())
+    assert consent, text
+    sf.write(v.path / 'reference.wav', x * 0.5, sr, subtype='FLOAT')  # by hand, not through save()
+    consent, text = voice.confirm_live(v, *speech(6, sr), said, Asr(' '.join(said)), Blend())
+    assert consent is None and 'not the voice of the recording' in text, text
+
+
+def test_a_few_loud_seconds_of_mine_do_not_lift_the_floor(tmp_path):
+    """FIXES-s3-tails r3 1: 4 s of me 20 dB louder lifted a floor taken from the loudest frames (p95 - 40 dB) and someone
+    else 25 dB under my speech fell under it, out of the check but in the file. The floor is under the median speech
+    frame: they stay in the file and in the check, refused."""
+    import soundfile as sf
+    root = tmp_path / 'v'
+    sr, said = 24_000, voice.LIVE_PHRASES['ru'][:2]
+    me = speech(40, sr)[0]
+    level = 10 * np.log10(np.mean(me[me != 0] ** 2))
+    x = np.concatenate([at_db(speech(4, sr)[0], level + 20), at_db(speech(12, sr, f=300.0)[0], level - 25), me])
+    v = voice.save(x, sr, 'me.new', 'ru', 'text', root)
+    assert sf.read(v.path / 'reference.wav')[0][5 * sr:15 * sr].any()  # in the file: so in the check
+    consent, text = voice.confirm_live(v, *speech(6, sr), said, Asr(' '.join(said)), Blend())
+    assert consent is None and 'not the voice of the recording' in text, text
 
 
 def test_consent_holds_only_for_the_recording_checked(tmp_path):

@@ -177,7 +177,16 @@ class Tray(QObject):
                 for a in group.actions():
                     a.setChecked(a.data()[1] == getattr(s, key))
         self.live.setChecked(self.ctl.live)
-        self.remember.setVisible(bool(getattr(self.ctl, 'on', False)) and hasattr(self.ctl, 'them_voice'))
+        self.remember.setVisible(bool(getattr(self.ctl, 'on', False)) and hasattr(self.ctl, 'them_voice')
+                                 and self._keeps_their_voice(s))
+
+    @staticmethod
+    def _keeps_their_voice(s) -> bool:
+        """Whether the them side's clone engine here (S2's voices/live.engine) keeps a voice to take to the next call:
+        Pocket TTS (its state) yes; an engine of the NVIDIA voice pack (XTTS, Qwen3) not (COMMON 23:49), nor none."""
+        from peresmeshnik.voices import live
+        engine = live.engine(s)[0]
+        return bool(engine) and not languages.needs_gpu(engine)
 
     def hotkey_note(self, combo: str, why: str, announce: bool = False) -> None:
         """The hotkey in the menu item; why there is none in its tooltip, on the wizard's hotkey page and, with
@@ -421,7 +430,8 @@ class Tray(QObject):
             from peresmeshnik.ui.components import ComponentsDialog
             self._pair = s, moved, back, engines_now
             d = ComponentsDialog(s, translating=lambda: bool(getattr(self.ctl, 'on', False)))
-            d.box.finished.connect(lambda err, s=s, box=d.box: err or box.missing() or self._pair_ready(s, ''))
+            d.box.finished.connect(lambda err, s=s, box=d.box: box.missing() or self._pair_ready(s, ''))  # a refused clone
+            # (403) is not missing: the pair changes, its stock voice speaks
 
             def let_go(*_, s=s, d=d):  # closed before what the pair needs is here: that pair is not on its way any more
                 if self._pair and self._pair[0] is s and not d.box.busy:
@@ -528,6 +538,8 @@ class Tray(QObject):
                 saved.local.voice = s.local.voice
                 config.save(saved)
                 self.restart()
+            elif hasattr(self.ctl, 'their_voices_deleted'):  # a contact's voice: the running them side forgets it now
+                self.ctl.their_voices_deleted()
         self._show(VoicesDialog(s, changed, translating=lambda: bool(getattr(self.ctl, 'on', False))))
 
     def open_components(self) -> None:

@@ -6,7 +6,11 @@ Stages: embed (LibriSpeech + FLEURS-ru embeddings -> work/*.npz), report (tables
 timing (1 thread, 5 s and 40 s), padded + report_padded (8 s live with silence, raw vs trimmed);
 stage 2 (reference in windows, min of cosines): wlive, wfile <8|10,12>, splice <0,8|10,12> <i/n>, report2, timing2,
 trimcheck (live with / without the app's trim),
-trim3 <i/n> + report_trim3 (live trimmed: none / edges / all frames).
+trim3 <i/n> + report_trim3 (live trimmed: none / edges / all frames);
+stage 3 (the reference's start in short windows): head <i/n>, report_head, timing_head;
+overlap <i/n> + report_overlap + timing_overlap (4 s windows every 2 s over the head, shifted splices);
+stage 4 (the raw start, voice._start of 1d79286; VOICE_PY = that voice.py): start4 <i/n>, report_start4,
+timing_start4; stage 6 (the file as save() writes it; VOICE_PY = voice.py now): save6 <i/n> <1|2>, report_save6.
 The model is run exactly as onnx-asr 0.12.0 does it: Manager().create_se()
 -> KaldiPreprocessorNumpy('wespeaker') -> mean subtraction over time -> ONNX 'feats' -> 'embs'.
 """
@@ -766,8 +770,808 @@ def stage_report_trim3():
     json.dump(out, open(WORK / "report_trim3.json", "w"), indent=1, default=float)
 
 
+# ---------- stage 3: the reference's first HEAD_S s of speech in short windows, the rest in 8 s ----------
+HEAD_S = 12
+SHORT = (4, 6)  # "4+8": the head in 4 s windows; "6+8": in 6 s
+HEAD_K = (3, 4, 5, 6)  # splice: the first K s of another person's speech, then the owner up to FILE_SEC
+T3 = (0.35, 0.40, 0.45)
+LIVE3_S = 8  # the app's live reading, trimmed at the edges only (voice._speech(edges=True))
+
+
+def head_windows(t: np.ndarray) -> dict[str, list[np.ndarray]]:
+    """Trimmed reference -> {kind: windows}: w8 = all in 8 s (the app now), s4 / s6 = the first HEAD_S s in 4 / 6 s,
+    r8 = the rest after HEAD_S in 8 s (the same tail rule)."""
+    h = HEAD_S * SR
+    out = {"w8": windows(t, 8), "r8": windows(t[h:], 8)}
+    out |= {f"s{w}": [t[a: a + w * SR] for a in range(0, h, w * SR)] for w in SHORT}
+    return out
+
+
+def stage_head():
+    """argv[2] = shard "i/n". live: 8 s chunks after the first 40 s (clean; white 20 / 10 for k % 3 == 0), edges
+    trimmed; ref: 40 / 60 s clean / opus24k, trimmed, windows s4 s6 r8 (w8 is emb_win8.npz); splice: the first K s of
+    the speech of another person of the same sex (splice_pairs) + the owner's first FILE_SEC - K s, windows w8 s4 s6 r8."""
+    i, n = map(int, sys.argv[2].split("/"))
+    se, gender, rows, t0 = make_se(1), libri_speakers(), [], time.time()
+    imps = {}
+    for spk, ch, imp, ich in splice_pairs():
+        imps.setdefault((spk, ch), []).append((imp, ich))
+    for j, (spk, ch, utts) in enumerate(chapters()):
+        if j % n != i:
+            continue
+        rng, base = np.random.default_rng([int(spk), int(ch), 3]), {"spk": spk, "ch": ch, "g": gender[spk]}
+        _, used = concat_from(utts, 0, FILE_SEC)
+        for k, lx in enumerate(live_chunks(utts, used, LIVE3_S)):
+            for lc in LIVE2_CONDS if k % 3 == 0 else ("clean",):
+                y = speech_edges(live_cond(lx, lc, rng))
+                rows.append((base | {"set": "live", "cond": lc, "k": k, "s": len(y) / SR}, embed(se, y)))
+        for L in REF_SECS:
+            fx, _ = concat_from(utts, 0, L)
+            for fc in ("clean", "opus24k") if fx is not None else ():
+                t = speech_only(file_cond(fx, fc))
+                rows += [(base | {"set": "ref", "cond": fc, "L": L, "kind": kind, "i": q}, embed(se, w))
+                         for kind, ws in head_windows(t).items() if kind != "w8" for q, w in enumerate(ws)]
+        for imp, ich in imps.get((spk, ch), []):
+            oth, _ = concat_from(sorted(glob.glob(str(LIBRI / "dev-clean" / imp / ich / "*.flac"))), 0, 20)
+            oth = speech_only(oth)
+            for K in HEAD_K:
+                own, _ = concat_from(utts, 0, FILE_SEC - K)
+                t = speech_only(np.concatenate([oth[: K * SR], own]))
+                rows += [(base | {"set": "splice", "imp": imp, "imp_ch": ich, "K": K, "kind": kind, "i": q},
+                          embed(se, w)) for kind, ws in head_windows(t).items() for q, w in enumerate(ws)]
+        print(f"{j} {spk}/{ch} rows={len(rows)} t={time.time() - t0:.0f}s", flush=True)
+    save2(WORK / f"emb_head_{i}.npz", rows)
+
+
+def kind_mins(E, M, keys, refs, Lv):
+    """{kind: refs x lives} of the min cosine over that reference's windows of the kind."""
+    pos = {}
+    for r, m in enumerate(M):
+        pos.setdefault((tuple(m[k] for k in keys), m["kind"]), []).append(r)
+    kinds = sorted({m["kind"] for m in M})
+    return {kd: np.stack([np.min(E[pos[(r, kd)]] @ Lv.T, axis=0) for r in refs]) for kd in kinds}
+
+
+def schemes(m):
+    """kind mins -> {scheme: pass fn(t)}: 8 / 4+8 / 6+8 with one threshold, and 4@ts+8 / 6@ts+8: the short windows
+    at their own ts, the 8 s ones at 0.45."""
+    out = {"8": lambda t: m["w8"] >= t}
+    for w in SHORT:
+        out[f"{w}+8"] = lambda t, w=w: np.minimum(m[f"s{w}"], m["r8"]) >= t
+        for ts in (0.35, 0.40):
+            out[f"{w}@{ts:.2f}+8@0.45"] = lambda t, w=w, ts=ts: (m[f"s{w}"] >= ts) & (m["r8"] >= 0.45)
+    return out
+
+
+def stage_report_head():
+    parts = [load2(p) for p in sorted(WORK.glob("emb_head_*.npz"))]
+    E, M = np.concatenate([e for e, _ in parts]), sum((m for _, m in parts), [])
+    we, wm = load2(WORK / "emb_win8.npz")
+    li = [j for j, m in enumerate(M) if m["set"] == "live"]
+    le, lm = E[li], [M[j] for j in li]
+    ri = [j for j, m in enumerate(M) if m["set"] == "ref"]
+    wi = [j for j, m in enumerate(wm) if m["cond"] in ("clean", "opus24k")]
+    RE = np.concatenate([E[ri], we[wi]])
+    RM = [M[j] for j in ri] + [wm[j] | {"kind": "w8"} for j in wi]
+    keys, out, lines = ("spk", "ch", "cond", "L"), {"a": {}, "dist": {}, "b": {}}, []
+    g = {m["spk"]: m["g"] for m in lm}
+    kept = {lc: np.percentile([m["s"] for m in lm if m["cond"] == lc], [5, 50, 95]) for lc in LIVE2_CONDS}
+    lines.append(f"live {LIVE3_S} s edges-trimmed, kept p5/p50/p95: "
+                 + "  ".join(f"{lc} {q[0]:.2f}/{q[1]:.2f}/{q[2]:.2f}" for lc, q in kept.items()))
+    lines.append("## (a) FRR (own, another chapter) at 0.35 / 0.40 / 0.45, FAR (other same sex) at 0.45")
+    for L in REF_SECS:
+        for fc, lc in (("clean", "clean"), ("opus24k", "clean"), ("clean", "laptop_white20"),
+                       ("clean", "laptop_white10")):
+            refs = sorted({tuple(m[k] for k in keys) for m in RM if m["cond"] == fc and m["L"] == L})
+            fmeta = [{"spk": r[0], "ch": r[1], "g": g[r[0]]} for r in refs]
+            lj = [j for j, m in enumerate(lm) if m["cond"] == lc]
+            gen, imp = masks(fmeta, [lm[j] for j in lj])
+            m = kind_mins(RE, RM, keys, refs, le[lj])
+            lines.append(f"ref={L}s {fc}/{lc} refs={len(refs)} gen={int(gen.sum())} imp={int(imp.sum())}")
+            for name, ok in schemes(m).items():
+                ts = T3 if "@" not in name else (0.45,)
+                r = {"frr": {str(t): float(1 - ok(t)[gen].mean()) for t in ts},
+                     "far": {str(t): float(ok(t)[imp].mean()) for t in ts}, "n_gen": int(gen.sum()),
+                     "n_imp": int(imp.sum())}
+                out["a"][f"{L}|{fc}|{lc}|{name}"] = r
+                lines.append(f"  {name}: " + "  ".join(f"{t}: {r['frr'][str(t)]:.2%}/{r['far'][str(t)]:.3%}" for t in ts))
+            if L == 40:  # each window's cosine and the min per kind, own vs other
+                d = {}
+                for kd in ("s4", "s6", "w8"):
+                    rows = [j for j, mm in enumerate(RM) if mm["cond"] == fc and mm["L"] == L and mm["kind"] == kd]
+                    S = RE[rows] @ le[lj].T
+                    ref_of = {r: a for a, r in enumerate(refs)}
+                    a_ = np.array([ref_of[tuple(RM[j][k] for k in keys)] for j in rows])
+                    gw, iw = gen[a_], imp[a_]
+                    d[kd] = {"win": pct(S[gw]) | {"imp_p99": float(np.percentile(S[iw], 99)),
+                                                   "far@0.45": float(np.mean(S[iw] >= 0.45))},
+                             "min": pct(m[kd][gen]) | {"imp_p99": float(np.percentile(m[kd][imp], 99))}}
+                out["dist"][f"{fc}|{lc}"] = d
+                for kd, v in d.items():
+                    for what in ("win", "min"):
+                        q = v[what]
+                        lines.append(f"  dist {kd} {what}: own p1={q['p1']:.3f} p5={q['p5']:.3f} p50={q['p50']:.3f} "
+                                     f"other p99={q['imp_p99']:.3f}"
+                                     + (f" other far@0.45={q['far@0.45']:.3%}" if what == "win" else ""))
+    lines.append("## (b) splice: the first K s of another's speech + the owner to 40 s; live = the owner, another "
+                 "chapter, clean; pass rate")
+    si = [j for j, m in enumerate(M) if m["set"] == "splice"]
+    SE_, SM = E[si], [M[j] for j in si]
+    lj = [j for j, m in enumerate(lm) if m["cond"] == "clean"]
+    Lv, lmeta = le[lj], [lm[j] for j in lj]
+    owners = sorted({(m["spk"], m["ch"]) for m in SM})
+    for K in (0,) + HEAD_K:
+        if K:
+            kk = ("spk", "ch", "imp", "K")
+            refs = sorted({tuple(m[k] for k in kk) for m in SM if m["K"] == K})
+            sk = [j for j, x in enumerate(SM) if x["K"] == K]
+            m = kind_mins(SE_[sk], [SM[j] for j in sk], kk, refs, Lv)
+        else:
+            refs = [(s, c, "clean", 40) for s, c in owners]
+            m = kind_mins(RE, RM, keys, refs, Lv)
+        ok_ = np.array([[lv["spk"] == r[0] and lv["ch"] != r[1] for lv in lmeta] for r in refs])
+        lines.append(f"K={K}: splices={len(refs)} pairs={int(ok_.sum())}")
+        for name, ok in schemes(m).items():
+            ts = (0.40, 0.45) if "@" not in name else (0.45,)
+            r = {str(t): float(ok(t)[ok_].mean()) for t in ts} | {"n_splices": len(refs), "n_pairs": int(ok_.sum())}
+            out["b"][f"{K}|{name}"] = r
+            lines.append(f"  {name}: " + "  ".join(f"{t}: {r[str(t)]:.2%}" for t in ts))
+        lines.append("  median min: " + "  ".join(f"{kd}={np.median(v[ok_]):.3f}" for kd, v in m.items()))
+    json.dump(out, open(WORK / "report_head.json", "w"), indent=1, default=float)
+    print("\n".join(lines))
+
+
+def stage_timing_head():
+    """1 thread: reference 60 s -> trim + 4+8 windows (3 x 4 s + 8 s after 12 s), live 8 s -> edges trim, the min."""
+    se = make_se(1)
+    utts = sorted(glob.glob(str(LIBRI / "dev-clean/84/121123/*.flac")))
+    x60, used = concat_from(utts, 0, 60)
+    live = live_chunks(utts, used, LIVE3_S)[0]
+
+    def run(fn):
+        fn()
+        ts = []
+        for _ in range(10):
+            t = time.perf_counter()
+            fn()
+            ts.append(time.perf_counter() - t)
+        return np.median(ts) * 1000, np.percentile(ts, 90) * 1000
+
+    lv = embed(se, speech_edges(live))
+    print("live 8 s edges+embed: median={:.0f}ms p90={:.0f}ms".format(*run(lambda: embed(se, speech_edges(live)))))
+    for name, kinds in (("8", ("w8",)), ("4+8", ("s4", "r8")), ("6+8", ("s6", "r8"))):
+        n = sum(len(head_windows(speech_only(x60))[k]) for k in kinds)
+        ms = run(lambda kinds=kinds: min(embed(se, s) @ lv for k in kinds for s in head_windows(speech_only(x60))[k]))
+        print(f"ref 60 s {name} ({n} windows) trim+embed+min: median={ms[0]:.0f}ms p90={ms[1]:.0f}ms")
+        ms = run(lambda kinds=kinds: min(embed(se, s) @ lv for k in kinds for s in head_windows(speech_only(x60))[k])
+                 + embed(se, speech_edges(live)) @ lv)
+        print(f"  + live: median={ms[0]:.0f}ms p90={ms[1]:.0f}ms")
+
+
+# ---------- stage 3b: the head in 4 s windows every 2 s ("4h2+8"); splices shifted by OFFS s of the owner ----------
+OFFS = (1, 2)
+X4 = (2, 6)  # the 4 s windows of the head not in s4 (0, 4, 8): together 0-4, 2-6, 4-8, 6-10, 8-12
+
+
+def head_x4(t: np.ndarray) -> list[np.ndarray]:
+    return [t[a * SR: (a + 4) * SR] for a in X4]
+
+
+def speech_cut(x: np.ndarray, sec: float, frame=480) -> int:
+    """The sample of x after which speech_only(x) has kept `sec` s (the same frame threshold)."""
+    f = (x - x.mean())[: len(x) // frame * frame].reshape(-1, frame).astype(np.float64)
+    db = 10 * np.log10(np.mean(f ** 2, axis=1) + 1e-12)
+    live = db[db > -100]
+    on = db > max(float(np.percentile(live, 10)) + 6 if len(live) else -120.0, -60.0)
+    return int(np.searchsorted(np.cumsum(on), round(sec * SR / frame)) + 1) * frame
+
+
+def stage_overlap():
+    """argv[2] = shard "i/n". ref (40 / 60 s, clean / opus24k) and splice (offset 0): the s4x windows only (the rest is
+    emb_head); splice shifted: the owner's first o s of speech, the K s of another person, the owner on (raw, 40 - K s
+    in all), windows w8 (only the first: the next ones are the owner's alone, taken from offset 0), s4, s4x (r8: offset 0)."""
+    i, n = map(int, sys.argv[2].split("/"))
+    se, gender, rows, t0 = make_se(1), libri_speakers(), [], time.time()
+    imps = {}
+    for spk, ch, imp, ich in splice_pairs():
+        imps.setdefault((spk, ch), []).append((imp, ich))
+    for j, (spk, ch, utts) in enumerate(chapters()):
+        if j % n != i:
+            continue
+        base = {"spk": spk, "ch": ch, "g": gender[spk]}
+        for L in REF_SECS:
+            fx, _ = concat_from(utts, 0, L)
+            for fc in ("clean", "opus24k") if fx is not None else ():
+                t = speech_only(file_cond(fx, fc))
+                rows += [(base | {"set": "ref", "cond": fc, "L": L, "kind": "s4x", "i": q}, embed(se, w))
+                         for q, w in enumerate(head_x4(t))]
+        for imp, ich in imps.get((spk, ch), []):
+            oth, _ = concat_from(sorted(glob.glob(str(LIBRI / "dev-clean" / imp / ich / "*.flac"))), 0, 20)
+            oth = speech_only(oth)
+            for K in HEAD_K:
+                own, _ = concat_from(utts, 0, FILE_SEC - K)
+                for o in (0,) + OFFS:
+                    c = speech_cut(own, o) if o else 0
+                    t = speech_only(np.concatenate([own[:c], oth[: K * SR], own[c:]]))
+                    ws = {"s4x": head_x4(t)} | ({"w8": windows(t, 8)[:1], "s4": head_windows(t)["s4"]} if o else {})
+                    rows += [(base | {"set": "splice", "imp": imp, "imp_ch": ich, "K": K, "o": o, "kind": kind, "i": q},
+                              embed(se, w)) for kind, v in ws.items() for q, w in enumerate(v)]
+        print(f"{j} {spk}/{ch} rows={len(rows)} t={time.time() - t0:.0f}s", flush=True)
+    save2(WORK / f"emb_overlap_{i}.npz", rows)
+
+
+def schemes_x(m):
+    """8 at t; 4+8 / 4h2+8: the 4 s windows at t4 (0.40 or 0.45), the 8 s ones at 0.45 (t is ignored for them)."""
+    s4h = np.minimum(m["s4"], m["s4x"])
+    out = {"8@0.45": m["w8"] >= 0.45}
+    for t4 in (0.40, 0.45):
+        out[f"4@{t4:.2f}+8"] = (m["s4"] >= t4) & (m["r8"] >= 0.45)
+        out[f"4h2@{t4:.2f}+8"] = (s4h >= t4) & (m["r8"] >= 0.45)
+    return out
+
+
+def stage_report_overlap():
+    H = [load2(p) for p in sorted(WORK.glob("emb_head_*.npz"))]
+    Ov = [load2(p) for p in sorted(WORK.glob("emb_overlap_*.npz"))]
+    HE, HM = np.concatenate([e for e, _ in H]), sum((m for _, m in H), [])
+    OE, OM = np.concatenate([e for e, _ in Ov]), sum((m for _, m in Ov), [])
+    we, wm = load2(WORK / "emb_win8.npz")
+    li = [j for j, m in enumerate(HM) if m["set"] == "live"]
+    le, lm = HE[li], [HM[j] for j in li]
+    hr = [j for j, m in enumerate(HM) if m["set"] == "ref" and m["kind"] in ("s4", "r8")]
+    orf = [j for j, m in enumerate(OM) if m["set"] == "ref"]
+    wi = [j for j, m in enumerate(wm) if m["cond"] in ("clean", "opus24k")]
+    RE = np.concatenate([HE[hr], OE[orf], we[wi]])
+    RM = [HM[j] for j in hr] + [OM[j] for j in orf] + [wm[j] | {"kind": "w8"} for j in wi]
+    keys, out, lines = ("spk", "ch", "cond", "L"), {"a": {}, "b": {}}, []
+    g = {m["spk"]: m["g"] for m in lm}
+    lines.append("## (a) FRR (own, another chapter) / FAR (other same sex)")
+    for L in REF_SECS:
+        for fc, lc in (("clean", "clean"), ("opus24k", "clean"), ("clean", "laptop_white20"),
+                       ("clean", "laptop_white10")):
+            refs = sorted({tuple(m[k] for k in keys) for m in RM if m["cond"] == fc and m["L"] == L})
+            fmeta = [{"spk": r[0], "ch": r[1], "g": g[r[0]]} for r in refs]
+            lj = [j for j, m in enumerate(lm) if m["cond"] == lc]
+            gen, imp = masks(fmeta, [lm[j] for j in lj])
+            lines.append(f"ref={L}s {fc}/{lc} refs={len(refs)} gen={int(gen.sum())} imp={int(imp.sum())}")
+            for name, ok in schemes_x(kind_mins(RE, RM, keys, refs, le[lj])).items():
+                r = {"frr": float(1 - ok[gen].mean()), "far": float(ok[imp].mean())}
+                out["a"][f"{L}|{fc}|{lc}|{name}"] = r
+                lines.append(f"  {name}: FRR={r['frr']:.2%} FAR={r['far']:.3%}")
+    lines.append("## (b) splice: o s of the owner, K s of another, the owner to 40 s; live = the owner, clean; pass rate")
+    lj = [j for j, m in enumerate(lm) if m["cond"] == "clean"]
+    Lv, lmeta = le[lj], [lm[j] for j in lj]
+    kk = ("spk", "ch", "imp", "K")
+    for K in HEAD_K:
+        h0 = [j for j, m in enumerate(HM) if m["set"] == "splice" and m["K"] == K]
+        for o in (0,) + OFFS:
+            oj = [j for j, m in enumerate(OM) if m["set"] == "splice" and m["K"] == K and m["o"] == o]
+            keep = ("w8", "s4", "r8") if o == 0 else ("r8",)
+            hj = [j for j in h0 if HM[j]["kind"] in keep or (o and HM[j]["kind"] == "w8" and HM[j]["i"] > 0)]
+            E, M = np.concatenate([HE[hj], OE[oj]]), [HM[j] for j in hj] + [OM[j] for j in oj]
+            refs = sorted({tuple(m[k] for k in kk) for m in M})
+            ok_ = np.array([[lv["spk"] == r[0] and lv["ch"] != r[1] for lv in lmeta] for r in refs])
+            m = kind_mins(E, M, kk, refs, Lv)
+            r = {name: float(ok[ok_].mean()) for name, ok in schemes_x(m).items()}
+            r |= {"n_splices": len(refs), "n_pairs": int(ok_.sum())}
+            out["b"][f"{K}|{o}"] = r
+            lines.append(f"K={K} o={o} splices={len(refs)} pairs={int(ok_.sum())}: "
+                         + "  ".join(f"{k}={v:.2%}" for k, v in r.items() if "@" in k)
+                         + "  median s4=" + f"{np.median(m['s4'][ok_]):.3f} s4x={np.median(m['s4x'][ok_]):.3f}")
+    json.dump(out, open(WORK / "report_overlap.json", "w"), indent=1, default=float)
+    print("\n".join(lines))
+
+
+def stage_timing_overlap():
+    """1 thread: reference 60 s -> trim + 4h2+8 windows (5 x 4 s every 2 s + 8 s after 12 s) vs 4+8, the min."""
+    se = make_se(1)
+    utts = sorted(glob.glob(str(LIBRI / "dev-clean/84/121123/*.flac")))
+    x60, used = concat_from(utts, 0, 60)
+    lv = embed(se, speech_edges(live_chunks(utts, used, LIVE3_S)[0]))
+
+    def wins(t, x):
+        h = head_windows(t)
+        return h["s4"] + (head_x4(t) if x else []) + h["r8"]
+
+    for name, x in (("4+8", False), ("4h2+8", True), ("4+8", False), ("4h2+8", True)):  # twice: load drifts
+        fn = lambda x=x: min(embed(se, s) @ lv for s in wins(speech_only(x60), x))  # noqa: E731
+        fn()
+        ts = []
+        for _ in range(10):
+            t = time.perf_counter()
+            fn()
+            ts.append(time.perf_counter() - t)
+        print(f"ref 60 s {name} ({len(wins(speech_only(x60), x))} windows) trim+embed+min: "
+              f"median={np.median(ts) * 1000:.0f}ms p90={np.percentile(ts, 90) * 1000:.0f}ms", flush=True)
+
+
+# ---------- stage 4: the reference's raw start (voice._start) with an absolute floor, the hidden-sound refusal ----------
+# start4 / report_start4 / timing_start4 are for the scheme of 1d79286 (_start -> (start, hidden, rest), LEVEL_DB):
+# run them with VOICE_PY = that commit's voice.py. Stage 6 below is for the scheme after it (save() writes the floor).
+VOICE_PY = Path(os.environ.get("VOICE_PY", Path(__file__).resolve().parents[1] / "peresmeshnik/voice.py"))
+VOICE_FNS = ("_frames", "_speech", "_start", "_windows")
+FILE4 = ("clean", "opus24k", "white30", "white20")  # white<snr>: white noise at SNR to the speech, over the whole file
+VARIANTS = tuple((fl, hd) for fl in (-55.0, -60.0) for hd in (2.0, 3.0, 4.0))  # (floor, margin dB): hidden s
+BYPASS_K, BYPASS_DB, BYPASS_SNR = (5, 10), (3, 5, 8), (30, 20)
+
+
+def voice_ns(fns=VOICE_FNS) -> dict:
+    """voice.py's functions `fns` (+ its Report) and all its UPPER_CASE constants, exec'd from the source itself (no
+    copy to drift): the bench calls the app's own code; FLOOR_DB can be changed in the namespace for the variants."""
+    import ast
+    from dataclasses import dataclass, field
+    tree = ast.parse(VOICE_PY.read_text(encoding="utf-8"))
+    ns = {"np": np, "dataclass": dataclass, "field": field}
+    for b in tree.body:
+        names = {t.id for t in ast.walk(b) if isinstance(t, ast.Name) and isinstance(t.ctx, ast.Store)}
+        if isinstance(b, ast.FunctionDef) and b.name in fns or isinstance(b, ast.ClassDef) and b.name == "Report" \
+                or isinstance(b, ast.Assign) and names and all(n.isupper() for n in names):
+            try:
+                exec(compile(ast.Module([b], []), str(VOICE_PY), "exec"), ns)
+            except NameError:  # a constant built from something not loaded here
+                pass
+    assert all(k in ns for k in fns), sorted(set(fns) - set(ns))
+    return ns
+
+
+def hidden_s(ns, x, floor: float, margin: float) -> float:
+    """The refusal measured here and dropped (BENCH; it refused the owner's own file 27-97 %): seconds of the raw start
+    above `floor` at LEVEL_DB, louder than the noise of the pauses (p10) by more than `margin` dB and no louder than
+    _speech's threshold. Refused at more than 1 s."""
+    f = ns["_frames"](x - x.mean(), SR)
+    db = 10 * np.log10(np.mean(f ** 2, axis=1) + 1e-12)
+    live = db[db > -100]
+    if not len(live):
+        return 0.0
+    gain, noise = ns["LEVEL_DB"] - float(np.percentile(live, 95)), float(np.percentile(live, 10))
+    d = db[:int(ns["START_S"] * 1000 / 30)]
+    return float(np.sum((d > -100) & (d + gain > floor) & (d > noise + margin) & (d <= max(noise + 6, -60.0)))) * 0.03
+
+
+def hidden_variants(ns, x) -> dict[str, float]:
+    return {f"{-fl:.0f}_{hd:.0f}": hidden_s(ns, x, fl, hd) for fl, hd in VARIANTS}
+
+
+def with_noise(ns, x, snr, rng):
+    """x + white noise whose RMS is `snr` dB below the RMS of x's speech (_speech), and that noise RMS."""
+    nr = rms(ns["_speech"](x, SR)) / 10 ** (snr / 20)
+    return np.clip(x + rng.standard_normal(len(x)) * nr, -1, 1).astype(np.float32), nr
+
+
+def gated(ns, x, K):
+    """The first K s of speech of x (its own frames above the _speech threshold) with everything else -> digital
+    silence, the timeline kept; scaled to speech RMS 1."""
+    f = ns["_frames"](x - x.mean(), SR)
+    db = 10 * np.log10(np.mean(f ** 2, axis=1) + 1e-12)
+    on = db > max(float(np.percentile(db[db > -100], 10)) + 6, -60.0)
+    c = int(np.searchsorted(np.cumsum(on), round(K / 0.03)) + 1)
+    g = f[:c] * on[:c, None]
+    return (g / rms(g[on[:c]])).reshape(-1).astype(np.float32)
+
+
+def stage_start4():
+    """argv[2] = shard "i/n". ref 40 / 60 s, FILE4: new = _windows(_start + rest) (+ hidden for VARIANTS), old =
+    4h2+8 of _speech (s4 s4x r8; clean / opus24k: emb_head + emb_overlap). splice (splice_pairs): the first K s of
+    another person's speech, pauses digital silence, at d dB above the owner's noise, then the owner's 40 s + white
+    noise at SNR (= ref white<SNR> 40 s): new and old. argv[3] = another FLOOR_DB ("-60"): new only, ref 40 s clean /
+    white30 and the splices at SNR 30 (where the floor cuts sound: elsewhere all of it is above both floors)."""
+    i, n = map(int, sys.argv[2].split("/"))
+    floor = sys.argv[3] if len(sys.argv) > 3 else None
+    ns, se, gender, rows, info, t0 = voice_ns(), make_se(1), libri_speakers(), [], [], time.time()
+    if floor:
+        ns["FLOOR_DB"] = float(floor)
+    imps = {}
+    for spk, ch, imp, ich in splice_pairs():
+        imps.setdefault((spk, ch), []).append((imp, ich))
+
+    def add(meta, x, old):
+        st, rest = ns["_start"](x, SR), ns["_speech"](x[int(ns["START_S"] * SR):], SR)
+        wins = ns["_windows"](st, SR)
+        rows.extend((meta | {"scheme": "new", "i": q, "thr": thr}, embed(se, w)) for q, (w, thr) in enumerate(wins))
+        info.append(meta | {"hidden": hidden_variants(ns, x), "start_s": (len(st) - len(rest)) / SR, "rest_s": len(rest) / SR,
+                            "n_new": len(wins), "raw_s": len(x) / SR})
+        if old:
+            t = ns["_speech"](x, SR)
+            h = head_windows(t)
+            ws = [(w, 0.40) for w in h["s4"] + head_x4(t)] + [(w, 0.45) for w in h["r8"]]
+            info[-1]["speech_s"] = len(t) / SR
+            rows.extend((meta | {"scheme": "old", "i": q, "thr": thr}, embed(se, w)) for q, (w, thr) in enumerate(ws))
+
+    for j, (spk, ch, utts) in enumerate(chapters()):
+        if j % n != i:
+            continue
+        base = {"spk": spk, "ch": ch, "g": gender[spk]}
+        for L in REF_SECS if floor is None else (FILE_SEC,):
+            fx, _ = concat_from(utts, 0, L)
+            for fc in (FILE4 if floor is None else ("clean", "white30")) if fx is not None else ():
+                w = fc.startswith("white")
+                x = with_noise(ns, fx, int(fc[5:]), np.random.default_rng([int(spk), int(ch), int(fc[5:]), L]))[0] \
+                    if w else file_cond(fx, fc)
+                add(base | {"set": "ref", "cond": fc, "L": L}, x, w and floor is None)
+        fx, _ = concat_from(utts, 0, FILE_SEC)
+        for imp, ich in imps.get((spk, ch), []):
+            oth, _ = concat_from(sorted(glob.glob(str(LIBRI / "dev-clean" / imp / ich / "*.flac"))), 0, 30)
+            for snr in BYPASS_SNR if floor is None else (30,):
+                own, nr = with_noise(ns, fx, snr, np.random.default_rng([int(spk), int(ch), snr, FILE_SEC]))
+                for K in BYPASS_K:
+                    g = gated(ns, oth, K)
+                    for d in BYPASS_DB:
+                        add(base | {"set": "splice", "imp": imp, "imp_ch": ich, "K": K, "d": d, "snr": snr},
+                            np.concatenate([g * nr * 10 ** (d / 20), own]), floor is None)
+        print(f"{j} {spk}/{ch} rows={len(rows)} t={time.time() - t0:.0f}s", flush=True)
+    np.savez(WORK / f"emb_start4{'f' + floor.lstrip('-') if floor else ''}_{i}.npz", e=np.stack([e for _, e in rows]),
+             m=json.dumps([m for m, _ in rows]), info=json.dumps(info))
+
+
+def min_margin(E, M, keyf, refs, Lv):
+    """refs x lives: min over the reference's windows of (cosine - the window's threshold); >= 0 passes."""
+    pos = {}
+    for r, m in enumerate(M):
+        pos.setdefault(keyf(m), []).append(r)
+    thr = np.array([m["thr"] for m in M])
+    return np.stack([np.min(E[pos[r]] @ Lv.T - thr[pos[r], None], axis=0) for r in refs])
+
+
+def stage_report_start4():
+    """argv[2] = another FLOOR_DB ("-60"): its new windows (emb_start4f60_*) against the old scheme of emb_start4_*."""
+    floor = sys.argv[2].lstrip("-") if len(sys.argv) > 2 else ""
+    H = [load2(p) for p in sorted(WORK.glob("emb_head_*.npz"))]
+    Ov = [load2(p) for p in sorted(WORK.glob("emb_overlap_*.npz"))]
+    S4 = [np.load(p) for p in sorted(WORK.glob("emb_start4_*.npz"))]
+    HE, HM = np.concatenate([e for e, _ in H]), sum((m for _, m in H), [])
+    OE, OM = np.concatenate([e for e, _ in Ov]), sum((m for _, m in Ov), [])
+    NE = np.concatenate([z["e"] for z in S4])
+    NM = sum((json.loads(str(z["m"])) for z in S4), [])
+    info = sum((json.loads(str(z["info"])) for z in S4), [])
+    if floor:
+        F = [np.load(p) for p in sorted(WORK.glob(f"emb_start4f{floor}_*.npz"))]
+        keep = [j for j, m in enumerate(NM) if m["scheme"] == "old"]
+        NE = np.concatenate([NE[keep]] + [z["e"] for z in F])
+        NM = [NM[j] for j in keep] + sum((json.loads(str(z["m"])) for z in F), [])
+        ik = lambda r: tuple(r.get(k) for k in ("set", "spk", "ch", "cond", "L", "imp", "K", "d", "snr"))  # noqa: E731
+        start = {ik(r): r["start_s"] for z in F for r in json.loads(str(z["info"]))}
+        for r in info:
+            r["start_s"] = start.get(ik(r), r["start_s"])
+    li = [j for j, m in enumerate(HM) if m["set"] == "live"]
+    le, lm = HE[li], [HM[j] for j in li]
+    g = {m["spk"]: m["g"] for m in lm}
+    thr_of = {"s4": 0.40, "s4x": 0.40, "r8": 0.45}
+    old_cached = [(HE[j], HM[j]) for j in range(len(HM)) if HM[j]["set"] == "ref" and HM[j]["kind"] in ("s4", "r8")] \
+        + [(OE[j], OM[j]) for j in range(len(OM)) if OM[j]["set"] == "ref"]
+    old_cached = [(e, m | {"scheme": "old", "thr": thr_of[m["kind"]]}) for e, m in old_cached]
+    rk = ("spk", "ch", "cond", "L")
+    sk = ("spk", "ch", "imp", "K", "d", "snr")
+    hid = {tuple(r[k] for k in (rk if r["set"] == "ref" else sk)): r for r in info}
+    out, lines = {"a": {}, "hidden": {}, "c": {}}, []
+    f_ = floor or "55"  # the refusal options: (floor_margin, HIDDEN_S)
+    ins_opts = ((f"{f_}_3", 1.0), (f"{f_}_4", 1.0), (f"{f_}_3", 2.0), (f"{f_}_4", 2.0), (f"{f_}_3", 3.0))
+
+    def scheme(name, keyset):
+        E = [NE[j] for j, m in enumerate(NM) if m["scheme"] == name and m["set"] == keyset]
+        M = [m for m in NM if m["scheme"] == name and m["set"] == keyset]
+        if name == "old" and keyset == "ref":
+            E, M = E + [e for e, _ in old_cached], M + [m for _, m in old_cached]
+        return np.stack(E), M
+
+    def q(a):
+        a = np.asarray(a)
+        return {"p50": float(np.median(a)), "p95": float(np.percentile(a, 95)), "max": float(a.max())}
+
+    lines.append("## hidden s of the start (refs): share > HIDDEN_S 1 s, p50/p95/max; variants floor_margin")
+    for L in REF_SECS:
+        for fc in FILE4:
+            rs = [r for r in info if r["set"] == "ref" and r["cond"] == fc and r["L"] == L]
+            d = {v: {"share": float(np.mean([r["hidden"][v] > 1.0 for r in rs]))} | q([r["hidden"][v] for r in rs])
+                 | {f"share>{hs}": float(np.mean([r["hidden"][v] > hs for r in rs])) for hs in (1.5, 2.0, 3.0)}
+                 for v in rs[0]["hidden"]}
+            d["start_s"] = q([r["start_s"] for r in rs])
+            out["hidden"][f"{L}|{fc}"] = d
+            lines.append(f"ref={L}s {fc} n={len(rs)} start_s p50={d['start_s']['p50']:.1f}: " + "  ".join(
+                f"{v} {x['share']:.1%} ({x['p50']:.2f}/{x['p95']:.2f}/{x['max']:.2f})"
+                for v, x in d.items() if v != "start_s"))
+    (OEn, OMn), (NEn, NMn) = scheme("old", "ref"), scheme("new", "ref")
+    lines.append("## (a) FRR (own, another chapter) / FAR (other same sex): old 4h2+8 of _speech; new windows; "
+                 "new + refusal at hidden (floor_margin) > s")
+    for L in REF_SECS:
+        for fc in FILE4:
+            for lc in LIVE2_CONDS:
+                refs = sorted({tuple(m[k] for k in rk) for m in NMn if m["cond"] == fc and m["L"] == L})
+                if not refs:
+                    continue
+                fmeta = [{"spk": r[0], "ch": r[1], "g": g[r[0]]} for r in refs]
+                lj = [j for j, m in enumerate(lm) if m["cond"] == lc]
+                gen, imp = masks(fmeta, [lm[j] for j in lj])
+                kf = lambda m: tuple(m[k] for k in rk)  # noqa: E731
+                old = min_margin(OEn, OMn, kf, refs, le[lj]) >= 0
+                new = min_margin(NEn, NMn, kf, refs, le[lj]) >= 0
+                r = {"n_gen": int(gen.sum()), "n_imp": int(imp.sum())}
+                for name, ok in (("old", old), ("new", new)) + tuple(
+                        (f"new+{v}>{hs:g}", new & np.array([hid[ref]["hidden"][v] <= hs for ref in refs])[:, None])
+                        for v, hs in ins_opts):
+                    r[name] = {"frr": float(1 - ok[gen].mean()), "far": float(ok[imp].mean())}
+                out["a"][f"{L}|{fc}|{lc}"] = r
+                lines.append(f"ref={L}s {fc}/{lc} gen={r['n_gen']} imp={r['n_imp']}: " + "  ".join(
+                    f"{k} {v['frr']:.2%}/{v['far']:.3%}" for k, v in r.items() if isinstance(v, dict)))
+    (OEs, OMs), (NEs, NMs) = scheme("old", "splice"), scheme("new", "splice")
+    lj = [j for j, m in enumerate(lm) if m["cond"] == "clean"]
+    Lv, lmeta = le[lj], [lm[j] for j in lj]
+    lines.append("## (c) bypass: K s of another person (pauses digital, d dB above the owner's pause noise) + the owner "
+                 "40 s + white noise at SNR; live = the owner, another chapter, clean; pass rate")
+    for snr in BYPASS_SNR:
+        for K in (0,) + BYPASS_K:
+            for d in BYPASS_DB if K else (0,):
+                kf = (lambda m: tuple(m[k] for k in sk)) if K else (lambda m: tuple(m[k] for k in rk))  # noqa: E731
+                if K:
+                    refs = sorted({kf(m) for m in NMs if m["K"] == K and m["d"] == d and m["snr"] == snr})
+                    oe, om, ne, nm = OEs, OMs, NEs, NMs
+                else:  # the owner's own file with that noise (= the splice without the piece)
+                    own = sorted({(m["spk"], m["ch"]) for m in NMs})
+                    have = {tuple(m[k] for k in rk) for m in NMn}
+                    refs = [r for r in ((s, c, f"white{snr}", FILE_SEC) for s, c in own) if r in have]
+                    oe, om, ne, nm = OEn, OMn, NEn, NMn
+                if not refs:
+                    continue
+                ok_ = np.array([[lv["spk"] == r[0] and lv["ch"] != r[1] for lv in lmeta] for r in refs])
+                old = min_margin(oe, om, kf, refs, Lv) >= 0
+                new = min_margin(ne, nm, kf, refs, Lv) >= 0
+                r = {"n_splices": len(refs), "n_pairs": int(ok_.sum()), "old": float(old[ok_].mean()),
+                     "new_windows": float(new[ok_].mean())}
+                for v, hs in ins_opts:
+                    ins = np.array([hid[ref]["hidden"][v] <= hs for ref in refs])
+                    r[f"ins_{v}>{hs:g}"] = float(np.broadcast_to(ins[:, None], ok_.shape)[ok_].mean())
+                    r[f"new+{v}>{hs:g}"] = float((new & ins[:, None])[ok_].mean())
+                r["hidden_55_3"] = q([hid[ref]["hidden"]["55_3"] for ref in refs])
+                r["start_s"] = q([hid[ref]["start_s"] for ref in refs])
+                r["speech_s"] = q([hid[ref].get("speech_s", 0) for ref in refs])
+                out["c"][f"{snr}|{K}|{d}"] = r
+                lines.append(f"snr={snr} K={K} d={d} splices={r['n_splices']} pairs={r['n_pairs']}: " + "  ".join(
+                    f"{k}={v:.2%}" for k, v in r.items() if isinstance(v, float))
+                    + f"  hidden p50/p95/max={r['hidden_55_3']['p50']:.2f}/{r['hidden_55_3']['p95']:.2f}/"
+                      f"{r['hidden_55_3']['max']:.2f}  start_s p50={r['start_s']['p50']:.1f}"
+                      f"  old speech_s p50={r['speech_s']['p50']:.1f}")
+    out["info"] = info  # per reference: hidden s of every variant, start / rest / speech s
+    json.dump(out, open(WORK / f"report_start4{'f' + floor if floor else ''}.json", "w"), indent=1, default=float)
+    print("\n".join(lines))
+
+
+def stage_timing_start4():
+    """1 thread, reference 60 s: new (_start + _windows, embed, min) vs old (4h2+8 of _speech), and _start alone."""
+    ns, se = voice_ns(), make_se(1)
+    utts = sorted(glob.glob(str(LIBRI / "dev-clean/84/121123/*.flac")))
+    x60, used = concat_from(utts, 0, 60)
+    lv = embed(se, speech_edges(live_chunks(utts, used, LIVE3_S)[0]))
+
+    def new():
+        return min(embed(se, w) @ lv - t for w, t in ns["_windows"](ns["_start"](x60, SR), SR))
+
+    def old():
+        t = ns["_speech"](x60, SR)
+        h = head_windows(t)
+        return min(embed(se, w) @ lv for w in h["s4"] + head_x4(t) + h["r8"])
+
+    for name, fn in (("_start alone", lambda: ns["_start"](x60, SR)), ("old 4h2+8", old), ("new", new),
+                     ("old 4h2+8", old), ("new", new)):  # twice: load drifts
+        fn()
+        ts = []
+        for _ in range(10):
+            t = time.perf_counter()
+            fn()
+            ts.append(time.perf_counter() - t)
+        print(f"ref 60 s {name}: median={np.median(ts) * 1000:.0f}ms p90={np.percentile(ts, 90) * 1000:.0f}ms",
+              flush=True)
+    st, _, rest = ns["_start"](x60, SR)
+    print(f"new: start {len(st) / SR:.1f} s + rest {len(rest) / SR:.1f} s, "
+          f"{len(ns['_windows'](np.concatenate([st, rest]), SR))} windows; old: speech "
+          f"{len(ns['_speech'](x60, SR)) / SR:.1f} s")
+
+
+# ---------- stage 6: what save() writes (frames FLOOR_DB under the median speech frame -> digital silence) is checked ----
+VOICE_FNS6 = ("_frames", "_speech", "_start", "_windows", "_under_floor", "check", "_band_db")
+FLOORS6 = (25.0, 30.0, 35.0)
+RAISE_S = (0, 3, 6)  # (c): the first s of my speech +20 dB, then 5 s of another person at -10 dB to my speech, then me 40 s
+
+
+def saved(ns, x):
+    """voice.save()'s numbers: (reference.wav as read back, frames of the start written as silence, the level-set
+    recording before that). Its file and json writing left out; PCM_16 through soundfile, as save() writes it."""
+    import io
+    x = np.asarray(x, np.float32)[:int(ns["MAX_S"] * SR)]
+    report = ns["check"](x, SR)
+    peak = float(np.max(np.abs(x))) or 1.0
+    gain = min(10 ** ((ns["TARGET_DB"] - report.level_db) / 20), 10 ** (-1 / 20) / peak)
+    y = np.clip(x * gain, -1, 1)
+    pre = y.copy()
+    under = ns["_under_floor"](y, SR)
+    fl = SR * 30 // 1000
+    y[:len(under) * fl].reshape(-1, fl)[under] = 0
+    buf = io.BytesIO()
+    sf.write(buf, y, SR, format="WAV", subtype="PCM_16")
+    buf.seek(0)
+    return sf.read(buf, dtype="float32")[0], under, pre
+
+
+def speech_frames(ns, x):
+    """check()'s speech frames of x: louder than the pauses' p10 + 6 dB, not under -60."""
+    f = ns["_frames"](x - x.mean(), SR)
+    db = 10 * np.log10(np.mean(f ** 2, axis=1) + 1e-12)
+    live = db[db > -100]
+    return db > max(float(np.percentile(live, 10)) + 6, -60.0) if len(live) else db > 0
+
+
+def stage_save6():
+    """argv[2] = shard "i/n", argv[3] = part: "1" = ref 40 s clean / opus24k + the bypass of stage 4 (K s of another
+    person, pauses digital, d dB above the owner's noise, then the owner 40 s + white noise at SNR); "2" = ref 40 s
+    white30 / white20, ref 60 s clean / white20 + (c) the floor raised (RAISE_S s of mine at +20 dB, 5 s of another
+    person at -10 dB, me 40 s; 0 = no loud start). Each at FLOORS6: the file as save() writes it, checked as
+    confirm_live does (_windows(_start)). Refs: every window's vector (FRR / FAR in the report); splices: only the pass
+    against the owner's clean lives of other chapters (windows in _windows' order, stopped once every live fails)."""
+    import hashlib
+    i, n = map(int, sys.argv[2].split("/"))
+    part = sys.argv[3]
+    ns, se, gender, rows, info, t0 = voice_ns(VOICE_FNS6), make_se(1), libri_speakers(), [], [], time.time()
+    H = [load2(p) for p in sorted(WORK.glob("emb_head_*.npz"))]
+    HE, HM = np.concatenate([e for e, _ in H]), sum((m for _, m in H), [])
+    lives = {}
+    for e, m in zip(HE, HM):
+        if m["set"] == "live" and m["cond"] == "clean":
+            lives.setdefault(m["spk"], []).append((m["ch"], e))
+    imps, cache = {}, {}
+    for spk, ch, imp, ich in splice_pairs():
+        imps.setdefault((spk, ch), []).append((imp, ich))
+
+    def emb(w):
+        k = hashlib.blake2b(w.tobytes(), digest_size=16).digest()
+        if k not in cache:
+            cache[k] = embed(se, w)
+        return cache[k]
+
+    def ref(meta, x):
+        sp = speech_frames(ns, saved(ns, x)[2])
+        for fl in FLOORS6:
+            ns["FLOOR_DB"] = fl
+            y, under, _ = saved(ns, x)
+            st = ns["_start"](y, SR)
+            wins = ns["_windows"](st, SR)
+            rows.extend((meta | {"floor": fl, "i": q, "thr": thr}, emb(w)) for q, (w, thr) in enumerate(wins))
+            info.append(meta | {"floor": fl, "zeroed_s": float(under.sum()) * 0.03,
+                                "speech_lost_s": float((under & sp[:len(under)]).sum()) * 0.03,
+                                "speech30_s": float(sp[:len(under)].sum()) * 0.03, "n_win": len(wins)})
+
+    def splice(meta, x, a, b, Lv):
+        """x with another person at samples a:b (frame-aligned)."""
+        fl_ = SR * 30 // 1000
+        on = np.mean(ns["_frames"](x[a:b], SR) ** 2, axis=1) > 1e-10
+        for fl in FLOORS6:
+            ns["FLOOR_DB"] = fl
+            y, under, _ = saved(ns, x)
+            kept = np.mean(ns["_frames"](y[a:b], SR) ** 2, axis=1) > 1e-10
+            ok, k = np.ones(len(Lv), bool), 0
+            for w, thr in ns["_windows"](ns["_start"](y, SR), SR):
+                ok &= emb(w) @ Lv.T >= thr
+                k += 1
+                if not ok.any():
+                    break
+            info.append(meta | {"floor": fl, "pass": ok.tolist(), "n_emb": k, "fore_on_s": float(on.sum()) * 0.03,
+                                "fore_kept_s": float((kept & on).sum()) * 0.03, "zeroed_s": float(under.sum()) * 0.03})
+        assert a % fl_ == 0
+
+    for j, (spk, ch, utts) in enumerate(chapters()):
+        if j % n != i:
+            continue
+        cache.clear()
+        base = {"spk": spk, "ch": ch, "g": gender[spk]}
+        for L, fc in ((40, "clean"), (40, "opus24k")) if part == "1" else \
+                ((40, "white30"), (40, "white20"), (60, "clean"), (60, "white20")):
+            fx, _ = concat_from(utts, 0, L)
+            if fx is None:
+                continue
+            x = with_noise(ns, fx, int(fc[5:]), np.random.default_rng([int(spk), int(ch), int(fc[5:]), L]))[0] \
+                if fc.startswith("white") else file_cond(fx, fc)
+            ref(base | {"set": "ref", "cond": fc, "L": L}, x)
+        Lv = np.stack([e for c, e in lives.get(spk, []) if c != ch] or [np.zeros(HE.shape[1], np.float32)])
+        for imp, ich in imps.get((spk, ch), []):
+            oth, _ = concat_from(sorted(glob.glob(str(LIBRI / "dev-clean" / imp / ich / "*.flac"))), 0, 30)
+            sm = base | {"set": "splice", "imp": imp, "imp_ch": ich}
+            if part == "1":
+                fx, _ = concat_from(utts, 0, FILE_SEC)
+                for snr in BYPASS_SNR:
+                    own, nr = with_noise(ns, fx, snr, np.random.default_rng([int(spk), int(ch), snr, FILE_SEC]))
+                    for K in BYPASS_K:
+                        g = gated(ns, oth, K)
+                        for d in BYPASS_DB:
+                            splice(sm | {"K": K, "d": d, "snr": snr}, np.concatenate([g * nr * 10 ** (d / 20), own]),
+                                   0, len(g), Lv)
+            elif (fx := concat_from(utts, 0, FILE_SEC + max(RAISE_S))[0]) is not None:  # 3 chapters are shorter
+                g = gated(ns, oth, 5) * rms(ns["_speech"](fx, SR)) * 10 ** (-10 / 20)
+                for R in RAISE_S:
+                    x = np.concatenate([fx[:R * SR] * 10, g, fx[R * SR:(R + FILE_SEC) * SR]])
+                    x *= min(1.0, 0.99 / float(np.max(np.abs(x))))  # no clipping: the whole file turned down
+                    splice(sm | {"R": R}, x, R * SR, R * SR + len(g), Lv)
+        print(f"{j} {spk}/{ch} rows={len(rows)} info={len(info)} t={time.time() - t0:.0f}s", flush=True)
+    np.savez(WORK / f"emb_save6_{part}_{i}.npz", e=np.stack([e for _, e in rows]) if rows else np.zeros((0, HE.shape[1])),
+             m=json.dumps([m for m, _ in rows]), info=json.dumps(info))
+
+
+def stage_report_save6():
+    H = [load2(p) for p in sorted(WORK.glob("emb_head_*.npz"))]
+    HE, HM = np.concatenate([e for e, _ in H]), sum((m for _, m in H), [])
+    Z = [np.load(p) for p in sorted(WORK.glob("emb_save6_*.npz"))]
+    E = np.concatenate([z["e"] for z in Z if len(z["e"])])
+    M = sum((json.loads(str(z["m"])) for z in Z), [])
+    info = sum((json.loads(str(z["info"])) for z in Z), [])
+    li = [j for j, m in enumerate(HM) if m["set"] == "live"]
+    le, lm = HE[li], [HM[j] for j in li]
+    g = {m["spk"]: m["g"] for m in lm}
+    rk = ("spk", "ch", "cond", "L", "floor")
+    out, lines = {"a": {}, "b": {}, "c": {}, "d": {}}, []
+
+    def q(a):
+        a = np.asarray(a, float)
+        return {"p50": float(np.median(a)), "p95": float(np.percentile(a, 95)), "max": float(a.max())} if len(a) else {}
+
+    lines.append("## (a) FRR (own, another chapter) / FAR (other same sex) of the file as save() writes it, per FLOOR_DB")
+    for L, fc in sorted({(m["L"], m["cond"]) for m in M}):
+        for lc in LIVE2_CONDS:
+            lj = [j for j, m in enumerate(lm) if m["cond"] == lc]
+            parts = []
+            for fl in FLOORS6:
+                refs = sorted({tuple(m[k] for k in rk) for m in M if m["cond"] == fc and m["L"] == L and m["floor"] == fl})
+                if not refs:
+                    continue
+                fmeta = [{"spk": r[0], "ch": r[1], "g": g[r[0]]} for r in refs]
+                gen, imp = masks(fmeta, [lm[j] for j in lj])
+                ok = min_margin(E, M, lambda m: tuple(m[k] for k in rk), refs, le[lj]) >= 0
+                r = {"frr": float(1 - ok[gen].mean()), "far": float(ok[imp].mean()), "n_gen": int(gen.sum()),
+                     "n_imp": int(imp.sum())}
+                out["a"][f"{L}|{fc}|{lc}|{fl:g}"] = r
+                parts.append(f"{fl:g}: {r['frr']:.2%}/{r['far']:.3%}")
+            lines.append(f"ref={L}s {fc}/{lc} gen={r['n_gen']} imp={r['n_imp']}: " + "  ".join(parts))
+    lines.append("## (d) the start (30 s) written as silence, s: all / my speech (check()'s frames) p50/p95/max")
+    for L, fc in sorted({(r["L"], r["cond"]) for r in info if r["set"] == "ref"}):
+        for fl in FLOORS6:
+            rs = [r for r in info if r["set"] == "ref" and r["cond"] == fc and r["L"] == L and r["floor"] == fl]
+            d = {"zeroed": q([r["zeroed_s"] for r in rs]), "speech_lost": q([r["speech_lost_s"] for r in rs]),
+                 "speech30": q([r["speech30_s"] for r in rs]), "n": len(rs)}
+            out["d"][f"{L}|{fc}|{fl:g}"] = d
+            lines.append(f"ref={L}s {fc} floor={fl:g} n={len(rs)}: zeroed {d['zeroed']['p50']:.2f}/{d['zeroed']['p95']:.2f}/"
+                         f"{d['zeroed']['max']:.2f}  speech lost {d['speech_lost']['p50']:.2f}/{d['speech_lost']['p95']:.2f}/"
+                         f"{d['speech_lost']['max']:.2f} (of speech {d['speech30']['p50']:.1f})")
+
+    def splices(key, sel, title):
+        lines.append(title)
+        for k in sorted({tuple(r[x] for x in key) for r in info if sel(r)}):
+            for fl in FLOORS6:
+                rs = [r for r in info if sel(r) and tuple(r[x] for x in key) == k and r["floor"] == fl]
+                if not rs:
+                    continue
+                P = [(p, r["fore_kept_s"]) for r in rs for p in r["pass"]]
+                d = {"n_splices": len(rs), "n_pairs": len(P), "pass": float(np.mean([p for p, _ in P])),
+                     "silenced": float(np.mean([r["fore_kept_s"] == 0 for r in rs])),
+                     "danger": float(np.mean([p and kept > 0 for p, kept in P])),
+                     "danger_1s": float(np.mean([p and kept >= 1 for p, kept in P])),
+                     "fore_kept_s": q([r["fore_kept_s"] for r in rs]), "fore_on_s": q([r["fore_on_s"] for r in rs]),
+                     "n_emb": float(np.mean([r["n_emb"] for r in rs]))}
+                out["b" if "K" in key else "c"]["|".join(map(str, k)) + f"|{fl:g}"] = d
+                lines.append(" ".join(f"{x}={v}" for x, v in zip(key, k)) + f" floor={fl:g} splices={d['n_splices']} "
+                             f"pairs={d['n_pairs']}: pass={d['pass']:.2%} silenced={d['silenced']:.1%} "
+                             f"danger={d['danger']:.2%} danger(kept>=1s)={d['danger_1s']:.2%} kept s p50/p95="
+                             f"{d['fore_kept_s']['p50']:.2f}/{d['fore_kept_s']['p95']:.2f} of {d['fore_on_s']['p50']:.2f}")
+
+    splices(("snr", "K", "d"), lambda r: r["set"] == "splice" and "K" in r,
+            "## (b) bypass of stage 4; pass = the check passes (live: the owner, clean); silenced = the other person all "
+            "written as silence; danger = in the file and passed")
+    splices(("R",), lambda r: r["set"] == "splice" and "R" in r,
+            "## (c) the floor raised: R s of mine at +20 dB, 5 s of another at -10 dB to my speech, me 40 s")
+    json.dump(out, open(WORK / "report_save6.json", "w"), indent=1, default=float)
+    print("\n".join(lines))
+
+
 if __name__ == "__main__":
     {"embed": stage_embed, "report": stage_report, "timing": stage_timing, "padded": stage_padded,
      "report_padded": stage_report_padded, "wlive": stage_wlive, "wfile": stage_wfile, "splice": stage_splice,
      "report2": stage_report2, "timing2": stage_timing2, "trimcheck": stage_trimcheck,
-     "trim3": stage_trim3, "report_trim3": stage_report_trim3}[sys.argv[1]]()
+     "trim3": stage_trim3, "report_trim3": stage_report_trim3, "head": stage_head, "report_head": stage_report_head,
+     "timing_head": stage_timing_head, "overlap": stage_overlap, "report_overlap": stage_report_overlap,
+     "timing_overlap": stage_timing_overlap, "start4": stage_start4, "report_start4": stage_report_start4,
+     "timing_start4": stage_timing_start4, "save6": stage_save6,
+     "report_save6": stage_report_save6}[sys.argv[1]]()

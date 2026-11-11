@@ -916,6 +916,13 @@ class Controller:
             return None, f'their voice is not made on this computer: {why or "it is not downloaded (Components…)"}'
         return None, 'them → me is not running'
 
+    def their_voices_deleted(self) -> None:
+        """A contact's voice deleted in Voices…: the them side running here forgets it now (voices/live.LiveVoice)."""
+        for x in list(self.sides):
+            if getattr(x, 'name', 'them') == 'them' and (
+                    lv := getattr(getattr(x.directions[0][0], 'tts', None), 'live', None)) is not None:
+                lv.deleted()
+
     def set_translation(self, on: bool) -> concurrent.futures.Future:
         self.wanted = on  # the user's choice: a sound server back does not undo an "off" made while it was gone
         return self.submit(self._on if on else self._off)

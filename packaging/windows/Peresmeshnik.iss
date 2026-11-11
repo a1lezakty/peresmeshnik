@@ -133,6 +133,7 @@ end;
     voice-pack.tmp, voice-pack.pip-tmp, voice-pack.old-*; asked about also when only those are there;
   - the voices (voices: my own recording, the voices of people I talk to that I chose to keep) go only when the user
     says so, a question of their own;
+  - the Hugging Face token (hf-token: Kyutai's Pocket TTS weights, models.hf_token_file) the same way;
   - the settings go only when the user says so, and with them the Gemini API key, which is a plain-text file there.
   Settings, data and cache are one folder on Windows (config.config_dir, data_dir, cache_dir: %LOCALAPPDATA%\Peresmeshnik):
   logs, crash reports and the models (Cache\models) stay, and the dialog says where. }
@@ -166,6 +167,10 @@ begin
       if MsgBox('Remove your saved voices too: the recording of your own voice and the voices of people you talk to '
                 + 'that you chose to keep (' + Dir + '\voices)?', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
         DelTree(Dir + '\voices', True, True, True);
+    if FileExists(Dir + '\hf-token') then
+      if MsgBox('Remove your Hugging Face token too? It is stored as plain text in ' + Dir + '\hf-token: anyone signed '
+                + 'in to your Windows account can read it.', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+        DeleteFile(Dir + '\hf-token');
     if FileExists(Dir + '\settings.toml') or FileExists(Dir + '\gemini-key') then
       if MsgBox('Remove your settings and your Gemini API key too? The key is stored as plain text in ' + Dir
                 + '\gemini-key: anyone signed in to your Windows account can read it.' + #13#10#13#10

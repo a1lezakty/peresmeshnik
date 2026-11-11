@@ -439,6 +439,10 @@ def save_them(name: str, lang: str, seconds: float, states: dict[str, tuple[np.n
     no recording of their speech. `states`: {model id: (the engine's state or vector, sha256 of its weights)}."""
     import secrets
     import shutil
+
+    from peresmeshnik import languages
+    if gpu := [m for m in states if languages.needs_gpu(m)]:  # the voice pack's engines keep no voice (COMMON 23:49)
+        raise ValueError(f'not kept: {", ".join(gpu)} keeps no voice for the next call')
     base = root or voices_dir()
     vid = f'them-{secrets.token_hex(4)}'
     tmp = base / f'{vid}.tmp'  # made whole aside, then renamed: never a folder without its voice.json
@@ -580,6 +584,22 @@ MATCH = 0.45
 # clean (3.4 % with one vector), another person passes 0.06 % a try, 0.19 % in 3 tries. 10-12 s: fewer refusals in
 # noise, more of another person in a mixed window
 WIN_S = 8.0
+# its start in shorter windows: a piece of someone else shorter than WIN_S at the very start (where the engines take their
+# prompt: XTTS 6 s, Pocket 10 s) is diluted by my voice in an 8 s window. BENCH (stage 8 tails), the worst over a shift
+# of 0-2 s: 3/4/5/6 s of another person passed 96/90/66/36 % with 8 s windows; with 4 s windows every 2 s over the first
+# 12 s at 0.40 (a 4 s window of mine scores lower: p5 0.51 against 0.55 at 8 s; another person's p99 0.41 against
+# 0.42) 36/23/3.5/0.9 %; the same person refused 4.1 % clean (3.8 %), another person passing a try 0.056 % (0.063 %)
+HEAD_S, HEAD_WIN_S, HEAD_HOP_S, HEAD_MATCH = 12.0, 4.0, 2.0, 0.40
+# what the engines take is the file's raw start, pauses and all (Pocket and Qwen3 its first 10 s, XTTS 6 s and its speaker
+# vector 30 s): checked as it is, not through the relative trim of _speech (a voice of someone else turned down to just
+# above the noise of my pauses fell under it whole, FIXES-s3-tails r2 1). What the check does not see the engines do not
+# get either (r3 1): save() writes the frames of the start more than FLOOR_DB under the median speech frame as digital
+# silence (the median: a few loud seconds do not move it), and the check takes all of the start but digital silence
+# (a file put there by hand, quiet voice and all, is checked whole). BENCH (stage 8 tails, written as silence): 5 s of
+# another person 3 dB above the noise of my pauses (SNR 30) in the file and passing 94 % with the trim, 1.1 % at 35 dB
+# (17 % at 30: a lower floor cuts them into shreds the windows miss); the same person refused 4.41 % clean (4.08 %),
+# another person 0.063 % (0.056 %); of my own speech p95 0.3 s goes silent
+START_S, FLOOR_DB = 30.0, 35.0
 TRIES, PAUSES_S = 3, (60, 300, 1500, 3600)  # failed checks in a row before a pause; the pauses after them, growing
 
 
@@ -595,13 +615,43 @@ def _to(pcm: np.ndarray, sr: int, to: int) -> np.ndarray:
     return x if sr == to else np.interp(np.arange(0, len(x), sr / to), np.arange(len(x)), x).astype(np.float32)
 
 
-def _windows(x: np.ndarray, sr: int) -> list[np.ndarray]:
-    """WIN_S pieces of `x`; a last one shorter than half of it joins the one before."""
-    n = int(WIN_S * sr)
-    w = [x[i:i + n] for i in range(0, len(x), n)] or [x]
-    if len(w) > 1 and len(w[-1]) < n // 2:
-        w[-2:] = [np.concatenate(w[-2:])]
-    return w
+def _under_floor(x: np.ndarray, sr: int) -> np.ndarray:
+    """Which 30 ms frames of the first START_S of `x` save() writes as digital silence: more than FLOOR_DB under the
+    median frame of the recording's speech (check()'s: above the noise of the pauses + 6 dB)."""
+    f = _frames(x - x.mean(), sr)
+    db = 10 * np.log10(np.mean(f ** 2, axis=1) + 1e-12)
+    live = db[db > -100]
+    speech = db[db > max(float(np.percentile(live, 10)) + 6, -60.0)] if len(live) else live
+    if not len(speech):
+        return np.zeros(min(len(f), int(START_S * 1000 / 30)), bool)
+    return db[:int(START_S * 1000 / 30)] < float(np.median(speech)) - FLOOR_DB
+
+
+def _start(pcm: np.ndarray, sr: int) -> np.ndarray:
+    """What is checked of a recording: its first START_S as the engines take it, only digital silence out (save() wrote
+    what is under the floor as such), then the speech of what follows (_speech's)."""
+    x = np.asarray(pcm, np.float32)
+    f, n = _frames(x, sr), int(START_S * 1000 / 30)
+    keep = np.mean(f[:n] ** 2, axis=1) > 1e-10  # not digital silence (-100 dB, of the samples as they are)
+    rest = _speech(x[n * f.shape[1]:], sr) if len(f) > n else x[:0]  # a short one joins the last window
+    return np.concatenate([(f[:n][keep] - x.mean()).reshape(-1), rest]).astype(np.float32)
+
+
+def _windows(x: np.ndarray, sr: int) -> list[tuple[np.ndarray, float]]:
+    """(piece, its threshold) of the speech `x`: its first HEAD_S in HEAD_WIN_S pieces every HEAD_HOP_S (HEAD_MATCH),
+    the rest in WIN_S pieces (MATCH), a last one shorter than half of it joining the one before."""
+    h, k, n = int(HEAD_S * sr), int(HEAD_WIN_S * sr), int(WIN_S * sr)
+    m = min(h, len(x))
+    at = list(range(0, max(m - k, 0) + 1, int(HEAD_HOP_S * sr)))
+    if at[-1] + k < m:  # a start shorter than HEAD_S: its end is covered too
+        at.append(m - k)
+    head = [(x[i:i + k], HEAD_MATCH) for i in at]
+    rest = [x[i:i + n] for i in range(h, len(x), n)]
+    if len(rest) > 1 and len(rest[-1]) < n // 2:
+        rest[-2:] = [np.concatenate(rest[-2:])]
+    if rest and len(rest[-1]) < n // 2 and len(x) > h:  # a short tail after the start: the last start window takes it
+        head[-1] = (np.concatenate([head[-1][0], rest.pop()]), HEAD_MATCH)
+    return head + [(w, MATCH) for w in rest]
 
 
 def _checks(voices: Path) -> Path:
@@ -681,20 +731,21 @@ def confirm_live(ref: Voice, pcm: np.ndarray, sr: int, said: list[str], asr, spe
     heard = asr.recognize(_to(pcm, sr, SAMPLE_RATE), lang=ref.meta.get('lang')).text
     err = wer(' '.join(said), heard)
     live = speaker.embed(_speech(pcm, sr, edges=True), sr)
-    sims = [float(speaker.embed(w, rsr) @ live) for w in _windows(_speech(x.mean(axis=1), rsr), rsr)]
-    sim = min(sims)
+    sims = [(float(speaker.embed(w, rsr) @ live), m) for w, m in _windows(_start(x.mean(axis=1), rsr), rsr)]
+    sim, worst = min(sims, key=lambda s: s[0] - s[1])  # the window furthest below its threshold (or nearest to it)
+    low = sim < worst
     why = ([f'the words heard are not the ones on the screen ({err:.0%} differ): read them as written'] if err > LIVE_WER
-           else []) + ([f'this is not the voice of the recording (similarity {sim:.2f})'] if sim < MATCH else [])
-    if sim < MATCH and (r := check(pcm, sr)).speech_s and r.snr_db < FAIR_DB:  # the same person: refused 3x as often
+           else []) + ([f'this is not the voice of the recording (similarity {sim:.2f})'] if low else [])
+    if low and (r := check(pcm, sr)).speech_s and r.snr_db < FAIR_DB:  # the same person: refused 3x as often
         why.append(f'the background is loud (your speech only {r.snr_db:.0f} dB above it): try again somewhere quiet')
-    if sim < MATCH and ref.meta.get('quality', {}).get('band_db', 0.0) < BAND_DB:
+    if low and ref.meta.get('quality', {}).get('band_db', 0.0) < BAND_DB:
         why.append('the recording sounds like a phone call: one from a better microphone matches more reliably')
     _tried(not why, ref.path.parent)
     if why:
         return None, 'Not confirmed: ' + '; '.join(why) + '.'
     import hashlib
     how = 'mic-live' if ref.meta.get('source') == 'mic' else 'import+mic-match'
-    return {'how': how, 'at': _now(), 'wer': round(err, 3), 'similarity': round(sim, 3), 'windows': len(sims),
+    return {'how': how, 'at': _now(), 'wer': round(err, 3), 'similarity': round(min(s for s, _ in sims), 3), 'windows': len(sims),
             'ref_sha256': hashlib.sha256(data).hexdigest()}, ''
 
 def set_consent(name: str, consent: dict | None, root: Path | None = None) -> Voice:
@@ -725,7 +776,11 @@ def save(pcm: np.ndarray, sr: int, name: str, lang: str, transcript: str | None 
     _private(base, path)
     for old in path.glob('*.pt'):  # engine caches of an older recording
         old.unlink()
-    sf.write(path / 'reference.wav', np.clip(x * gain, -1, 1), sr, subtype='PCM_16')
+    y = np.clip(x * gain, -1, 1)
+    under = _under_floor(y, sr)
+    fl = sr * 30 // 1000
+    y[:len(under) * fl].reshape(-1, fl)[under] = 0  # the engines get only what is checked
+    sf.write(path / 'reference.wav', y, sr, subtype='PCM_16')
     meta = {'version': VERSION, 'id': name, 'name': name, 'kind': 'me', 'lang': lang, 'created': _now(),
             'consent': None, 'source': source, 'seconds': report.seconds, 'engines': {},
             'transcript': transcript or '', 'sample_rate': sr, 'gain_db': round(20 * np.log10(gain), 1),

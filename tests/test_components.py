@@ -351,7 +351,8 @@ def test_the_hugging_face_token_where_the_clone_waits_for_it(no_token):
     assert components.token_page('en') == 'https://huggingface.co/kyutai/pocket-tts' and not models.hf_token()
     box = ComponentsBox(s)
     box.refresh()
-    dialog = voices.VoicesDialog(s)
+    changed = []
+    dialog = voices.VoicesDialog(s, changed.append)
     page = wizard.VoicePage(type('W', (), {'s': s})())
     page.initializePage()
     assert not box.hf.isHidden() and not dialog.hf.isHidden() and not page.hf.isHidden()
@@ -365,10 +366,27 @@ def test_the_hugging_face_token_where_the_clone_waits_for_it(no_token):
     box.hf.saved.emit()  # the token changed: the list again
     (pocket,) = [c for c in box.rows if c.id == 'pocket-tts-en']
     assert pocket.recommended and pocket.token and box.wanted(pocket) and box.hf.isHidden()
+    asked = []
+    dialog.hf.confirm = lambda text: asked.append(text) or False
     dialog.hf.token.setText('')
-    dialog.hf.save.click()  # empty: forgotten
+    dialog.hf.save.click()  # empty: asked first (00:50); No keeps it
+    assert asked and models.hf_token() == 'hf_secret'
+    dialog.hf.confirm = lambda text: True
+    dialog.hf.save.click()  # Yes: forgotten
     assert not no_token.exists() and models.hf_token() == '' and 'forgotten' in dialog.token_note.text()
-    assert not dialog.hf.isHidden()
+    assert not dialog.hf.isHidden() and changed == []  # 00:50: no restart of translation for it
+
+
+def test_a_token_from_the_environment_is_said(no_token, monkeypatch):
+    """00:50: HF_TOKEN set: the field says so (it goes before the saved one)."""
+    from PySide6.QtWidgets import QWidget
+
+    from peresmeshnik.ui.components import HfTokenBox
+    monkeypatch.setenv('HF_TOKEN', 'hf_from_env')
+    window = QWidget()  # as in the app: inside a window (shown on its own, it crashed the test process at exit)
+    box = HfTokenBox(window)
+    box.show_for('https://huggingface.co/kyutai/pocket-tts')
+    assert 'HF_TOKEN' in box.token.placeholderText() and models.hf_token() == 'hf_from_env'
 
 
 def test_hugging_face_refusing_does_not_hold_the_wizard(no_token, monkeypatch):
@@ -377,8 +395,12 @@ def test_hugging_face_refusing_does_not_hold_the_wizard(no_token, monkeypatch):
     from peresmeshnik.ui.components import ComponentsBox
     models.save_hf_token('hf_wrong')
 
+    tries = []
+
     def refused(progress, cancel):
-        raise models.Gated('Hugging Face refused pocket-tts-en (403): accept its conditions', 'https://hf.example/pocket')
+        tries.append(1)
+        if len(tries) == 1:
+            raise models.Gated('Hugging Face refused pocket-tts-en (403): accept its conditions', 'https://hf.example/pocket')
     rows = [components.Component('pocket-tts-en', 'Your cloned voice: pocket-tts-en', 9, 'CC-BY-4.0', 'https://x', '',
                                  False, 0, True, 'a stock voice speaks instead', token=True, _fetch=refused)]
     monkeypatch.setattr(components, 'listing', lambda s: rows)
@@ -392,6 +414,11 @@ def test_hugging_face_refusing_does_not_hold_the_wizard(no_token, monkeypatch):
     assert box.missing() == [] and 'accept its conditions' in box.state.text()
     assert not box.hf.isHidden() and box.hf.page == 'https://hf.example/pocket'
     assert 'Without Your cloned voice: pocket-tts-en: a stock voice speaks instead.' in box.without.text()
+    box.download()  # the conditions accepted meanwhile: it comes through, the refusal is forgotten (00:50)
+    end = time.monotonic() + 5
+    while box.busy and time.monotonic() < end:
+        settle()
+    assert box.refused == {} and box.hf.isHidden() and 'Without Your cloned voice' not in box.without.text()
 
 
 def test_removing_the_pack_goes_through_its_lock(tmp_path, monkeypatch):

@@ -430,7 +430,8 @@ class Tray(QObject):
             from peresmeshnik.ui.components import ComponentsDialog
             self._pair = s, moved, back, engines_now
             d = ComponentsDialog(s, translating=lambda: bool(getattr(self.ctl, 'on', False)))
-            d.box.finished.connect(lambda err, s=s, box=d.box: err or box.missing() or self._pair_ready(s, ''))
+            d.box.finished.connect(lambda err, s=s, box=d.box: box.missing() or self._pair_ready(s, ''))  # a refused clone
+            # (403) is not missing: the pair changes, its stock voice speaks
 
             def let_go(*_, s=s, d=d):  # closed before what the pair needs is here: that pair is not on its way any more
                 if self._pair and self._pair[0] is s and not d.box.busy:

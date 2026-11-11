@@ -967,3 +967,17 @@ def test_the_tray_asks_before_it_downloads_and_never_fetches_the_clone_unasked(t
     assert wait_for(lambda: len(calls) == 2)
     assert config.load().me_to_them == 'local' and got == [] and len(asked) == 3  # no, choose, choose: this one not asked
     assert any('your cloned voice (clone-en' in m and 'a stock voice speaks' in m for m in t.said), t.said
+
+
+def test_choose_then_a_refused_clone_still_changes_the_pair(tmp_path, monkeypatch):
+    """00:50: in the Components window from Choose…, Hugging Face refusing the clone (403) leaves nothing the pair needs
+    missing: the pair changes (its stock voice speaks), the refusal said there."""
+    s = wire(config.Settings(my_lang='ru', their_lang='en', them_to_me='local', me_to_them='cloud'))
+    t, calls = tray_with(monkeypatch, tmp_path, s)
+    t.ask = lambda text, choose=True: 'choose'
+    t.switch_pair('de', 'ja')
+    settle(0.2)
+    d = t.windows[-1]
+    monkeypatch.setattr(d.box, 'missing', lambda: [])
+    d.box.finished.emit('Your cloned voice: pocket-tts-de: Hugging Face refused it (403)')
+    assert wait_for(lambda: calls) and (config.load().my_lang, config.load().their_lang) == ('de', 'ja')

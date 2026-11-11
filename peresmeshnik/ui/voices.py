@@ -211,14 +211,14 @@ class VoicesDialog(QDialog):
         self._buttons()
 
     def _token_saved(self) -> None:
-        """Another token: the clone engine is chosen again; my side takes it at its restart (its weights: Components…)."""
+        """Another token: the clone engine is chosen again the next time translation starts (its weights: Components…);
+        translation going on now is not restarted for it."""
         from peresmeshnik import languages, models
         engine = languages.clone_engine(self.s.their_lang)[0]
         self.token_note.setText(f'Saved. Your cloned voice ({engine}) is downloaded in Components… (tray menu).'
                                 if engine and not models.is_fetched(models.get(engine)) else
                                 'Saved.' if models.hf_token() else 'The token is forgotten.')
         self.refresh()
-        self.on_change(True)
 
     def selected(self):
         """The voice of the selected row, or the damaged folder's name (str), or None."""

@@ -362,6 +362,21 @@ def test_the_addon_cancel_resume_and_uninstall(addon_pack):
     assert list(where.parent.iterdir()) == []
 
 
+def test_removing_an_addon_cancelled_in_pip_leaves_no_temp(addon_pack):
+    """Cancelled while pip ran: its temp (voice-pack.pip-tmp, beside the pack) goes with the addon's removal too."""
+    lock, where, _, publish = addon_pack
+    run(lock, where)
+    spec = json.loads(lock.read_text())
+    spec['addon']['wheels'].append(publish(*wheel('slow')))
+    lock.write_text(json.dumps(spec))
+    cancel = threading.Event()
+    with pytest.raises(Cancelled):
+        run(lock, where, addon=True, cancel=cancel, progress=lambda stage, *a: stage == 'installing' and cancel.set())
+    assert where.with_name('voice-pack.pip-tmp').is_dir()
+    voicepack.uninstall(addon=True, lock=lock, where=where)
+    assert sorted(p.name for p in where.parent.iterdir()) == ['voice-pack'] and voicepack.state(lock, where) == 'ready'
+
+
 def test_an_addon_removal_windows_stops_never_leaves_it_ready(addon_pack, monkeypatch):
     """Windows: the runner still has a file of Lib/addon open: the marker went first, the pack's path is back."""
     lock, where, _, _ = addon_pack

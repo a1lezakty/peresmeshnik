@@ -265,6 +265,10 @@ MAX_WER, WARN_WER = 0.25, 0.10  # word error rate of the app's ASR on the clone'
 # speaker similarity of the clone to the recording (XTTS's own encoder, cross-lingual): fail / warn below. BENCH: the
 # clone of the same speaker 0.37-0.68 (median 0.54) over clean and degraded recordings, of another speaker median 0.11
 MIN_SIM, WARN_SIM = 0.25, 0.35
+# engines whose similarity has no threshold (the runner's `kind` in VoicePackClone.info): only WER judges their clone.
+# Qwen3-TTS: the cosine of its own x-vector, the very one its clone speaks from: its clone 0.96-0.99 against its own
+# recording, another speaker's recording 0.87-0.97 (BENCH, bench/voice_check.py qwen3): no threshold tells them apart
+NO_SIM = {'qwen3'}
 
 
 @dataclass
@@ -302,7 +306,8 @@ def wer(ref: str, hyp: str) -> float:
 
 def check_clone(tts, voice: Voice, lang: str, asr, phrases: list[str] | None = None) -> CloneReport:
     """The clone (`tts`, a `Tts` with the profile `voice`) says the test phrases in `lang`; `asr` (local/asr.OnnxAsr
-    for that language) transcribes them. Similarity comes from `tts.similarity(voice, pcm, sr)` where it exists."""
+    for that language) transcribes them. Similarity comes from `tts.similarity(voice, pcm, sr)` where it exists and has
+    thresholds (not NO_SIM)."""
     from peresmeshnik.engines import SAMPLE_RATE
     phrases = phrases or TEST_PHRASES[lang]
     heard, audio = [], []
@@ -312,7 +317,8 @@ def check_clone(tts, voice: Voice, lang: str, asr, phrases: list[str] | None = N
         x = np.interp(np.arange(0, len(pcm), tts.sample_rate / SAMPLE_RATE), np.arange(len(pcm)), pcm).astype(np.float32)
         heard.append(asr.recognize(x).text)
     err = wer(' '.join(phrases), ' '.join(heard))
-    sim = tts.similarity(voice, np.concatenate(audio), tts.sample_rate) if hasattr(tts, 'similarity') else None
+    judged = hasattr(tts, 'similarity') and not (isinstance(i := getattr(tts, 'info', None), dict) and i.get('kind') in NO_SIM)
+    sim = tts.similarity(voice, np.concatenate(audio), tts.sample_rate) if judged else None
     r = CloneReport(round(err, 3), None if sim is None else round(float(sim), 3), heard)
     if err > MAX_WER:
         r.errors.append(f'the clone is hard to understand ({err:.0%} of the words misheard)')
@@ -332,7 +338,8 @@ def clone_verdict(r: CloneReport) -> str:
                 f'(WER {r.wer:.0%}{sim}).')
     if r.warnings:
         return f'Usable: {"; ".join(r.warnings)} (WER {r.wer:.0%}{sim}).'
-    return f'Good: the clone is understood and sounds like the recording (WER {r.wer:.0%}{sim}).'
+    like = '' if r.similarity is None else ' and sounds like the recording'  # not claimed where nothing measured it
+    return f'Good: the clone is understood{like} (WER {r.wer:.0%}{sim}).'
 
 
 def voices_dir() -> Path:

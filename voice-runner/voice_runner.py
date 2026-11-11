@@ -75,6 +75,8 @@ def main():
     ap.add_argument('--vram-gb', type=float, help='cap of CUDA memory: emulates a smaller card')
     ap.add_argument('--engine', type=Path, help=argparse.SUPPRESS)  # tests: a stub engine
     a = ap.parse_args()
+    # the models are local folders: no library in here asks the Hub (an unpinned file, HF_TOKEN), none waits on it offline
+    os.environ.update(HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1')
     out = os.fdopen(os.dup(1), 'wb')  # the protocol; the libraries' prints go to stderr instead
     os.dup2(2, 1)
     sys.stdout = sys.stderr

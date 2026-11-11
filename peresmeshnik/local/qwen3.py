@@ -41,7 +41,12 @@ CHUNK = 2  # codec steps (1/12 s each) per streamed chunk: the first sound in ~0
 CFG = 0.5  # Chatterbox cfg_weight: 0 (upstream's advice for a foreign voice) said worse Russian (§11.4)
 LANGS = {'en': 'English', 'ru': 'Russian', 'de': 'German', 'fr': 'French', 'es': 'Spanish', 'it': 'Italian',
          'pt': 'Portuguese', 'zh': 'Chinese', 'ja': 'Japanese', 'ko': 'Korean'}
-cuda_info, cap_vram, folder = xtts.cuda_info, xtts.cap_vram, xtts.folder
+cap_vram, folder = xtts.cap_vram, xtts.folder
+
+
+def cuda_info() -> dict:
+    """xtts.cuda_info() and the kind: the runner's start line says it, and voice.check_clone then judges no similarity."""
+    return xtts.cuda_info() | {'kind': 'qwen3'}
 
 
 def sha256(path: Path) -> str:
@@ -160,8 +165,12 @@ class Engine:
     def _chatterbox(self, text: str, lang: str, voice) -> Iterator[np.ndarray]:
         """The whole clause at once (no streaming upstream)."""
         if self.fallback is None:
+            from chatterbox.models.tokenizers import tokenizer
             from chatterbox.mtl_tts import ChatterboxMultilingualTTS
-            self.fallback = ChatterboxMultilingualTTS.from_local(Path(self.fallback_dir), self.device)
+            d = Path(self.fallback_dir)
+            # its Chinese tokenizer fetches Cangjie5_TC.json from the Hub's main: the pinned one in this folder instead
+            tokenizer.hf_hub_download = lambda repo_id, filename, **kw: str(d / filename)
+            self.fallback = ChatterboxMultilingualTTS.from_local(d, self.device)
         if (st := getattr(voice, 'state', None)) is not None:  # a sample: its conditionals live with it
             if st.conds is None:
                 import soundfile as sf

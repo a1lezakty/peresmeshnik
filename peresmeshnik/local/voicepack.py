@@ -239,7 +239,7 @@ def uninstall(addon: bool = False, lock: Path | None = None, where: Path | None 
         (where / (ADDON_DONE if addon else '.complete')).unlink(missing_ok=True)
         if addon:
             _addon_path(where, False)
-        names = ('addon-download',) if addon else ('download', 'addon-download', 'tmp', 'pip-tmp')
+        names = ('addon-download', 'pip-tmp') if addon else ('download', 'addon-download', 'tmp', 'pip-tmp')
         try:
             for p in [*([where / 'Lib' / ADDON, where / 'Lib' / f'{ADDON}.tmp'] if addon else [where]),
                       *(where.with_name(f'voice-pack.{n}') for n in names)]:

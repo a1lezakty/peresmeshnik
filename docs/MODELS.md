@@ -72,6 +72,39 @@ XTTS-v2's tokenizer cleans the text of each language with these before the model
 | [fugashi](https://github.com/polm/fugashi) 1.5.2 | Japanese: word splitting (MeCab, bundled in its wheel) | MIT; MeCab BSD-3-Clause (of its BSD / LGPL / GPL choice) |
 | [unidic-lite](https://github.com/polm/unidic-lite) 1.0.8 | Japanese: the MeCab dictionary (UniDic 2.1.2, 260 MB unpacked); no wheel: the voice pack unpacks its folder from the source archive, with its license files | MIT (packaging); UniDic BSD-3-Clause, © The UniDic Consortium |
 
+### The voice pack's addon Qwen3 + Chatterbox (Lib\\addon on Windows, the same venv on Linux, never in the app)
+
+What the addon adds to the pack or pins to another version (`voice-runner/requirements-*-addon.txt` minus the pack's
+lock, the same 23 on Windows, Linux and Linux CUDA), with what pulls it in. Checked in the installed packages' metadata
+(License-Expression, classifiers) and license files, 2026-11-11: no GPL, AGPL or LGPL. Left out on purpose:
+pykakasi (GPL-3.0), gradio, spacy-pkuseg, pre-commit (`requirements-addon-overrides.txt`).
+
+| Package | For | License |
+|---|---|---|
+| [faster-qwen3-tts](https://pypi.org/project/faster-qwen3-tts/) 0.5.4 | Qwen3-TTS with CUDA graphs: the streaming clone | MIT |
+| [qwen-tts-hf](https://pypi.org/project/qwen-tts-hf/) 0.1.1.post1 | Qwen3-TTS model code (faster-qwen3-tts) | Apache-2.0 |
+| [chatterbox-tts](https://pypi.org/project/chatterbox-tts/) 0.1.7 | Chatterbox Multilingual: the fallback | MIT |
+| [resemble-perth](https://pypi.org/project/resemble-perth/) 1.0.1 | Chatterbox's Perth watermark | MIT |
+| [transformers](https://pypi.org/project/transformers/) 5.16.1 (the pack: 5.22.2) | Qwen3-TTS and Chatterbox (Lib\\addon wins on the path) | Apache-2.0 |
+| [huggingface-hub](https://pypi.org/project/huggingface-hub/) 1.33.0 (the pack: 2.4.0) | transformers 5.16.1; the runner keeps it offline | Apache-2.0 |
+| [accelerate](https://pypi.org/project/accelerate/) 1.12.0 | qwen-tts-hf | Apache-2.0 |
+| [diffusers](https://pypi.org/project/diffusers/) 0.29.0 | chatterbox-tts | Apache-2.0 |
+| [s3tokenizer](https://pypi.org/project/s3tokenizer/) 0.3.0 | chatterbox-tts | Apache-2.0 |
+| [conformer](https://pypi.org/project/conformer/) 0.3.2 | chatterbox-tts | MIT |
+| [pyloudnorm](https://pypi.org/project/pyloudnorm/) 0.2.0 | chatterbox-tts | MIT |
+| [omegaconf](https://pypi.org/project/omegaconf/) 2.4.0 | chatterbox-tts | BSD-3-Clause (its ANTLR4 runtime BSD-3-Clause) |
+| [sox](https://pypi.org/project/sox/) 1.5.0 | qwen-tts-hf; no wheel: the pack unpacks its folder from the source archive | BSD-3-Clause |
+| [onnxruntime](https://pypi.org/project/onnxruntime/) 1.31.1 | qwen-tts-hf | MIT |
+| [onnx](https://pypi.org/project/onnx/) 1.23.2 | s3tokenizer | Apache-2.0 |
+| [flatbuffers](https://pypi.org/project/flatbuffers/) 25.12.19 | onnxruntime | Apache-2.0 |
+| [ml-dtypes](https://pypi.org/project/ml-dtypes/) 0.6.0 | onnx | Apache-2.0; its Eigen headers MPL-2.0 |
+| [importlib-metadata](https://pypi.org/project/importlib-metadata/) 10.2.0 | diffusers | Apache-2.0 |
+| [zipp](https://pypi.org/project/zipp/) 4.1.2 | importlib-metadata | MIT |
+| [lazy-importer](https://pypi.org/project/lazy-importer/) 0.1.0 | importlib-metadata | Apache-2.0 |
+| [httpx](https://pypi.org/project/httpx/) 0.28.1 | huggingface-hub 1.33.0 | BSD-3-Clause |
+| [httpcore](https://pypi.org/project/httpcore/) 1.0.9 | httpx | BSD-3-Clause |
+| [setuptools](https://pypi.org/project/setuptools/) 69.5.1 (the pack: 84.2.1) | `pkg_resources` for resemble-perth (not declared by it) | MIT |
+
 ## Texts to record your voice
 
 The wizard shows a text to read aloud in your language (`voice.PROMPTS`): for ru and en one written for the app; for

@@ -164,7 +164,9 @@ Windows 10 version 2004 or later, or Windows 11 (x64).
    into the same pack, 170 MB on disk, and its two models, 5.7 GB) speaks English, Russian, German, French, Spanish,
    Italian, Portuguese, Chinese, Japanese and Korean with Qwen3-TTS (the first sound in ~0.1 s), Chatterbox
    Multilingual saying again a clause Qwen3 does not stop on; Polish, Turkish and Arabic stay with XTTS-v2. Without the
-   addon, or on a 6 GB card, XTTS-v2 speaks them all.
+   addon, or on a 6 GB card, XTTS-v2 speaks them all. With both directions cloned on one card, the other person's voice
+   takes what is left beside yours: on 8 GB yours is Qwen3-TTS (with Chatterbox up to ~5.9 GB), theirs XTTS-v2 (~2 GB);
+   where nothing fits beside, theirs is Pocket TTS on the CPU or a stock voice, said why.
 
 The hotkey Ctrl+Alt+Space switches between translation and your live voice (Settings to change it; a combo that
 Windows keeps for itself, such as Alt+Tab or Win+Space, or that another app has taken is refused with the reason).
@@ -312,11 +314,14 @@ Apache-2.0, BSD-3-Clause; [docs/MODELS.md](docs/MODELS.md)); the XTTS-v2 model i
 an NVIDIA GPU with 6 GB of memory or more, compute capability 6.1 or newer (GeForce GTX 10xx and later; a GTX 10xx is
 not measured: the app measures the clone at start and uses the stock voice if the card is slower than real time) and
 driver 570.65 or newer (528.33 to 570.64: not checked, may work); the wizard checks before the download.
-Its addon Qwen3 + Chatterbox (Components…, only when ticked; a card of 8 GB) adds faster-qwen3-tts, chatterbox-tts,
-resemble-perth, pyloudnorm (MIT), qwen-tts-hf, transformers 5.16.1, accelerate, diffusers, s3tokenizer, onnx,
-onnxruntime (Apache-2.0, onnxruntime MIT), sox, omegaconf (BSD-3-Clause) and setuptools 69.5.1 (MIT) to the pack, not
-pykakasi (GPL-3.0: Chatterbox's Japanese romanization) or gradio; the models are Qwen3-TTS 0.6B Base (Apache-2.0) and
-Chatterbox Multilingual (MIT; every sound it makes carries Resemble AI's inaudible Perth watermark).
+Its addon Qwen3 + Chatterbox (Components…, only when ticked; a card of 8 GB) adds to the pack, with what they pull in
+(checked in the packages' own metadata and license files, 2026-11-11): faster-qwen3-tts, chatterbox-tts,
+resemble-perth, pyloudnorm, conformer, onnxruntime, zipp, setuptools 69.5.1 (MIT); qwen-tts-hf, transformers 5.16.1,
+huggingface-hub 1.33.0, accelerate, diffusers, s3tokenizer, onnx, flatbuffers, ml-dtypes (its Eigen headers MPL-2.0),
+importlib-metadata, lazy-importer (Apache-2.0); sox, omegaconf, httpx, httpcore (BSD-3-Clause) — no GPL, AGPL or LGPL
+([docs/MODELS.md](docs/MODELS.md)); not pykakasi (GPL-3.0: Chatterbox's Japanese romanization) or gradio. The models
+are Qwen3-TTS 0.6B Base (Apache-2.0) and Chatterbox Multilingual (MIT; every sound it makes carries Resemble AI's
+inaudible Perth watermark).
 
 ---
 

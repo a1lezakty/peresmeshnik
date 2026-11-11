@@ -69,6 +69,7 @@ def test_a_runaway_is_cut_and_chatterbox_speaks_that_voice_from_then_on(eng, tmp
     calls, cb = len(eng.model.calls), eng.fallback
     assert whose(say(eng, 'привет', me)) == CHATTERBOX_ONLY and len(eng.model.calls) == calls  # Chatterbox only now
     assert eng.fallback is cb  # loaded once
+    assert cb.cangjie == str(tmp_path / 'chatterbox' / 'Cangjie5_TC.json')  # the pinned file, not the Hub's (no network)
     assert whose(say(eng, 'привет', you))[1] == 0  # another voice: still Qwen3
     assert eng.info() == {'runaways': 1, 'fallback_voices': [str(me.path)], 'fallback_loaded': True}
     eng.forget(me)  # a new recording: still Chatterbox (for this engine's life), conditioned again
@@ -119,12 +120,13 @@ def test_the_runner_picks_the_model_code_by_kind(tmp_path):
         assert whose(np.concatenate(list(p.synth('привет', 'ru', me))))[1] == 0
         q, c = whose(np.concatenate(list(p.synth('loop', 'ru', me))))
         assert 0 < q and c == 24_000
-        assert {k: v for k, v in p.stats().items() if k != 'torch' and k != 'cuda'} == {
+        assert {k: v for k, v in p.stats().items() if k not in ('torch', 'cuda', 'kind')} == {
             'runaways': 1, 'fallback_voices': [str(me.path)], 'fallback_loaded': True}
         assert p.latents(me) and (me.path / 'qwen3.pt').exists()
     finally:
         p.close()
     assert 'qwen3: runaway in ' in log.read_text()
+    assert 'chatterbox: HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1' in log.read_text()  # the runner's libraries: offline
     with pytest.raises(CloneUnavailable, match="No module named 'TTS'"):  # the default kind: xtts.py, no coqui-tts here
         VoicePackClone(tmp_path / 'xtts', cmd=[*STUB, '--device', 'cpu'], log=log)
 
@@ -172,3 +174,24 @@ def test_the_runner_speaks_a_state_of_qwen3(tmp_path):
         assert whose(np.concatenate(list(p.synth('привет', 'ru', types.SimpleNamespace(path=None, state=sid)))))[0] > 0
     finally:
         p.close()
+
+
+def test_the_clone_check_judges_qwen3_by_wer_only(tmp_path):
+    """FIXES addon 7: Qwen3's similarity (its own x-vector) gave its clone 0.96-0.99 and another speaker 0.87-0.97 on C:
+    XTTS's thresholds mean nothing there, so voice.check_clone asks none and the verdict claims no likeness."""
+    from peresmeshnik import voice
+    me = profile(tmp_path, 'me')
+    (tmp_path / 'chatterbox').mkdir()
+    p = VoicePackClone(tmp_path / 'qwen3', cmd=[*STUB, '--kind', 'qwen3', '--fallback-dir', str(tmp_path / 'chatterbox'),
+                                                '--device', 'cpu'], log=tmp_path / 'runner.log')
+    asr = type('Asr', (), {'recognize': lambda self, pcm: type('R', (), {'text': 'good morning can you hear me well'})()})()
+    try:
+        assert p.info['kind'] == 'qwen3'
+        p.similarity = lambda *a: pytest.fail('asked for a similarity that has no threshold')
+        r = voice.check_clone(p, me, 'en', asr)
+    finally:
+        p.close()
+    assert r.similarity is None and not any('sound' in m for m in r.errors + r.warnings)
+    assert not r.ok and voice.clone_verdict(r).startswith('Record again: the clone is hard to understand')
+    r.errors, r.wer = [], 0.0
+    assert voice.clone_verdict(r) == 'Good: the clone is understood (WER 0%).'

@@ -370,3 +370,26 @@ def test_hugging_face_refusing_does_not_hold_the_wizard(no_token, monkeypatch):
     assert box.missing() == [] and 'accept its conditions' in box.state.text()
     assert not box.hf.isHidden() and box.hf.page == 'https://hf.example/pocket'
     assert 'Without Your cloned voice: pocket-tts-en: a stock voice speaks instead.' in box.without.text()
+
+
+def test_removing_the_pack_goes_through_its_lock(tmp_path, monkeypatch):
+    """FIXES addon 4: Remove of the voice pack is voicepack.uninstall: while its addon installs (the pack's lock taken)
+    it refuses with the reason and leaves the pack as it is; then it removes the pack, its marker first."""
+    monkeypatch.setattr(components, 'sys', SimpleNamespace(platform='win32'))
+    monkeypatch.delenv('PERESMESHNIK_VOICE_CMD', raising=False)
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
+    monkeypatch.setattr(languages, 'nvidia_once', lambda: CARD)
+    monkeypatch.setattr(voicepack, 'folder', lambda: tmp_path / 'voice-pack')
+    monkeypatch.setattr(voicepack, 'lock_file', lambda: lock(tmp_path))
+    (tmp_path / 'voice-pack').mkdir()
+    (tmp_path / 'voice-pack' / '.complete').write_text('x')
+    pack = {c.id: c for c in components.listing(config.Settings(me_to_them='local'), CARD)}[components.VOICE_PACK]
+    assert voicepack._BUSY.acquire(blocking=False)  # the addon's install runs
+    try:
+        with pytest.raises(voicepack.PackError, match='being installed or removed'):
+            pack.remove()
+        assert (tmp_path / 'voice-pack' / '.complete').exists()
+    finally:
+        voicepack._BUSY.release()
+    pack.remove()
+    assert not (tmp_path / 'voice-pack').exists()

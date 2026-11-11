@@ -281,10 +281,33 @@ def not_here(engine: str) -> str:
         return 'the voice pack is not installed (setup wizard, "Your voice")'
     if m.addon and not addon_here():
         return "the voice pack's addon Qwen3 + Chatterbox is not installed (Components…)"
+    if m.addon and not all(models.is_fetched(models.get(i)) for i in (engine, m.fallback) if i):  # its packages alone
+        return "the models of the voice pack's addon are not downloaded (Components…)"  # do not speak: XTTS-v2 does
     return ''
 
 
-def clone_engine(lang: str, side: str = 'me_to_them', *, platform: Platform | None = None) -> tuple[str | None, str]:
+def vram_peak(engine: str) -> float:
+    """GB of GPU memory `engine` takes while it speaks, with its fallback (Qwen3 with Chatterbox after a breakdown)."""
+    from peresmeshnik import models
+    m = models.get(engine)
+    return m.vram_peak + (models.get(m.fallback).vram_peak if m.fallback else 0)
+
+
+def _no_room(engine: str, beside: str, card) -> str:
+    """Why `engine` does not fit on the NVIDIA card (`card`: as clone_why's has_gpu) beside the other side's `beside`
+    ('' = it does, or its memory is unknown)."""
+    if not (beside and needs_gpu(engine) and needs_gpu(beside)):
+        return ''
+    g = card if isinstance(card, Gpu) else nvidia_once() if card is None and gpu() else Gpu()
+    need = vram_peak(engine) + vram_peak(beside)
+    if not g.vram or need <= g.vram:
+        return ''
+    return (f'the cloned voice does not fit on the NVIDIA GPU beside the other direction\'s ({need:.1f} GB of '
+            f'{g.vram:.1f} GB)')
+
+
+def clone_engine(lang: str, side: str = 'me_to_them', *, platform: Platform | None = None, beside: str = '',
+                 skip: tuple[str, ...] = ()) -> tuple[str | None, str]:
     """(the clone engine that speaks `lang` live for `side` on `platform` (None: this computer), '') or (None, why not):
     then the stock voice of `lang` speaks, if there is one. The one answer to "can a cloned voice speak here, and which":
     the wizard, the tray, the app, the cloud's fallback and a server's client ask it, nobody checks on their own. Whether
@@ -292,11 +315,15 @@ def clone_engine(lang: str, side: str = 'me_to_them', *, platform: Platform | No
     cannot start here (`not_here`) gives way to the next one that can: an NVIDIA engine without the voice pack to Pocket
     TTS, an engine of the pack's addon without it to XTTS-v2; if none can, the NVIDIA engine stays, one that needs only
     the pack first (the pack is the wizard's offer, the app says why at start), a gated one without the user's token does
-    not (the stock voice, said why; with the token it is chosen again)."""
+    not (the stock voice, said why; with the token it is chosen again). `beside`: the other side's clone engine on the
+    same card (them -> me passes me -> them's, which comes first): an NVIDIA engine fits only if both, with their
+    fallbacks, fit its memory (`vram_peak`), else the next one does (Qwen3 beside Qwen3 on 8 GB: XTTS-v2). `skip`:
+    engines left out (one that did not start: app.py)."""
     if side not in SIDES:
         raise ValueError(f'side {side!r}: one of {SIDES}')
     p = platform or Platform()
-    whys = [(e, clone_why(e, lang, p.gpu, **({'os': p.os} if p.os else {}))) for e in clone_engines() if covers(e, lang)]
+    whys = [(e, clone_why(e, lang, p.gpu, **({'os': p.os} if p.os else {})) or _no_room(e, beside, p.gpu))
+            for e in clone_engines() if covers(e, lang) and e not in skip]
     fits = [e for e, why in whys if not why]  # its hardware is there
     if not p.os:  # this computer: also what is installed here
         late = {e: not_here(e) for e in fits}

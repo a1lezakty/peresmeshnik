@@ -152,16 +152,13 @@ def _pack(s, gpu: Gpu, needed: set[str]) -> list[Component]:
     dl = voicepack.need_bytes() - spec['installed_bytes'] - voicepack.MARGIN  # what is not downloaded yet
     folder = voicepack.folder()
 
-    def remove():
-        (folder / '.complete').unlink(missing_ok=True)  # first: a pack Windows deletes only in part is never "ready"
-        for p in (folder, folder.with_name('voice-pack.download')):
-            shutil.rmtree(p, ignore_errors=True)
     out = [Component(VOICE_PACK, 'NVIDIA voice pack (XTTS-v2)', 0 if st == 'ready' else dl, PACK_LICENSE, PACK_URL,
                      'your own voice on an NVIDIA GPU: its own Python with torch', st == 'ready',
                      (spec['installed_bytes'] if st == 'ready' else du(folder))  # not a walk over ~8 GB of torch each time
                      + du(folder.with_name('voice-pack.download')), gpu_clone and not no,
                      'a stock voice speaks instead of yours' if gpu_clone else '', no, consent=True,
-                     _fetch=lambda progress, cancel: voicepack.install(progress, cancel), _remove=remove)]
+                     _fetch=lambda progress, cancel: voicepack.install(progress, cancel),
+                     _remove=lambda: voicepack.uninstall())]  # under the pack's lock: not while its addon installs
     if add := spec.get('addon'):
         low = f'the addon needs {add["vram_gb"]} GB of GPU memory; this computer has {languages.gpu_text(gpu.vram)}' \
             if gpu.vram < add.get('vram_gb', 0) else ''

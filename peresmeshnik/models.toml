@@ -1128,6 +1128,7 @@ needs = "gpu"  # first audio 0.08-0.12 s on an RTX A4000, about half real time o
 fallback = "chatterbox-mtl"
 addon = true  # in the voice pack's addon "Qwen3 + Chatterbox": chosen where it is installed (languages.not_here)
 vram = 7.5  # an 8 GB card (8192 MiB, some report less): Qwen3 2.4 GB, with Chatterbox after a breakdown 5.6-5.9 GB
+vram_peak = 2.4  # Qwen3 alone (faster-qwen3-tts, CUDA graphs), RTX A4000
 url = "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base/resolve/5d83992436eae1d760afd27aff78a71d676296fc/"
 [qwen3-tts.files]
 "config.json" = { sha256 = "2e714c787c8edb98b05432685cddb634add2de4d4e645f653d68251ef72ba011", size = 4494 }
@@ -1150,6 +1151,7 @@ license_url = "https://huggingface.co/ResembleAI/chatterbox"
 note = "Chatterbox Multilingual by Resemble AI: an inaudible watermark (Perth) in every output"
 needs = "gpu"  # 2.2x slower than speech on a CPU (RESEARCH-clone 11.2)
 addon = true
+vram_peak = 3.5  # on top of Qwen3 after a breakdown: 5.6-5.9 GB with it
 url = "https://huggingface.co/ResembleAI/chatterbox/resolve/5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18/"
 [chatterbox-mtl.files]
 "Cangjie5_TC.json" = { sha256 = "7073fd9de919443ae88e0bd2449917a65fe54898a4413ed1edcc4b67f28bce8c", size = 1920163 }
@@ -1167,6 +1169,7 @@ license_url = "https://huggingface.co/coqui/XTTS-v2/blob/main/LICENSE.txt"  # co
 note = "Coqui Public Model License: noncommercial use only"
 consent = true
 needs = "gpu"  # keeps up live only on an NVIDIA GPU (BENCH stage 6): languages.clone_why
+vram_peak = 2.0  # 1.9-2.0 GB on an RTX A4000 (BENCH stage 6, the runner)
 url = "https://huggingface.co/coqui/XTTS-v2/resolve/6c2b0d75eae4b7047358e3b6bd9325f857d43f77/"
 [xtts-v2.files]
 "config.json" = { sha256 = "ef262b1454dd2a77e1461b0b2cd53e19b8a7624cc131b837d36df67356bc75e8", size = 4368 }

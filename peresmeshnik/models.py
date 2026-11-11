@@ -67,6 +67,7 @@ class Model:
     fallback: str = ''  # clone: the model that takes over a voice when this one breaks down; downloaded with it
     addon: bool = False  # clone: runs only with the voice pack's addon (Qwen3 + Chatterbox), lock.py puts it there
     vram: float = 0  # GB of GPU memory its engine needs (`needs = "gpu"`); 0: languages.MIN_VRAM_GB
+    vram_peak: float = 0  # GB it takes while it speaks (BENCH): both directions on one card (languages.clone_engine)
 
     @property
     def size(self) -> int:

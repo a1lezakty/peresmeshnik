@@ -20,6 +20,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+from peresmeshnik.audio.resample import Resampler
 from peresmeshnik.engines import SAMPLE_RATE, Speech
 from peresmeshnik.local.clone import make_engine
 from peresmeshnik.pipeline import MAX_LAG_S, cpu_s, make_local, read_audio, run
@@ -122,12 +123,14 @@ def main() -> None:
     out, start = [], time.perf_counter()
 
     def consume():
-        at = 0
+        at, rs = 0, {}
         for e in d.events():
-            if isinstance(e, Speech):
+            if isinstance(e, Speech):  # at the rate it says (FIXES-s2 r2 1), into the recording's
+                x = e.pcm if e.sample_rate == live.OUT_SR else rs.setdefault(e.sample_rate, Resampler(e.sample_rate,
+                                                                                                      live.OUT_SR))(e.pcm)
                 gap = int((time.perf_counter() - start) * live.OUT_SR) - at
-                out.extend([np.zeros(max(gap, 0), np.float32), e.pcm])
-                at += max(gap, 0) + len(e.pcm)
+                out.extend([np.zeros(max(gap, 0), np.float32), x])
+                at += max(gap, 0) + len(x)
     th = threading.Thread(target=consume)
     th.start()
     c0 = cpu_s(d)

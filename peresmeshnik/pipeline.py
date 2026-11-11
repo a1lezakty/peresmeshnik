@@ -255,10 +255,11 @@ side has no subtitles of what was dropped; them -> me takes MAX_LAG_S."""
             self._spoken.put(c)
 
     def _speak(self):
-        st, sr = self.stats, self.tts.sample_rate
+        st = self.stats
         while (c := self._spoken.get()) is not None:
             if self._stop.is_set():
                 continue
+            sr = self.tts.sample_rate  # per clause: the them side's voice is put in after the workers start (S2)
             end_wall, translation, voice = c.pop('end_wall'), c.pop('translation'), c.pop('voice', self.voice)
             t, samples, start = time.perf_counter(), 0, 0.0
             speed = 1.0

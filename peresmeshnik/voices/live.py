@@ -30,16 +30,25 @@ from peresmeshnik.audio.resample import Resampler
 from peresmeshnik.engines import SAMPLE_RATE, Voice
 
 log = logging.getLogger('peresmeshnik.live')
-MIN_CLAUSE_S = 1.0  # shorter clauses: their speaker vector is unreliable (S3's threshold was measured on 3-8 s)
+MIN_CLAUSE_S = 1.0  # shorter clauses: their speaker vector is unreliable (S3's threshold was measured on 3-8 s): such a
+# clause goes into nobody's sample and makes nobody new, it is only matched to the people known
+MIN_EMBED_S = 0.25  # shorter still: no speaker vector at all, the stock voice says it
 READY_S = (3.0, 5.0, 10.0, 20.0)  # their clean speech when the voice is made, and made again; then it stays (§4.2)
 BEST_S = 10.0  # the sample: their cleanest clauses up to this long (longer sounds no closer; Pocket breaks at ~40 s)
 # cosine of a clause's speaker vector to a person's mean vector: the same person. ponytail: S3's threshold (5 s live vs
 # a file, same-gender strangers pass <= 0.64 %); clauses are shorter but of one call, BENCH stage 8 S2 checks it
 SAME = 0.45
-WAIT_S = 0.5  # the speak worker waits this long to know whose clause it is (the worker is making a voice), then guesses
+WAIT_S = 0.5  # the speak worker waits this long to know whose clause it is (the worker is making a voice), then the
+# stock voice says it
 OUT_SR = 24_000  # the side's audio: the clone engines' (Pocket, XTTS); the stock voice is resampled to it
 GAP = np.zeros(SAMPLE_RATE // 10, np.float32)  # between clauses in the sample
 CLOSE_WAIT_S = 5.0  # translation off: waited for the worker this long; one still loading the engine frees it itself
+START_WAIT_S = 180.0  # a new call's worker waits for the last call's to free its engine (a runner's start_s and more)
+OURS = -4.5  # echo.bands' loudest band of a block where we spoke into the call (speech at -40 dBFS: most blocks above;
+# the microphone's noise up to ~-47 dBFS below; echo.LOUD, -7, is noise at -60 dBFS already)
+OURS_S = 0.25  # this much of our speech in a clause's echo window: it may carry our voice, not into their sample
+KEEP_S = 10.0  # their clean speech before "keep their voice" keeps it (a voice of 3 s is a first guess)
+RESET = object()  # LiveVoice.reset() in its worker's queue
 RTF_AFTER_S = 4.0  # their cloned voice's speed is checked once, after this much of it (me -> them: a ~4 s test phrase)
 
 
@@ -57,6 +66,7 @@ class Person:
     voice: LiveProfile | None = None
     made_at: float = 0.0  # seconds when the voice was made
     kept: bool = False  # from an earlier call: it stays as it is
+    said: float = 0.0  # seconds of their clauses matched to them in this call (any, not only those for the sample)
 
     def similarity(self, v: np.ndarray) -> float:
         return float(v @ self.vec / (np.linalg.norm(self.vec) + 1e-12))
@@ -86,58 +96,116 @@ class LiveVoice:
     said once when the clone fails and the stock voice takes over.
     Clauses go to the worker in order (those without audio for the sample too): who said one is decided in order."""
 
-    def __init__(self, make_engine, make_speaker, engine_id: str = '', lang: str = '', kept=(), echo=None, note=None):
+    _closing: threading.Thread | None = None  # a closed call's worker still freeing its engine: ours loads after it
+
+    def __init__(self, make_engine, make_speaker, engine_id: str = '', lang: str = '', kept=(), echo=None, note=None,
+                 raw=None, me: str = ''):
         self.engine, self.engine_id, self.lang, self.dead, self.note = None, engine_id, lang, '', note
-        self.people: list[Person] = [Person(np.asarray(v, np.float32), s, voice=LiveProfile('them', engine_id, None, {
-            'kind': 'them'}, state=st), made_at=s, kept=True) for v, st, s in kept]
+        self.me, self._my_vec = me, None  # my own voice profile: a voice like it is never kept as theirs
+        self._kept = list(kept)
+        self.people: list[Person] = self._known()
         self.speaking: Person | None = None  # who said the last clause the worker went through
         self.speaker = None
-        self.ref, self.pad = (echo.ref, float(echo.delays[-1]) + 0.2) if echo is not None else (None, 0.0)
+        self.gate, self.raw = echo, raw  # raw(): my microphone goes into the call as it is, not through our output
         self.stats = {'clauses': 0, 'short': 0, 'echo': 0, 'noisy': 0, 'made': 0, 'late': 0}
         self._q: queue.Queue = queue.Queue()
         self._closed = False
-        self._thread = threading.Thread(target=self._work, args=(make_engine, make_speaker), name='their-voice',
-                                        daemon=True)
+        self._thread = threading.Thread(target=self._work, args=(make_engine, make_speaker, LiveVoice._closing),
+                                        name='their-voice', daemon=True)
         self._thread.start()
+
+    def _known(self) -> list[Person]:
+        return [Person(np.asarray(v, np.float32), s, voice=LiveProfile('them', self.engine_id, None, {'kind': 'them'},
+                                                                         state=st), made_at=s, kept=True)
+                for v, st, s in self._kept]
+
+    def reset(self) -> None:
+        """A new call on the same engines (a server's warm side): the people of the last one, their speech and their
+        voices go, in order after its clauses; the engine stays loaded."""
+        self._q.put(RESET)
 
     # the pipeline's listen worker: only checks and enqueues
     def offer(self, pcm: np.ndarray, text: str, t0: float, t1: float) -> Clause:
         """A clause the ASR heard words in -> its Clause, the `voice` the pipeline hands to synth() for it."""
         c = Clause()
         self.stats['clauses'] += 1
+        sample = True
         if len(pcm) < MIN_CLAUSE_S * SAMPLE_RATE:
             self.stats['short'] += 1
-            pcm = None
-        elif self.ref is not None:  # we said something into the call around it: their audio may carry it back
-            from peresmeshnik.audio.echo import HOP, LOUD
-            if self.ref.features(np.arange(t0 - self.pad, t1, HOP / SAMPLE_RATE)).max() > LOUD:
-                self.stats['echo'] += 1
-                pcm = None
-        self._q.put((pcm, c))
+            sample = False
+        elif self._ours(t0, t1):  # it may carry our own voice: matched to who said it, not into their sample
+            self.stats['echo'] += 1
+            sample = False
+        self._q.put((pcm if len(pcm) >= MIN_EMBED_S * SAMPLE_RATE else None, c, sample))
         return c
+
+    def _ours(self, t0: float, t1: float) -> bool:
+        """We spoke into the call around this clause of theirs (times on the echo gate's clock): what came back may be
+        in it (the gate zeroes our echo alone, double talk passes). The window is where our speech can sound in it: at
+        the gate's delay once it has found one, else over all the delays it searches; or my raw microphone goes there."""
+        if self.raw is not None and self.raw():
+            return True
+        g = self.gate
+        if g is None:
+            return False
+        from peresmeshnik.audio.echo import HOP
+        tail = 0.2  # the delay's jitter and the far room's reverb
+        lo, hi = (t0 - g.delay - tail, t1 - g.delay + tail) if g.rho >= g.rho_on and g.gain is not None else (
+            t0 - float(g.delays[-1]) - tail, t1 - float(g.delays[0]))
+        f = g.ref.features(np.arange(lo, hi, HOP / SAMPLE_RATE)).max(axis=-1)
+        return int((f > OURS).sum()) * HOP / SAMPLE_RATE >= OURS_S
 
     # the speak worker
     def voice(self, clause: Clause | None = None) -> LiveProfile | None:
-        """The voice to say `clause` in: its person's; None: theirs is not made yet (the stock voice speaks it)."""
-        if self.dead:
+        """The voice to say `clause` in: its person's; None (the stock voice says it): theirs is not made yet, nobody
+        knows whose it is (a new person's short word), or not within WAIT_S. No voice made yet: no wait at all."""
+        if self.dead or not any(p.voice is not None for p in list(self.people)):
             return None
-        if clause is not None and not clause.known.wait(WAIT_S):
+        if clause is None:
+            p = self.speaking
+        elif clause.known.wait(WAIT_S):
+            p = clause.person
+        else:
             self.stats['late'] += 1
-        p = clause.person if clause is not None and clause.known.is_set() else self.speaking
+            p = None
         return p.voice if p is not None else None
 
-    def them(self) -> tuple[dict, str, float] | None:
-        """The voice of the person who spoke last, for the tray's "keep the voice" (voice.save_them): ({model id: (state, sha256 of its
-        weights)}: the engine's and the speaker vector's, their language, seconds of their speech); None: none yet, or
-        an engine of the voice pack (NVIDIA), whose voice is the runner's for this call only (COMMON-stage8 23:49)."""
+    def them(self) -> tuple[tuple[dict, str, float] | None, str]:
+        """For the tray's "keep their voice" (voice.save_them), taken once the user said they agreed: (({model id:
+        (state, sha256 of its weights)}: the engine's and the speaker vector's, their language, seconds of their speech),
+        '') or (None, why not, for the user). Only in a call with one person on their side, after KEEP_S of their speech,
+        not a voice like mine, not an engine of the voice pack (NVIDIA: its runner's for this call only, 23:49)."""
         from peresmeshnik import languages, models
         from peresmeshnik.voice import SPEAKER
-        p = self.speaking
-        if p is None or p.voice is None or self.dead or languages.needs_gpu(self.engine_id):
-            return None
+        if self.dead:
+            return None, f'their cloned voice stopped in this call ({self.dead})'
+        if languages.needs_gpu(self.engine_id):
+            return None, ('with the NVIDIA voice pack their voice lives only during the call, in the pack\'s own memory: '
+                          'it cannot be kept')
+        here = [p for p in list(self.people) if p.said >= READY_S[0]]
+        if len(here) > 1:
+            return None, f'{len(here)} people speak in this call: a voice can be kept in a call with one of them only'
+        p = here[0] if here else None
+        if p is not None and p.kept:
+            return None, 'their voice is kept already (Voices…)'
+        if p is None or p.voice is None or p.seconds < KEEP_S:
+            return None, f'not enough of their speech yet: {p.seconds if p else 0:.0f} of {KEEP_S:.0f} s'
+        if (mine := self._mine()) is not None and p.similarity(mine) >= SAME:
+            return None, 'this voice is too close to your own: it is not kept as theirs'
         return ({self.engine_id: (p.voice.state, models.get(self.engine_id).fingerprint),
                  SPEAKER: (p.vec / (np.linalg.norm(p.vec) + 1e-12), models.get(SPEAKER).fingerprint)},
-                self.lang, round(p.seconds, 1))
+                self.lang, round(p.seconds, 1)), ''
+
+    def _mine(self) -> np.ndarray | None:
+        """My own voice's speaker vector (from my profile's recording, once), None without one."""
+        if self._my_vec is None and self.me and self.speaker is not None:
+            from peresmeshnik import voice
+            try:
+                x, sr = voice.read_audio(voice.load(self.me).path / 'reference.wav')
+                self._my_vec = self.speaker.embed(x, sr)
+            except Exception:  # no profile, a damaged one: nothing to compare with
+                self._my_vec = False
+        return None if self._my_vec is None or self._my_vec is False else self._my_vec
 
     def fail(self, why) -> None:
         """The clone failed: the stock voice for the rest of the call."""
@@ -153,47 +221,61 @@ class LiveVoice:
         self._closed = True
         self._q.put(None)
         self._thread.join(CLOSE_WAIT_S)
+        if self._thread.is_alive():  # still loading: the next call's worker waits for it (one runner of theirs at a time)
+            LiveVoice._closing = self._thread
 
     # the worker
-    def _work(self, make_engine, make_speaker) -> None:
+    def _work(self, make_engine, make_speaker, last: threading.Thread | None = None) -> None:
+        if last is not None:  # translation off and on again quickly: one runner of theirs on the card, not two
+            last.join(START_WAIT_S)
         try:
-            self.engine, self.speaker = make_engine(), make_speaker()
-            if not hasattr(self.engine, 'condition'):  # a voice only from a folder (the voice pack before its condition)
-                self.engine.close()
-                self.engine = None
-                self.fail(f'{self.engine_id} cannot take a voice during a call')
+            if not self._closed:
+                self.engine = make_engine()
+                if not hasattr(self.engine, 'condition'):  # a voice only from a folder (the voice pack before its condition)
+                    raise RuntimeError(f'{self.engine_id} cannot take a voice during a call')
+                self.speaker = make_speaker()
         except Exception as e:  # weights broken, onnxruntime refuses: the stock voice speaks, as before
+            if (engine := self.engine) is not None:  # the speaker model failed after it: nothing of it is kept
+                self.engine = None
+                if hasattr(engine, 'close'):
+                    engine.close()
             self.fail(e)
         while (item := self._q.get()) is not None:
-            pcm, c = item
+            if item is RESET:
+                self.people, self.speaking = self._known(), None
+                continue
+            pcm, c, sample = item
             try:
                 if pcm is not None and not self.dead and not self._closed:
-                    self._add(pcm, c)
+                    self._add(pcm, c, sample)
             except Exception as e:
                 self.fail(e)
-            finally:  # nobody new: the person of the clause before
-                if not c.known.is_set():
-                    c.person = self.speaking
-                    c.known.set()
+            finally:  # not matched to anyone: nobody's voice, the stock one says it
+                c.known.set()
         if self._closed and (engine := self.engine) is not None:
             self.engine = None
             if hasattr(engine, 'close'):
                 engine.close()
 
-    def _add(self, pcm: np.ndarray, c: Clause | None = None) -> None:
-        if (snr := clean(pcm)) is None:
+    def _add(self, pcm: np.ndarray, c: Clause | None = None, sample: bool = True) -> None:
+        """Whose clause it is, and its audio into that person's sample when `sample` (long enough, none of our voice)
+        and it is clean. A clause that is not for a sample is only matched: it makes nobody new."""
+        if sample and (snr := clean(pcm)) is None:
             self.stats['noisy'] += 1
-            return
+        sample = sample and snr is not None
         v, sec = self.speaker.embed(pcm, SAMPLE_RATE), len(pcm) / SAMPLE_RATE
         p = max(self.people, key=lambda q: q.similarity(v), default=None)
         if p is None or p.similarity(v) < SAME:
-            p = Person(np.zeros_like(v))
-            self.people.append(p)
+            p = Person(np.zeros_like(v)) if sample else None
+            if p is not None:
+                self.people.append(p)
         self.speaking = p
+        if p is not None:
+            p.said += sec
         if c is not None:  # known before their voice is made again: the clause need not wait for that
             c.person = p
             c.known.set()
-        if not p.kept and p.seconds < READY_S[-1]:
+        if sample and not p.kept and p.seconds < READY_S[-1]:
             p.vec += sec * v
             p.seconds += sec
             p.clips.append((snr, pcm))
@@ -306,39 +388,56 @@ class TheirVoice:
         return getattr(self.stock, '_p', None)
 
 
-def attach(d, s, echo=None, note=None):
+def attach(d, s, echo=None, note=None, raw=None):
     """Their voice on the them side `d` (a LocalDirection with its stock voice), when `[local] their_voice` is on and a
     clone engine speaks the language here (languages.clone_engine) with its weights and the speaker vector model
-    downloaded; else `d` as it was (logged: the stock voice speaks, as before). `note(why)`: LiveVoice's."""
-    from peresmeshnik import models
-    from peresmeshnik.local.clone import make_engine
-    engine_id, why = engine(s)
-    if not engine_id:
-        log.info('their voice: the stock voice speaks (%s)', why)
-        return d
+    downloaded; else `d` as it was (logged: the stock voice speaks, as before), whatever goes wrong here: the side
+    starts all the same. `note(why)`, `raw()`: LiveVoice's."""
     try:
-        from peresmeshnik.voice import SPEAKER, Speaker
-        model_dir, spk_dir = models.path(engine_id), models.path(SPEAKER)
-    except (models.ModelMissing, ImportError) as e:
-        log.info('their voice: the stock voice speaks (%s)', e)
+        from peresmeshnik import models
+        from peresmeshnik.local.clone import make_engine
+        engine_id, why = engine(s)
+        if not engine_id:
+            log.info('their voice: the stock voice speaks (%s)', why)
+            return d
+        try:
+            from peresmeshnik.voice import SPEAKER, Speaker
+            model_dir, spk_dir = models.path(engine_id), models.path(SPEAKER)
+        except (models.ModelMissing, ImportError) as e:
+            log.info('their voice: the stock voice speaks (%s)', e)
+            return d
+        threads = s.local.threads
+        live = LiveVoice(lambda: make_engine(engine_id, model_dir, threads), lambda: Speaker(spk_dir), engine_id,
+                         s.their_lang, kept(engine_id), echo, note, raw, s.local.voice)
+    except Exception:  # a broken profile folder, the registry: their voice is a nicety, the side is not
+        log.exception('their voice: the stock voice speaks')
         return d
-    threads = s.local.threads
-    live = LiveVoice(lambda: make_engine(engine_id, model_dir, threads), lambda: Speaker(spk_dir), engine_id,
-                     s.their_lang, kept(engine_id), echo, note)
     d.tts, d.on_clause = TheirVoice(d.tts, live), live.offer
     return d
+
+
+def forget(d) -> None:
+    """A side's direction `d` is kept for another call (remote/server.py's warm side): their voices of this one go."""
+    if (lv := getattr(getattr(d, 'tts', None), 'live', None)) is not None:
+        lv.reset()
 
 
 def engine(s) -> tuple[str | None, str]:
     """(the clone engine their voice is made in with settings `s` on this computer, '') or (None, why not): the side
     (attach), languages.needed_models and the Components page ask it, nobody else (languages.clone_engine's answer).
     With my own voice cloned here too, its engine goes `beside`: both must fit the NVIDIA card (mine Qwen3-TTS: on 8 GB
-    theirs Pocket TTS on the CPU, on 12 GB XTTS-v2)."""
+    theirs Pocket TTS on the CPU, on 12 GB XTTS-v2). Me -> them in the cloud or on my server speaks in my clone here
+    when that fails (cloud/fallback.local_voice, if it is ready): it goes beside too."""
     from peresmeshnik import languages
     if not s.local.their_voice:
         return None, 'their voice is off ([local] their_voice)'
-    me = languages.direction(s, 'me_to_them')
-    beside = me.tts if s.me_to_them == 'local' and me.voice == 'clone' else ''
+    me, beside = languages.direction(s, 'me_to_them'), ''
+    if s.me_to_them == 'local':
+        beside = me.tts if me.voice == 'clone' else ''
+    elif me.voice == 'clone' and not languages.cloud_subtitles(s, 'me_to_them'):  # a local path to fall back on
+        from peresmeshnik.cloud import fallback
+        i = fallback.local_voice('me', s)[0]
+        beside = i if i and fallback._is_clone(i) else ''
     return languages.clone_engine(s.my_lang, 'them_to_me', beside=beside)
 
 

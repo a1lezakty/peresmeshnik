@@ -1039,11 +1039,14 @@ class DonePage(QWizardPage):
     def __init__(self):
         super().__init__()
         self.setTitle('Ready')
-        lab = QLabel({'darwin': DONE_MACOS, 'win32': DONE_WINDOWS}.get(sys.platform, DONE_LINUX))
+        lab = QLabel({'darwin': DONE_MACOS, 'win32': DONE_WINDOWS}.get(sys.platform, DONE_LINUX) + THEIRS_DONE)
         lab.setWordWrap(True)
         QVBoxLayout(self).addWidget(lab)
 
 
+THEIRS_DONE = ('<br><br>The other person speaks in their own voice, only in your headphones: who is speaking and the '
+               'clone of their voice stay in memory for the call, not on disk, unless you keep it with their agreement '
+               '(menu <b>Keep the voice of the person in this call…</b>); off in the menu <b>Their own voice</b>.')
 DONE_MACOS = ('In your call app (Meet, Zoom, Telegram) choose the microphone <b>BlackHole 2ch</b>. While translation '
               'is off it carries your own voice, so the call always hears you.<br><br>'
               "Their voice: while translation is on, the app records the call app's sound and mutes its original for you "

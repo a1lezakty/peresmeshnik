@@ -594,6 +594,8 @@ class Server:
         if (side := slot.engines) is not None:
             side.inp.feed(pause(side.directions[0][0]))
             side.interrupt()
+            from peresmeshnik.voices import live
+            live.forget(side.directions[0][0])  # the next call on these warm engines may be someone else: their voices go
 
     def _expire(self, slot: Slot) -> None:
         if slot.conn is None:

@@ -23,10 +23,21 @@ def speech(s: float, amp: float, seed: int = 0) -> np.ndarray:
     return (np.where(on, amp * np.sin(t * 0.07), 0) + noise).astype(np.float32)
 
 
+A, B, C = np.eye(3, dtype=np.float32)
+
+
 class AmpSpeaker:
-    """The 'speaker vector' of a clause is its loudness: 0.3 is A, 0.1 is B (orthogonal vectors)."""
+    """The 'speaker vector' of a clause is its loudness: 0.3 is A, 0.1 is B, 0.6 is C (orthogonal vectors)."""
     def embed(self, pcm, sr):
-        return np.array([1.0, 0.0], np.float32) if np.abs(pcm).max() > 0.2 else np.array([0.0, 1.0], np.float32)
+        peak = np.abs(pcm).max()
+        return C if peak > 0.45 else A if peak > 0.2 else B
+
+
+class Gate:
+    """audio.echo.EchoGate as LiveVoice reads it: its reference, the delays it searches, the one it found (if any)."""
+    def __init__(self, ref, delay=None):
+        self.ref, self.delays, self.rho_on = ref, np.array([-0.1, 2.0]), 0.5
+        self.delay, self.rho, self.gain = (delay or 0.0), (0.9 if delay is not None else 0.0), (0.0 if delay else None)
 
 
 class FakeClone:
@@ -57,10 +68,10 @@ class FakeStock:
         yield np.zeros(2205, np.float32)
 
 
-def voice_of(engine=None, kept=(), echo=None, note=None):
+def voice_of(engine=None, kept=(), echo=None, note=None, raw=None):
     """A LiveVoice whose worker has loaded its engines and stopped: clauses go through _add() right here."""
     engine = engine or FakeClone()
-    v = live.LiveVoice(lambda: engine, AmpSpeaker, 'pocket-tts-ru', 'en', kept, echo, note)
+    v = live.LiveVoice(lambda: engine, AmpSpeaker, 'pocket-tts-ru', 'en', kept, echo, note, raw)
     v._q.put(None)
     v._thread.join()
     return v
@@ -98,38 +109,96 @@ def test_the_voice_is_made_at_3_5_10_and_20_s_then_stays():
 
 
 def test_short_noisy_and_echoed_clauses_stay_out_of_the_sample():
+    """Each goes to the worker in order with its audio, to be matched to who said it; only long clean clauses without
+    our voice around them go into a sample, and only they make someone new."""
     ref = Reference()
-    gate = type('Gate', (), {'ref': ref, 'delays': np.array([0.0, 2.0])})()
-    v = voice_of(echo=gate)
+    v = voice_of(echo=Gate(ref))
     v.offer(speech(0.8, 0.3), 'hi', 0.0, 0.8)
-    assert v.stats['short'] == 1 and v._q.get()[0] is None  # in order, without its audio
+    pcm, _, sample = v._q.get()
+    assert v.stats['short'] == 1 and pcm is not None and not sample
+    v.offer(speech(0.2, 0.3), 'm', 0.0, 0.2)
+    assert v._q.get()[0] is None  # too short for a speaker vector at all
     ref.push(speech(1.0, 0.3), SAMPLE_RATE)  # we spoke into the call just now
     now = time.perf_counter()
     v.offer(speech(1.5, 0.3), 'their words', now - 0.5, now + 1.0)
-    assert v.stats['echo'] == 1 and v._q.get()[0] is None
+    assert v.stats['echo'] == 1 and not v._q.get()[2]
     v.offer(speech(1.5, 0.3), 'their words', now + 10, now + 11.5)  # long after: no echo
-    assert v._q.get()[0] is not None
+    assert v._q.get()[2]
     v._add(np.random.default_rng(1).normal(0, 0.1, 2 * SAMPLE_RATE).astype(np.float32))  # noise: no speech above it
     assert v.stats['noisy'] == 1 and v.people == []
+    v._add(speech(1.5, 0.3), sample=False)  # an echoed clause of someone unknown: nobody new
+    assert v.people == [] and v.speaking is None
+
+
+def test_the_echo_window_is_where_our_speech_can_sound_and_noise_is_not_speech():
+    """Live voice into the call (the reference is my microphone, noise between my words): their clauses still make a
+    sample; with the gate's delay found, only our speech at that delay counts, not all of the 2 s it searches."""
+    ref = Reference()
+    noise = np.random.default_rng(2).normal(0, 10 ** (-55 / 20), 3 * SAMPLE_RATE).astype(np.float32)
+    now = time.perf_counter()
+    ref.push(noise, SAMPLE_RATE, now)  # my microphone's noise, played into the call up to now
+    v = voice_of(echo=Gate(ref))
+    v.offer(speech(1.5, 0.3), 'their words', now - 1.5, now)
+    assert v._q.get()[2] and v.stats['echo'] == 0  # echo.LOUD alone would have taken the noise for us
+    end = time.perf_counter()
+    ref.push(speech(0.5, 0.3), SAMPLE_RATE, end)  # I said a word: it played over the last 0.5 s
+    far = voice_of(echo=Gate(ref))  # no delay found yet: anything we said within 2 s before the clause counts
+    far.offer(speech(1.5, 0.3), 'their words', end + 1.0, end + 2.5)
+    assert not far._q.get()[2]
+    near = voice_of(echo=Gate(ref, delay=0.1))  # the echo comes back after 0.1 s: our word is done by then
+    near.offer(speech(1.5, 0.3), 'their words', end + 1.0, end + 2.5)
+    assert near._q.get()[2]
+    raw = voice_of(echo=Gate(Reference()), raw=lambda: True)  # my microphone into the call as it is (loopback)
+    raw.offer(speech(1.5, 0.3), 'their words', end + 10, end + 11.5)
+    assert not raw._q.get()[2] and raw.stats['echo'] == 1
 
 
 def test_each_clause_in_the_voice_of_who_said_it_stock_until_theirs_is_made():
-    eng = FakeClone()
-    v = live.LiveVoice(lambda: eng, AmpSpeaker, 'pocket-tts-ru', 'en')  # its worker runs: offer() as the pipeline does
-    a = [v.offer(speech(1.2, 0.3, i), 'a', 0, 1.2) for i in range(3)]
+    eng, ref = FakeClone(), Reference()
+    v = live.LiveVoice(lambda: eng, AmpSpeaker, 'pocket-tts-ru', 'en', echo=Gate(ref))  # its worker runs: offer() as
+    a = [v.offer(speech(1.2, 0.3, i), 'a', 0, 1.2) for i in range(3)]  # the pipeline does
     b = v.offer(speech(1.5, 0.1, 10), 'b', 0, 1.5)
-    short = v.offer(speech(0.5, 0.3, 11), 'uh', 0, 0.5)  # too short to tell: the person before (B)
+    short = v.offer(speech(0.5, 0.1, 11), 'uh', 0, 0.5)  # B's short word: matched to B, not taken as A's
     a2 = v.offer(speech(1.2, 0.3, 12), 'a', 0, 1.2)
+    yes = v.offer(speech(0.5, 0.6, 13), 'yes', 0, 0.5)  # C's first word, too short to make anyone: nobody's voice
+    ref.push(speech(1.0, 0.3), SAMPLE_RATE)  # we spoke into the call, and C talks over it: not into a sample
+    now = time.perf_counter()
+    echoed = v.offer(speech(1.5, 0.6, 14), 'c', now - 0.5, now + 1.0)
     assert v.voice(a2) is not None and v.voice(a2) is v.people[0].voice  # the worker is past A's 3.6 s: made
     assert v.voice(a[0]) is v.people[0].voice  # A's voice as it is when the clause is said
     assert v.voice(b) is None and v.voice(short) is None  # B's: not made yet, the stock voice (not A's)
-    assert short.person is v.people[1] and len(v.people) == 2 and v.stats['short'] == 1
+    assert short.person is v.people[1] and v.stats['short'] == 2
+    assert v.voice(yes) is None and yes.person is None  # the stock voice, not A's who spoke before
+    assert v.voice(echoed) is None and echoed.person is None and len(v.people) == 2
+    v.close()
+
+
+def test_a_clause_not_known_in_time_or_before_any_voice_is_stock():
+    """While someone's voice is being made, a clause queued behind it waits WAIT_S, then the stock voice says it (not
+    the voice of whoever spoke last); before anyone's voice is made it does not wait at all (the engine loading)."""
+    class Slow(FakeClone):
+        def condition(self, pcm, sr):
+            time.sleep(1.0)
+            return super().condition(pcm, sr)
+    v = live.LiveVoice(lambda: time.sleep(0.5) or Slow(), AmpSpeaker, 'pocket-tts-ru', 'en')
+    first = v.offer(speech(1.2, 0.3), 'a', 0, 1.2)
+    t = time.perf_counter()
+    assert v.voice(first) is None and time.perf_counter() - t < 0.1  # still loading: no wait
+    v.close()
+    kept = [(B, np.full(3, 7.0, np.float32), 14.0)]  # B's voice is there from the start
+    v = live.LiveVoice(Slow, AmpSpeaker, 'pocket-tts-ru', 'en', kept)
+    a = [v.offer(speech(1.2, 0.3, i), 'a', 0, 1.2) for i in range(3)]  # A's third clause: A's voice made, 1 s
+    behind = v.offer(speech(1.2, 0.3, 9), 'a', 0, 1.2)
+    a[2].known.wait(5)
+    t = time.perf_counter()
+    assert v.voice(behind) is None and live.WAIT_S <= time.perf_counter() - t < live.WAIT_S + 0.4
+    assert v.stats['late'] == 1
     v.close()
 
 
 def test_a_kept_voice_speaks_from_their_first_clause():
     eng = FakeClone()
-    v = voice_of(eng, kept=[(np.array([0.0, 1.0], np.float32), np.full(3, 7.0, np.float32), 14.0)])
+    v = voice_of(eng, kept=[(B, np.full(3, 7.0, np.float32), 14.0)])
     v._add(speech(1.2, 0.1))  # B, kept from an earlier call
     assert v.voice().state[0] == 7 and eng.made == []  # as kept: not made again
     v._add(speech(1.2, 0.3))  # someone new: a person of their own
@@ -194,7 +263,8 @@ def test_their_voice_never_goes_into_the_call(monkeypatch):
 def test_their_engine_shares_the_card_with_my_cloned_voice(monkeypatch):
     """FIXES-s1-addon 5 and its reserve (a runner per side): both directions cloned here, mine Qwen3-TTS. On an 8 GB card
     theirs is Pocket TTS on the CPU (no NVIDIA engine fits beside), on 12 GB XTTS-v2, on 24 GB Qwen3 too, and the same in
-    what is downloaded; my voice in the cloud: theirs Qwen3 on 8 GB."""
+    what is downloaded; my voice in the cloud: the same while its fallback here is my clone, Qwen3 when it is a stock
+    voice."""
     from peresmeshnik import languages, models
     monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
     monkeypatch.setattr(languages, 'pack_here', lambda: True)
@@ -205,7 +275,11 @@ def test_their_engine_shares_the_card_with_my_cloned_voice(monkeypatch):
     assert languages.direction(s, 'me_to_them').tts == 'qwen3-tts' and live.engine(s) == ('pocket-tts-ru', '')
     need = languages.needed_models(s)
     assert {'qwen3-tts', 'pocket-tts-ru', 'wespeaker-resnet34'} <= set(need) and 'xtts-v2' not in need
-    s.me_to_them = 'cloud'
+    from peresmeshnik.cloud import fallback
+    s.me_to_them = 'cloud'  # my clone speaks here when the cloud fails, if it is ready: on the same card
+    monkeypatch.setattr(fallback, 'local_voice', lambda name, s: ('qwen3-tts', ''))
+    assert live.engine(s) == ('pocket-tts-ru', '')
+    monkeypatch.setattr(fallback, 'local_voice', lambda name, s: ('piper-en_US-john-medium', ''))  # its stock voice
     assert live.engine(s) == ('qwen3-tts', '')
     s.me_to_them = 'local'
     monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(12.0, (572, 83), 8.6))
@@ -229,18 +303,39 @@ def test_attach_leaves_the_stock_voice_when_off_or_not_downloaded(monkeypatch, t
     d.close()
 
 
-def test_the_tray_gets_the_voice_speaking_now():
+def test_the_tray_gets_the_voice_speaking_now_or_why_not():
+    """FIXES-s2 r2 6, 7: kept only after KEEP_S of their speech, in a call with one person on their side, not a voice
+    like mine; otherwise (and with the NVIDIA voice pack, a dead clone, them -> me elsewhere) the tray says why."""
     from types import SimpleNamespace
     v = voice_of()
-    them = SimpleNamespace(directions=[(SimpleNamespace(tts=live.TheirVoice(FakeStock(), v)), True, True)])
-    me = SimpleNamespace(directions=[(SimpleNamespace(tts=FakeStock()), True, True)])
-    ctl = SimpleNamespace(sides=[me, them])
-    assert app.Controller.them_voice(ctl) is None  # nothing made yet: the tray says so
+    them = SimpleNamespace(name='them', engine='local',
+                           directions=[(SimpleNamespace(tts=live.TheirVoice(FakeStock(), v)), True, True)])
+    me = SimpleNamespace(name='me', engine='local', directions=[(SimpleNamespace(tts=FakeStock()), True, True)])
+    ctl = SimpleNamespace(sides=[me, them], settings=config.Settings())
+    assert app.Controller.them_voice(ctl) == (None, 'not enough of their speech yet: 0 of 10 s')
     for i in range(3):
         v._add(speech(1.2, 0.3, i))
-    states, lang, seconds = app.Controller.them_voice(ctl)
-    assert set(states) == {'pocket-tts-ru', 'wespeaker-resnet34'} and lang == 'en' and seconds == 3.6
-    assert app.Controller.them_voice(SimpleNamespace(sides=[me])) is None
+    assert app.Controller.them_voice(ctl)[1] == 'not enough of their speech yet: 4 of 10 s'  # a first voice only
+    for i in range(6):
+        v._add(speech(1.2, 0.3, 3 + i))
+    states, lang, seconds = app.Controller.them_voice(ctl)[0]
+    assert set(states) == {'pocket-tts-ru', 'wespeaker-resnet34'} and lang == 'en' and seconds == 10.8
+    v._my_vec = A  # A is too close to my own voice (my echo made it, say)
+    assert 'too close to your own' in app.Controller.them_voice(ctl)[1]
+    v._my_vec = None
+    for i in range(3):
+        v._add(speech(1.2, 0.1, 20 + i))  # B speaks too: whose would it be?
+    assert app.Controller.them_voice(ctl) == (None, '2 people speak in this call: a voice can be kept in a call with '
+                                                    'one of them only')
+    v.dead = 'onnxruntime: out of memory'
+    assert 'stopped in this call (onnxruntime' in app.Controller.them_voice(ctl)[1]
+    them.engine, them.directions = 'cloud', [(SimpleNamespace(tts=FakeStock()), True, True)]
+    assert 'in the cloud: their voice is made only when it runs on this computer' in app.Controller.them_voice(ctl)[1]
+    them.engine = 'local'
+    ctl.settings.local.their_voice = False
+    assert app.Controller.them_voice(ctl)[1] == ('their voice is not made on this computer: their voice is off ([local] '
+                                                 'their_voice)')
+    assert app.Controller.them_voice(SimpleNamespace(sides=[me])) == (None, 'them → me is not running')
 
 
 def test_a_voice_kept_from_the_tray_is_theirs_from_the_first_clause_of_the_next_call(tmp_path):
@@ -248,14 +343,15 @@ def test_a_voice_kept_from_the_tray_is_theirs_from_the_first_clause_of_the_next_
     vector, `kind = them`, no recording of their speech; the next call speaks it from their first clause."""
     from peresmeshnik import voice
     v = voice_of()
-    for i in range(3):
-        v._add(speech(1.2, 0.1, i))  # B: 3.6 s, their voice is made
-    states, lang, seconds = v.them()
+    for i in range(9):
+        v._add(speech(1.2, 0.1, i))  # B: 10.8 s, their voice is made
+    (states, lang, seconds), why = v.them()
+    assert why == ''
     saved = voice.save_them('Anna', lang, seconds, states, tmp_path)
     assert saved.meta['kind'] == 'them' and sorted(p.name for p in saved.path.iterdir()) == [
         'pocket-tts-ru.npy', 'voice.json', 'wespeaker-resnet34.npy']
     [(vec, state, s)] = live.kept('pocket-tts-ru', tmp_path)
-    assert np.array_equal(state, v.speaking.voice.state) and vec @ [0, 1] > 0.99 and s == seconds
+    assert np.array_equal(state, v.speaking.voice.state) and vec @ B > 0.99 and s == seconds
     assert live.kept('pocket-tts-en', tmp_path) == []  # another engine: made again in that call
     eng = FakeClone()
     w = voice_of(eng, kept=live.kept('pocket-tts-ru', tmp_path))
@@ -271,7 +367,8 @@ def test_a_voice_pack_voice_speaks_in_the_call_and_is_not_offered_to_keep():
     v._thread.join()
     for i in range(3):
         v._add(speech(1.2, 0.3, i))
-    assert v.voice() is not None and v.them() is None
+    assert v.voice() is not None and v.them() == (None, 'with the NVIDIA voice pack their voice lives only during '
+                                                    "the call, in the pack's own memory: it cannot be kept")
 
 
 def test_an_engine_still_loading_when_translation_goes_off_is_freed_after_it(monkeypatch):
@@ -316,3 +413,99 @@ def test_faster_keeps_the_pitch_and_shortens_by_the_speed():
     assert abs(f - 220) < 3  # the same pitch, not a faster tape
     mid = y[sr // 10:-sr // 10]
     assert np.abs(mid).max() < 0.33 and np.sqrt(np.mean(mid ** 2)) > 0.19  # frames add up without dips or clicks
+
+
+def test_the_them_side_speaks_at_its_voices_rate_not_the_stock_one(monkeypatch, tmp_path):
+    """FIXES-s2 r2 1: live.attach puts TheirVoice (24 kHz) in after the pipeline's workers started on the stock voice's
+    rate: every Speech goes out at 24 kHz, the stock voice's clauses resampled, not labelled 22.05 kHz."""
+    from peresmeshnik import models
+    from peresmeshnik.engines import Speech
+    from peresmeshnik.local import clone
+    monkeypatch.setattr(live, 'engine', lambda s: ('pocket-tts-ru', ''))
+    monkeypatch.setattr(models, 'path', lambda mid: tmp_path)
+    monkeypatch.setattr(clone, 'make_engine', lambda *a, **k: FakeClone())
+    monkeypatch.setattr(live, 'kept', lambda engine_id, root=None: [])  # not the voices of this computer's user
+    monkeypatch.setattr('peresmeshnik.voice.Speaker', lambda path: AmpSpeaker())
+
+    class Piper(FakeStock):
+        def synth(self, text, lang, voice=None, speed=1.0):
+            yield from (np.zeros(2205, np.float32) for _ in text.split())
+    d = LocalDirection(EnergyVad(), WordAsr(), UpperMt(), Piper(), 'en', 'ru')
+    d.realtime = False
+    assert live.attach(d, config.Settings()) is d and isinstance(d.tts, live.TheirVoice)
+    run(d, np.concatenate([tone(1.5), silence(0.6), tone(1.5), silence(0.6)]))
+    d.finish()
+    rates = [e.sample_rate for e in d.events() if isinstance(e, Speech)]
+    assert rates and set(rates) == {24_000}
+    d.close()
+
+
+def test_a_speaker_model_that_fails_frees_the_engine_and_attach_never_stops_the_side(monkeypatch):
+    """FIXES-s2 r2 12, 13: the engine loaded, then the speaker model failed: the engine is closed, the stock voice
+    speaks; anything failing in attach itself leaves the side as it was."""
+    class Engine(FakeClone):
+        closed = False
+
+        def close(self):
+            Engine.closed = True
+
+    def broken():
+        raise OSError('wespeaker: no such file')
+    v = live.LiveVoice(Engine, broken, 'pocket-tts-ru', 'en')
+    v.close()
+    assert Engine.closed and v.engine is None and 'wespeaker' in v.dead
+    d = LocalDirection(EnergyVad(), WordAsr(), UpperMt(), ToneTts(), 'en', 'ru')
+    stock = d.tts
+    monkeypatch.setattr(live, 'engine', lambda s: 1 / 0)
+    assert live.attach(d, config.Settings()) is d and d.tts is stock and d.on_clause is None
+    d.close()
+
+
+def test_translation_off_and_on_again_waits_for_the_last_runner(monkeypatch):
+    """FIXES-s2 r2 14: the last call's worker still loading its engine when translation went off: the new call's
+    engine loads only once that one is freed (one runner of theirs on the card)."""
+    monkeypatch.setattr(live, 'CLOSE_WAIT_S', 0.01)
+    times = {}
+
+    def slow():
+        time.sleep(0.4)
+        return FakeClone()
+
+    def stamped(name, make):
+        def f():
+            times[name] = time.perf_counter()
+            return make()
+        return f
+    old = live.LiveVoice(slow, AmpSpeaker, 'xtts-v2', 'en')
+    old.close()
+    assert old._thread.is_alive() and live.LiveVoice._closing is old._thread
+    t = time.perf_counter()
+    new = live.LiveVoice(stamped('new', FakeClone), AmpSpeaker, 'xtts-v2', 'en')
+    new._q.put(None)
+    new._thread.join(5)
+    assert times['new'] - t >= 0.3 and not old._thread.is_alive()
+
+
+def test_saved_headphones_are_checked_as_the_default_is(monkeypatch):
+    """FIXES-s2 r2 15: a saved output that is one of ours (Linux) or a BlackHole device (macOS) is refused like a
+    default one would be: the translation would go into the call."""
+    import sys
+    from types import SimpleNamespace
+
+    import peresmeshnik.audio as audio
+    monkeypatch.setattr(sys, 'platform', 'linux')
+    monkeypatch.setattr(app, 'pactl', lambda *a: '1\tperesmeshnik_mic_sink\tx\n2\talsa_output.usb\tx\n' if a[0] == 'list'
+                        else 'alsa_output.usb\n')
+    assert app.Headphones('alsa_output.usb').resolve() == 'alsa_output.usb'
+    with pytest.raises(RuntimeError, match='saved output is our own device peresmeshnik_mic_sink'):
+        app.Headphones('peresmeshnik_mic_sink').resolve()
+    monkeypatch.setattr(sys, 'platform', 'darwin')
+    core = SimpleNamespace(devices=lambda: [{'name': n, 'outputs': 2, 'virtual': n.startswith('BlackHole')}
+                                            for n in ('BlackHole 2ch', 'AirPods')], default=lambda: 'AirPods')
+    cap = SimpleNamespace(CALL_DEVICE='BlackHole 16ch', path=lambda: 'tap')
+    for name, mod in (('coreaudio', core), ('capture_macos', cap)):
+        monkeypatch.setattr(audio, name, mod, raising=False)
+        monkeypatch.setitem(sys.modules, f'peresmeshnik.audio.{name}', mod)
+    assert app.Headphones('AirPods').resolve() == 'AirPods'
+    with pytest.raises(RuntimeError, match='saved output is BlackHole 2ch, a device of the call'):
+        app.Headphones('BlackHole 2ch').resolve()

@@ -6,7 +6,9 @@ Stages: embed (LibriSpeech + FLEURS-ru embeddings -> work/*.npz), report (tables
 timing (1 thread, 5 s and 40 s), padded + report_padded (8 s live with silence, raw vs trimmed);
 stage 2 (reference in windows, min of cosines): wlive, wfile <8|10,12>, splice <0,8|10,12> <i/n>, report2, timing2,
 trimcheck (live with / without the app's trim),
-trim3 <i/n> + report_trim3 (live trimmed: none / edges / all frames).
+trim3 <i/n> + report_trim3 (live trimmed: none / edges / all frames);
+stage 3 (the reference's start in short windows): head <i/n>, report_head, timing_head;
+overlap <i/n> + report_overlap + timing_overlap (4 s windows every 2 s over the head, shifted splices).
 The model is run exactly as onnx-asr 0.12.0 does it: Manager().create_se()
 -> KaldiPreprocessorNumpy('wespeaker') -> mean subtraction over time -> ONNX 'feats' -> 'embs'.
 """
@@ -766,8 +768,325 @@ def stage_report_trim3():
     json.dump(out, open(WORK / "report_trim3.json", "w"), indent=1, default=float)
 
 
+# ---------- stage 3: the reference's first HEAD_S s of speech in short windows, the rest in 8 s ----------
+HEAD_S = 12
+SHORT = (4, 6)  # "4+8": the head in 4 s windows; "6+8": in 6 s
+HEAD_K = (3, 4, 5, 6)  # splice: the first K s of another person's speech, then the owner up to FILE_SEC
+T3 = (0.35, 0.40, 0.45)
+LIVE3_S = 8  # the app's live reading, trimmed at the edges only (voice._speech(edges=True))
+
+
+def head_windows(t: np.ndarray) -> dict[str, list[np.ndarray]]:
+    """Trimmed reference -> {kind: windows}: w8 = all in 8 s (the app now), s4 / s6 = the first HEAD_S s in 4 / 6 s,
+    r8 = the rest after HEAD_S in 8 s (the same tail rule)."""
+    h = HEAD_S * SR
+    out = {"w8": windows(t, 8), "r8": windows(t[h:], 8)}
+    out |= {f"s{w}": [t[a: a + w * SR] for a in range(0, h, w * SR)] for w in SHORT}
+    return out
+
+
+def stage_head():
+    """argv[2] = shard "i/n". live: 8 s chunks after the first 40 s (clean; white 20 / 10 for k % 3 == 0), edges
+    trimmed; ref: 40 / 60 s clean / opus24k, trimmed, windows s4 s6 r8 (w8 is emb_win8.npz); splice: the first K s of
+    the speech of another person of the same sex (splice_pairs) + the owner's first FILE_SEC - K s, windows w8 s4 s6 r8."""
+    i, n = map(int, sys.argv[2].split("/"))
+    se, gender, rows, t0 = make_se(1), libri_speakers(), [], time.time()
+    imps = {}
+    for spk, ch, imp, ich in splice_pairs():
+        imps.setdefault((spk, ch), []).append((imp, ich))
+    for j, (spk, ch, utts) in enumerate(chapters()):
+        if j % n != i:
+            continue
+        rng, base = np.random.default_rng([int(spk), int(ch), 3]), {"spk": spk, "ch": ch, "g": gender[spk]}
+        _, used = concat_from(utts, 0, FILE_SEC)
+        for k, lx in enumerate(live_chunks(utts, used, LIVE3_S)):
+            for lc in LIVE2_CONDS if k % 3 == 0 else ("clean",):
+                y = speech_edges(live_cond(lx, lc, rng))
+                rows.append((base | {"set": "live", "cond": lc, "k": k, "s": len(y) / SR}, embed(se, y)))
+        for L in REF_SECS:
+            fx, _ = concat_from(utts, 0, L)
+            for fc in ("clean", "opus24k") if fx is not None else ():
+                t = speech_only(file_cond(fx, fc))
+                rows += [(base | {"set": "ref", "cond": fc, "L": L, "kind": kind, "i": q}, embed(se, w))
+                         for kind, ws in head_windows(t).items() if kind != "w8" for q, w in enumerate(ws)]
+        for imp, ich in imps.get((spk, ch), []):
+            oth, _ = concat_from(sorted(glob.glob(str(LIBRI / "dev-clean" / imp / ich / "*.flac"))), 0, 20)
+            oth = speech_only(oth)
+            for K in HEAD_K:
+                own, _ = concat_from(utts, 0, FILE_SEC - K)
+                t = speech_only(np.concatenate([oth[: K * SR], own]))
+                rows += [(base | {"set": "splice", "imp": imp, "imp_ch": ich, "K": K, "kind": kind, "i": q},
+                          embed(se, w)) for kind, ws in head_windows(t).items() for q, w in enumerate(ws)]
+        print(f"{j} {spk}/{ch} rows={len(rows)} t={time.time() - t0:.0f}s", flush=True)
+    save2(WORK / f"emb_head_{i}.npz", rows)
+
+
+def kind_mins(E, M, keys, refs, Lv):
+    """{kind: refs x lives} of the min cosine over that reference's windows of the kind."""
+    pos = {}
+    for r, m in enumerate(M):
+        pos.setdefault((tuple(m[k] for k in keys), m["kind"]), []).append(r)
+    kinds = sorted({m["kind"] for m in M})
+    return {kd: np.stack([np.min(E[pos[(r, kd)]] @ Lv.T, axis=0) for r in refs]) for kd in kinds}
+
+
+def schemes(m):
+    """kind mins -> {scheme: pass fn(t)}: 8 / 4+8 / 6+8 with one threshold, and 4@ts+8 / 6@ts+8: the short windows
+    at their own ts, the 8 s ones at 0.45."""
+    out = {"8": lambda t: m["w8"] >= t}
+    for w in SHORT:
+        out[f"{w}+8"] = lambda t, w=w: np.minimum(m[f"s{w}"], m["r8"]) >= t
+        for ts in (0.35, 0.40):
+            out[f"{w}@{ts:.2f}+8@0.45"] = lambda t, w=w, ts=ts: (m[f"s{w}"] >= ts) & (m["r8"] >= 0.45)
+    return out
+
+
+def stage_report_head():
+    parts = [load2(p) for p in sorted(WORK.glob("emb_head_*.npz"))]
+    E, M = np.concatenate([e for e, _ in parts]), sum((m for _, m in parts), [])
+    we, wm = load2(WORK / "emb_win8.npz")
+    li = [j for j, m in enumerate(M) if m["set"] == "live"]
+    le, lm = E[li], [M[j] for j in li]
+    ri = [j for j, m in enumerate(M) if m["set"] == "ref"]
+    wi = [j for j, m in enumerate(wm) if m["cond"] in ("clean", "opus24k")]
+    RE = np.concatenate([E[ri], we[wi]])
+    RM = [M[j] for j in ri] + [wm[j] | {"kind": "w8"} for j in wi]
+    keys, out, lines = ("spk", "ch", "cond", "L"), {"a": {}, "dist": {}, "b": {}}, []
+    g = {m["spk"]: m["g"] for m in lm}
+    kept = {lc: np.percentile([m["s"] for m in lm if m["cond"] == lc], [5, 50, 95]) for lc in LIVE2_CONDS}
+    lines.append(f"live {LIVE3_S} s edges-trimmed, kept p5/p50/p95: "
+                 + "  ".join(f"{lc} {q[0]:.2f}/{q[1]:.2f}/{q[2]:.2f}" for lc, q in kept.items()))
+    lines.append("## (a) FRR (own, another chapter) at 0.35 / 0.40 / 0.45, FAR (other same sex) at 0.45")
+    for L in REF_SECS:
+        for fc, lc in (("clean", "clean"), ("opus24k", "clean"), ("clean", "laptop_white20"),
+                       ("clean", "laptop_white10")):
+            refs = sorted({tuple(m[k] for k in keys) for m in RM if m["cond"] == fc and m["L"] == L})
+            fmeta = [{"spk": r[0], "ch": r[1], "g": g[r[0]]} for r in refs]
+            lj = [j for j, m in enumerate(lm) if m["cond"] == lc]
+            gen, imp = masks(fmeta, [lm[j] for j in lj])
+            m = kind_mins(RE, RM, keys, refs, le[lj])
+            lines.append(f"ref={L}s {fc}/{lc} refs={len(refs)} gen={int(gen.sum())} imp={int(imp.sum())}")
+            for name, ok in schemes(m).items():
+                ts = T3 if "@" not in name else (0.45,)
+                r = {"frr": {str(t): float(1 - ok(t)[gen].mean()) for t in ts},
+                     "far": {str(t): float(ok(t)[imp].mean()) for t in ts}, "n_gen": int(gen.sum()),
+                     "n_imp": int(imp.sum())}
+                out["a"][f"{L}|{fc}|{lc}|{name}"] = r
+                lines.append(f"  {name}: " + "  ".join(f"{t}: {r['frr'][str(t)]:.2%}/{r['far'][str(t)]:.3%}" for t in ts))
+            if L == 40:  # each window's cosine and the min per kind, own vs other
+                d = {}
+                for kd in ("s4", "s6", "w8"):
+                    rows = [j for j, mm in enumerate(RM) if mm["cond"] == fc and mm["L"] == L and mm["kind"] == kd]
+                    S = RE[rows] @ le[lj].T
+                    ref_of = {r: a for a, r in enumerate(refs)}
+                    a_ = np.array([ref_of[tuple(RM[j][k] for k in keys)] for j in rows])
+                    gw, iw = gen[a_], imp[a_]
+                    d[kd] = {"win": pct(S[gw]) | {"imp_p99": float(np.percentile(S[iw], 99)),
+                                                   "far@0.45": float(np.mean(S[iw] >= 0.45))},
+                             "min": pct(m[kd][gen]) | {"imp_p99": float(np.percentile(m[kd][imp], 99))}}
+                out["dist"][f"{fc}|{lc}"] = d
+                for kd, v in d.items():
+                    for what in ("win", "min"):
+                        q = v[what]
+                        lines.append(f"  dist {kd} {what}: own p1={q['p1']:.3f} p5={q['p5']:.3f} p50={q['p50']:.3f} "
+                                     f"other p99={q['imp_p99']:.3f}"
+                                     + (f" other far@0.45={q['far@0.45']:.3%}" if what == "win" else ""))
+    lines.append("## (b) splice: the first K s of another's speech + the owner to 40 s; live = the owner, another "
+                 "chapter, clean; pass rate")
+    si = [j for j, m in enumerate(M) if m["set"] == "splice"]
+    SE_, SM = E[si], [M[j] for j in si]
+    lj = [j for j, m in enumerate(lm) if m["cond"] == "clean"]
+    Lv, lmeta = le[lj], [lm[j] for j in lj]
+    owners = sorted({(m["spk"], m["ch"]) for m in SM})
+    for K in (0,) + HEAD_K:
+        if K:
+            kk = ("spk", "ch", "imp", "K")
+            refs = sorted({tuple(m[k] for k in kk) for m in SM if m["K"] == K})
+            sk = [j for j, x in enumerate(SM) if x["K"] == K]
+            m = kind_mins(SE_[sk], [SM[j] for j in sk], kk, refs, Lv)
+        else:
+            refs = [(s, c, "clean", 40) for s, c in owners]
+            m = kind_mins(RE, RM, keys, refs, Lv)
+        ok_ = np.array([[lv["spk"] == r[0] and lv["ch"] != r[1] for lv in lmeta] for r in refs])
+        lines.append(f"K={K}: splices={len(refs)} pairs={int(ok_.sum())}")
+        for name, ok in schemes(m).items():
+            ts = (0.40, 0.45) if "@" not in name else (0.45,)
+            r = {str(t): float(ok(t)[ok_].mean()) for t in ts} | {"n_splices": len(refs), "n_pairs": int(ok_.sum())}
+            out["b"][f"{K}|{name}"] = r
+            lines.append(f"  {name}: " + "  ".join(f"{t}: {r[str(t)]:.2%}" for t in ts))
+        lines.append("  median min: " + "  ".join(f"{kd}={np.median(v[ok_]):.3f}" for kd, v in m.items()))
+    json.dump(out, open(WORK / "report_head.json", "w"), indent=1, default=float)
+    print("\n".join(lines))
+
+
+def stage_timing_head():
+    """1 thread: reference 60 s -> trim + 4+8 windows (3 x 4 s + 8 s after 12 s), live 8 s -> edges trim, the min."""
+    se = make_se(1)
+    utts = sorted(glob.glob(str(LIBRI / "dev-clean/84/121123/*.flac")))
+    x60, used = concat_from(utts, 0, 60)
+    live = live_chunks(utts, used, LIVE3_S)[0]
+
+    def run(fn):
+        fn()
+        ts = []
+        for _ in range(10):
+            t = time.perf_counter()
+            fn()
+            ts.append(time.perf_counter() - t)
+        return np.median(ts) * 1000, np.percentile(ts, 90) * 1000
+
+    lv = embed(se, speech_edges(live))
+    print("live 8 s edges+embed: median={:.0f}ms p90={:.0f}ms".format(*run(lambda: embed(se, speech_edges(live)))))
+    for name, kinds in (("8", ("w8",)), ("4+8", ("s4", "r8")), ("6+8", ("s6", "r8"))):
+        n = sum(len(head_windows(speech_only(x60))[k]) for k in kinds)
+        ms = run(lambda kinds=kinds: min(embed(se, s) @ lv for k in kinds for s in head_windows(speech_only(x60))[k]))
+        print(f"ref 60 s {name} ({n} windows) trim+embed+min: median={ms[0]:.0f}ms p90={ms[1]:.0f}ms")
+        ms = run(lambda kinds=kinds: min(embed(se, s) @ lv for k in kinds for s in head_windows(speech_only(x60))[k])
+                 + embed(se, speech_edges(live)) @ lv)
+        print(f"  + live: median={ms[0]:.0f}ms p90={ms[1]:.0f}ms")
+
+
+# ---------- stage 3b: the head in 4 s windows every 2 s ("4h2+8"); splices shifted by OFFS s of the owner ----------
+OFFS = (1, 2)
+X4 = (2, 6)  # the 4 s windows of the head not in s4 (0, 4, 8): together 0-4, 2-6, 4-8, 6-10, 8-12
+
+
+def head_x4(t: np.ndarray) -> list[np.ndarray]:
+    return [t[a * SR: (a + 4) * SR] for a in X4]
+
+
+def speech_cut(x: np.ndarray, sec: float, frame=480) -> int:
+    """The sample of x after which speech_only(x) has kept `sec` s (the same frame threshold)."""
+    f = (x - x.mean())[: len(x) // frame * frame].reshape(-1, frame).astype(np.float64)
+    db = 10 * np.log10(np.mean(f ** 2, axis=1) + 1e-12)
+    live = db[db > -100]
+    on = db > max(float(np.percentile(live, 10)) + 6 if len(live) else -120.0, -60.0)
+    return int(np.searchsorted(np.cumsum(on), round(sec * SR / frame)) + 1) * frame
+
+
+def stage_overlap():
+    """argv[2] = shard "i/n". ref (40 / 60 s, clean / opus24k) and splice (offset 0): the s4x windows only (the rest is
+    emb_head); splice shifted: the owner's first o s of speech, the K s of another person, the owner on (raw, 40 - K s
+    in all), windows w8 (only the first: the next ones are the owner's alone, taken from offset 0), s4, s4x (r8: offset 0)."""
+    i, n = map(int, sys.argv[2].split("/"))
+    se, gender, rows, t0 = make_se(1), libri_speakers(), [], time.time()
+    imps = {}
+    for spk, ch, imp, ich in splice_pairs():
+        imps.setdefault((spk, ch), []).append((imp, ich))
+    for j, (spk, ch, utts) in enumerate(chapters()):
+        if j % n != i:
+            continue
+        base = {"spk": spk, "ch": ch, "g": gender[spk]}
+        for L in REF_SECS:
+            fx, _ = concat_from(utts, 0, L)
+            for fc in ("clean", "opus24k") if fx is not None else ():
+                t = speech_only(file_cond(fx, fc))
+                rows += [(base | {"set": "ref", "cond": fc, "L": L, "kind": "s4x", "i": q}, embed(se, w))
+                         for q, w in enumerate(head_x4(t))]
+        for imp, ich in imps.get((spk, ch), []):
+            oth, _ = concat_from(sorted(glob.glob(str(LIBRI / "dev-clean" / imp / ich / "*.flac"))), 0, 20)
+            oth = speech_only(oth)
+            for K in HEAD_K:
+                own, _ = concat_from(utts, 0, FILE_SEC - K)
+                for o in (0,) + OFFS:
+                    c = speech_cut(own, o) if o else 0
+                    t = speech_only(np.concatenate([own[:c], oth[: K * SR], own[c:]]))
+                    ws = {"s4x": head_x4(t)} | ({"w8": windows(t, 8)[:1], "s4": head_windows(t)["s4"]} if o else {})
+                    rows += [(base | {"set": "splice", "imp": imp, "imp_ch": ich, "K": K, "o": o, "kind": kind, "i": q},
+                              embed(se, w)) for kind, v in ws.items() for q, w in enumerate(v)]
+        print(f"{j} {spk}/{ch} rows={len(rows)} t={time.time() - t0:.0f}s", flush=True)
+    save2(WORK / f"emb_overlap_{i}.npz", rows)
+
+
+def schemes_x(m):
+    """8 at t; 4+8 / 4h2+8: the 4 s windows at t4 (0.40 or 0.45), the 8 s ones at 0.45 (t is ignored for them)."""
+    s4h = np.minimum(m["s4"], m["s4x"])
+    out = {"8@0.45": m["w8"] >= 0.45}
+    for t4 in (0.40, 0.45):
+        out[f"4@{t4:.2f}+8"] = (m["s4"] >= t4) & (m["r8"] >= 0.45)
+        out[f"4h2@{t4:.2f}+8"] = (s4h >= t4) & (m["r8"] >= 0.45)
+    return out
+
+
+def stage_report_overlap():
+    H = [load2(p) for p in sorted(WORK.glob("emb_head_*.npz"))]
+    Ov = [load2(p) for p in sorted(WORK.glob("emb_overlap_*.npz"))]
+    HE, HM = np.concatenate([e for e, _ in H]), sum((m for _, m in H), [])
+    OE, OM = np.concatenate([e for e, _ in Ov]), sum((m for _, m in Ov), [])
+    we, wm = load2(WORK / "emb_win8.npz")
+    li = [j for j, m in enumerate(HM) if m["set"] == "live"]
+    le, lm = HE[li], [HM[j] for j in li]
+    hr = [j for j, m in enumerate(HM) if m["set"] == "ref" and m["kind"] in ("s4", "r8")]
+    orf = [j for j, m in enumerate(OM) if m["set"] == "ref"]
+    wi = [j for j, m in enumerate(wm) if m["cond"] in ("clean", "opus24k")]
+    RE = np.concatenate([HE[hr], OE[orf], we[wi]])
+    RM = [HM[j] for j in hr] + [OM[j] for j in orf] + [wm[j] | {"kind": "w8"} for j in wi]
+    keys, out, lines = ("spk", "ch", "cond", "L"), {"a": {}, "b": {}}, []
+    g = {m["spk"]: m["g"] for m in lm}
+    lines.append("## (a) FRR (own, another chapter) / FAR (other same sex)")
+    for L in REF_SECS:
+        for fc, lc in (("clean", "clean"), ("opus24k", "clean"), ("clean", "laptop_white20"),
+                       ("clean", "laptop_white10")):
+            refs = sorted({tuple(m[k] for k in keys) for m in RM if m["cond"] == fc and m["L"] == L})
+            fmeta = [{"spk": r[0], "ch": r[1], "g": g[r[0]]} for r in refs]
+            lj = [j for j, m in enumerate(lm) if m["cond"] == lc]
+            gen, imp = masks(fmeta, [lm[j] for j in lj])
+            lines.append(f"ref={L}s {fc}/{lc} refs={len(refs)} gen={int(gen.sum())} imp={int(imp.sum())}")
+            for name, ok in schemes_x(kind_mins(RE, RM, keys, refs, le[lj])).items():
+                r = {"frr": float(1 - ok[gen].mean()), "far": float(ok[imp].mean())}
+                out["a"][f"{L}|{fc}|{lc}|{name}"] = r
+                lines.append(f"  {name}: FRR={r['frr']:.2%} FAR={r['far']:.3%}")
+    lines.append("## (b) splice: o s of the owner, K s of another, the owner to 40 s; live = the owner, clean; pass rate")
+    lj = [j for j, m in enumerate(lm) if m["cond"] == "clean"]
+    Lv, lmeta = le[lj], [lm[j] for j in lj]
+    kk = ("spk", "ch", "imp", "K")
+    for K in HEAD_K:
+        h0 = [j for j, m in enumerate(HM) if m["set"] == "splice" and m["K"] == K]
+        for o in (0,) + OFFS:
+            oj = [j for j, m in enumerate(OM) if m["set"] == "splice" and m["K"] == K and m["o"] == o]
+            keep = ("w8", "s4", "r8") if o == 0 else ("r8",)
+            hj = [j for j in h0 if HM[j]["kind"] in keep or (o and HM[j]["kind"] == "w8" and HM[j]["i"] > 0)]
+            E, M = np.concatenate([HE[hj], OE[oj]]), [HM[j] for j in hj] + [OM[j] for j in oj]
+            refs = sorted({tuple(m[k] for k in kk) for m in M})
+            ok_ = np.array([[lv["spk"] == r[0] and lv["ch"] != r[1] for lv in lmeta] for r in refs])
+            m = kind_mins(E, M, kk, refs, Lv)
+            r = {name: float(ok[ok_].mean()) for name, ok in schemes_x(m).items()}
+            r |= {"n_splices": len(refs), "n_pairs": int(ok_.sum())}
+            out["b"][f"{K}|{o}"] = r
+            lines.append(f"K={K} o={o} splices={len(refs)} pairs={int(ok_.sum())}: "
+                         + "  ".join(f"{k}={v:.2%}" for k, v in r.items() if "@" in k)
+                         + "  median s4=" + f"{np.median(m['s4'][ok_]):.3f} s4x={np.median(m['s4x'][ok_]):.3f}")
+    json.dump(out, open(WORK / "report_overlap.json", "w"), indent=1, default=float)
+    print("\n".join(lines))
+
+
+def stage_timing_overlap():
+    """1 thread: reference 60 s -> trim + 4h2+8 windows (5 x 4 s every 2 s + 8 s after 12 s) vs 4+8, the min."""
+    se = make_se(1)
+    utts = sorted(glob.glob(str(LIBRI / "dev-clean/84/121123/*.flac")))
+    x60, used = concat_from(utts, 0, 60)
+    lv = embed(se, speech_edges(live_chunks(utts, used, LIVE3_S)[0]))
+
+    def wins(t, x):
+        h = head_windows(t)
+        return h["s4"] + (head_x4(t) if x else []) + h["r8"]
+
+    for name, x in (("4+8", False), ("4h2+8", True), ("4+8", False), ("4h2+8", True)):  # twice: load drifts
+        fn = lambda x=x: min(embed(se, s) @ lv for s in wins(speech_only(x60), x))  # noqa: E731
+        fn()
+        ts = []
+        for _ in range(10):
+            t = time.perf_counter()
+            fn()
+            ts.append(time.perf_counter() - t)
+        print(f"ref 60 s {name} ({len(wins(speech_only(x60), x))} windows) trim+embed+min: "
+              f"median={np.median(ts) * 1000:.0f}ms p90={np.percentile(ts, 90) * 1000:.0f}ms", flush=True)
+
+
 if __name__ == "__main__":
     {"embed": stage_embed, "report": stage_report, "timing": stage_timing, "padded": stage_padded,
      "report_padded": stage_report_padded, "wlive": stage_wlive, "wfile": stage_wfile, "splice": stage_splice,
      "report2": stage_report2, "timing2": stage_timing2, "trimcheck": stage_trimcheck,
-     "trim3": stage_trim3, "report_trim3": stage_report_trim3}[sys.argv[1]]()
+     "trim3": stage_trim3, "report_trim3": stage_report_trim3, "head": stage_head, "report_head": stage_report_head,
+     "timing_head": stage_timing_head, "overlap": stage_overlap, "report_overlap": stage_report_overlap,
+     "timing_overlap": stage_timing_overlap}[sys.argv[1]]()

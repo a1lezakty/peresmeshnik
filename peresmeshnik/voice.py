@@ -580,6 +580,12 @@ MATCH = 0.45
 # clean (3.4 % with one vector), another person passes 0.06 % a try, 0.19 % in 3 tries. 10-12 s: fewer refusals in
 # noise, more of another person in a mixed window
 WIN_S = 8.0
+# its start in shorter windows: a piece of someone else shorter than WIN_S at the very start (where the engines take their
+# prompt: XTTS 6 s, Pocket 10 s) is diluted by my voice in an 8 s window. BENCH (stage 8 tails), the worst over a shift
+# of 0-2 s: 3/4/5/6 s of another person passed 96/90/66/36 % with 8 s windows; with 4 s windows every 2 s over the first
+# 12 s at 0.40 (a 4 s window of mine scores lower: p5 0.51 against 0.55 at 8 s; another person's p99 0.41 against
+# 0.42) 36/23/3.5/0.9 %; the same person refused 4.1 % clean (3.8 %), another person passing a try 0.056 % (0.063 %)
+HEAD_S, HEAD_WIN_S, HEAD_HOP_S, HEAD_MATCH = 12.0, 4.0, 2.0, 0.40
 TRIES, PAUSES_S = 3, (60, 300, 1500, 3600)  # failed checks in a row before a pause; the pauses after them, growing
 
 
@@ -595,13 +601,21 @@ def _to(pcm: np.ndarray, sr: int, to: int) -> np.ndarray:
     return x if sr == to else np.interp(np.arange(0, len(x), sr / to), np.arange(len(x)), x).astype(np.float32)
 
 
-def _windows(x: np.ndarray, sr: int) -> list[np.ndarray]:
-    """WIN_S pieces of `x`; a last one shorter than half of it joins the one before."""
-    n = int(WIN_S * sr)
-    w = [x[i:i + n] for i in range(0, len(x), n)] or [x]
-    if len(w) > 1 and len(w[-1]) < n // 2:
-        w[-2:] = [np.concatenate(w[-2:])]
-    return w
+def _windows(x: np.ndarray, sr: int) -> list[tuple[np.ndarray, float]]:
+    """(piece, its threshold) of the speech `x`: its first HEAD_S in HEAD_WIN_S pieces every HEAD_HOP_S (HEAD_MATCH),
+    the rest in WIN_S pieces (MATCH), a last one shorter than half of it joining the one before."""
+    h, k, n = int(HEAD_S * sr), int(HEAD_WIN_S * sr), int(WIN_S * sr)
+    m = min(h, len(x))
+    at = list(range(0, max(m - k, 0) + 1, int(HEAD_HOP_S * sr)))
+    if at[-1] + k < m:  # a start shorter than HEAD_S: its end is covered too
+        at.append(m - k)
+    head = [(x[i:i + k], HEAD_MATCH) for i in at]
+    rest = [x[i:i + n] for i in range(h, len(x), n)]
+    if len(rest) > 1 and len(rest[-1]) < n // 2:
+        rest[-2:] = [np.concatenate(rest[-2:])]
+    if rest and len(rest[-1]) < n // 2 and len(x) > h:  # a short tail after the start: the last start window takes it
+        head[-1] = (np.concatenate([head[-1][0], rest.pop()]), HEAD_MATCH)
+    return head + [(w, MATCH) for w in rest]
 
 
 def _checks(voices: Path) -> Path:
@@ -681,20 +695,21 @@ def confirm_live(ref: Voice, pcm: np.ndarray, sr: int, said: list[str], asr, spe
     heard = asr.recognize(_to(pcm, sr, SAMPLE_RATE), lang=ref.meta.get('lang')).text
     err = wer(' '.join(said), heard)
     live = speaker.embed(_speech(pcm, sr, edges=True), sr)
-    sims = [float(speaker.embed(w, rsr) @ live) for w in _windows(_speech(x.mean(axis=1), rsr), rsr)]
-    sim = min(sims)
+    sims = [(float(speaker.embed(w, rsr) @ live), m) for w, m in _windows(_speech(x.mean(axis=1), rsr), rsr)]
+    sim, worst = min(sims, key=lambda s: s[0] - s[1])  # the window furthest below its threshold (or nearest to it)
+    low = sim < worst
     why = ([f'the words heard are not the ones on the screen ({err:.0%} differ): read them as written'] if err > LIVE_WER
-           else []) + ([f'this is not the voice of the recording (similarity {sim:.2f})'] if sim < MATCH else [])
-    if sim < MATCH and (r := check(pcm, sr)).speech_s and r.snr_db < FAIR_DB:  # the same person: refused 3x as often
+           else []) + ([f'this is not the voice of the recording (similarity {sim:.2f})'] if low else [])
+    if low and (r := check(pcm, sr)).speech_s and r.snr_db < FAIR_DB:  # the same person: refused 3x as often
         why.append(f'the background is loud (your speech only {r.snr_db:.0f} dB above it): try again somewhere quiet')
-    if sim < MATCH and ref.meta.get('quality', {}).get('band_db', 0.0) < BAND_DB:
+    if low and ref.meta.get('quality', {}).get('band_db', 0.0) < BAND_DB:
         why.append('the recording sounds like a phone call: one from a better microphone matches more reliably')
     _tried(not why, ref.path.parent)
     if why:
         return None, 'Not confirmed: ' + '; '.join(why) + '.'
     import hashlib
     how = 'mic-live' if ref.meta.get('source') == 'mic' else 'import+mic-match'
-    return {'how': how, 'at': _now(), 'wer': round(err, 3), 'similarity': round(sim, 3), 'windows': len(sims),
+    return {'how': how, 'at': _now(), 'wer': round(err, 3), 'similarity': round(min(s for s, _ in sims), 3), 'windows': len(sims),
             'ref_sha256': hashlib.sha256(data).hexdigest()}, ''
 
 def set_consent(name: str, consent: dict | None, root: Path | None = None) -> Voice:

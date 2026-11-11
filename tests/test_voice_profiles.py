@@ -204,6 +204,33 @@ def test_a_recording_spliced_from_someone_else_and_me_is_refused(tmp_path):
     assert consent and consent['similarity'] == 1.0 and consent['windows'] >= 4, consent
 
 
+class Blend:
+    """A speaker vector from how much of a window is 180 Hz (me) and how much 300 Hz (someone else): a window of half and
+    half scores 0.71 against my live reading."""
+    def embed(self, pcm, sr):
+        x = np.abs(np.fft.rfft(np.asarray(pcm, np.float64)))
+        band = lambda f: x[int((f - 20) * len(pcm) / sr):int((f + 20) * len(pcm) / sr)].sum()  # noqa: E731
+        v = np.array([band(180), band(300)])
+        return v / np.linalg.norm(v)
+
+
+def test_a_short_piece_of_someone_else_at_the_start_is_refused(tmp_path):
+    """Stage 8 tails: 4 s of someone else, then me: an 8 s window of half and half scored as me (0.71), and the clone
+    takes its prompt from the start (XTTS 6 s, Pocket 10 s). The start's 4 s windows (HEAD_MATCH) refuse it; me alone
+    passes."""
+    root = tmp_path / 'v'
+    sr, said = 24_000, voice.LIVE_PHRASES['ru'][:2]
+    x = np.concatenate([speech(4, sr, f=300.0)[0], speech(40, sr)[0]])
+    live = Blend().embed(speech(6, sr)[0], sr)
+    assert Blend().embed(x[:8 * sr], sr) @ live > voice.MATCH  # the 8 s window alone would let it through
+    v = voice.save(x, sr, 'me.new', 'ru', 'text', root)
+    consent, text = voice.confirm_live(v, *speech(6, sr), said, Asr(' '.join(said)), Blend())
+    assert consent is None and 'not the voice of the recording' in text, text
+    v = voice.save(speech(44, sr)[0], sr, 'me.new', 'ru', 'text', root)
+    consent, _ = voice.confirm_live(v, *speech(6, sr), said, Asr(' '.join(said)), Blend())
+    assert consent and consent['windows'] == 5 + 4, consent  # 5 start windows of 4 s every 2 s, then 8 s ones
+
+
 def test_consent_holds_only_for_the_recording_checked(tmp_path):
     """FIXES-s3 3: a new take or import while the check ran gets no consent; a recording replaced after its consent
     (a new save, or a crash between reference.wav and voice.json) is not mine."""

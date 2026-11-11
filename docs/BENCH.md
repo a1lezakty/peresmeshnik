@@ -2391,6 +2391,38 @@ another passes in 3 tries; 649 own and ~17 000 other pairs per row):
 | 8 s with silence and a pause, quiet | 4.5 / 0.07 / 0.20 % | 4.7 / 0.10 / 0.28 % | 4.4 / 0.07 / 0.20 % |
 | 8 s with silence and a pause, SNR 20 | 19.5 / 0.02 / 0.09 % | 15.9 / 0.03 / 0.10 % | 17.8 / 0.02 / 0.06 % |
 
+### Stage 8, tails: the start of the recording in 4 s windows (S3)
+
+The clone takes its prompt from the start of the recording (XTTS its first 6 s, Pocket its first 10 s). A piece of
+someone else shorter than an 8 s window there is diluted by the owner's voice in that window. Same data and script
+(`bench/speaker_threshold.py`, stages `head`, `report_head`, `timing_head`, then `overlap`); 40 s recordings (silence
+out), 8 s live readings (edges trimmed, as the app does), 1543 own pairs and 41 157 other-person pairs of the same sex;
+88 splices per cell: the first K s of speech of another person of the same sex, then the owner, 0, 1 or 2 s of the
+owner's speech first (the worst of the three is shown). Schemes: `8` (8 s windows at 0.45, as before), `4+8` (the first
+12 s of speech in three 4 s windows, then 8 s windows), `4h2+8` (the first 12 s in 4 s windows every 2 s, five of them,
+then 8 s windows); 4 s windows at 0.40, 8 s windows at 0.45.
+
+| K s of another person first, worst shift | 3 s | 4 s | 5 s | 6 s |
+|---|---|---|---|---|
+| `8` | 96 % | 90 % | 66 % | 36 % |
+| `4+8` | 86 % | 81 % | 40 % | 22 % |
+| `4h2+8` (the app) | 36 % | 23 % | 3.5 % | 0.9 % |
+
+| file / live: same person refused | `8` | `4+8` | `4h2+8` |
+|---|---|---|---|
+| clean / clean | 3.8 % | 4.1 % | 4.1 % |
+| Opus 24k / clean | 4.0 % | 4.5 % | 4.5 % |
+| clean / white noise, SNR 20 | 10.4 % | 11.1 % | 11.1 % |
+| clean / white noise, SNR 10 | 26.3 % | 28.9 % | 29.4 % |
+
+Another person passing a try: 0.063 % (`8`), 0.056 % (`4h2+8`). Why 0.40 for 4 s windows: the owner's own 4 s window
+scores lower than an 8 s one (p5 0.51 against 0.55) while another person's does not score higher (p99 0.41 against
+0.42); at 0.45 a 4 s piece shifted by 1 s still passes 9.6 %, but the owner's Opus file is refused 5.4 %. A 60 s
+recording: `4h2+8` refuses the owner 4.2 % clean, 4.8 % Opus. Time, 1 thread, a 60 s recording: about the same as `8`
+(more audio through the model, +16 % by its amount; the server was loaded, the runs differ more than that). Not closed:
+a piece of 3 s, or of 4 s not on the 2 s grid — no 4 s window lies wholly inside it; the live check's two random
+phrases and the pause after three tries stay in front of it.
+
 ## Stage 8: Pocket TTS on onnxruntime, both sides cloned at once on 4 cores (S1)
 
 Measured 2026-11-10 on the C server's i7-13700 (Linux, onnxruntime 1.31.1, CUDA hidden), the app's own engine

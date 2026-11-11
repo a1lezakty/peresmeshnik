@@ -1,7 +1,8 @@
 """A stand-in for peresmeshnik/local/xtts.py inside voice-runner/voice_runner.py (tests/test_voice_pack.py): no torch,
 no model. Only the runner's hidden --engine option loads it; nothing in the app passes that.
 
-A synth chunk holds len(text) / 100 in every sample, so a test sees whose audio it got. Texts: 'slow' streams 100
+A synth chunk holds len(text) / 100 in every sample, so a test sees whose audio it got; in a voice of condition() (its
+state: the sample's mean) it holds that mean. Texts: 'slow' streams 100
 chunks 50 ms apart, 'boom' fails like CUDA out of memory, 'die' kills the runner like a driver crash, 'hang' sends
 nothing for a minute like a hung CUDA call."""
 import os
@@ -38,7 +39,10 @@ class Engine:
         n, pause = (100, 0.05) if text == 'slow' else (3, 0.0)
         for _ in range(n):
             time.sleep(pause)
-            yield np.full(2400, len(text) / 100, np.float32)
+            yield np.full(2400, len(text) / 100 if getattr(voice, 'state', None) is None else voice.state, np.float32)
+
+    def condition(self, pcm, sr):
+        return float(np.mean(pcm))
 
     def latents(self, voice):  # as xtts.Engine: cached in memory, written as xtts.pt (the count of conditionings)
         if str(voice) not in self.conditioned:

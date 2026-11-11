@@ -18,6 +18,10 @@ Protocol, all JSON in ASCII:
   {"cmd": "latents", "voice", "fresh": bool}, {"cmd": "similarity", "voice", "pcm": <base64 float32 LE>, "sr"},
   {"cmd": "info"} (CUDA memory; qwen3 adds its runaways and the voices Chatterbox speaks); {"cmd": "stop", "id"} at any
   time stops that synth after its current chunk (barge-in);
+- a voice from a sample, no profile folder (the other person in a call, voices/live.py): {"cmd": "condition", "pcm":
+  <base64 float32 LE mono>, "sr"} -> {"state": "<id>"}; then {"cmd": "synth", "text", "lang", "state": "<id>"} speaks
+  in it. The runner keeps the last MAX_STATES of them in memory (a synth uses one again: it stays); a state it no longer
+  has, or another runner's, is that synth's error;
 - a synth reply: chunks of uint32 LE byte count + float32 LE mono PCM; 0 ends it; 0xFFFFFFFF + a JSON line
   {"error"} ends it with an error. Any other reply is one JSON line: the result fields, or {"error": "..."}.
 The process sleeps in blocking reads between requests; stdin closed ends it.
@@ -29,14 +33,20 @@ import importlib.util
 import json
 import os
 import queue
+import secrets
 import struct
 import sys
 import threading
 import traceback
+import types
+from collections import OrderedDict
 from pathlib import Path
 
 ERR = 0xFFFFFFFF
 HERE = Path(__file__).resolve().parent
+# voices from a sample kept: each is a few hundred kB (XTTS's latents on the GPU, Qwen3's vector and its 10 s sample);
+# live.py makes up to 4 per person in a call. ponytail: a fixed count, a client's "forget" if calls outgrow it
+MAX_STATES = 32
 
 
 def engine_path(kind: str = 'xtts') -> Path:
@@ -105,11 +115,27 @@ def main():
         requests.put(None)
     threading.Thread(target=read, name='stdin', daemon=True).start()
 
+    states: OrderedDict = OrderedDict()  # id -> the engine's state of a voice from a sample, oldest first
+
+    def voice(req):
+        """A synth's voice: its profile folder, or a state of `condition` (as an object with `state`, as live.py's)."""
+        if 'state' not in req:
+            return req['voice']
+        if (sid := req['state']) not in states:
+            raise LookupError(f'no voice state {sid!r}: this runner keeps the last {MAX_STATES} it made, and none '
+                              'of a runner before it')
+        states.move_to_end(sid)
+        return types.SimpleNamespace(state=states[sid])
+
+    def samples(req):
+        import numpy as np
+        return np.frombuffer(base64.b64decode(req['pcm']), '<f4')
+
     while (req := requests.get()) is not None:
         cmd, rid = req.get('cmd'), req.get('id')
         try:
             if cmd == 'synth':
-                gen = engine.synth(req['text'], req['lang'], req['voice'])
+                gen = engine.synth(req['text'], req['lang'], voice(req))
                 try:
                     for c in gen:
                         if stop['id'] == rid or stop['eof']:
@@ -127,9 +153,13 @@ def main():
                 engine.latents(req['voice'])
                 say({'ok': True})
             elif cmd == 'similarity':
-                import numpy as np
-                pcm = np.frombuffer(base64.b64decode(req['pcm']), '<f4')
-                say({'similarity': engine.similarity(req['voice'], pcm, req['sr'])})
+                say({'similarity': engine.similarity(req['voice'], samples(req), req['sr'])})
+            elif cmd == 'condition':
+                sid = secrets.token_hex(8)  # random: an id of a runner before this one is never another voice here
+                states[sid] = engine.condition(samples(req), req['sr'])
+                while len(states) > MAX_STATES:
+                    states.popitem(last=False)
+                say({'state': sid})
             elif cmd == 'info':
                 say({**code.cuda_info(), **(engine.info() if hasattr(engine, 'info') else {})})
             else:

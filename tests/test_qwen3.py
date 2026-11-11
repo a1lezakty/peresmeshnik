@@ -146,3 +146,29 @@ def test_the_xtts_cache_follows_the_recording(tmp_path):
     eng._latents.clear()
     gpt, _ = xtts.Engine.latents(eng, v)
     assert len(made) == 2 and gpt.x[0] == 2
+
+
+def test_a_voice_from_a_sample_and_chatterbox_from_it(eng):
+    """voices/live.py: condition(pcm, sr) -> a state; Qwen3 speaks from its vector (the first REF_S s); a runaway gives
+    that voice to Chatterbox conditioned from the sample in memory (no file), a new state of it is Qwen3's again."""
+    import types
+    st = eng.condition(np.full(15 * 16_000, 0.4, np.float32), 16_000)
+    them = types.SimpleNamespace(path=None, state=st)
+    assert whose(say(eng, 'привет', them))[1] == 0 and eng.model.model.vectors == [10.0]
+    assert eng.model.calls[-1][2].x[0] == pytest.approx(0.4)
+    assert eng.similarity(them, np.full(16_000, 0.4, np.float32), 16_000) == pytest.approx(1.0)
+    q, c = whose(say(eng, 'loop', them))
+    assert 0 < q and c == 24_000 and eng.fallback.said[-1][2] == ('sample', 10.0, 0.4)
+    assert whose(say(eng, 'привет', them)) == CHATTERBOX_ONLY and eng.info()['fallback_voices'] == [st.key]
+    again = types.SimpleNamespace(path=None, state=eng.condition(np.full(16_000, 0.2, np.float32), 16_000))
+    assert whose(say(eng, 'привет', again))[1] == 0
+
+
+def test_the_runner_speaks_a_state_of_qwen3(tmp_path):
+    p = VoicePackClone(tmp_path / 'qwen3', cmd=[*STUB, '--kind', 'qwen3', '--device', 'cpu'], log=tmp_path / 'runner.log')
+    try:
+        import types
+        sid = p.condition(np.full(16_000, 0.3, np.float32), 16_000)
+        assert whose(np.concatenate(list(p.synth('привет', 'ru', types.SimpleNamespace(path=None, state=sid)))))[0] > 0
+    finally:
+        p.close()

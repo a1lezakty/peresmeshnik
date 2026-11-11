@@ -83,8 +83,13 @@ class ChatterboxMultilingualTTS:
             raise FileNotFoundError(f'{ckpt_dir}/ve.pt')
         return cls(ckpt_dir, device)
 
-    def prepare_conditionals(self, wav_fpath, exaggeration=0.5):
-        self.conds = str(wav_fpath)
+    def prepare_conditionals(self, wav_fpath, exaggeration=0.5):  # a file in memory: ('sample', its seconds, its level)
+        if isinstance(wav_fpath, str):
+            self.conds = wav_fpath
+        else:
+            import soundfile as sf
+            x, sr = sf.read(wav_fpath, dtype='float32')
+            self.conds = ('sample', len(x) / sr, round(float(np.mean(x)), 3))
 
     def generate(self, text, language_id, cfg_weight=0.5, **kw):
         self.said.append((text, language_id, self.conds, cfg_weight))

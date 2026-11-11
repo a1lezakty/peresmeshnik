@@ -68,6 +68,10 @@ class XttsClone(xtts.Engine):
         return Voice(name=v.name, engine='xtts', path=v.path, meta=v.meta)
 
 
+def _b64(pcm: np.ndarray) -> str:
+    return base64.b64encode(np.asarray(pcm, '<f4').tobytes()).decode()
+
+
 def voice_cmd() -> list[str] | None:
     """How to start the voice pack's runner: $PERESMESHNIK_VOICE_CMD, else the installed pack of this app version in
     <data dir>/voice-pack (local/voicepack.py) with its own python.exe; None: no such pack here."""
@@ -206,9 +210,12 @@ class VoicePackClone:
         return r
 
     def synth(self, text: str, lang: str, voice: Voice | None = None) -> Iterator[np.ndarray]:
+        """`voice`: a profile, or one with `state` (condition()'s id: a voice of the other person in a call)."""
         if voice is None:
             raise ValueError('the clone engine speaks only in an enrolled voice')
-        rid = self._send({'cmd': 'synth', 'text': text, 'lang': lang, 'voice': str(voice.path)})
+        st = getattr(voice, 'state', None)
+        rid = self._send({'cmd': 'synth', 'text': text, 'lang': lang,
+                          **({'state': st} if st is not None else {'voice': str(voice.path)})})
         try:
             while n := self._u32():
                 if n == ERR:
@@ -238,9 +245,15 @@ class VoicePackClone:
         return Path(voice.path) / 'xtts.pt'
 
     def similarity(self, voice: Voice, pcm: np.ndarray, sr: int) -> float:
-        b = base64.b64encode(np.asarray(pcm, '<f4').tobytes()).decode()
-        self._send({'cmd': 'similarity', 'voice': str(voice.path), 'pcm': b, 'sr': sr})
+        self._send({'cmd': 'similarity', 'voice': str(voice.path), 'pcm': _b64(pcm), 'sr': sr})
         return float(self._reply()['similarity'])
+
+    def condition(self, pcm: np.ndarray, sr: int) -> str:
+        """A voice from a sample, no profile folder (voices/live.py): the runner's id of its state, for synth() as a
+        voice's `state`. It lives in the runner's memory (its last MAX_STATES): gone with this runner, and a synth with
+        it then is that clause's error (left out, as any)."""
+        self._send({'cmd': 'condition', 'pcm': _b64(pcm), 'sr': sr})
+        return self._reply()['state']
 
     def stats(self) -> dict:
         """What the runner sees now: VRAM free and the peak so far (bench/voice_pack.py)."""

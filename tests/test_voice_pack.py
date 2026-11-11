@@ -452,3 +452,39 @@ def test_onnxruntime_errors_give_the_stock_voice(monkeypatch, tmp_path):
     d = side._local(s)
     assert isinstance(d, FakeDirection) and not isinstance(d, Warm) and 'out of memory' in side.errors[0]
 
+
+
+def live(state):
+    """A voice made during the call, as voices/live.py's LiveProfile: no folder, the engine's state."""
+    return types.SimpleNamespace(name='them', engine='xtts', path=None, state=state)
+
+
+def test_a_voice_from_a_sample_speaks_without_a_folder(pack, me):
+    """voices/live.py: condition(pcm, sr) gives the runner's id of the voice's state; a synth by it speaks in that voice
+    (the stub says the sample's mean), a profile folder as before."""
+    a, b = (pack.condition(np.full(16_000, x, np.float32), 16_000) for x in (0.25, 0.5))
+    assert isinstance(a, str) and a != b
+    assert np.all(say(pack, 'hello', live(a)) == np.float32(0.25)) and len(say(pack, 'hello', live(b))) == 3 * 2400
+    assert np.all(say(pack, 'hello', live(b)) == np.float32(0.5)) and np.all(say(pack, 'hello', me) == np.float32(0.05))
+    gen = pack.synth('slow', 'en', live(a))  # barge-in as with a folder
+    next(gen)
+    gen.close()
+    assert np.all(say(pack, 'hi', live(a)) == np.float32(0.25))
+
+
+def test_a_state_the_runner_no_longer_has_is_a_clause_error(pack, tmp_path, caplog):
+    """The runner keeps its last MAX_STATES (one a synth used stays); an older one, or one of a runner before (a
+    restart), is that clause's error: left out with the reason, the clone goes on."""
+    limit = int(re.search(r'^MAX_STATES = (\d+)', RUNNER.read_text(), re.M)[1])
+    a, b = (pack.condition(np.full(2400, x, np.float32), 24_000) for x in (0.25, 0.5))
+    say(pack, 'hi', live(a))  # used: newer than b now
+    for _ in range(limit - 1):
+        pack.condition(np.full(2400, 0.1, np.float32), 24_000)
+    assert np.all(say(pack, 'hi', live(a)) == np.float32(0.25))
+    assert list(pack.synth('hi', 'en', live(b))) == [] and 'no voice state' in caplog.text  # b: dropped
+    assert len(say(pack, 'hi', live(a))) == 3 * 2400  # it goes on
+    other = VoicePackClone(tmp_path / 'xtts-v2', cmd=STUB, log=tmp_path / 'other.log')
+    try:
+        assert list(other.synth('hi', 'en', live(a))) == []  # another runner's id: not a voice there
+    finally:
+        other.close()

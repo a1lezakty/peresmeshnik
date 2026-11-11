@@ -42,6 +42,8 @@ import types
 from collections import OrderedDict
 from pathlib import Path
 
+os.environ.setdefault('ORT_DISABLE_TELEMETRY', '1')  # onnxruntime (qwen-tts imports it) to Microsoft: off, as piper_runner
+
 ERR = 0xFFFFFFFF
 HERE = Path(__file__).resolve().parent
 # voices from a sample kept: each is a few hundred kB (XTTS's latents on the GPU, Qwen3's vector and its 10 s sample);
@@ -61,6 +63,14 @@ def load_module(path: Path):
     sys.modules[path.stem] = m
     spec.loader.exec_module(m)
     return m
+
+
+def no_telemetry() -> None:
+    """Windows: onnxruntime's TraceLogging telemetry does not read ORT_DISABLE_TELEMETRY; off by its call, before the
+    engine's code makes a session (Qwen3's tokenizer; C: without the variable it called mobile.events.data.microsoft.com)."""
+    if importlib.util.find_spec('onnxruntime') is not None:
+        import onnxruntime as rt
+        rt.disable_telemetry_events()
 
 
 def main():
@@ -86,6 +96,7 @@ def main():
         out.flush()
 
     try:
+        no_telemetry()
         code = load_module(a.engine or engine_path(a.kind))
         info = code.cuda_info()
         if a.device is None and not info.get('cuda'):

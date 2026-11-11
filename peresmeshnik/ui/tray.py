@@ -182,10 +182,10 @@ class Tray(QObject):
 
     @staticmethod
     def _keeps_their_voice(s) -> bool:
-        """Whether the them side's clone engine here keeps a voice to take to the next call: Pocket TTS (its state) yes;
-        an engine of the NVIDIA voice pack (XTTS, Qwen3) not (COMMON 23:49), nor no engine at all."""
-        from peresmeshnik import languages
-        engine = languages.clone_engine(s.my_lang, 'them_to_me')[0]
+        """Whether the them side's clone engine here (S2's voices/live.engine) keeps a voice to take to the next call:
+        Pocket TTS (its state) yes; an engine of the NVIDIA voice pack (XTTS, Qwen3) not (COMMON 23:49), nor none."""
+        from peresmeshnik.voices import live
+        engine = live.engine(s)[0]
         return bool(engine) and not languages.needs_gpu(engine)
 
     def hotkey_note(self, combo: str, why: str, announce: bool = False) -> None:

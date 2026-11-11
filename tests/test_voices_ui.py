@@ -332,6 +332,12 @@ def test_keep_their_voice_only_where_the_engine_keeps_one(tmp_path, monkeypatch)
     for engine[:] in (['xtts-v2', ''], ['qwen3-tts', ''], [None, 'no clone of their voice here']):
         t.sync()
         assert not t.remember.isVisible(), engine
+    engine[:] = ['pocket-tts-de', '']
+    s = config.load()
+    s.local.their_voice = False  # S2's live.engine: their voice off, nothing to keep
+    config.save(s)
+    t.sync()
+    assert not t.remember.isVisible()
     t.icon.hide()
 
 

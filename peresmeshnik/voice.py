@@ -439,6 +439,10 @@ def save_them(name: str, lang: str, seconds: float, states: dict[str, tuple[np.n
     no recording of their speech. `states`: {model id: (the engine's state or vector, sha256 of its weights)}."""
     import secrets
     import shutil
+
+    from peresmeshnik import languages
+    if gpu := [m for m in states if languages.needs_gpu(m)]:  # the voice pack's engines keep no voice (COMMON 23:49)
+        raise ValueError(f'not kept: {", ".join(gpu)} keeps no voice for the next call')
     base = root or voices_dir()
     vid = f'them-{secrets.token_hex(4)}'
     tmp = base / f'{vid}.tmp'  # made whole aside, then renamed: never a folder without its voice.json

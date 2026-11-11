@@ -83,6 +83,18 @@ def test_contact_kept_without_recording(tmp_path):
     assert 'Анна' not in str(e.value)
 
 
+def test_a_contacts_voice_of_a_voice_pack_engine_is_not_kept(tmp_path):
+    """FIXES r2 2: the voice pack's engines (needs = "gpu": XTTS, Qwen3) keep no voice for the next call (COMMON 23:49):
+    save_them refuses their states whoever calls it, and leaves nothing on disk."""
+    root = tmp_path / 'v'
+    for model in ('xtts-v2', 'qwen3-tts'):
+        with pytest.raises(ValueError, match=model):
+            voice.save_them('Bob', 'en', 9.0, {'pocket-tts-en': (np.ones(3, np.float32), 'a'),
+                                               model: (np.ones(3, np.float32), 'b')}, root)
+    assert not root.exists() or list(root.iterdir()) == []
+    assert voice.save_them('Bob', 'en', 9.0, {'pocket-tts-en': (np.ones(3, np.float32), 'a')}, root).meta['engines']
+
+
 def test_a_failed_save_leaves_no_folder_and_no_temporary_file(tmp_path):
     """FIXES-s3 6: a contact's voice is made aside and renamed whole; voice.json's temporary file goes on a failure."""
     root = tmp_path / 'v'

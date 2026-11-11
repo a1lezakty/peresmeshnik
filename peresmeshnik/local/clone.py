@@ -224,6 +224,8 @@ class VoicePackClone:
                         r = json.loads(self._wait(self._p.stdout.readline) or b'{}')
                         if not r:  # it died or was killed (hung) right then: the clone's death, said now
                             raise self._exited()
+                        if str(r.get('error', '')).startswith('LookupError'):  # a state it no longer keeps (voices/live.py
+                            raise LookupError(r['error'])  # makes it again); the runner is fine
                         self._errors += 1  # it lives on: this clause is lost, not the clone (L-43)
                         if self._errors >= self.MAX_ERRORS:
                             raise RuntimeError(f'the voice pack: {r.get("error")}')
@@ -257,12 +259,13 @@ class VoicePackClone:
     def condition(self, pcm: np.ndarray, sr: int) -> str:
         """A voice from a sample, no profile folder (voices/live.py): the runner's id of its state, for synth() as a
         voice's `state`. It lives in the runner's memory (its last MAX_STATES): gone with this runner, and a synth with
-        it then is that clause's error (left out, as any)."""
+        it then raises LookupError (the caller makes it again or says the clause otherwise)."""
         return self._ask({'cmd': 'condition', 'pcm': _b64(pcm), 'sr': sr})['state']
 
-    def forget_states(self) -> None:
-        """Every voice condition() made goes from the runner's memory (voices/live.py: a new call on warm engines)."""
-        self._ask({'cmd': 'forget'})
+    def forget_states(self, ids: list[str] | None = None) -> None:
+        """The voices condition() made go from the runner's memory: `ids` (voices/live.py: a contact's voice deleted
+        during the call), else every one (a new call on warm engines)."""
+        self._ask({'cmd': 'forget', **({'states': ids} if ids is not None else {})})
 
     def stats(self) -> dict:
         """What the runner sees now: VRAM free and the peak so far (bench/voice_pack.py)."""

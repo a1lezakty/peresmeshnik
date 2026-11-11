@@ -366,7 +366,11 @@ def voices_dir() -> Path:
 #          (kind 'them'): `file` in the folder (np.save of the engine's state or vector), `model` the sha256 of the
 #          weights it was made with; other weights cannot use it (a contact is made again only from a new call).
 #          'me' needs none: its engines cache what they need next to reference.wav and check it against the recording.
+# sample   (them, an engine of the NVIDIA voice pack: its voice is an id in that call's runner, no state to keep) {file,
+#          sha256, seconds}: up to THEM_S of their clean speech, `file` (16-bit WAV) in the folder; the next call's runner
+#          makes their voice from it. Another file there (sha256) is not used: the voice is made again in the call
 VERSION = 2
+THEM_S = 10.0  # a contact's recording (`sample`): at most this long
 CONSENT = {'mic-live': 'me', 'import+mic-match': 'me', 'call-saved': 'them'}  # how -> the kind it confirms
 
 
@@ -434,11 +438,14 @@ def _now() -> str:
 
 
 def save_them(name: str, lang: str, seconds: float, states: dict[str, tuple[np.ndarray, str]],
-              root: Path | None = None) -> Voice:
-    """Keep a contact's voice from a call (an explicit "remember", the other person agreed): the engines' states only,
-    no recording of their speech. `states`: {model id: (the engine's state or vector, sha256 of its weights)}."""
+              root: Path | None = None, sample: tuple[np.ndarray, int] | None = None) -> Voice:
+    """Keep a contact's voice from a call (an explicit "remember", the other person agreed): the engines' states, no
+    recording of their speech; with the NVIDIA voice pack (no state to keep) `sample`, (pcm, sr) of their clean speech,
+    written as a recording of at most THEM_S. `states`: {model id: (the engine's state or vector, sha256 of its weights)}."""
     import secrets
     import shutil
+
+    import soundfile as sf
 
     from peresmeshnik import languages
     if gpu := [m for m in states if languages.needs_gpu(m)]:  # the voice pack's engines keep no voice (COMMON 23:49)
@@ -456,6 +463,10 @@ def save_them(name: str, lang: str, seconds: float, states: dict[str, tuple[np.n
         meta = {'version': VERSION, 'id': vid, 'name': name, 'kind': 'them', 'lang': lang, 'created': _now(),
                 'consent': {'how': 'call-saved', 'at': _now(), 'wer': None, 'similarity': None},
                 'seconds': round(float(seconds), 2), 'engines': engines}
+        if sample is not None:
+            pcm, sr = np.asarray(sample[0], np.float32)[:int(THEM_S * sample[1])], sample[1]
+            sf.write(tmp / 'sample.wav', np.clip(pcm, -1, 1), sr, subtype='PCM_16')
+            meta['sample'] = {'file': 'sample.wav', 'sha256': _sha(tmp / 'sample.wav'), 'seconds': round(len(pcm) / sr, 2)}
         _write(tmp, meta)
         tmp.rename(base / vid)
     except BaseException:
@@ -509,6 +520,15 @@ def engine_state(v: Voice, model: str, sha: str) -> np.ndarray | None:
     if not e or e.get('model') != sha:
         return None
     return np.load(v.path / Path(e['file']).name, allow_pickle=False)
+
+
+def their_sample(v: Voice) -> tuple[np.ndarray, int] | None:
+    """A contact's recording kept for the NVIDIA voice pack (save_them's `sample`): (pcm, sr); None without one, or when
+    the file there is not the one kept."""
+    s = v.meta.get('sample')
+    if not s or not (sha := _sha(path := v.path / Path(s['file']).name)) or sha != s.get('sha256'):
+        return None
+    return read_audio(path)
 
 
 # --- the live check: my voice is mine (M-20, RESEARCH-clone 6.1) ---

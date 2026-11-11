@@ -68,10 +68,10 @@ class FakeStock:
         yield np.zeros(2205, np.float32)
 
 
-def voice_of(engine=None, kept=(), echo=None, note=None, raw=None):
+def voice_of(engine=None, kept=(), echo=None, note=None, raw=None, engine_id='pocket-tts-ru'):
     """A LiveVoice whose worker has loaded its engines and stopped: clauses go through _add() right here."""
     engine = engine or FakeClone()
-    v = live.LiveVoice(lambda: engine, AmpSpeaker, 'pocket-tts-ru', 'en', kept, echo, note, raw)
+    v = live.LiveVoice(lambda: engine, AmpSpeaker, engine_id, 'en', kept, echo, note, raw)
     v._q.put(None)
     v._thread.join()
     return v
@@ -318,8 +318,8 @@ def test_the_tray_gets_the_voice_speaking_now_or_why_not():
     assert app.Controller.them_voice(ctl)[1] == 'not enough of their speech yet: 4 of 10 s'  # a first voice only
     for i in range(6):
         v._add(speech(1.2, 0.3, 3 + i))
-    states, lang, seconds = app.Controller.them_voice(ctl)[0]
-    assert set(states) == {'pocket-tts-ru', 'wespeaker-resnet34'} and lang == 'en' and seconds == 10.8
+    states, lang, seconds, sample = app.Controller.them_voice(ctl)[0]
+    assert set(states) == {'pocket-tts-ru', 'wespeaker-resnet34'} and lang == 'en' and seconds == 10.8 and sample is None
     v._my_vec = A  # A is too close to my own voice (my echo made it, say)
     assert 'too close to your own' in app.Controller.them_voice(ctl)[1]
     v._my_vec = None
@@ -345,8 +345,8 @@ def test_a_voice_kept_from_the_tray_is_theirs_from_the_first_clause_of_the_next_
     v = voice_of()
     for i in range(9):
         v._add(speech(1.2, 0.1, i))  # B: 10.8 s, their voice is made
-    (states, lang, seconds), why = v.them()
-    assert why == ''
+    (states, lang, seconds, sample), why = v.them()
+    assert why == '' and sample is None  # Pocket: its state, no recording of their speech
     saved = voice.save_them('Anna', lang, seconds, states, tmp_path)
     assert saved.meta['kind'] == 'them' and sorted(p.name for p in saved.path.iterdir()) == [
         'pocket-tts-ru.npy', 'voice.json', 'wespeaker-resnet34.npy']
@@ -383,16 +383,113 @@ def test_a_kept_voice_deleted_during_the_call_is_forgotten_at_once(tmp_path, mon
     assert not v.speaking.kept and v.voice() is None
 
 
-def test_a_voice_pack_voice_speaks_in_the_call_and_is_not_offered_to_keep():
-    """NVIDIA (the voice pack's Qwen3-TTS / XTTS): their voice is an id in that call's runner, so the tray does not offer
-    to keep it (COMMON-stage8 23:49); in the call it speaks as Pocket's does."""
-    v = live.LiveVoice(FakeClone, AmpSpeaker, 'xtts-v2', 'en')
-    v._q.put(None)
-    v._thread.join()
+def test_a_voice_pack_voice_speaks_in_the_call_and_is_kept_only_as_pockets_is():
+    """NVIDIA (the voice pack's Qwen3-TTS / XTTS): their voice speaks in the call as Pocket's does; "keep" (the user,
+    11.11) only after KEEP_S of their speech, with one person on their side, not a voice like mine."""
+    v = voice_of(engine_id='xtts-v2')
     for i in range(3):
         v._add(speech(1.2, 0.3, i))
-    assert v.voice() is not None and v.them() == (None, 'with the NVIDIA voice pack their voice lives only during '
-                                                    "the call, in the pack's own memory: it cannot be kept")
+    assert v.voice() is not None and v.them() == (None, 'not enough of their speech yet: 4 of 10 s')
+    for i in range(6):
+        v._add(speech(1.2, 0.3, 3 + i))
+    assert v.them()[1] == ''
+    v._my_vec = A
+    assert 'too close to your own' in v.them()[1]
+    v._my_vec = None
+    for i in range(3):
+        v._add(speech(1.2, 0.1, i))  # B too
+    assert v.them() == (None, '2 people speak in this call: a voice can be kept in a call with one of them only')
+
+
+def test_with_the_voice_pack_10_s_of_their_clean_speech_is_kept_and_speaks_from_the_first_clause_next_time(tmp_path):
+    """BRIEF-s2-keep-nvidia: their voice is an id in that call's runner, so "keep" writes at most voice.THEM_S of their
+    cleanest clauses (whole, none with our speech around it) and their speaker vector, no state; the next call's runner
+    makes their voice from it for their first clause, which speaks in it. Another file there, or a Pocket call:
+    not used, the voice is made again in the call."""
+    from peresmeshnik import voice
+    v = voice_of(engine_id='xtts-v2')
+    clean = [speech(1.2, 0.3, i) for i in range(12)]
+    for i, pcm in enumerate(clean):
+        v._add(pcm)
+        if i == 4:
+            v._add(speech(1.5, 0.3, 77), sample=False)  # we spoke into the call around it (offer(): _ours)
+    (states, lang, seconds, (pcm, sr)), why = v.them()
+    assert why == '' and list(states) == [voice.SPEAKER] and sr == SAMPLE_RATE and seconds == 14.4
+    n = len(clean[0]) + len(live.GAP)
+    assert len(pcm) <= voice.THEM_S * SAMPLE_RATE and len(pcm) // n == 7  # whole clauses only: 7 of 1.2 s and the gaps
+    assert all(any(np.array_equal(pcm[k * n:k * n + len(clean[0])], c) for c in clean) for k in range(7))
+    saved = voice.save_them('Anna', lang, seconds, states, tmp_path, (pcm, sr))
+    assert sorted(p.name for p in saved.path.iterdir()) == ['sample.wav', 'voice.json', 'wespeaker-resnet34.npy']
+    assert saved.meta['sample']['seconds'] == round(len(pcm) / sr, 2)
+    [(vec, st, s, (back, bsr))] = live.kept('xtts-v2', tmp_path)
+    assert st is None and vec @ A > 0.99 and s == seconds and bsr == sr and np.allclose(back, pcm, atol=1e-4)
+    assert live.kept('pocket-tts-ru', tmp_path) == []  # a Pocket call: its voice is made in that call
+    eng = FakeClone()
+    w = voice_of(eng, kept=live.kept('xtts-v2', tmp_path), engine_id='xtts-v2')
+    assert eng.made == []  # not before they speak
+    w._add(speech(1.2, 0.3, 50))  # their first clause: their voice made from the recording for it
+    assert w.speaking.kept and w.voice().state[0] == 1 and eng.made == [pytest.approx(len(pcm) / sr)]
+    w._forget()  # reset() in the worker, a new call on warm engines: made again (the runner forgot it)
+    w._add(speech(1.2, 0.3, 51))
+    assert len(eng.made) == 2 and w.people[0].voice.state[0] == 2
+    long = voice.save_them('Bob', 'en', 30.0, states, tmp_path, (np.full(12 * sr, 0.1, np.float32), sr))
+    assert long.meta['sample']['seconds'] == voice.THEM_S  # at most THEM_S on disk, whoever hands more
+    (saved.path / 'sample.wav').write_bytes((long.path / 'sample.wav').read_bytes())  # another file there
+    assert [k[2] for k in live.kept('xtts-v2', tmp_path)] == [30.0]  # Anna's not used: only Bob's
+
+
+def test_a_kept_recording_the_runner_refuses_is_made_again_in_the_call_the_others_speak(caplog):
+    """FIXES-s2-39 1: one contact's recording refused by the runner is logged and that person made again in the call
+    as anyone new; another contact and someone new speak in their own voices, the clone goes on."""
+    class Picky(FakeClone):
+        def condition(self, pcm, sr):
+            if np.isclose(pcm.mean(), 0.5):
+                raise RuntimeError('the voice pack: ValueError: a bad sample')
+            return super().condition(pcm, sr)
+    eng = Picky()
+    rec = (np.full(SAMPLE_RATE * 9, 0.5, np.float32), SAMPLE_RATE), (np.full(SAMPLE_RATE * 9, 0.25, np.float32), SAMPLE_RATE)
+    v = voice_of(eng, kept=[(B, None, 12.0, rec[0]), (C, None, 12.0, rec[1])], engine_id='xtts-v2')
+    v._add(speech(1.2, 0.1))  # B: their recording refused
+    assert not v.dead and not v.speaking.kept and v.voice() is None and 'could not be made' in caplog.text
+    v._add(speech(1.2, 0.6))  # C: their voice from their recording
+    assert v.speaking.kept and v.voice().state[0] == 1
+    for i in range(3):
+        v._add(speech(1.2, 0.3, i))  # someone new: made at 3 s
+        v._add(speech(1.2, 0.1, i))  # and B, from their speech in this call
+    assert [p.voice.state[0] for p in v.people] == [1, 2, 3] and not v.dead
+
+
+def test_kept_recordings_hold_up_no_clause_and_a_voice_made_again_leaves_no_state_behind():
+    """FIXES-s2-39 2: a contact's voice is made from their recording when they first speak, not all of them before the
+    first clause (each clause of the call's start would wait WAIT_S and be said in the stock voice); a voice made again
+    replaces its state in the runner, which keeps no copies of it."""
+    class Slow(FakeClone):
+        def __init__(self):
+            super().__init__()
+            self.forgot = []
+
+        def condition(self, pcm, sr):
+            time.sleep(0.2)
+            return super().condition(pcm, sr)
+
+        def forget_states(self, ids=None):
+            self.forgot.append([int(i[0]) for i in ids])
+    eng, rec = Slow(), (np.full(SAMPLE_RATE * 9, 0.25, np.float32), SAMPLE_RATE)
+    v = live.LiveVoice(lambda: eng, AmpSpeaker, 'xtts-v2', 'en', [(B, None, 12.0, rec), (C, None, 12.0, rec),
+                                                                   (np.float32([0, .6, .8]), None, 12.0, rec)])
+    while v.engine is None:
+        time.sleep(0.01)
+    c = v.offer(speech(1.2, 0.3), 'a', 0, 1.2)  # someone new speaks first
+    t = time.perf_counter()
+    assert v.voice(c) is None and time.perf_counter() - t < 0.1 and eng.made == []
+    c = v.offer(speech(1.2, 0.1), 'b', 0, 1.2)  # then a contact: their voice, made now (0.2 s)
+    assert v.voice(c).state[0] == 1 and len(eng.made) == 1
+    for i in range(1, 5):
+        v.offer(speech(1.2, 0.3, i), 'a', 0, 1.2)  # 6 s of A: made at 3.6 and again at 6
+    v._q.put(None)  # the worker goes through them all, then stops
+    v._thread.join(10)
+    a = next(p for p in v.people if not p.kept)
+    assert len(eng.made) == 3 and a.voice.state[0] == 3 and eng.forgot == [[2]]  # the 3.6 s state forgotten
 
 
 def test_an_engine_still_loading_when_translation_goes_off_is_freed_after_it(monkeypatch):

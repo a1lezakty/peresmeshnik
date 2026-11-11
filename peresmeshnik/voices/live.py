@@ -13,8 +13,10 @@ it is before the clause has been translated (a clause too short or unclear for a
 before), and the speak worker waits up to WAIT_S for that. Until their voice is made, the stock voice says it, not
 someone else's. The voice is taken when a clause starts, so a voice made again never changes a clause half said. A
 voice kept from an earlier call (`voice.save_them`, with its speaker vector) is known by that vector and speaks from
-their first clause. Nothing here is written to disk: `them()` hands the voice of the person who spoke last to the
-tray, which keeps it only when the user asks and the other person agreed.
+their first clause: Pocket's as its state; the NVIDIA voice pack's (its voice an id in that call's runner) as up to
+voice.THEM_S of their clean speech, made into their voice when they first speak. Nothing here is written to disk:
+`them()` hands the voice of the person who spoke last to the tray, which keeps it only when the user asks and the
+other person agreed.
 """
 from __future__ import annotations
 
@@ -72,6 +74,8 @@ class Person:
     made_at: float = 0.0  # seconds when the voice was made
     kept: bool = False  # from an earlier call: it stays as it is
     said: float = 0.0  # seconds of their clauses matched to them in this call (any, not only those for the sample)
+    heard: tuple | None = None  # the voice pack: (pcm, sr) of up to voice.THEM_S of their cleanest speech, what "keep"
+    # writes (the call's), or what their voice is made from (kept)
 
     def similarity(self, v: np.ndarray) -> float:
         return float(v @ self.vec / (np.linalg.norm(self.vec) + 1e-12))
@@ -97,7 +101,8 @@ def clean(pcm: np.ndarray) -> float | None:
 class LiveVoice:
     """Collects the voices of the call (see the module). `make_engine()` and `make_speaker()` run on its worker:
     the clone engine (`condition(pcm, sr) -> state`, `synth(text, lang, voice)`) and voice.Speaker. `kept`: voices
-    from earlier calls, [(speaker vector, engine state, seconds)]. `echo`: the side's audio.echo.EchoGate. `note(why)`:
+    from earlier calls, [(speaker vector, engine state, seconds[, (pcm, sr) to make it from: the voice pack])]. `echo`:
+    the side's audio.echo.EchoGate. `note(why)`:
     said once when the clone fails and the stock voice takes over.
     Clauses go to the worker in order (those without audio for the sample too): who said one is decided in order."""
 
@@ -105,7 +110,9 @@ class LiveVoice:
 
     def __init__(self, make_engine, make_speaker, engine_id: str = '', lang: str = '', kept=(), echo=None, note=None,
                  raw=None, me: str = ''):
+        from peresmeshnik import languages
         self.engine, self.engine_id, self.lang, self.dead, self.note = None, engine_id, lang, '', note
+        self.pack = languages.needs_gpu(engine_id)  # the NVIDIA voice pack: kept as a recording, not as a state
         self.me, self._my_vec = me, None  # my own voice profile: a voice like it is never kept as theirs
         self._kept = list(kept)
         self.people: list[Person] = self._known()
@@ -122,9 +129,10 @@ class LiveVoice:
         self._thread.start()
 
     def _known(self) -> list[Person]:
-        return [Person(np.asarray(v, np.float32), s, voice=LiveProfile('them', self.engine_id, None, {'kind': 'them'},
-                                                                         state=st), made_at=s, kept=True)
-                for v, st, s in self._kept]
+        """The kept voices; one kept as a recording has its voice once _ready() made it."""
+        return [Person(np.asarray(v, np.float32), s, made_at=s, kept=True, heard=h[0] if h else None,
+                       voice=None if st is None else LiveProfile('them', self.engine_id, None, {'kind': 'them'}, state=st))
+                for v, st, s, *h in self._kept]
 
     def reset(self) -> None:
         """A new call on the same engines (a server's warm side): the people of the last one, their speech and their
@@ -172,9 +180,11 @@ class LiveVoice:
     # the speak worker
     def voice(self, clause: Clause | None = None) -> LiveProfile | None:
         """The voice to say `clause` in: its person's; None (the stock voice says it): theirs is not made yet, nobody
-        knows whose it is (a new person's short word), or not within WAIT_S. No voice made yet, or the engine not loaded
-        yet (a kept voice: the worker loading it, or waiting for the last call's to be freed): no wait at all."""
-        if self.dead or self.engine is None or not any(p.voice is not None for p in list(self.people)):
+        knows whose it is (a new person's short word), or not within WAIT_S. No voice made yet nor to be made from a
+        recording, or the engine not loaded yet (a kept voice: the worker loading it, or waiting for the last call's to be
+        freed): no wait at all."""
+        if self.dead or self.engine is None or not any(p.voice is not None or p.heard is not None
+                                                       for p in list(self.people)):
             return None
         if clause is None:
             p = self.speaking
@@ -192,18 +202,16 @@ class LiveVoice:
         voice of the call does: deleting its saved copy only stops the next calls from knowing it."""
         self._q.put(DELETED)
 
-    def them(self) -> tuple[tuple[dict, str, float] | None, str]:
+    def them(self) -> tuple[tuple[dict, str, float, tuple | None] | None, str]:
         """For the tray's "keep their voice" (voice.save_them), taken once the user said they agreed: (({model id:
-        (state, sha256 of its weights)}: the engine's and the speaker vector's, their language, seconds of their speech),
-        '') or (None, why not, for the user). Only in a call with one person on their side, after KEEP_S of their speech,
-        not a voice like mine, not an engine of the voice pack (NVIDIA: its runner's for this call only, 23:49)."""
-        from peresmeshnik import languages, models
+        (state, sha256 of its weights)}: the engine's and the speaker vector's, their language, seconds of their speech,
+        None), '') or (None, why not, for the user). With the NVIDIA voice pack (its voice an id in this call's runner)
+        the speaker vector only, and last (pcm, sr): up to voice.THEM_S of their cleanest speech, to make it from in the
+        next call. Only in a call with one person on their side, after KEEP_S of their speech, not a voice like mine."""
+        from peresmeshnik import models
         from peresmeshnik.voice import SPEAKER
         if self.dead:
             return None, f'their cloned voice stopped in this call ({self.dead})'
-        if languages.needs_gpu(self.engine_id):
-            return None, ('with the NVIDIA voice pack their voice lives only during the call, in the pack\'s own memory: '
-                          'it cannot be kept')
         here = [p for p in list(self.people) if p.said >= READY_S[0]]
         if not here and self.stats['raw'] and self.raw is not None and self.raw():
             return None, ('your microphone goes into the call as it is (me → them is not running): their voice takes no '
@@ -217,9 +225,10 @@ class LiveVoice:
             return None, f'not enough of their speech yet: {p.seconds if p else 0:.0f} of {KEEP_S:.0f} s'
         if (mine := self._mine()) is not None and p.similarity(mine) >= SAME:
             return None, 'this voice is too close to your own: it is not kept as theirs'
-        return ({self.engine_id: (p.voice.state, models.get(self.engine_id).fingerprint),
-                 SPEAKER: (p.vec / (np.linalg.norm(p.vec) + 1e-12), models.get(SPEAKER).fingerprint)},
-                self.lang, round(p.seconds, 1)), ''
+        states = {SPEAKER: (p.vec / (np.linalg.norm(p.vec) + 1e-12), models.get(SPEAKER).fingerprint)}
+        if not self.pack:
+            states[self.engine_id] = (p.voice.state, models.get(self.engine_id).fingerprint)
+        return (states, self.lang, round(p.seconds, 1), p.heard if self.pack else None), ''
 
     def _mine(self) -> np.ndarray | None:
         """My own voice's speaker vector (from my profile's recording, once), None without one."""
@@ -296,13 +305,48 @@ class LiveVoice:
                 except Exception as e:  # a dead runner: nothing of them in it any more
                     self.fail(e)
 
+    def _ready(self, p: Person) -> bool:
+        """A contact kept as a recording (the voice pack's): their voice made from it when they first speak, so the
+        clause waits for it (a few hundred ms) and not the call's start for all of them. False when the runner refuses
+        that one: it goes, they are made again in this call as anyone new (logged); a dead runner is said by its next
+        use (a synth, a voice made)."""
+        if not p.kept or p.voice is not None or p.heard is None:
+            return True
+        try:
+            p.voice = LiveProfile('them', self.engine_id, None, {'kind': 'them'}, state=self.engine.condition(*p.heard))
+            return True
+        except Exception as e:
+            log.warning('their voice: a kept voice could not be made, made again in the call: %s', e)
+            self.people = [q for q in self.people if q is not p]
+            return False
+
+    def again(self, v: LiveProfile) -> bool:
+        """`v`'s state pushed out of the voice pack's runner (it keeps its last MAX_STATES): made again from their speech
+        (`heard`), from the speak worker; False without it or when that fails (the stock voice says the clause)."""
+        p = next((p for p in list(self.people) if p.voice is v), None)
+        if p is None or p.heard is None or self.engine is None:
+            return False
+        try:
+            v.state = self.engine.condition(*p.heard)
+            return True
+        except Exception as e:
+            log.warning('their voice: a voice pushed out of the runner could not be made again: %s', e)
+            return False
+
     def _deleted(self) -> None:
-        """deleted() in the worker."""
+        """deleted() in the worker. The voice pack's runner forgets the voices of those gone too (Qwen3's holds the
+        sample it was made from)."""
         self._kept = kept(self.engine_id)
-        left = [v for v, _, _ in self._kept]
-        self.people = [p for p in self.people if not p.kept or any(np.array_equal(p.vec, v) for v in left)]
+        left = [k[0] for k in self._kept]
+        gone = [p for p in self.people if p.kept and not any(np.array_equal(p.vec, v) for v in left)]
+        self.people = [p for p in self.people if not any(p is g for g in gone)]
         if not any(p is self.speaking for p in self.people):
             self.speaking = None
+        if (ids := [p.voice.state for p in gone if p.voice is not None]) and hasattr(self.engine, 'forget_states'):
+            try:
+                self.engine.forget_states(ids)
+            except Exception as e:  # a dead runner: nothing of them in it any more
+                self.fail(e)
 
     def _add(self, pcm: np.ndarray, c: Clause | None = None, sample: bool = True) -> None:
         """Whose clause it is, and its audio into that person's sample when `sample` (long enough, none of our voice)
@@ -312,7 +356,7 @@ class LiveVoice:
         sample = sample and snr is not None
         v, sec = self.speaker.embed(pcm, SAMPLE_RATE), len(pcm) / SAMPLE_RATE
         p = max(self.people, key=lambda q: q.similarity(v), default=None)
-        if p is None or p.similarity(v) < (SAME if sec >= MIN_CLAUSE_S else SHORT_SAME):
+        if p is None or p.similarity(v) < (SAME if sec >= MIN_CLAUSE_S else SHORT_SAME) or not self._ready(p):
             p = Person(np.zeros_like(v)) if sample else None
             if p is not None:
                 self.people.append(p)
@@ -339,11 +383,31 @@ class LiveVoice:
             n += len(p.clips[i][1]) / SAMPLE_RATE
         sample = np.concatenate([x for i, (_, pcm) in enumerate(p.clips) if i in best for x in (pcm, GAP)])
         state = self.engine.condition(sample, SAMPLE_RATE)
-        p.voice, p.made_at = LiveProfile('them', self.engine_id, None, {'kind': 'them'}, state=state), p.seconds
+        if p.voice is None:
+            p.voice = LiveProfile('them', self.engine_id, None, {'kind': 'them'}, state=state)
+        else:  # the same voice, its state anew: a clause given it before speaks in the new one
+            old, p.voice.state = p.voice.state, state
+            if hasattr(self.engine, 'forget_states'):  # the voice pack: its runner keeps no state of it twice
+                self.engine.forget_states([old])
+        p.made_at = p.seconds
         self.stats['made'] += 1
+        if self.pack:  # what "keep" writes: the voice is an id in this call's runner
+            p.heard = ten(p.clips), SAMPLE_RATE
         if p.seconds >= READY_S[-1]:
-            p.clips = []  # it stays: their speech is not kept any longer
+            p.clips = []  # it stays: their speech is not kept any longer (the voice pack: but for those THEM_S)
         log.info('their voice made from %.1f s of speech (%d people in the call)', p.seconds, len(self.people))
+
+
+def ten(clips: list) -> np.ndarray:
+    """Up to voice.THEM_S of the cleanest `clips` ((snr, pcm)), whole clauses in the order said; one longer than that
+    alone: its start."""
+    from peresmeshnik.voice import THEM_S
+    left, best = int(THEM_S * SAMPLE_RATE), set()
+    for i in sorted(range(len(clips)), key=lambda i: -clips[i][0]):
+        if (n := len(clips[i][1]) + len(GAP)) <= left or not best:
+            best.add(i)
+            left -= n
+    return np.concatenate([x for i, (_, pcm) in enumerate(clips) if i in best for x in (pcm, GAP)])[:int(THEM_S * SAMPLE_RATE)]
 
 
 def faster(chunks, speed: float, sr: int = OUT_SR):
@@ -388,16 +452,22 @@ class TheirVoice:
         """`voice`: the clause's Clause (LiveVoice.offer, through the pipeline); None: a clause of whoever spoke last."""
         if (v := self.live.voice(voice if isinstance(voice, Clause) else None)) is not None:
             said, eng = False, self.live.engine
-            try:
-                for chunk in self._at(faster(self._timed(eng.synth(text, lang, v), eng.sample_rate), speed,
-                                             eng.sample_rate), eng.sample_rate):
-                    said = True
-                    yield chunk
-                return
-            except Exception as e:  # GeneratorExit (barge-in) is no Exception: it goes through
-                self.live.fail(e)
-                if said:  # the rest of this clause is lost, the next ones are said in the stock voice
+            for last in (False, True):
+                try:
+                    for chunk in self._at(faster(self._timed(eng.synth(text, lang, v), eng.sample_rate), speed,
+                                                 eng.sample_rate), eng.sample_rate):
+                        said = True
+                        yield chunk
                     return
+                except Exception as e:  # GeneratorExit (barge-in) is no Exception: it goes through
+                    if isinstance(e, LookupError) and self.live.pack and not said:  # its state pushed out of the voice
+                        if not last and self.live.again(v):  # pack's runner: made again from their speech, once; else
+                            continue  # the stock voice says this clause
+                        break
+                    self.live.fail(e)
+                    if said:  # the rest of this clause is lost, the next ones are said in the stock voice
+                        return
+                    break
         yield from self._at(self.stock.synth(text, lang, **({'speed': speed} if speed != 1.0 else {})),
                             self.stock.sample_rate)
 
@@ -489,15 +559,19 @@ def engine(s) -> tuple[str | None, str]:
 
 def kept(engine_id: str, root=None) -> list:
     """The contacts' voices kept from earlier calls that this engine (these weights) and the speaker vector model can use:
-    [(speaker vector, engine state, seconds)]."""
-    from peresmeshnik import models, voice
+    [(speaker vector, engine state, seconds)]; an engine of the NVIDIA voice pack: [(speaker vector, None, seconds,
+    (pcm, sr) of their recording)]. A Pocket contact has no recording, one of the voice pack no state: either is made
+    again in a call on the other."""
+    from peresmeshnik import languages, models, voice
     out, eng, spk = [], models.get(engine_id).fingerprint, models.get(voice.SPEAKER).fingerprint
+    pack = languages.needs_gpu(engine_id)
     for v in voice.profiles(root):
         if v.meta.get('kind') == 'them':
             try:
-                st, vec = voice.engine_state(v, engine_id, eng), voice.engine_state(v, voice.SPEAKER, spk)
-            except (OSError, ValueError):  # a broken file: that voice is made again in the call
+                vec = voice.engine_state(v, voice.SPEAKER, spk)
+                st, heard = (None, voice.their_sample(v)) if pack else (voice.engine_state(v, engine_id, eng), None)
+            except (OSError, ValueError, RuntimeError):  # a broken file: that voice is made again in the call
                 continue
-            if st is not None and vec is not None:
-                out.append((vec, st, float(v.meta.get('seconds') or READY_S[-1])))
+            if vec is not None and (st is not None or heard is not None):
+                out.append((vec, st, float(v.meta.get('seconds') or READY_S[-1]), *([heard] if pack else [])))
     return out

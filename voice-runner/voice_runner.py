@@ -22,7 +22,8 @@ Protocol, all JSON in ASCII:
   <base64 float32 LE mono>, "sr"} -> {"state": "<id>"}; then {"cmd": "synth", "text", "lang", "state": "<id>"} speaks
   in it. The runner keeps the last MAX_STATES of them in memory (a synth uses one again: it stays); a state it no longer
   has, or another runner's, is that synth's error; {"cmd": "forget"} drops them all (a new call on a warm server: the
-  last one's people, their samples and Chatterbox's conditionals of them go) -> {"ok": true};
+  last one's people, their samples and Chatterbox's conditionals of them go), {"cmd": "forget", "states": [ids]} those
+  (a contact's voice deleted during the call) -> {"ok": true};
 - a synth reply: chunks of uint32 LE byte count + float32 LE mono PCM; 0 ends it; 0xFFFFFFFF + a JSON line
   {"error"} ends it with an error. Any other reply is one JSON line: the result fields, or {"error": "..."}.
 The process sleeps in blocking reads between requests; stdin closed ends it.
@@ -175,7 +176,8 @@ def main():
                     states.popitem(last=False)
                 say({'state': sid})
             elif cmd == 'forget':
-                states.clear()
+                for sid in req['states'] if 'states' in req else list(states):  # [] forgets none
+                    states.pop(sid, None)
                 if getattr(fb := getattr(engine, 'fallback', None), 'conds', None) is not None:  # Qwen3's Chatterbox:
                     fb.conds = None  # the last voice it spoke in; every use sets its own conditionals first
                 say({'ok': True})

@@ -182,11 +182,10 @@ class Tray(QObject):
 
     @staticmethod
     def _keeps_their_voice(s) -> bool:
-        """Whether the them side's clone engine here (S2's voices/live.engine) keeps a voice to take to the next call:
-        Pocket TTS (its state) yes; an engine of the NVIDIA voice pack (XTTS, Qwen3) not (COMMON 23:49), nor none."""
+        """Whether the them side clones their voice here (S2's voices/live.engine): Pocket TTS keeps its state, an engine
+        of the NVIDIA voice pack (XTTS, Qwen3) 10 s of their speech (the user's choice, 11.11); none, nothing."""
         from peresmeshnik.voices import live
-        engine = live.engine(s)[0]
-        return bool(engine) and not languages.needs_gpu(engine)
+        return bool(live.engine(s)[0])
 
     def hotkey_note(self, combo: str, why: str, announce: bool = False) -> None:
         """The hotkey in the menu item; why there is none in its tooltip, on the wizard's hotkey page and, with
@@ -549,14 +548,15 @@ class Tray(QObject):
 
     def remember_voice(self) -> None:
         """Keep the voice of the person in this call, only with their agreement (S2: Controller.them_voice() ->
-        (({model id: (state, sha256 of the weights)}, language, seconds of their speech), '') or (None, why not)). The
-        voice kept is the one of when the user said they agreed, not of when the dialog opened."""
+        (({model id: (state, sha256 of the weights)}, language, seconds of their speech, (pcm, sr) of their speech with
+        the NVIDIA voice pack or None), '') or (None, why not)). The voice kept is the one of when the user said they
+        agreed, not of when the dialog opened."""
         from peresmeshnik.ui.voices import RememberDialog
-        _, why = self.ctl.them_voice()
+        live, why = self.ctl.them_voice()
         if why:
             self.message(f'Their voice cannot be kept now: {why}.')
             return
-        d = RememberDialog()
+        d = RememberDialog(heard=live[3] is not None)
         if d.exec():
             live, why = self.ctl.them_voice()
             if why:

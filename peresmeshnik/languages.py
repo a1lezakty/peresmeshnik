@@ -117,6 +117,9 @@ ENGINE = {'asr': 'onnxruntime', 'mt': 'CTranslate2'}
 # --- the clone's NVIDIA GPU (nvidia-smi, no torch): memory, driver, compute capability
 
 MIN_VRAM_GB = 5.5  # the clone (XTTS-v2 ~2 GB) next to them -> me on CUDA (~0.6 GB): a 6 GB card (6144 MiB, some report less)
+RUNNER_VRAM_GB = 0.5  # each voice-pack runner process beyond the registry's peaks: CUDA context 0.2 (XTTS) - 0.3 GB
+# (Qwen3) by nvidia-smi on an A4000, and its growth over a call's clauses (+0.25 GB)
+VRAM_RESERVE_GB = 0.6  # the rest of the card's users: the desktop (Windows), them -> me's ASR on CUDA, other apps
 
 
 MIN_DRIVER = (570, 65)  # Windows: CUDA 12.8 GA's driver (the pack's torch 2.8.0+cu128; NVIDIA's CUDA 12.8.0 notes)
@@ -295,11 +298,11 @@ def vram_peak(engine: str) -> float:
 
 def _no_room(engine: str, beside: str, card) -> str:
     """Why `engine` does not fit on the NVIDIA card (`card`: as clone_why's has_gpu) beside the other side's `beside`
-    ('' = it does, or its memory is unknown)."""
+    ('' = it does, or its memory is unknown): both engines with their fallbacks, a runner process each, and a reserve."""
     if not (beside and needs_gpu(engine) and needs_gpu(beside)):
         return ''
     g = card if isinstance(card, Gpu) else nvidia_once() if card is None and gpu() else Gpu()
-    need = vram_peak(engine) + vram_peak(beside)
+    need = vram_peak(engine) + vram_peak(beside) + 2 * RUNNER_VRAM_GB + VRAM_RESERVE_GB  # a runner per side (S2)
     if not g.vram or need <= g.vram:
         return ''
     return (f'the cloned voice does not fit on the NVIDIA GPU beside the other direction\'s ({need:.1f} GB of '

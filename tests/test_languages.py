@@ -456,24 +456,27 @@ def test_the_addon_without_its_models_leaves_xtts(monkeypatch):
 
 
 def test_both_directions_cloned_share_the_card(monkeypatch):
-    """FIXES addon 5: them -> me's clone passes me -> them's engine (`beside`): on an 8 GB card Qwen3 (with Chatterbox)
-    and XTTS-v2 fit together, two Qwen3 do not, so their voice takes XTTS-v2; where nothing fits beside, the next engine
-    (Pocket on the CPU) or none, said why; on a 24 GB card both are Qwen3."""
+    """FIXES addon 5, COMMON 02:23: them -> me's clone passes me -> them's engine (`beside`); both engines with their
+    fallbacks, a runner process each (its CUDA context) and a reserve for the desktop must fit the card. 8 GB: mine
+    Qwen3 (with Chatterbox), theirs not on the GPU (Pocket on the CPU, or none, said why); 12 GB: theirs XTTS-v2; 16 GB:
+    both Qwen3; 6 GB: both XTTS-v2."""
     monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
     monkeypatch.setattr(languages, 'pack_here', lambda: True)
     monkeypatch.setattr(languages, 'addon_here', lambda: True)
     monkeypatch.setattr(models, 'is_fetched', lambda m, base=None: True)
-    monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(8188 / 1024, (572, 83), 8.6))  # 8 GB as reported
+    card = [8188 / 1024]  # 8 GB as nvidia-smi reports it
+    monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(card[0], (572, 83), 8.6))
+    extra = 2 * languages.RUNNER_VRAM_GB + languages.VRAM_RESERVE_GB
+    assert languages.vram_peak('qwen3-tts') + languages.vram_peak('xtts-v2') + extra > card[0]  # 2.4 + 3.5 + 2.0 + ...
     me, _ = languages.clone_engine('en')
-    assert me == 'qwen3-tts' and languages.clone_engine('ru', 'them_to_me', beside=me) == ('xtts-v2', '')
-    assert languages.clone_engine('ru', 'them_to_me') == ('qwen3-tts', '')  # nothing beside it: the best one
-    monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(6.0, (572, 83), 8.6))
-    assert languages.clone_engine('en') == ('xtts-v2', '')  # Qwen3 needs 8 GB
-    assert languages.clone_engine('pl', 'them_to_me', beside='xtts-v2') == ('xtts-v2', '')  # 2 + 2 GB of 6
-    monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(7.5, (572, 83), 8.6))  # Qwen3 just fits alone
-    assert languages.clone_engine('en') == ('qwen3-tts', '')
-    assert languages.clone_engine('de', 'them_to_me', beside='qwen3-tts')[0] == 'pocket-tts-de'  # XTTS beside: 7.9 GB
-    engine, why = languages.clone_engine('pl', 'them_to_me', beside='qwen3-tts')
+    assert me == 'qwen3-tts' and languages.clone_engine('ru', 'them_to_me') == ('qwen3-tts', '')  # nothing beside it
+    assert languages.clone_engine('ru', 'them_to_me', beside=me) == ('pocket-tts-ru', '')
+    engine, why = languages.clone_engine('pl', 'them_to_me', beside=me)
     assert engine is None and 'does not fit on the NVIDIA GPU beside' in why
-    monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(24.0, (572, 83), 8.6))
+    card[0] = 12.0
+    assert languages.clone_engine('ru', 'them_to_me', beside='qwen3-tts') == ('xtts-v2', '')
+    card[0] = 16.0
     assert languages.clone_engine('ru', 'them_to_me', beside='qwen3-tts') == ('qwen3-tts', '')
+    card[0] = 6.0
+    assert languages.clone_engine('en') == ('xtts-v2', '')  # Qwen3 needs 8 GB
+    assert languages.clone_engine('pl', 'them_to_me', beside='xtts-v2') == ('xtts-v2', '')  # 2 + 2 GB + runners of 6

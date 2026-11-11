@@ -545,3 +545,22 @@ def test_qwen3_that_does_not_start_gives_way_to_xtts(monkeypatch, tmp_path):
     assert tried == ['qwen3-tts', 'xtts-v2'] and made[0].name == 'xtts-v2' and d.warm == 1
     assert side.errors == ['note: me → them: xtts-v2 speaks your cloned voice: qwen3-tts did not start (the voice pack: '
                            'ModuleNotFoundError: faster_qwen3_tts)']
+
+
+def test_the_runner_sends_no_telemetry(monkeypatch):
+    """C: the runner alone (no app before it) called onnxruntime's telemetry from Qwen3's tokenizer; the variable on its
+    import (Linux, macOS), the call before the engine's code (Windows' TraceLogging does not read it)."""
+    env = {k: v for k, v in os.environ.items() if k != 'ORT_DISABLE_TELEMETRY'}
+    code = ('import importlib.util, os, sys; s = importlib.util.spec_from_file_location("r", sys.argv[1]); '
+            's.loader.exec_module(importlib.util.module_from_spec(s)); print(os.environ.get("ORT_DISABLE_TELEMETRY"))')
+    assert subprocess.run([sys.executable, '-I', '-c', code, str(RUNNER)], env=env, capture_output=True, text=True,
+                          check=True).stdout.strip() == '1'
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('voice_runner_t', RUNNER)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    import onnxruntime as rt
+    calls = []
+    monkeypatch.setattr(rt, 'disable_telemetry_events', lambda: calls.append(1))
+    m.no_telemetry()
+    assert calls == [1]

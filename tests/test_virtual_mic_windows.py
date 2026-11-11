@@ -63,6 +63,15 @@ def cpu(p: subprocess.Popen) -> float:
     return t.user + t.system
 
 
+def live(chunks: list, sr: int = SR_OUT) -> None:
+    """Until a recorder's helper gives sound (0.2 s of it): a busy runner starts it late, and a fixed wait then lets the
+    test play into a recording not begun yet (the round trip's tone came 1.41 s of 1.5 once)."""
+    end = time.monotonic() + 10
+    while sum(map(len, chunks)) < sr // 5:
+        assert time.monotonic() < end, 'the recorder gave nothing'
+        time.sleep(0.01)
+
+
 def tone(seconds: float, sr: int, f: float = 440.0, level: float = 0.3) -> np.ndarray:
     return (level * np.sin(2 * np.pi * f * np.arange(int(sr * seconds)) / sr)).astype(np.float32)
 
@@ -412,7 +421,7 @@ def test_round_trip():
     vm = VirtualMic()
     rec = Recorder(vm.call_mic['uid'], SR_OUT)
     try:
-        time.sleep(0.3)
+        live(rec.chunks)
         t = np.arange(int(SR_IN * 3)) / SR_IN
         x = (0.3 * np.sin(2 * np.pi * 440 * t) * (t < 1.5)).astype(np.float32)  # 1.5 s tone, 1.5 s silence
         t0 = time.perf_counter()
@@ -472,7 +481,7 @@ def test_flush_leaves_silence():
     vm = VirtualMic()
     rec = Timed(vm.call_mic['uid'])
     try:
-        time.sleep(0.4)
+        live(rec.chunks)
         vm.play(tone(6.0, SR_IN), SR_IN)
         time.sleep(1.0)
         vm.flush()

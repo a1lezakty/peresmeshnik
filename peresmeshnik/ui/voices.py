@@ -29,9 +29,9 @@ from peresmeshnik import config, voice
 READ_S = 8.0  # the live reading: two short phrases at a normal pace, 3-4 s each
 THEIRS = ('This voice is heard only by you, in your headphones; it never speaks into the call. It is kept as the clone '
           "engine's state, not as a recording of their speech, and stays on this computer.")
-THEIRS_HEARD = ('This voice is heard only by you, in your headphones; it never speaks into the call. 10 s of their speech '
-                'is saved on this computer: the NVIDIA voice pack makes their voice from it in your next calls. Delete it '
-                'in Voices…')
+THEIRS_HEARD = ('This voice is heard only by you, in your headphones; it never speaks into the call. Up to 10 s of their '
+                'speech is saved on this computer: the NVIDIA voice pack makes their voice from it in your next calls. '
+                'Delete it in Voices…')
 
 
 def described(v) -> str:
@@ -289,7 +289,7 @@ class VoicesDialog(QDialog):
 class RememberDialog(QDialog):
     """Keep the voice of the person in this call (S2's live profile), under a name, only once the user says the person
     agreed. The tray: `if d.exec(): d.keep(states, lang, seconds, sample)`. `heard`: the NVIDIA voice pack's, kept as
-    10 s of their speech (the text says so)."""
+    up to 10 s of their speech (the text says so)."""
 
     def __init__(self, parent=None, heard: bool = False):
         super().__init__(parent)

@@ -474,18 +474,21 @@ def test_a_voice_from_a_sample_speaks_without_a_folder(pack, me):
 
 def test_a_state_the_runner_no_longer_has_is_a_clause_error(pack, tmp_path, caplog):
     """The runner keeps its last MAX_STATES (one a synth used stays); an older one, or one of a runner before (a
-    restart), is that clause's error: left out with the reason, the clone goes on."""
+    restart), is a LookupError of that synth (voices/live.py makes it again), not one of the errors counted to its
+    death: the clone goes on."""
     limit = int(re.search(r'^MAX_STATES = (\d+)', RUNNER.read_text(), re.M)[1])
     a, b = (pack.condition(np.full(2400, x, np.float32), 24_000) for x in (0.25, 0.5))
     say(pack, 'hi', live(a))  # used: newer than b now
     for _ in range(limit - 1):
         pack.condition(np.full(2400, 0.1, np.float32), 24_000)
     assert np.all(say(pack, 'hi', live(a)) == np.float32(0.25))
-    assert list(pack.synth('hi', 'en', live(b))) == [] and 'no voice state' in caplog.text  # b: dropped
+    with pytest.raises(LookupError, match='no voice state'):  # b: dropped
+        list(pack.synth('hi', 'en', live(b)))
     assert len(say(pack, 'hi', live(a))) == 3 * 2400  # it goes on
     other = VoicePackClone(tmp_path / 'xtts-v2', cmd=STUB, log=tmp_path / 'other.log')
     try:
-        assert list(other.synth('hi', 'en', live(a))) == []  # another runner's id: not a voice there
+        with pytest.raises(LookupError):  # another runner's id: not a voice there
+            list(other.synth('hi', 'en', live(a)))
     finally:
         other.close()
 
@@ -508,7 +511,8 @@ def test_a_new_call_on_warm_engines_leaves_nothing_of_the_last_in_the_runner(pac
     b = [v.offer(speech(1.2, 0.1, i), 'b', v._since + 1, v._since + 2.2) for i in range(3)]
     b[-1].known.wait(5)
     test_live.time.sleep(0.5)
-    assert list(pack.synth('hi', 'en', old)) == []  # gone from the runner: that clause's error
+    with pytest.raises(LookupError):  # gone from the runner
+        list(pack.synth('hi', 'en', old))
     assert len(v.people) == 1 and len(say(pack, 'hi', v.people[0].voice)) == 3 * 2400  # B's, made anew
     v.close()
 
@@ -540,8 +544,47 @@ def test_a_contacts_recording_speaks_from_their_first_clause_and_goes_from_the_r
     v.deleted()
     after = v.offer(speech(1.2, 0.1, 5), 'b', 0, 1.2)
     assert after.known.wait(5) and not after.person.kept  # gone: someone new
-    assert list(pack.synth('hi', 'en', kept)) == []  # gone from the runner: that clause's error
+    with pytest.raises(LookupError):  # gone from the runner
+        list(pack.synth('hi', 'en', kept))
     assert len(say(pack, 'hi', other)) == 3 * 2400  # the other voice of the call stays
+    v.close()
+
+
+def test_the_runner_forgets_the_states_named_and_an_empty_list_forgets_none(pack):
+    """FIXES-s2-39 3: {"cmd": "forget", "states": [...]} drops those only; [] none (not all, as without "states")."""
+    a, b = (pack.condition(np.full(2400, x, np.float32), 24_000) for x in (0.25, 0.5))
+    pack.forget_states([])
+    assert np.all(say(pack, 'hi', live(a)) == np.float32(0.25)) and np.all(say(pack, 'hi', live(b)) == np.float32(0.5))
+    pack.forget_states([a])
+    with pytest.raises(LookupError):
+        list(pack.synth('hi', 'en', live(a)))
+    assert np.all(say(pack, 'hi', live(b)) == np.float32(0.5))
+    pack.forget_states()
+    with pytest.raises(LookupError):
+        list(pack.synth('hi', 'en', live(b)))
+
+
+def test_a_voice_pushed_out_of_the_runner_is_made_again_from_their_speech(pack, monkeypatch, tmp_path):
+    """FIXES-s2-39 2: the runner keeps its last MAX_STATES voices; a contact's pushed out by more of them speaks their
+    next clause in their voice again (made from their recording), not silence nor the end of their voice."""
+    import test_live
+    from test_live import AmpSpeaker, FakeStock, speech
+
+    from peresmeshnik import models, voice
+    from peresmeshnik.voices import live as lv
+    limit = int(re.search(r'^MAX_STATES = (\d+)', RUNNER.read_text(), re.M)[1])
+    root = tmp_path / 'voices'
+    voice.save_them('Anna', 'en', 12.0, {voice.SPEAKER: (test_live.B, models.get(voice.SPEAKER).fingerprint)}, root,
+                    (np.full(9 * 16_000, 0.25, np.float32), 16_000))
+    v = lv.LiveVoice(lambda: pack, AmpSpeaker, 'xtts-v2', 'en', lv.kept('xtts-v2', root))
+    tts = lv.TheirVoice(FakeStock(), v)
+    c = v.offer(speech(1.2, 0.1), 'b', 0, 1.2)
+    assert np.allclose(np.concatenate(list(tts.synth('hi', 'en', c))), 0.25, atol=1e-3)
+    for _ in range(limit + 1):
+        pack.condition(np.full(2400, 0.1, np.float32), 24_000)
+    c = v.offer(speech(1.2, 0.1, 1), 'b', 0, 1.2)
+    out = np.concatenate(list(tts.synth('hi again', 'en', c)))
+    assert len(out) and np.allclose(out, 0.25, atol=1e-3) and not v.dead and tts.stock.said == []
     v.close()
 
 

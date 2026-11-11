@@ -34,8 +34,8 @@ version is the top of its GitHub release notes (`.github/workflows/release.yml`)
   as it is while my side loads) never go into their voice. When the voice falls behind it speaks faster at the same
   pitch; a computer too slow for it gets the stock voice, said why. Its download: the clone engine of your language
   (as for your voice; Russian on the CPU 0.44 GB) and the 27 MB speaker model. With the NVIDIA voice pack keeping it
-  saves 10 s of their clear speech on this computer (the pack makes their voice from it in the next call; Pocket TTS
-  keeps its state, not a recording); delete it in Voices…. Off: tray → Their own voice (them → me), or
+  saves up to 10 s of their clear speech on this computer (the pack makes their voice from it in the next call; Pocket
+  TTS keeps its state, not a recording); delete it in Voices…. Off: tray → Their own voice (them → me), or
   `[local] their_voice = false`: the stock voice as before, nothing more downloaded.
 
 ## 0.3.0

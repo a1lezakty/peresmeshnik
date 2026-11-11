@@ -176,7 +176,7 @@ def main():
                     states.popitem(last=False)
                 say({'state': sid})
             elif cmd == 'forget':
-                for sid in req.get('states') or list(states):
+                for sid in req['states'] if 'states' in req else list(states):  # [] forgets none
                     states.pop(sid, None)
                 if getattr(fb := getattr(engine, 'fallback', None), 'conds', None) is not None:  # Qwen3's Chatterbox:
                     fb.conds = None  # the last voice it spoke in; every use sets its own conditionals first

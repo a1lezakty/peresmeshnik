@@ -57,13 +57,15 @@ s; until then a stock voice, and for the whole call where this computer cannot k
 hear it, in your headphones: it never goes into the call (only your own confirmed voice does). What is taken from their
 voice, who is speaking (a speaker vector) and the clone made from their clear phrases, stays in this computer's memory
 for the call and goes when translation goes off (with Pocket TTS their speech itself is let go once the voice is final,
-after 20 s; with the NVIDIA voice pack 10 s of it stays until the call ends, for keeping it). With them → me on your own
-server it is that server's memory instead, and it goes when your computer disconnects (a dropped connection too). It is
-written to disk only when you keep it: tray → Keep the voice of the person in this call…, with their agreement, with one
-person on their side and after 10 s of their speech. Pocket TTS keeps the clone's state, not a recording; the NVIDIA
-voice pack saves 10 s of their clearest speech (none of yours) on this computer and makes their voice from it in your
-next calls. Delete it in tray → Voices…. With two people or more on their side, each phrase is said in the voice of
-whoever said it, and one not known yet in a stock voice. Off: tray → Their own voice (them → me), or
+after 20 s; with the NVIDIA voice pack up to 10 s of it stays until the call ends, for keeping it, and Qwen3-TTS in the
+voice pack's runner holds its sample of each person until then too). With them → me on your own server it is that
+server's memory instead, and it goes when your computer disconnects (a dropped connection too). It is written to disk
+only when you keep it: tray → Keep the voice of the person in this call…, with their agreement, with one person on their
+side and after 10 s of their speech. Pocket TTS keeps the clone's state, not a recording; the NVIDIA voice pack saves up
+to 10 s of their clearest speech on this computer (phrases where your voice may sound are left out) and makes their
+voice from it in your next calls; a server you run yourself on this same computer, as the same user, loads these
+recordings into its runner too. Delete it in tray → Voices…. With two people or more on their side, each phrase is said
+in the voice of whoever said it, and one not known yet in a stock voice. Off: tray → Their own voice (them → me), or
 `their_voice = false` under `[local]` in the settings.
 
 Speech recognition of Turkish, Chinese and Korean on this computer is Whisper on an NVIDIA GPU, through a CUDA build of

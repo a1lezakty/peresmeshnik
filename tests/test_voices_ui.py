@@ -86,7 +86,7 @@ def test_keep_a_contacts_voice_only_as_agreed(tmp_path):
     assert v.meta['kind'] == 'them' and v.meta['name'] == 'Анна' and voice.why_not_mine(v)
     assert not (v.path / 'sample.wav').exists() and 'not as a recording' in d.findChildren(QLabel)[0].text()
     d = voices.RememberDialog(heard=True)  # the NVIDIA voice pack: 10 s of their speech, said so before they agree
-    assert '10 s of their speech is saved on this computer' in d.findChildren(QLabel)[0].text()
+    assert 'Up to 10 s of their speech is saved on this computer' in d.findChildren(QLabel)[0].text()
     d.name.setText('Bob')
     d.agreed.setChecked(True)
     v = d.keep({}, 'en', 12.0, (np.full(16_000, 0.1, np.float32), 16_000), tmp_path)

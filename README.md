@@ -22,8 +22,8 @@ runs from source. Not yet tried in a real call (see below).
   clicks; it cannot stop someone who edits the app's files. A voice recorded in 0.3.0 is confirmed once the same way.
   Tray → **Voices…** lists and deletes the voices. Cloned from a 30–60 s recording. On any computer, a Mac too: Kyutai's
   Pocket TTS on the CPU in English, French, German, Spanish, Portuguese, Italian (its weights need your Hugging Face
-  token, of an account that accepted Kyutai's conditions on huggingface.co/kyutai/pocket-tts: paste it in the wizard's
-  Components or "Your voice" page or in Voices…; saved empty, it is forgotten) and Russian. On an NVIDIA
+  token (type Read), of an account that accepted Kyutai's conditions on huggingface.co/kyutai/pocket-tts: paste it in
+  the wizard's Components or "Your voice" page or in Voices…; saved empty, it is forgotten) and Russian. On an NVIDIA
   GPU with 6 GB or more (Windows, Linux; on Windows also a recent driver, see below) XTTS-v2 in 13 languages. Elsewhere
   a stock voice or the cloud speaks for you.
 - A hotkey switches between translation and your live voice.

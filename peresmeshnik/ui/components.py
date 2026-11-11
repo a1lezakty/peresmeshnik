@@ -33,9 +33,9 @@ PACK_CONSENT = ('I accept the licenses of the voice pack: PyTorch (BSD-3-Clause)
                 '(huggingface.co/coqui/XTTS-v2): noncommercial use only, it binds me as the user')
 
 HF_TEXT = ('Your cloned voice without an NVIDIA GPU speaks through Kyutai\'s Pocket TTS. Its weights are behind a '
-           'button on Hugging Face: open the page, sign in, accept the conditions, then make a read token (Settings → '
-           'Access Tokens) and paste it here. It is kept in the settings folder, readable only by you, and sent only to '
-           'huggingface.co.')
+           'button on Hugging Face: open the page, sign in, accept the conditions, then make a token of type Read '
+           '(Settings → Access Tokens) and paste it here. It is kept in the settings folder, readable only by you, and '
+           'sent only to huggingface.co.')
 
 
 def mb(n: int) -> str:

@@ -10,9 +10,16 @@ XTTS's text cleaning), is an `archives` entry: its folder is unpacked from the v
 half-installed one (cleaned up by the next install), one with another identity was made for another app version and
 is outdated (installed again). The runner itself ships with the app (beside the executable when frozen), so it always
 matches the app.
+
+The addon "Qwen3 + Chatterbox" (the lock's section `addon`, ~80 MB of wheels; its models are the registry's) goes into
+the same pack only when asked: `install(addon=True)` after the pack, into Lib/addon, which the pack's Python reads
+before Lib/site-packages (its transformers 5.16.1 over the pack's 5.22.2), with `.addon-complete` last;
+`uninstall(addon=True)` takes it away and leaves the pack as it was. One install or removal at a time (the wizard and
+the tray's Components… share the pack): another one meanwhile is refused.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -28,6 +35,9 @@ from peresmeshnik import config, models
 
 MARGIN = 1 << 30  # free space left after the install
 PTH = 'python312._pth'
+ADDON = 'addon'  # <pack>/Lib/addon
+ADDON_DONE = '.addon-complete'
+_BUSY = threading.Lock()
 
 
 class PackError(RuntimeError):
@@ -55,30 +65,58 @@ def lock_file() -> Path:
     return runner_dir() / 'pack-windows.json'
 
 
-def identity(lock: Path | None = None) -> str:
-    return models.sha256(lock or lock_file())
+def identity(lock: Path | None = None, addon: bool = False) -> str:
+    """The pack's identity: the SHA-256 of its lock as lock.py writes it without the addon (the bytes of a lock that has
+    none: a new addon outdates no pack); the addon's: of all of it (a new pack outdates its addon too)."""
+    spec = json.loads((lock or lock_file()).read_text())
+    if not addon:
+        spec.pop('addon', None)
+    return hashlib.sha256((json.dumps(spec, indent=1) + '\n').encode()).hexdigest()
 
 
-def state(lock: Path | None = None, where: Path | None = None) -> str:
-    """'ready', 'outdated' (another app version's pack), 'partial' (an install that did not finish) or 'none'."""
-    where = where or folder()
+def addon_section(lock: Path | None = None) -> dict:
+    """The lock's section `addon` ({} : this app has none): wheels, archives, installed_bytes, models, vram_gb."""
+    lock = lock or lock_file()
+    return json.loads(lock.read_text()).get('addon', {}) if lock.is_file() else {}
+
+
+def state(lock: Path | None = None, where: Path | None = None, addon: bool = False) -> str:
+    """'ready', 'outdated' (another app version's pack), 'partial' (an install that did not finish) or 'none'; `addon`:
+    the addon's, in this pack ('none' too where the lock has no addon)."""
+    where, lock = where or folder(), lock or lock_file()
+    if addon:
+        if not addon_section(lock):
+            return 'none'
+        done = where / ADDON_DONE
+        if done.is_file():
+            return 'ready' if state(lock, where) == 'ready' and done.read_text().strip() == identity(lock, True) else 'outdated'
+        return 'partial' if (where / 'Lib' / ADDON).exists() or _dl(where, True).exists() else 'none'
     done = where / '.complete'
     if done.is_file():  # no lock: an app without the pack's files (not the Windows build)
-        lock = lock or lock_file()
         return 'ready' if lock.is_file() and done.read_text().strip() == identity(lock) else 'outdated'
-    return 'partial' if where.exists() or where.with_name('voice-pack.download').exists() else 'none'
+    return 'partial' if where.exists() or _dl(where).exists() else 'none'
 
 
 def python(where: Path | None = None) -> Path:
     return (where or folder()) / 'python.exe'
 
 
-def need_bytes(lock: Path | None = None, where: Path | None = None) -> int:
-    """Free space the install needs: what is not downloaded yet, the installed size and a margin."""
+def _dl(where: Path, addon: bool = False) -> Path:
+    return where.with_name('voice-pack.addon-download' if addon else 'voice-pack.download')
+
+
+def _files(spec: dict, addon: bool = False) -> list[dict]:
+    """What the install downloads; the addon's without the pip wheel (fetched first, not counted in its progress)."""
+    part = spec['addon'] if addon else spec
+    return [*([] if addon else [spec['python'], spec['pip']]), *part['wheels'], *part.get('archives', [])]
+
+
+def need_bytes(lock: Path | None = None, where: Path | None = None, addon: bool = False) -> int:
+    """Free space the install (of the addon) needs: what is not downloaded yet, the installed size and a margin."""
     spec = json.loads((lock or lock_file()).read_text())
-    dl = (where or folder()).with_name('voice-pack.download')
-    files = [spec['python'], spec['pip'], *spec['wheels'], *spec.get('archives', [])]
-    return sum(f['size'] - _have(dl, f) for f in files) + spec['installed_bytes'] + MARGIN
+    dl = _dl(where or folder(), addon)
+    files = _files(spec, addon) + [spec['pip']] * addon
+    return sum(f['size'] - _have(dl, f) for f in files) + (spec['addon'] if addon else spec)['installed_bytes'] + MARGIN
 
 
 def _name(f: dict) -> str:
@@ -106,12 +144,23 @@ def _discard(p: Path) -> None:
 
 def install(progress=lambda stage, done, total, text='': None, cancel: threading.Event | None = None,
             lock: Path | None = None, where: Path | None = None, run_python: list[str] | None = None,
-            retries: int = 3) -> Path:
-    """Install the pack; `progress(stage, done_bytes, total_bytes, text)` with stage 'cleaning', 'downloading',
-    'unpacking' or 'installing' (then `text` is pip's last line); `cancel` set: stops soon with Cancelled, the
-    downloads so far stay for the next attempt. `run_python`: how to run the pack's Python (tests)."""
+            retries: int = 3, addon: bool = False) -> Path:
+    """Install the pack, or with `addon` its addon into the installed pack; `progress(stage, done_bytes, total_bytes,
+    text)` with stage 'cleaning', 'downloading', 'unpacking' (the pack's Python) or 'installing' (then `text` is pip's
+    last line); `cancel` set: stops soon with Cancelled, the downloads so far stay for the next attempt. `run_python`: how
+    to run the pack's Python (tests). Another install or removal still going: PackError."""
     lock, where = lock or lock_file(), where or folder()
-    cancel = cancel or threading.Event()
+    if not _BUSY.acquire(blocking=False):
+        raise PackError('the voice pack is being installed or removed already (setup wizard or Components…): '
+                        'wait until that ends')
+    try:
+        return (_install_addon if addon else _install)(progress, cancel or threading.Event(), lock, where, run_python,
+                                                        retries)
+    finally:
+        _BUSY.release()
+
+
+def _install(progress, cancel: threading.Event, lock: Path, where: Path, run_python, retries: int) -> Path:
     spec = json.loads(lock.read_text())
     if state(lock, where) == 'ready':
         return where
@@ -125,31 +174,117 @@ def install(progress=lambda stage, done, total, text='': None, cancel: threading
         _discard(p)
     for old in where.parent.glob(f'{where.name}.old-*'):  # what an earlier cleanup did not finish
         shutil.rmtree(old, ignore_errors=True)
-    dl = where.with_name('voice-pack.download')
+    dl = _dl(where)
     dl.mkdir(parents=True, exist_ok=True)
-    free, need = shutil.disk_usage(dl).free, need_bytes(lock, where)
-    if free < need:
-        raise PackError(f'the voice pack needs {need / 2 ** 30:.1f} GB free on {dl.anchor or dl.parent}, '
-                        f'there are {free / 2 ** 30:.1f} GB')
-    files = [spec['python'], spec['pip'], *spec['wheels'], *spec.get('archives', [])]
-    total, done = sum(f['size'] for f in files), 0
-    for f in files:
-        name = _name(f)
-        done += _fetch(f, dl, retries, cancel, lambda n, base=done, name=name: progress('downloading', base + n, total, name))
-        progress('downloading', done, total, name)
+    _room(dl, need_bytes(lock, where), 'the voice pack')
+    _fetch_all(_files(spec), dl, retries, cancel, progress)
     progress('unpacking', 0, 0)
     shutil.unpack_archive(dl / _name(spec['python']), tmp, 'zip')
     site = tmp / 'Lib' / 'site-packages'
     site.mkdir(parents=True)
     (tmp / PTH).write_text('python312.zip\n.\nLib\\site-packages\nimport site\n')  # the runner's packages; .pth files
-    reqs = tmp / 'pack-requirements.txt'
-    reqs.write_text(''.join(f'{dl / _name(w)} --hash=sha256:{w["sha256"]}\n' for w in spec['wheels']), 'utf-8')
-    cmd = [*(run_python or [str(python(tmp))]), str(dl / _name(spec['pip']) / 'pip'), 'install', '--no-index', '--no-deps',
+    _pip_install(spec, dl, site, tmp / 'pack-requirements.txt', run_python or [str(python(tmp))], cancel, progress, pip_tmp)
+    _unpack(spec.get('archives', []), dl, site, progress)
+    tmp.rename(where)
+    (where / '.complete').write_text(identity(lock) + '\n')  # last: until here the pack is not there
+    for p in (dl, pip_tmp):
+        shutil.rmtree(p, ignore_errors=True)
+    return where
+
+
+def _install_addon(progress, cancel: threading.Event, lock: Path, where: Path, run_python, retries: int) -> Path:
+    spec = json.loads(lock.read_text())
+    if 'addon' not in spec:
+        raise PackError('this version of the app has no addon for the voice pack')
+    if state(lock, where) != 'ready':
+        raise PackError('the addon goes into the voice pack: install the voice pack first')
+    if state(lock, where, addon=True) == 'ready':
+        return where
+    progress('cleaning', 0, 0)
+    lib, pip_tmp, dl = where / 'Lib', where.with_name('voice-pack.pip-tmp'), _dl(where, True)
+    tmp = lib / f'{ADDON}.tmp'
+    (where / ADDON_DONE).unlink(missing_ok=True)
+    _addon_path(where, False)
+    try:
+        for p in (lib / ADDON, tmp, pip_tmp):  # half installed or outdated: from scratch
+            _discard(p)
+    except OSError as e:
+        raise PackError(f'cannot move the old addon away ({e}): turn translation off first') from e
+    for old in lib.glob(f'{ADDON}.old-*'):
+        shutil.rmtree(old, ignore_errors=True)
+    dl.mkdir(exist_ok=True)
+    _room(dl, need_bytes(lock, where, addon=True), 'the addon')
+    _fetch(spec['pip'], dl, retries, cancel, lambda n: None)
+    _fetch_all(_files(spec, addon=True), dl, retries, cancel, progress)
+    tmp.mkdir()
+    pip_tmp.mkdir()
+    _pip_install(spec['addon'], dl, tmp, pip_tmp / 'addon-requirements.txt', run_python or [str(python(where))], cancel,
+                 progress, pip_tmp, spec['pip'])
+    _unpack(spec['addon'].get('archives', []), dl, tmp, progress)
+    tmp.rename(lib / ADDON)
+    _addon_path(where, True)
+    (where / ADDON_DONE).write_text(identity(lock, addon=True) + '\n')  # last
+    for p in (dl, pip_tmp):
+        shutil.rmtree(p, ignore_errors=True)
+    return where
+
+
+def uninstall(addon: bool = False, lock: Path | None = None, where: Path | None = None) -> None:
+    """Remove the pack (its addon with it), or with `addon` only the addon: the marker goes first, so a removal that
+    stops halfway (Windows: a file the runner has open) never leaves a 'ready' one. PackError: it could not."""
+    where = where or folder()
+    if not _BUSY.acquire(blocking=False):
+        raise PackError('the voice pack is being installed or removed already: wait until that ends')
+    try:
+        (where / (ADDON_DONE if addon else '.complete')).unlink(missing_ok=True)
+        if addon:
+            _addon_path(where, False)
+        names = ('addon-download',) if addon else ('download', 'addon-download', 'tmp', 'pip-tmp')
+        try:
+            for p in [*([where / 'Lib' / ADDON, where / 'Lib' / f'{ADDON}.tmp'] if addon else [where]),
+                      *(where.with_name(f'voice-pack.{n}') for n in names)]:
+                _discard(p)
+        except OSError as e:
+            raise PackError(f'cannot remove {"the addon" if addon else "the voice pack"} ({e}): turn translation off '
+                            'first') from e
+    finally:
+        _BUSY.release()
+
+
+def _addon_path(where: Path, on: bool) -> None:
+    """Lib\\addon on the pack's Python path before Lib\\site-packages (`on`), or off it again."""
+    if (pth := where / PTH).is_file():
+        text = pth.read_text().replace('Lib\\addon\n', '')
+        pth.write_text(text.replace('Lib\\site-packages\n', 'Lib\\addon\nLib\\site-packages\n') if on else text)
+
+
+def _room(dl: Path, need: int, what: str) -> None:
+    if (free := shutil.disk_usage(dl).free) < need:
+        raise PackError(f'{what} needs {need / 2 ** 30:.1f} GB free on {dl.anchor or dl.parent}, '
+                        f'there are {free / 2 ** 30:.1f} GB')
+
+
+def _fetch_all(files: list[dict], dl: Path, retries: int, cancel: threading.Event, progress) -> None:
+    total, done = sum(f['size'] for f in files), 0
+    for f in files:
+        name = _name(f)
+        done += _fetch(f, dl, retries, cancel, lambda n, base=done, name=name: progress('downloading', base + n, total, name))
+        progress('downloading', done, total, name)
+
+
+def _pip_install(part: dict, dl: Path, target: Path, reqs: Path, run_python: list[str], cancel: threading.Event, progress,
+                 pip_tmp: Path, pip: dict | None = None) -> None:
+    """pip from its verified wheel installs `part`'s verified wheels from disk into `target`: no index, no deps."""
+    reqs.write_text(''.join(f'{dl / _name(w)} --hash=sha256:{w["sha256"]}\n' for w in part['wheels']), 'utf-8')
+    cmd = [*run_python, str(dl / _name(pip or part['pip']) / 'pip'), 'install', '--no-index', '--no-deps',
            '--require-hashes', '--only-binary', ':all:', '--no-cache-dir', '--disable-pip-version-check',
-           '--no-warn-script-location', '--target', str(site), '-r', str(reqs)]
-    pip_tmp.mkdir()  # pip's temp on the drive checked above: its moves are renames
+           '--no-warn-script-location', '--target', str(target), '-r', str(reqs)]
+    pip_tmp.mkdir(exist_ok=True)  # pip's temp on the drive checked above: its moves are renames
     _pip(cmd, cancel, lambda line: progress('installing', 0, 0, line), pip_tmp)
-    for a in spec.get('archives', []):  # 'folder': the package's folder in the archive, e.g. unidic-lite-1.0.8/unidic_lite
+
+
+def _unpack(archives: list[dict], dl: Path, site: Path, progress) -> None:
+    for a in archives:  # 'folder': the package's folder in the archive, e.g. unidic-lite-1.0.8/unidic_lite
         progress('installing', 0, 0, f'unpacking {a["folder"]}')
         root, name = a['folder'].rsplit('/', 1)
         with tarfile.open(dl / _name(a)) as t:
@@ -163,11 +298,6 @@ def install(progress=lambda stage, done, total, text='': None, cancel: threading
                     continue
                 members.append(m)
             t.extractall(site, members, filter='data')
-    tmp.rename(where)
-    (where / '.complete').write_text(identity(lock) + '\n')  # last: until here the pack is not there
-    for p in (dl, pip_tmp):
-        shutil.rmtree(p, ignore_errors=True)
-    return where
 
 
 def _fetch(f: dict, dl: Path, retries: int, cancel: threading.Event, progress) -> int:

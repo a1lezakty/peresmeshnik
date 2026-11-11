@@ -14,6 +14,8 @@ and the tests all ask this module.
 from __future__ import annotations
 
 import importlib.util
+import math
+import os
 import shutil
 import subprocess
 import sys
@@ -188,13 +190,14 @@ def nvidia_once() -> Gpu:
     return g
 
 
-def gpu_why(g: Gpu, windows: bool = True) -> str:
-    """Why the clone cannot run on this NVIDIA GPU ('' = it can): its memory, and for the Windows voice pack's torch the
-    driver and the compute capability."""
+def gpu_why(g: Gpu, windows: bool = True, vram: float = 0) -> str:
+    """Why the clone cannot run on this NVIDIA GPU ('' = it can): its memory (`vram` GB, the engine's registry `vram`; 0:
+    MIN_VRAM_GB), and for the Windows voice pack's torch the driver and the compute capability."""
     if g.why:
         return f'the NVIDIA driver does not answer ({g.why})'
-    if g.vram < MIN_VRAM_GB:
-        return f'the clone of your voice needs an NVIDIA GPU with at least 6 GB of memory; this computer has {gpu_text(g.vram)}'
+    if g.vram < (vram or MIN_VRAM_GB):
+        return (f'the clone of your voice needs an NVIDIA GPU with at least {math.ceil(vram or MIN_VRAM_GB)} GB of memory; '
+                f'this computer has {gpu_text(g.vram)}')
     if windows and g.driver < MIN_DRIVER_COMPAT:
         return (f'the clone of your voice needs NVIDIA driver {version_text(MIN_DRIVER)} or newer; this computer has '
                 f'{g.driver_text or "an older one"}')
@@ -217,9 +220,10 @@ def clone_why(model_id: str, lang: str = '', has_gpu: bool | Gpu | None = None, 
     """Why the clone `model_id` cannot speak `lang` live on this computer ('' = it can): the one answer the wizard, the
     tray, the app and the cloud's fallback get (through `direction` or directly). It reads the registry — the model's
     `langs` and `needs = "gpu"` (XTTS-v2 keeps up only on an NVIDIA GPU, BENCH stage 6) — and for such a model the GPU
-    (`gpu_why`: memory; on Windows also the voice pack's driver and compute capability), so another clone engine is a
+    (`gpu_why`: memory, its `vram`; on Windows also the voice pack's driver and compute capability), so another clone engine is a
     registry row, not a change here. `has_gpu`: None looks (nvidia-smi, once per run), a `Gpu` is that card, True / False
     say there is a suitable one or none. `os`: sys.platform of the computer it runs on ('' = this one)."""
+    from peresmeshnik import models
     os = os or sys.platform
     if lang and not covers(model_id, lang):
         return f'your cloned voice cannot speak {name(lang)}'
@@ -230,7 +234,7 @@ def clone_why(model_id: str, lang: str = '', has_gpu: bool | Gpu | None = None, 
         return ''
     if not (g.vram or g.why):
         return 'no clone of your voice keeps up on a Mac' if os == 'darwin' else 'your cloned voice needs an NVIDIA GPU'
-    return gpu_why(g, windows=os == 'win32')
+    return gpu_why(g, windows=os == 'win32', vram=models.get(model_id).vram)
 
 
 class Platform(NamedTuple):
@@ -255,15 +259,28 @@ def pack_here() -> bool:
     return voice_cmd() is not None or importlib.util.find_spec('torch') is not None
 
 
+def addon_here() -> bool:
+    """Whether the voice pack's addon (Qwen3 + Chatterbox) is installed: in the pack (local/voicepack.py), or for a runner
+    of one's own ($PERESMESHNIK_VOICE_CMD: from source, the server) when $PERESMESHNIK_VOICE_ADDON=1 says that its venv
+    has it (voice-runner/requirements-linux-addon*.txt)."""
+    if os.environ.get('PERESMESHNIK_VOICE_CMD'):
+        return os.environ.get('PERESMESHNIK_VOICE_ADDON') == '1'
+    from peresmeshnik.local import voicepack
+    return voicepack.state(addon=True) == 'ready'
+
+
 def not_here(engine: str) -> str:
     """Why `engine` cannot start on this computer as it is now ('' = it can): a gated model without its weights and
-    without the user's Hugging Face token, an NVIDIA engine without the voice pack (or torch from source)."""
+    without the user's Hugging Face token, an NVIDIA engine without the voice pack (or torch from source), an engine of
+    the pack's addon (Qwen3-TTS) without the addon."""
     from peresmeshnik import models
     m = models.get(engine)
     if m.token == 'hf' and not models.hf_token() and not models.is_fetched(m):
         return 'your cloned voice needs a Hugging Face token (Voices…, setup wizard)'
     if needs_gpu(engine) and not pack_here():
         return 'the voice pack is not installed (setup wizard, "Your voice")'
+    if m.addon and not addon_here():
+        return "the voice pack's addon Qwen3 + Chatterbox is not installed (Components…)"
     return ''
 
 
@@ -273,8 +290,9 @@ def clone_engine(lang: str, side: str = 'me_to_them', *, platform: Platform | No
     the wizard, the tray, the app, the cloud's fallback and a server's client ask it, nobody checks on their own. Whether
     its weights are downloaded is not asked here (models). On this computer (`platform` without `os`) an engine that
     cannot start here (`not_here`) gives way to the next one that can: an NVIDIA engine without the voice pack to Pocket
-    TTS; if none can, the NVIDIA engine stays (its pack is the wizard's offer, the app says why at start), a gated one
-    without the user's token does not (the stock voice, said why; with the token it is chosen again)."""
+    TTS, an engine of the pack's addon without it to XTTS-v2; if none can, the NVIDIA engine stays, one that needs only
+    the pack first (the pack is the wizard's offer, the app says why at start), a gated one without the user's token does
+    not (the stock voice, said why; with the token it is chosen again)."""
     if side not in SIDES:
         raise ValueError(f'side {side!r}: one of {SIDES}')
     p = platform or Platform()
@@ -282,7 +300,7 @@ def clone_engine(lang: str, side: str = 'me_to_them', *, platform: Platform | No
     fits = [e for e, why in whys if not why]  # its hardware is there
     if not p.os:  # this computer: also what is installed here
         late = {e: not_here(e) for e in fits}
-        fits = [e for e in fits if not late[e]] or [e for e in fits if needs_gpu(e)]
+        fits = [e for e in fits if not late[e]] or sorted((e for e in fits if needs_gpu(e)), key=_addon)
         whys = [(e, late[e]) for e in late if late[e]] + whys
     if fits:
         return fits[0], ''
@@ -346,6 +364,11 @@ def fallback_voice(s, side: str) -> str:
     return d.tts if d.voice == 'stock' else pick(s.local.tts, d.tgt)
 
 
+def _addon(model_id: str) -> bool:
+    from peresmeshnik import models
+    return models.get(model_id).addon
+
+
 def _fallback_engine(model_id: str) -> str:
     from peresmeshnik import models
     return models.get(model_id).fallback
@@ -396,7 +419,10 @@ def table(s=None) -> str:
     rows = ['| Language | Speech recognition | Stock voice | Your cloned voice | Cloud (Gemini Live) |', '|---|---|---|---|---|']
     for c in LANGS:
         cpu, nvidia = (clone_engine(c, platform=Platform('linux', g))[0] for g in (False, True))
-        clone = ' or '.join([f'{nvidia} (NVIDIA GPU)'] * (nvidia != cpu) + [cpu] * bool(cpu))
+        gpus = [nvidia] * (nvidia != cpu)
+        if nvidia and reg[nvidia].addon:  # without the addon: the next NVIDIA engine
+            gpus += [e for e in clone_engines() if needs_gpu(e) and covers(e, c) and not reg[e].addon][:1]
+        clone = ' or '.join([f'{e} (NVIDIA GPU{", voice pack addon" * reg[e].addon})' for e in gpus] + [cpu] * bool(cpu))
         rows.append(f'| {label(c)} | {asr(pick(loc.asr, c))} | {cell(pick(loc.tts, c))} | '
                     f'{clone or "— (cloud or a stock voice)"} | {"✔" if c in CLOUD else "—"} |')
     gpu_mark = {True: ' (NVIDIA GPU)', False: ''}

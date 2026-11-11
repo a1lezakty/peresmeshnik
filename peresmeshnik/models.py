@@ -65,6 +65,8 @@ class Model:
     pivot: bool = False  # mt: the model of its language to or from English for a pair through English
     token: str = ''  # 'hf': a gated Hugging Face repo: the download needs the user's token (hf_token) and its conditions
     fallback: str = ''  # clone: the model that takes over a voice when this one breaks down; downloaded with it
+    addon: bool = False  # clone: runs only with the voice pack's addon (Qwen3 + Chatterbox), lock.py puts it there
+    vram: float = 0  # GB of GPU memory its engine needs (`needs = "gpu"`); 0: languages.MIN_VRAM_GB
 
     @property
     def size(self) -> int:

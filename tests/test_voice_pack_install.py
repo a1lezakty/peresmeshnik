@@ -287,3 +287,159 @@ def test_a_server_sending_more_than_the_pinned_size_does_not_fill_the_disk(serve
     part = tmp_path / 'big.bin.part'
     models._download(url + 'big.bin', part, 1000, lambda n: None)
     assert part.stat().st_size == 1000
+
+
+@pytest.fixture
+def addon_pack(pack):
+    """`pack` with an addon section: a 5 MB wheel (`qwen`), a small one replacing the pack's `tts`, a source archive."""
+    import tarfile
+    lock, where, httpd, publish = pack
+    b = io.BytesIO()
+    with tarfile.open(fileobj=b, mode='w:gz') as t:
+        for name, body in {'sox-1.0/sox/__init__.py': b'X = 1\n', 'sox-1.0/LICENSE': b'BSD', 'sox-1.0/setup.py': b''}.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(body)
+            t.addfile(info, io.BytesIO(body))
+    spec = json.loads(lock.read_text())
+    spec['addon'] = {'wheels': [publish(*wheel('qwen', bytes(range(256)) * 20_000)), publish('tts-2.0-py3-none-any.whl',
+                                                                                         wheel('tts', b'5.16.1')[1])],
+                     'archives': [publish('sox-1.0.tar.gz', b.getvalue()) | {'folder': 'sox-1.0/sox'}],
+                     'installed_bytes': 2 << 20, 'models': ['qwen3-tts', 'chatterbox-mtl'], 'vram_gb': 7.5}
+    lock.write_text(json.dumps(spec))
+    return pack
+
+
+def test_the_addon_goes_into_the_installed_pack(addon_pack):
+    """The addon: only after the pack, into Lib/addon ahead of Lib/site-packages on the pack's Python path (its versions
+    win), .addon-complete last; the pack's identity does not count the addon, so the pack stays ready."""
+    lock, where, httpd, _ = addon_pack
+    assert voicepack.state(lock, where, addon=True) == 'none'
+    with pytest.raises(PackError, match='install the voice pack first'):
+        run(lock, where, addon=True)
+    run(lock, where)
+    assert voicepack.state(lock, where) == 'ready' and voicepack.state(lock, where, addon=True) == 'none'
+    seen = []
+    assert run(lock, where, addon=True, progress=lambda *a: seen.append(a)) == where
+    lib = where / 'Lib'
+    assert (lib / 'addon' / 'qwen' / 'data.bin').stat().st_size == 5_120_000
+    assert (lib / 'addon' / 'tts' / 'data.bin').read_bytes() == b'5.16.1' and (lib / 'site-packages' / 'tts').is_dir()
+    assert sorted(p.name for p in (lib / 'addon' / 'sox').iterdir()) == ['LICENSE', '__init__.py']
+    assert (where / voicepack.PTH).read_text() == 'python312.zip\n.\nLib\\addon\nLib\\site-packages\nimport site\n'
+    assert (where / '.addon-complete').read_text().strip() == voicepack.identity(lock, addon=True)
+    assert voicepack.state(lock, where) == 'ready' and voicepack.state(lock, where, addon=True) == 'ready'
+    assert sorted(p.name for p in where.parent.iterdir()) == ['voice-pack']  # its downloads, pip's temp: gone
+    add = json.loads(lock.read_text())['addon']
+    total = sum(f['size'] for f in [*add['wheels'], *add['archives']])  # pip's wheel is not counted: S3's own sum
+    down = [a for a in seen if a[0] == 'downloading']
+    assert down[-1][1:3] == (total, total) and all(a[2] == total for a in down)
+    assert [a[1] for a in down] == sorted(a[1] for a in down)  # never backwards
+    n = len(httpd.ranges)
+    assert run(lock, where, addon=True) == where and len(httpd.ranges) == n  # ready: nothing again
+
+
+def test_the_addon_cancel_resume_and_uninstall(addon_pack):
+    lock, where, httpd, _ = addon_pack
+    run(lock, where)
+    cancel = threading.Event()
+
+    def progress(stage, done, total, text=''):
+        if stage == 'downloading' and text.startswith('qwen') and done > 1 << 20:
+            cancel.set()
+    with pytest.raises(Cancelled):
+        run(lock, where, addon=True, progress=progress, cancel=cancel)
+    got = (where.with_name('voice-pack.addon-download') / 'qwen-1.0-py3-none-any.whl.part').stat().st_size
+    assert 0 < got < 5_120_000 and voicepack.state(lock, where, addon=True) == 'partial'
+    run(lock, where, addon=True)
+    assert ('/qwen-1.0-py3-none-any.whl', f'bytes={got}-') in httpd.ranges  # resumed where it stopped
+    assert voicepack.state(lock, where, addon=True) == 'ready'
+    voicepack.uninstall(addon=True, lock=lock, where=where)
+    assert voicepack.state(lock, where, addon=True) == 'none' and not (where / 'Lib' / 'addon').exists()
+    assert (where / voicepack.PTH).read_text() == 'python312.zip\n.\nLib\\site-packages\nimport site\n'
+    assert voicepack.state(lock, where) == 'ready' and (where / 'Lib' / 'site-packages' / 'tts').is_dir()
+    run(lock, where, addon=True)
+    voicepack.uninstall(lock=lock, where=where)  # the pack: its addon with it
+    assert voicepack.state(lock, where) == voicepack.state(lock, where, addon=True) == 'none'
+    assert list(where.parent.iterdir()) == []
+
+
+def test_an_addon_removal_windows_stops_never_leaves_it_ready(addon_pack, monkeypatch):
+    """Windows: the runner still has a file of Lib/addon open: the marker went first, the pack's path is back."""
+    lock, where, _, _ = addon_pack
+    run(lock, where)
+    run(lock, where, addon=True)
+    monkeypatch.setattr(voicepack, '_discard', lambda p: (_ for _ in ()).throw(PermissionError('in use')))
+    with pytest.raises(PackError, match='cannot remove the addon .*turn translation off'):
+        voicepack.uninstall(addon=True, lock=lock, where=where)
+    assert voicepack.state(lock, where, addon=True) == 'partial' and voicepack.state(lock, where) == 'ready'
+    assert 'addon' not in (where / voicepack.PTH).read_text()
+    monkeypatch.undo()
+    run(lock, where, addon=True)  # cleaned up and installed again
+    assert voicepack.state(lock, where, addon=True) == 'ready'
+
+
+def test_a_new_addon_outdates_the_addon_only(addon_pack):
+    lock, where, _, publish = addon_pack
+    run(lock, where)
+    run(lock, where, addon=True)
+    spec = json.loads(lock.read_text())
+    spec['addon']['wheels'][0] = publish('qwen-2.0-py3-none-any.whl', wheel('qwen', b'new')[1])
+    lock.write_text(json.dumps(spec))
+    assert voicepack.state(lock, where) == 'ready' and voicepack.state(lock, where, addon=True) == 'outdated'
+    run(lock, where, addon=True)
+    assert (where / 'Lib' / 'addon' / 'qwen' / 'data.bin').read_bytes() == b'new'
+    assert voicepack.state(lock, where, addon=True) == 'ready'
+    del spec['addon']  # an app without the addon: no addon state, and nothing to install
+    lock.write_text(json.dumps(spec))
+    assert voicepack.state(lock, where, addon=True) == 'none' and voicepack.state(lock, where) == 'ready'
+    with pytest.raises(PackError, match='no addon'):
+        run(lock, where, addon=True)
+
+
+def test_one_install_at_a_time(pack):
+    """FIXES S3 (Components): the wizard and the tray's Components… may both start one; the second is refused while the
+    first runs (two pips into one folder break the pack), and neither can remove it meanwhile."""
+    lock, where, _, publish = pack
+    spec = json.loads(lock.read_text())
+    spec['wheels'].append(publish(*wheel('slow')))
+    lock.write_text(json.dumps(spec))
+    cancel, started, out = threading.Event(), threading.Event(), []
+
+    def first():
+        try:
+            run(lock, where, cancel=cancel, progress=lambda stage, *a: stage == 'installing' and started.set())
+        except Cancelled as e:
+            out.append(e)
+    t = threading.Thread(target=first)
+    t.start()
+    assert started.wait(30)
+    with pytest.raises(PackError, match='being installed or removed already'):
+        run(lock, where)
+    with pytest.raises(PackError, match='being installed or removed already'):
+        voicepack.uninstall(lock=lock, where=where)
+    cancel.set()
+    t.join(15)
+    assert out and isinstance(out[0], Cancelled)
+    publish('slow-1.0-py3-none-any.whl', wheel('slow')[1])
+    spec['wheels'].pop()
+    lock.write_text(json.dumps(spec))
+    assert run(lock, where) == where  # free again
+
+
+def test_the_real_lock_has_the_addon():
+    """voice-runner/lock.py --addon windows: what the addon adds or changes over the pack, cp312 win_amd64; its models
+    and memory from the registry; the pack's identity is the lock's without it (an installed pack stays ready)."""
+    from peresmeshnik import models
+    spec = json.loads(voicepack.lock_file().read_text())
+    add = spec['addon']
+    names = {w['name']: w['url'] for w in add['wheels']}
+    assert {'faster-qwen3-tts', 'qwen-tts-hf', 'chatterbox-tts', 'resemble-perth', 'transformers', 'onnxruntime'} <= set(names)
+    assert 'transformers-5.16.1-' in names['transformers'] and not {'gradio', 'pykakasi', 'spacy-pkuseg', 'torch'} & set(names)
+    assert all('win_amd64' in u or u.endswith('-any.whl') for u in names.values())
+    assert [a['name'] for a in add['archives']] == ['sox']
+    base = {(w['name'], w['url']) for w in spec['wheels']}
+    assert not base & {(w['name'], w['url']) for w in add['wheels']}  # nothing the pack has already
+    assert add['models'] == [m.id for m in models.registry().values() if m.addon] == ['qwen3-tts', 'chatterbox-mtl']
+    assert add['vram_gb'] == models.get('qwen3-tts').vram > models.get('xtts-v2').vram == 0
+    assert 1e7 < add['installed_bytes'] < 1e9
+    del spec['addon']
+    assert voicepack.identity() == hashlib.sha256((json.dumps(spec, indent=1) + '\n').encode()).hexdigest()

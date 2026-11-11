@@ -1,0 +1,20 @@
+# The voice pack's addon (Qwen3-TTS + Chatterbox Multilingual): what replaces its packages' own pins, for uv's
+# --overrides (voice-runner/lock.py --addon). One environment with the pack (checked on an RTX A4000: XTTS, Qwen3 and
+# Chatterbox load and speak in one process): chatterbox-tts 0.1.7 pins torch 2.6, transformers 5.2, numpy<2, librosa
+# 0.11 and safetensors 0.5.3, which the pack's own pins replace; faster-qwen3-tts fails on transformers 5.18-5.22 (and
+# wants huggingface-hub 1.x), so the addon brings transformers 5.16.1 (coqui-tts asks only >= 4.57), which the pack's
+# Python finds before the pack's 5.22.2.
+transformers==5.16.1
+huggingface-hub>=1.5,<2
+setuptools==69.5.1  # pkg_resources, for Chatterbox's watermark (resemble-perth)
+torch>=2.6
+torchaudio>=2.6
+numpy>=1.24
+librosa>=0.11
+safetensors>=0.5.3
+# Never installed (a marker that is never true): gradio (qwen-tts-hf's and chatterbox-tts's demos), pykakasi (GPL-3.0,
+# Chatterbox's Japanese), spacy-pkuseg (its Chinese), pre-commit (s3tokenizer's developer tool)
+gradio ; python_version < '0'
+pykakasi ; python_version < '0'
+spacy-pkuseg ; python_version < '0'
+pre-commit ; python_version < '0'

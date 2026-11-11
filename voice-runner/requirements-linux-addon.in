@@ -1,0 +1,9 @@
+# The voice pack's addon "Qwen3 + Chatterbox" (Linux from source: requirements-linux-addon*.txt): the clone's venv and,
+# in the same environment, Qwen3-TTS (faster-qwen3-tts) with Chatterbox Multilingual taking over a voice that breaks
+# down. Every pin of the pack stays (voice-runner/lock.py --addon: its lock is the constraint) but those that
+# requirements-addon-overrides.txt replaces.
+-r requirements-linux.in
+faster-qwen3-tts==0.5.4
+qwen-tts-hf==0.1.1.post1
+chatterbox-tts==0.1.7
+setuptools==69.5.1  # pkg_resources for resemble-perth, not declared by it

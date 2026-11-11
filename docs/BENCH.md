@@ -2458,6 +2458,40 @@ the splices and added nothing to the windows at −60. Not closed: a voice mostl
 SNR 30: 10 %); a lower floor was not measured. Whether the engines take a voice 35 dB under the owner's: the next section
 (−57 dBFS: XTTS speaks as the owner, Pocket hardly at all).
 
+### Stage 8, tails: does a short piece of someone else in the prompt recolour the clone? (S3, review 2)
+
+What the check above lets through is a piece of someone else shorter than its windows. Measured here is what the clone
+then says, not the windows. LibriSpeech dev-clean, 15 pairs of the same sex (8 female, 7 male), each speaker in one pair.
+A 10 s prompt of the owner's speech with 2 / 3 / 4 s of the other person's speech at its start or its end (levels
+matched, 20 ms crossfade, the whole at the level the app saves a recording at), plus the bases (all mine, all theirs).
+The engines as the app runs them (`local/pocket.py`, int8, its first 10 s ending on a pause; `local/xtts.py`, GPT
+latents from the first 6 s, the speaker embedding from all of it), three English phrases each. Each output's speaker
+vector (`voice.Speaker`) against the owner's and the other person's (30 s of other chapters): "me − other" per output,
+45 outputs a cell. Pocket: the open Kyutai English weights with a bench Mimi encoder (the app's gated weights were not on
+that server); XTTS: the registry's weights, voice pack environment, GPU. `bench/clone_prompt_splice.py`.
+
+| piece of someone else | Pocket: median "me − other" | closer to the other | XTTS: median | closer to the other |
+|---|---|---|---|---|
+| none (all mine) | +0.305 | 0 % | +0.397 | 0 % |
+| first 2 / 3 / 4 s | +0.265 / +0.207 / +0.147 | 7 / 16 / 20 % | +0.211 / +0.077 / −0.033 | 0 / 24 / 69 % |
+| last 2 / 3 / 4 s | +0.190 / +0.110 / +0.004 | 18 / 36 / 44 % | +0.341 / +0.262 / +0.191 | 0 / 0 / 2 % |
+| all theirs | −0.344 | 100 % | −0.457 | 100 % |
+
+It does recolour, and more than the piece's share of the prompt: Pocket goes on from the end of its prompt, XTTS takes
+its GPT latents from the first 6 s. Through the app's check (the prompt followed by 30 s more of the owner, the live
+reading another chapter, stage `gate`), of 15 splices pass: all mine 14; 2 s first / last 14 / 12; 3 s 6 / 5; 4 s 1 / 1;
+all theirs 0. What passes recolours as much: 3 s first, XTTS,
+39 % of the outputs closer to the other person; 3 s last, Pocket, 20 %; the one 4 s splice that passed, all three outputs
+(XTTS first, Pocket last); 2 s, 0-7 %. A voice under the floor (the other person's 10 s at −57 dBFS, the owner's 20 s
+at −20 after it; passes 14 of 15): XTTS speaks as the owner (+0.255, its speaker vector over 30 s), Pocket hardly speaks
+at all (−66 dBFS, like nobody).
+
+Residual risk, accepted for 0.3.0 (review 2, 3): a deliberate splice of 3-4 s of someone else's speech, cut to the
+second, at the start (XTTS) or at the end of the first 10 s (Pocket) of a recording passes the check in 5-6 cases of 15
+at 3 s and 1 at 4 s, and makes the clone a blend of the two voices; on the median the output stays further from the
+other person (cosine 0.38-0.45) than a clone of that person's own recording (0.54-0.61). 2 s barely recolour. Closing it
+for any length and place: check the clone's own output against the live reading (a separate task).
+
 ## Stage 8: Pocket TTS on onnxruntime, both sides cloned at once on 4 cores (S1)
 
 Measured 2026-11-10 on the C server's i7-13700 (Linux, onnxruntime 1.31.1, CUDA hidden), the app's own engine

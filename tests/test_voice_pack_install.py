@@ -383,7 +383,7 @@ def test_an_addon_removal_windows_stops_never_leaves_it_ready(addon_pack, monkey
     lock, where, _, _ = addon_pack
     run(lock, where)
     run(lock, where, addon=True)
-    monkeypatch.setattr(voicepack, '_discard', lambda p: (_ for _ in ()).throw(PermissionError('in use')))
+    monkeypatch.setattr(voicepack, '_discard', lambda p, *wait: (_ for _ in ()).throw(PermissionError('in use')))
     with pytest.raises(PackError, match='cannot remove the addon .*turn translation off'):
         voicepack.uninstall(addon=True, lock=lock, where=where)
     assert voicepack.state(lock, where, addon=True) == 'partial' and voicepack.state(lock, where) == 'ready'
@@ -481,3 +481,29 @@ def test_a_folder_held_open_a_moment_is_moved_away_on_windows(monkeypatch, tmp_p
     held[0] = 1
     with pytest.raises(PermissionError):
         voicepack._discard(d)
+
+
+def test_a_folder_held_open_too_long_says_why(monkeypatch, pack):
+    """FIXES #38 1, 3, 4: a file that stays open: _discard gives up after its wait; the install says why in a PackError;
+    the removal (Components' Remove runs in the UI's thread) waits only ~1 s; each says to try again."""
+    lock, where, _, _ = pack
+    tmp = where.with_name('voice-pack.tmp')
+    for d in (tmp, where):
+        (d / 'Lib').mkdir(parents=True)
+
+    def held(self, target):
+        raise PermissionError(13, 'Access is denied')
+    monkeypatch.setattr(Path, 'rename', held)
+    monkeypatch.setattr(voicepack, 'os', types.SimpleNamespace(name='nt'))
+    t = time.monotonic()
+    with pytest.raises(PermissionError):
+        voicepack._discard(tmp, wait_s=0.2)
+    assert 0.2 <= time.monotonic() - t < 2
+    t = time.monotonic()
+    with pytest.raises(PackError, match=r'cannot remove the voice pack \(.*Access is denied.*try again in a minute'):
+        voicepack.uninstall(lock=lock, where=where)
+    assert 1 <= time.monotonic() - t < 3  # not the install's 10 s
+    monkeypatch.setattr(voicepack, 'os', types.SimpleNamespace(name='posix'))  # at once, without the install's wait
+    with pytest.raises(PackError, match=r'cannot move the old voice pack away \(.*Access is denied.*try again in a minute'):
+        run(lock, where)
+    assert tmp.is_dir()  # left as it was: the next attempt moves it away

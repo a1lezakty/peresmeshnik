@@ -219,7 +219,8 @@ def _install_addon(progress, cancel: threading.Event, lock: Path, where: Path, r
         for p in (lib / ADDON, tmp, pip_tmp):  # half installed or outdated: from scratch
             _discard(p)
     except OSError as e:
-        raise PackError(f'cannot move the old addon away ({e}): turn translation off first') from e
+        raise PackError(f'cannot move the old addon away ({e}): turn translation off first, or try again in a minute') \
+            from e
     for old in lib.glob(f'{ADDON}.old-*'):
         shutil.rmtree(old, ignore_errors=True)
     dl.mkdir(exist_ok=True)
@@ -253,10 +254,10 @@ def uninstall(addon: bool = False, lock: Path | None = None, where: Path | None 
         try:
             for p in [*([where / 'Lib' / ADDON, where / 'Lib' / f'{ADDON}.tmp'] if addon else [where]),
                       *(where.with_name(f'voice-pack.{n}') for n in names)]:
-                _discard(p)
+                _discard(p, 1.0)  # Components' Remove runs in the UI's thread: no 10 s of a frozen window
         except OSError as e:
             raise PackError(f'cannot remove {"the addon" if addon else "the voice pack"} ({e}): turn translation off '
-                            'first') from e
+                            'first, or try again in a minute') from e
     finally:
         _BUSY.release()
 

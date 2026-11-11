@@ -227,9 +227,15 @@ class ComponentsBox(QWidget):
         if not self.confirm(f'Remove {c.title} ({mb(c.on_disk)})?'
                             + (f' Without it {c.instead}; choosing it again downloads it again.' if c.instead else '')):
             return
-        c.remove()
+        try:
+            c.remove()
+            err = ''
+        except Exception as e:  # the voice pack's files still held (Windows): said, as a failed download is
+            err = f'Could not remove {c.title}: {e}'
         self.refresh()
         self.changed.emit()
+        if err:
+            self.state.setText(err)
 
     def confirm(self, text: str) -> bool:
         return QMessageBox.question(self, 'Remove', text) == QMessageBox.StandardButton.Yes

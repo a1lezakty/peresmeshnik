@@ -4,8 +4,17 @@ the times are measured: fault -> the side decides (the tray message), fault -> i
 server answers again and the phrase start -> back in the cloud. One JSON line per run.
 
     python bench/fallback.py --fault drop --runs 3      # drop | quota | slow | back
+
+`--remote`: the side on your own server instead (`peresmeshnik serve`, this computer paired with it), made as the app
+makes it; the fault is the network's, on the tunnel this script runs (`--tunnel`, its command): drop kills it (a
+reset), stall stops it (SIGSTOP: the network gone without a reset), back stops it and lets it go on 8 s later; cmd runs
+`--cmd` then (a restart of the server: its models load again) over the recording three times; none measures the
+latencies only. No local models needed here: when the server fails, the side passes the call as it is.
+
+    python bench/fallback.py --remote PAIRING --tunnel "<the ssh -L command>" --fault stall   # none | drop | stall | back | cmd
 """
 import argparse
+import contextlib
 import json
 import statistics
 import sys
@@ -22,7 +31,7 @@ from fake_gemini import FakeGemini  # noqa: E402
 from peresmeshnik import config  # noqa: E402
 from peresmeshnik.cloud import fallback  # noqa: E402
 from peresmeshnik.cloud.gemini import GeminiDirection  # noqa: E402
-from peresmeshnik.engines import SAMPLE_RATE, Speech  # noqa: E402
+from peresmeshnik.engines import SAMPLE_RATE, Caption, Latency, Speech  # noqa: E402
 from peresmeshnik.pipeline import MAX_LAG_S, make_local, read_audio  # noqa: E402
 
 
@@ -80,15 +89,136 @@ def one(fault: str, at: float, rec: str, s) -> dict:
     return r
 
 
+def ends(pcm) -> list[float]:
+    """The phrase ends in a recording (s from its start) by the client's own energy gate ('pause' 300 ms after one): the
+    client's clock for the first voice after a clause, without the server's word for it."""
+    from peresmeshnik.cloud.gemini import BLOCK, _Gate
+    g, x, out = _Gate(), (np.clip(pcm, -1, 1) * 32767).astype(np.int16), []
+    for i in range(0, len(x) - BLOCK + 1, BLOCK):
+        if g.update(x[i:i + BLOCK], i / SAMPLE_RATE) == 'pause':
+            out.append((i + BLOCK) / SAMPLE_RATE - 0.3)
+    return out
+
+
+def q(v: list[float]) -> dict:
+    v = sorted(v)
+    return {'p50': round(statistics.median(v), 2), 'p95': round(v[min(len(v) - 1, int(0.95 * len(v)))], 2),
+            'max': round(v[-1], 2), 'n': len(v)} if v else {}
+
+
+def up(address: str, wait_s: float = 30.0) -> None:
+    """Until the tunnel takes connections on `address` (ssh logs in first: seconds)."""
+    import socket
+    host, port = address.rsplit(':', 1)
+    end = time.monotonic() + wait_s
+    while True:
+        try:
+            socket.create_connection((host.strip('[]'), int(port)), 1).close()
+            return
+        except OSError:
+            if time.monotonic() > end:
+                raise
+            time.sleep(0.2)
+
+
+def remote(fault: str, at: float, rec: str, s, side: str, paired: dict, tunnel: str, cmd: str = '') -> dict:
+    import shlex
+    import signal
+    import subprocess
+    proc = subprocess.Popen(shlex.split(tunnel)) if tunnel else None
+    try:
+        if proc:
+            up(paired['address'])
+        states, got = [], []
+        t0 = time.monotonic()
+        fb = fallback.make(side, s, '', on_state=lambda x: states.append(x), remote=paired)
+        while not fb.cloud.ready.wait(0.2) and time.monotonic() - t0 < 120:  # client.READY_S: a cold server loads its
+            pass  # models; fb.cloud: a new one if the first failed
+        ready_s = time.monotonic() - t0
+        consumer = threading.Thread(target=lambda: [got.append((time.monotonic(), e)) for e in fb.events()], daemon=True)
+        consumer.start()
+        pcm = read_audio(rec)
+        pcm = np.concatenate([pcm] * {'back': 2, 'cmd': 3}.get(fault, 1))
+        t_fault = t_up = None
+        start = time.monotonic()
+        for i in range(0, len(pcm), 512):
+            time.sleep(max(0.0, start + i / SAMPLE_RATE - time.monotonic()))
+            now = i / SAMPLE_RATE
+            if fault != 'none' and t_fault is None and now >= at:
+                t_fault = time.monotonic()
+                if fault == 'cmd':
+                    subprocess.Popen(cmd, shell=True)
+                else:
+                    proc.kill() if fault == 'drop' else proc.send_signal(signal.SIGSTOP)
+            if fault == 'back' and t_up is None and now >= at + 8:
+                proc.send_signal(signal.SIGCONT)
+                t_up = time.monotonic()
+            fb.feed(pcm[i:i + 512])
+        time.sleep(5)
+        fb.close()
+    finally:
+        if proc:
+            with contextlib.suppress(ProcessLookupError):
+                proc.send_signal(signal.SIGCONT)
+            proc.kill()
+            proc.wait()
+    cut = t_fault or float('inf')
+    before = [(t, e) for t, e in got if t < cut]
+    voice = [t for t, e in before if isinstance(e, Speech)]
+    starts = [t for i, t in enumerate(voice) if i == 0 or t - voice[i - 1] > 0.15]  # a voice after a quiet gap
+    ends_m = [start + x for x in ends(pcm)]
+    after_final, heard = [], []
+    for t, e in before:
+        if isinstance(e, Caption) and e.final:
+            if (nxt := next((v for v in voice if v > t), None)) is not None:
+                after_final.append(nxt - t)  # the client's "no voice slow_s after a subtitle" (any voice clears it)
+            end = max((x for x in ends_m if t - 3 < x < t), default=None)
+            if end is not None and (first := next((v for v in starts if v > t), None)) is not None:
+                heard.append(first - end)  # ponytail: a voice queued right after another has no gap: counted late
+    down = next((t for w, t in fb.switched if w == 'down'), None)
+    back = next((t for w, t in fb.switched if w == 'back'), None)
+    return {'fault': fault, 'side': side, 'ready_s': round(ready_s, 1),
+            'first_voice_s': round(voice[0] - start, 2) if voice else None,  # the call began -> its first voice heard
+            'dropped': sum(isinstance(e, Latency) and e.what == 'dropped' for _, e in before),
+            'rtt_s': fb.cloud.rtt if fb.mode == 'cloud' else None,
+            'caption_s': q([e.s for _, e in before if isinstance(e, Latency) and e.what == 'caption']),
+            'voice_s': q([e.s for _, e in before if isinstance(e, Latency) and e.what == 'voice']),
+            'heard_s': q(heard), 'voice_after_subtitle_s': q(after_final),
+            'decided_s': round(down - t_fault, 2) if down and t_fault else None,
+            'back_after_up_s': round(back - t_up, 2) if back and t_up else None,
+            'back_after_fault_s': round(back - t_fault, 2) if back and t_fault else None, 'mode': fb.mode, 'messages': states}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument('--fault', choices=['drop', 'quota', 'slow', 'back'], default='drop')
+    ap.add_argument('--fault', choices=['drop', 'quota', 'slow', 'back', 'stall', 'cmd', 'none'], default='drop')
     ap.add_argument('--runs', type=int, default=3)
     ap.add_argument('--at', type=float, default=8.0, help='seconds into the recording')
     ap.add_argument('--in', dest='rec', default=str(ROOT / 'tests' / 'data' / 'call-en.ogg'))
+    ap.add_argument('--remote', nargs='?', const='', help="your own server: the pairing file (default: this computer's)")
+    ap.add_argument('--tunnel', default='', help='the command of the tunnel to the server, run and faulted here')
+    ap.add_argument('--side', choices=['them', 'me'], default='them')
+    ap.add_argument('--voice', default='', help='me: the folder of the voice profile that goes up (confirmed live)')
+    ap.add_argument('--cmd', default='', help='cmd: the command run at --at (a restart of the server)')
     a = ap.parse_args()
     s = config.Settings()
     s.their_lang, s.my_lang = 'en', 'ru'
+    if a.remote is not None:
+        from peresmeshnik.remote import pairing
+        if a.fault in ('quota', 'slow') or (a.fault in ('drop', 'stall', 'back') and not a.tunnel) \
+                or (a.fault == 'cmd') != bool(a.cmd):
+            ap.error('--remote: --fault none, drop | stall | back with --tunnel, or cmd with --cmd')
+        if (paired := pairing.load(Path(a.remote) if a.remote else None)) is None:
+            ap.error('not paired with a server: tray menu, Server…')
+        s.them_to_me = s.me_to_them = 'remote'
+        if a.voice:  # a profile's folder: its parent as the voices folder
+            from peresmeshnik import voice
+            voice.voices_dir = lambda: Path(a.voice).resolve().parent
+            s.local.voice = Path(a.voice).name
+        rec = a.rec if a.side == 'them' or a.rec != ap.get_default('rec') else str(ROOT / 'tests' / 'data' / 'call-ru.ogg')
+        for _ in range(a.runs):
+            print(json.dumps(remote(a.fault, a.at, rec, s, a.side, paired, a.tunnel, a.cmd), ensure_ascii=False), flush=True)
+        return 0
     if a.fault == 'back':
         fallback.RETRY_S = 0.0
     rows = [one(a.fault, a.at, a.rec, s) for _ in range(a.runs)]

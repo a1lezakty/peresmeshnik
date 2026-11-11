@@ -331,8 +331,8 @@ class RemoteDirection:
                     return
                 continue
             self._heard_at = time.monotonic()
-            if isinstance(e, Speech):
-                self._voice_at = self._heard_at
+            if isinstance(e, Speech) or isinstance(e, Latency) and e.what == 'dropped':  # its voice, or none comes (the
+                self._voice_at = self._heard_at  # server's queue policy, a barge-in): that subtitle is answered
             elif isinstance(e, Caption) and e.final:
                 self._final_at = self._heard_at
                 if self._final_wait is None or self._voice_at >= self._final_wait:

@@ -238,6 +238,20 @@ def test_a_server_whose_voice_hangs(server, monkeypatch):
     d.close()
 
 
+def test_a_clause_whose_voice_the_server_dropped_is_not_a_hang(server, monkeypatch):
+    """Them -> me drops a clause's voice that would start more than MAX_LAG_S after it ended (its subtitle stays) and says
+    so (Latency 'dropped'): no voice comes for that final, and nothing hung."""
+    monkeypatch.setattr(protocol, 'PING_S', 0.1)
+    d = direction(server, stall_s=1.0)
+    ev = Events(d)
+    assert d.ready.wait(5)
+    server.send(protocol.event(Caption('hi', 'привет', True, 1)), protocol.event(Latency(1, 'dropped', 5.3)))
+    assert ev.get() == Caption('hi', 'привет', True, 1) and ev.get() == Latency(1, 'dropped', 5.3)
+    time.sleep(2.0)  # twice stall_s: nothing more from it, the call is quiet
+    assert ev.t.is_alive() and ev.error is None
+    d.close()
+
+
 def test_a_long_clause_voiced_after_it_ends_is_not_too_slow(server, monkeypatch):
     """The server cuts a clause without a pause at 5 s and voices it ~1.3-1.9 s after (BENCH): its voice comes more than
     stall_s after the phrase began (here: 2.5 s of speech, voice at 3.5 s, stall_s 2), yet nothing hung."""

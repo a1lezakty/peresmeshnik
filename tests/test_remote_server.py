@@ -18,6 +18,7 @@ import time
 
 import numpy as np
 import pytest
+from remote_stubs import CONFIRMED, Fake, profile, start
 from websockets.sync.client import connect
 
 from peresmeshnik import __version__, app, config, voice
@@ -28,60 +29,11 @@ from peresmeshnik.remote.client import RemoteDirection, ServerError
 FRAME = 512
 
 
-class Fake:
-    """A side's local direction without models: records what it hears, says what the test tells it."""
-
-    def __init__(self, side, s):
-        self.side, self.src, self.tgt = side.name, side.src, side.tgt
-        self.voice_dir, self.clone = s.local.voice, s.local.clone
-        self.audio, self.interrupts, self.closed = [], 0, False
-        self.q = queue.Queue()
-
-    def feed(self, pcm):
-        self.audio.append(pcm)
-
-    def events(self):
-        while (e := self.q.get()) is not None:
-            yield e
-
-    def interrupt(self):
-        self.interrupts += 1
-
-    def close(self):
-        self.closed = True
-        self.q.put(None)
-
-    def say(self, *events):
-        for e in events:
-            self.q.put(e)
-
-
 @pytest.fixture(autouse=True)
 def clone_here(monkeypatch):
     """The server's GPU can speak my cloned voice (CI has none): it asks for the voice. A test says otherwise itself."""
     from peresmeshnik import languages
     monkeypatch.setattr(languages, 'clone_why', lambda *a, **k: '')
-
-
-@pytest.fixture
-def made(monkeypatch):
-    """Every Fake the server's sides made, in order (app.Side._local, so ServerSide's own code runs as in the app)."""
-    out = []
-
-    def local(side, s):
-        out.append(Fake(side, s))
-        return out[-1]
-    monkeypatch.setattr(app.Side, '_local', local)
-    return out
-
-
-def start(folder, host='127.0.0.1', port=0, **kw):
-    srv = server.Server(folder, config.Settings(), host, port, **kw)
-    srv.thread = threading.Thread(target=asyncio.run, args=(srv.serve(),), daemon=True)
-    srv.thread.start()
-    assert srv.started.wait(10)
-    srv.address = f'127.0.0.1:{srv.ports[0]}'
-    return srv
 
 
 @pytest.fixture
@@ -139,24 +91,6 @@ def hello(token, side='them', src='en', tgt='ru', **kw):
 
 def frame(v):
     return np.full(FRAME, v, np.float32)
-
-
-CONFIRMED = {'version': 2, 'kind': 'me', 'name': 'me', 'consent': {'how': 'mic-live'}}  # voice.json v2 (S3); its
-# consent names the recording it checked (ref_sha256): profile() fills it in
-
-
-def profile(folder, size=int(2.5 * protocol.CHUNK), meta=CONFIRMED):
-    """My confirmed voice (a recording as big as `size`), and engines' caches the server must not keep: a pickle
-    (xtts.pt) and a state nothing on the server reads (state.npy)."""
-    import hashlib
-    folder.mkdir()
-    (folder / 'reference.wav').write_bytes(wav := os.urandom(size))
-    if isinstance(meta, dict) and isinstance(c := meta.get('consent'), dict) and 'ref_sha256' not in c:
-        meta = {**meta, 'consent': {**c, 'ref_sha256': hashlib.sha256(wav).hexdigest()}}
-    (folder / 'voice.json').write_text(json.dumps(meta))
-    (folder / 'state.npy').write_bytes(b'a state')
-    (folder / 'xtts.pt').write_bytes(b'a pickle')
-    return protocol.pack_voice(folder)
 
 
 def test_pair_then_a_side_end_to_end(srv, made, tmp_path):

@@ -592,11 +592,14 @@ WIN_S = 8.0
 HEAD_S, HEAD_WIN_S, HEAD_HOP_S, HEAD_MATCH = 12.0, 4.0, 2.0, 0.40
 # what the engines take is the file's raw start, pauses and all (Pocket and Qwen3 its first 10 s, XTTS 6 s and its speaker
 # vector 30 s): checked as it is, not through the relative trim of _speech (a voice of someone else turned down to just
-# above the noise of my pauses fell under it whole, FIXES-s3-tails r2 1). Out goes only what is silent however quiet the
-# room: digital silence, and frames below FLOOR_DB once the recording's loudest speech is set to LEVEL_DB. BENCH (stage 8
-# tails, raw start): 5 s of another person 3 dB above the noise of my pauses (SNR 30) passed 94 % with the trim, 10 %
-# here at -60 (72 % at -55), <= 0.9 % at SNR 20; the same person refused 4.08 % clean as before, another person 0.051 %
-START_S, LEVEL_DB, FLOOR_DB = 30.0, -20.0, -60.0
+# above the noise of my pauses fell under it whole, FIXES-s3-tails r2 1). What the check does not see the engines do not
+# get either (r3 1): save() writes the frames of the start more than FLOOR_DB under the median speech frame as digital
+# silence (the median: a few loud seconds do not move it), and the check takes all of the start but digital silence
+# (a file put there by hand, quiet voice and all, is checked whole). BENCH (stage 8 tails, written as silence): 5 s of
+# another person 3 dB above the noise of my pauses (SNR 30) in the file and passing 94 % with the trim, 1.1 % at 35 dB
+# (17 % at 30: a lower floor cuts them into shreds the windows miss); the same person refused 4.41 % clean (4.08 %),
+# another person 0.063 % (0.056 %); of my own speech p95 0.3 s goes silent
+START_S, FLOOR_DB = 30.0, 35.0
 TRIES, PAUSES_S = 3, (60, 300, 1500, 3600)  # failed checks in a row before a pause; the pauses after them, growing
 
 
@@ -612,20 +615,26 @@ def _to(pcm: np.ndarray, sr: int, to: int) -> np.ndarray:
     return x if sr == to else np.interp(np.arange(0, len(x), sr / to), np.arange(len(x)), x).astype(np.float32)
 
 
-def _start(pcm: np.ndarray, sr: int) -> np.ndarray:
-    """What is checked of a recording: its raw first START_S without digital silence and the frames below FLOOR_DB at
-    LEVEL_DB, then the speech of what follows (_speech's)."""
-    x = np.asarray(pcm, np.float32)
-    x = x - x.mean()
-    f = _frames(x, sr)
+def _under_floor(x: np.ndarray, sr: int) -> np.ndarray:
+    """Which 30 ms frames of the first START_S of `x` save() writes as digital silence: more than FLOOR_DB under the
+    median frame of the recording's speech (check()'s: above the noise of the pauses + 6 dB)."""
+    f = _frames(x - x.mean(), sr)
     db = 10 * np.log10(np.mean(f ** 2, axis=1) + 1e-12)
-    live = db[db > -100]  # digital silence: out
-    if not len(live):
-        return x[:0]
-    n = int(START_S * 1000 / 30)  # frames of the start
-    keep = (db[:n] > -100) & (db[:n] + LEVEL_DB - float(np.percentile(live, 95)) > FLOOR_DB)
-    rest = _speech(x[n * len(f[0]):], sr) if len(f) > n else x[:0]  # a short one joins the last window
-    return np.concatenate([f[:n][keep].reshape(-1), rest]).astype(np.float32)
+    live = db[db > -100]
+    speech = db[db > max(float(np.percentile(live, 10)) + 6, -60.0)] if len(live) else live
+    if not len(speech):
+        return np.zeros(min(len(f), int(START_S * 1000 / 30)), bool)
+    return db[:int(START_S * 1000 / 30)] < float(np.median(speech)) - FLOOR_DB
+
+
+def _start(pcm: np.ndarray, sr: int) -> np.ndarray:
+    """What is checked of a recording: its first START_S as the engines take it, only digital silence out (save() wrote
+    what is under the floor as such), then the speech of what follows (_speech's)."""
+    x = np.asarray(pcm, np.float32)
+    f, n = _frames(x, sr), int(START_S * 1000 / 30)
+    keep = np.mean(f[:n] ** 2, axis=1) > 1e-10  # not digital silence (-100 dB, of the samples as they are)
+    rest = _speech(x[n * f.shape[1]:], sr) if len(f) > n else x[:0]  # a short one joins the last window
+    return np.concatenate([(f[:n][keep] - x.mean()).reshape(-1), rest]).astype(np.float32)
 
 
 def _windows(x: np.ndarray, sr: int) -> list[tuple[np.ndarray, float]]:
@@ -767,7 +776,11 @@ def save(pcm: np.ndarray, sr: int, name: str, lang: str, transcript: str | None 
     _private(base, path)
     for old in path.glob('*.pt'):  # engine caches of an older recording
         old.unlink()
-    sf.write(path / 'reference.wav', np.clip(x * gain, -1, 1), sr, subtype='PCM_16')
+    y = np.clip(x * gain, -1, 1)
+    under = _under_floor(y, sr)
+    fl = sr * 30 // 1000
+    y[:len(under) * fl].reshape(-1, fl)[under] = 0  # the engines get only what is checked
+    sf.write(path / 'reference.wav', y, sr, subtype='PCM_16')
     meta = {'version': VERSION, 'id': name, 'name': name, 'kind': 'me', 'lang': lang, 'created': _now(),
             'consent': None, 'source': source, 'seconds': report.seconds, 'engines': {},
             'transcript': transcript or '', 'sample_rate': sr, 'gain_db': round(20 * np.log10(gain), 1),

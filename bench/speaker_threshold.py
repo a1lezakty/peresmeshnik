@@ -9,7 +9,8 @@ trimcheck (live with / without the app's trim),
 trim3 <i/n> + report_trim3 (live trimmed: none / edges / all frames);
 stage 3 (the reference's start in short windows): head <i/n>, report_head, timing_head;
 overlap <i/n> + report_overlap + timing_overlap (4 s windows every 2 s over the head, shifted splices);
-stage 4 (the raw start, voice._start; VOICE_PY = voice.py): start4 <i/n>, report_start4, timing_start4.
+stage 4 (the raw start, voice._start of 1d79286; VOICE_PY = that voice.py): start4 <i/n>, report_start4,
+timing_start4; stage 6 (the file as save() writes it; VOICE_PY = voice.py now): save6 <i/n> <1|2>, report_save6.
 The model is run exactly as onnx-asr 0.12.0 does it: Manager().create_se()
 -> KaldiPreprocessorNumpy('wespeaker') -> mean subtraction over time -> ONNX 'feats' -> 'embs'.
 """
@@ -1085,26 +1086,31 @@ def stage_timing_overlap():
 
 
 # ---------- stage 4: the reference's raw start (voice._start) with an absolute floor, the hidden-sound refusal ----------
+# start4 / report_start4 / timing_start4 are for the scheme of 1d79286 (_start -> (start, hidden, rest), LEVEL_DB):
+# run them with VOICE_PY = that commit's voice.py. Stage 6 below is for the scheme after it (save() writes the floor).
 VOICE_PY = Path(os.environ.get("VOICE_PY", Path(__file__).resolve().parents[1] / "peresmeshnik/voice.py"))
 VOICE_FNS = ("_frames", "_speech", "_start", "_windows")
-VOICE_CONSTS = {"START_S", "LEVEL_DB", "FLOOR_DB", "HEAD_S", "HEAD_WIN_S", "HEAD_HOP_S",
-                "HEAD_MATCH", "WIN_S", "MATCH"}
 FILE4 = ("clean", "opus24k", "white30", "white20")  # white<snr>: white noise at SNR to the speech, over the whole file
 VARIANTS = tuple((fl, hd) for fl in (-55.0, -60.0) for hd in (2.0, 3.0, 4.0))  # (floor, margin dB): hidden s
 BYPASS_K, BYPASS_DB, BYPASS_SNR = (5, 10), (3, 5, 8), (30, 20)
 
 
-def voice_ns() -> dict:
-    """voice._start / _windows / _speech / _frames and their constants, exec'd from the source itself (no copy to drift):
-    the bench calls the app's own code; FLOOR_DB can be changed in the namespace for the variants."""
+def voice_ns(fns=VOICE_FNS) -> dict:
+    """voice.py's functions `fns` (+ its Report) and all its UPPER_CASE constants, exec'd from the source itself (no
+    copy to drift): the bench calls the app's own code; FLOOR_DB can be changed in the namespace for the variants."""
     import ast
+    from dataclasses import dataclass, field
     tree = ast.parse(VOICE_PY.read_text(encoding="utf-8"))
-    body = [b for b in tree.body if isinstance(b, ast.FunctionDef) and b.name in VOICE_FNS
-            or isinstance(b, ast.Assign) and {t.id for t in ast.walk(b) if isinstance(t, ast.Name)
-                                              and isinstance(t.ctx, ast.Store)} & VOICE_CONSTS]
-    ns = {"np": np}
-    exec(compile(ast.Module(body, []), str(VOICE_PY), "exec"), ns)
-    assert all(k in ns for k in VOICE_FNS + tuple(VOICE_CONSTS)), sorted(set(VOICE_FNS) | VOICE_CONSTS - set(ns))
+    ns = {"np": np, "dataclass": dataclass, "field": field}
+    for b in tree.body:
+        names = {t.id for t in ast.walk(b) if isinstance(t, ast.Name) and isinstance(t.ctx, ast.Store)}
+        if isinstance(b, ast.FunctionDef) and b.name in fns or isinstance(b, ast.ClassDef) and b.name == "Report" \
+                or isinstance(b, ast.Assign) and names and all(n.isupper() for n in names):
+            try:
+                exec(compile(ast.Module([b], []), str(VOICE_PY), "exec"), ns)
+            except NameError:  # a constant built from something not loaded here
+                pass
+    assert all(k in ns for k in fns), sorted(set(fns) - set(ns))
     return ns
 
 
@@ -1359,6 +1365,207 @@ def stage_timing_start4():
           f"{len(ns['_speech'](x60, SR)) / SR:.1f} s")
 
 
+# ---------- stage 6: what save() writes (frames FLOOR_DB under the median speech frame -> digital silence) is checked ----
+VOICE_FNS6 = ("_frames", "_speech", "_start", "_windows", "_under_floor", "check", "_band_db")
+FLOORS6 = (25.0, 30.0, 35.0)
+RAISE_S = (0, 3, 6)  # (c): the first s of my speech +20 dB, then 5 s of another person at -10 dB to my speech, then me 40 s
+
+
+def saved(ns, x):
+    """voice.save()'s numbers: (reference.wav as read back, frames of the start written as silence, the level-set
+    recording before that). Its file and json writing left out; PCM_16 through soundfile, as save() writes it."""
+    import io
+    x = np.asarray(x, np.float32)[:int(ns["MAX_S"] * SR)]
+    report = ns["check"](x, SR)
+    peak = float(np.max(np.abs(x))) or 1.0
+    gain = min(10 ** ((ns["TARGET_DB"] - report.level_db) / 20), 10 ** (-1 / 20) / peak)
+    y = np.clip(x * gain, -1, 1)
+    pre = y.copy()
+    under = ns["_under_floor"](y, SR)
+    fl = SR * 30 // 1000
+    y[:len(under) * fl].reshape(-1, fl)[under] = 0
+    buf = io.BytesIO()
+    sf.write(buf, y, SR, format="WAV", subtype="PCM_16")
+    buf.seek(0)
+    return sf.read(buf, dtype="float32")[0], under, pre
+
+
+def speech_frames(ns, x):
+    """check()'s speech frames of x: louder than the pauses' p10 + 6 dB, not under -60."""
+    f = ns["_frames"](x - x.mean(), SR)
+    db = 10 * np.log10(np.mean(f ** 2, axis=1) + 1e-12)
+    live = db[db > -100]
+    return db > max(float(np.percentile(live, 10)) + 6, -60.0) if len(live) else db > 0
+
+
+def stage_save6():
+    """argv[2] = shard "i/n", argv[3] = part: "1" = ref 40 s clean / opus24k + the bypass of stage 4 (K s of another
+    person, pauses digital, d dB above the owner's noise, then the owner 40 s + white noise at SNR); "2" = ref 40 s
+    white30 / white20, ref 60 s clean / white20 + (c) the floor raised (RAISE_S s of mine at +20 dB, 5 s of another
+    person at -10 dB, me 40 s; 0 = no loud start). Each at FLOORS6: the file as save() writes it, checked as
+    confirm_live does (_windows(_start)). Refs: every window's vector (FRR / FAR in the report); splices: only the pass
+    against the owner's clean lives of other chapters (windows in _windows' order, stopped once every live fails)."""
+    import hashlib
+    i, n = map(int, sys.argv[2].split("/"))
+    part = sys.argv[3]
+    ns, se, gender, rows, info, t0 = voice_ns(VOICE_FNS6), make_se(1), libri_speakers(), [], [], time.time()
+    H = [load2(p) for p in sorted(WORK.glob("emb_head_*.npz"))]
+    HE, HM = np.concatenate([e for e, _ in H]), sum((m for _, m in H), [])
+    lives = {}
+    for e, m in zip(HE, HM):
+        if m["set"] == "live" and m["cond"] == "clean":
+            lives.setdefault(m["spk"], []).append((m["ch"], e))
+    imps, cache = {}, {}
+    for spk, ch, imp, ich in splice_pairs():
+        imps.setdefault((spk, ch), []).append((imp, ich))
+
+    def emb(w):
+        k = hashlib.blake2b(w.tobytes(), digest_size=16).digest()
+        if k not in cache:
+            cache[k] = embed(se, w)
+        return cache[k]
+
+    def ref(meta, x):
+        sp = speech_frames(ns, saved(ns, x)[2])
+        for fl in FLOORS6:
+            ns["FLOOR_DB"] = fl
+            y, under, _ = saved(ns, x)
+            st = ns["_start"](y, SR)
+            wins = ns["_windows"](st, SR)
+            rows.extend((meta | {"floor": fl, "i": q, "thr": thr}, emb(w)) for q, (w, thr) in enumerate(wins))
+            info.append(meta | {"floor": fl, "zeroed_s": float(under.sum()) * 0.03,
+                                "speech_lost_s": float((under & sp[:len(under)]).sum()) * 0.03,
+                                "speech30_s": float(sp[:len(under)].sum()) * 0.03, "n_win": len(wins)})
+
+    def splice(meta, x, a, b, Lv):
+        """x with another person at samples a:b (frame-aligned)."""
+        fl_ = SR * 30 // 1000
+        on = np.mean(ns["_frames"](x[a:b], SR) ** 2, axis=1) > 1e-10
+        for fl in FLOORS6:
+            ns["FLOOR_DB"] = fl
+            y, under, _ = saved(ns, x)
+            kept = np.mean(ns["_frames"](y[a:b], SR) ** 2, axis=1) > 1e-10
+            ok, k = np.ones(len(Lv), bool), 0
+            for w, thr in ns["_windows"](ns["_start"](y, SR), SR):
+                ok &= emb(w) @ Lv.T >= thr
+                k += 1
+                if not ok.any():
+                    break
+            info.append(meta | {"floor": fl, "pass": ok.tolist(), "n_emb": k, "fore_on_s": float(on.sum()) * 0.03,
+                                "fore_kept_s": float((kept & on).sum()) * 0.03, "zeroed_s": float(under.sum()) * 0.03})
+        assert a % fl_ == 0
+
+    for j, (spk, ch, utts) in enumerate(chapters()):
+        if j % n != i:
+            continue
+        cache.clear()
+        base = {"spk": spk, "ch": ch, "g": gender[spk]}
+        for L, fc in ((40, "clean"), (40, "opus24k")) if part == "1" else \
+                ((40, "white30"), (40, "white20"), (60, "clean"), (60, "white20")):
+            fx, _ = concat_from(utts, 0, L)
+            if fx is None:
+                continue
+            x = with_noise(ns, fx, int(fc[5:]), np.random.default_rng([int(spk), int(ch), int(fc[5:]), L]))[0] \
+                if fc.startswith("white") else file_cond(fx, fc)
+            ref(base | {"set": "ref", "cond": fc, "L": L}, x)
+        Lv = np.stack([e for c, e in lives.get(spk, []) if c != ch] or [np.zeros(HE.shape[1], np.float32)])
+        for imp, ich in imps.get((spk, ch), []):
+            oth, _ = concat_from(sorted(glob.glob(str(LIBRI / "dev-clean" / imp / ich / "*.flac"))), 0, 30)
+            sm = base | {"set": "splice", "imp": imp, "imp_ch": ich}
+            if part == "1":
+                fx, _ = concat_from(utts, 0, FILE_SEC)
+                for snr in BYPASS_SNR:
+                    own, nr = with_noise(ns, fx, snr, np.random.default_rng([int(spk), int(ch), snr, FILE_SEC]))
+                    for K in BYPASS_K:
+                        g = gated(ns, oth, K)
+                        for d in BYPASS_DB:
+                            splice(sm | {"K": K, "d": d, "snr": snr}, np.concatenate([g * nr * 10 ** (d / 20), own]),
+                                   0, len(g), Lv)
+            elif (fx := concat_from(utts, 0, FILE_SEC + max(RAISE_S))[0]) is not None:  # 3 chapters are shorter
+                g = gated(ns, oth, 5) * rms(ns["_speech"](fx, SR)) * 10 ** (-10 / 20)
+                for R in RAISE_S:
+                    x = np.concatenate([fx[:R * SR] * 10, g, fx[R * SR:(R + FILE_SEC) * SR]])
+                    x *= min(1.0, 0.99 / float(np.max(np.abs(x))))  # no clipping: the whole file turned down
+                    splice(sm | {"R": R}, x, R * SR, R * SR + len(g), Lv)
+        print(f"{j} {spk}/{ch} rows={len(rows)} info={len(info)} t={time.time() - t0:.0f}s", flush=True)
+    np.savez(WORK / f"emb_save6_{part}_{i}.npz", e=np.stack([e for _, e in rows]) if rows else np.zeros((0, HE.shape[1])),
+             m=json.dumps([m for m, _ in rows]), info=json.dumps(info))
+
+
+def stage_report_save6():
+    H = [load2(p) for p in sorted(WORK.glob("emb_head_*.npz"))]
+    HE, HM = np.concatenate([e for e, _ in H]), sum((m for _, m in H), [])
+    Z = [np.load(p) for p in sorted(WORK.glob("emb_save6_*.npz"))]
+    E = np.concatenate([z["e"] for z in Z if len(z["e"])])
+    M = sum((json.loads(str(z["m"])) for z in Z), [])
+    info = sum((json.loads(str(z["info"])) for z in Z), [])
+    li = [j for j, m in enumerate(HM) if m["set"] == "live"]
+    le, lm = HE[li], [HM[j] for j in li]
+    g = {m["spk"]: m["g"] for m in lm}
+    rk = ("spk", "ch", "cond", "L", "floor")
+    out, lines = {"a": {}, "b": {}, "c": {}, "d": {}}, []
+
+    def q(a):
+        a = np.asarray(a, float)
+        return {"p50": float(np.median(a)), "p95": float(np.percentile(a, 95)), "max": float(a.max())} if len(a) else {}
+
+    lines.append("## (a) FRR (own, another chapter) / FAR (other same sex) of the file as save() writes it, per FLOOR_DB")
+    for L, fc in sorted({(m["L"], m["cond"]) for m in M}):
+        for lc in LIVE2_CONDS:
+            lj = [j for j, m in enumerate(lm) if m["cond"] == lc]
+            parts = []
+            for fl in FLOORS6:
+                refs = sorted({tuple(m[k] for k in rk) for m in M if m["cond"] == fc and m["L"] == L and m["floor"] == fl})
+                if not refs:
+                    continue
+                fmeta = [{"spk": r[0], "ch": r[1], "g": g[r[0]]} for r in refs]
+                gen, imp = masks(fmeta, [lm[j] for j in lj])
+                ok = min_margin(E, M, lambda m: tuple(m[k] for k in rk), refs, le[lj]) >= 0
+                r = {"frr": float(1 - ok[gen].mean()), "far": float(ok[imp].mean()), "n_gen": int(gen.sum()),
+                     "n_imp": int(imp.sum())}
+                out["a"][f"{L}|{fc}|{lc}|{fl:g}"] = r
+                parts.append(f"{fl:g}: {r['frr']:.2%}/{r['far']:.3%}")
+            lines.append(f"ref={L}s {fc}/{lc} gen={r['n_gen']} imp={r['n_imp']}: " + "  ".join(parts))
+    lines.append("## (d) the start (30 s) written as silence, s: all / my speech (check()'s frames) p50/p95/max")
+    for L, fc in sorted({(r["L"], r["cond"]) for r in info if r["set"] == "ref"}):
+        for fl in FLOORS6:
+            rs = [r for r in info if r["set"] == "ref" and r["cond"] == fc and r["L"] == L and r["floor"] == fl]
+            d = {"zeroed": q([r["zeroed_s"] for r in rs]), "speech_lost": q([r["speech_lost_s"] for r in rs]),
+                 "speech30": q([r["speech30_s"] for r in rs]), "n": len(rs)}
+            out["d"][f"{L}|{fc}|{fl:g}"] = d
+            lines.append(f"ref={L}s {fc} floor={fl:g} n={len(rs)}: zeroed {d['zeroed']['p50']:.2f}/{d['zeroed']['p95']:.2f}/"
+                         f"{d['zeroed']['max']:.2f}  speech lost {d['speech_lost']['p50']:.2f}/{d['speech_lost']['p95']:.2f}/"
+                         f"{d['speech_lost']['max']:.2f} (of speech {d['speech30']['p50']:.1f})")
+
+    def splices(key, sel, title):
+        lines.append(title)
+        for k in sorted({tuple(r[x] for x in key) for r in info if sel(r)}):
+            for fl in FLOORS6:
+                rs = [r for r in info if sel(r) and tuple(r[x] for x in key) == k and r["floor"] == fl]
+                if not rs:
+                    continue
+                P = [(p, r["fore_kept_s"]) for r in rs for p in r["pass"]]
+                d = {"n_splices": len(rs), "n_pairs": len(P), "pass": float(np.mean([p for p, _ in P])),
+                     "silenced": float(np.mean([r["fore_kept_s"] == 0 for r in rs])),
+                     "danger": float(np.mean([p and kept > 0 for p, kept in P])),
+                     "danger_1s": float(np.mean([p and kept >= 1 for p, kept in P])),
+                     "fore_kept_s": q([r["fore_kept_s"] for r in rs]), "fore_on_s": q([r["fore_on_s"] for r in rs]),
+                     "n_emb": float(np.mean([r["n_emb"] for r in rs]))}
+                out["b" if "K" in key else "c"]["|".join(map(str, k)) + f"|{fl:g}"] = d
+                lines.append(" ".join(f"{x}={v}" for x, v in zip(key, k)) + f" floor={fl:g} splices={d['n_splices']} "
+                             f"pairs={d['n_pairs']}: pass={d['pass']:.2%} silenced={d['silenced']:.1%} "
+                             f"danger={d['danger']:.2%} danger(kept>=1s)={d['danger_1s']:.2%} kept s p50/p95="
+                             f"{d['fore_kept_s']['p50']:.2f}/{d['fore_kept_s']['p95']:.2f} of {d['fore_on_s']['p50']:.2f}")
+
+    splices(("snr", "K", "d"), lambda r: r["set"] == "splice" and "K" in r,
+            "## (b) bypass of stage 4; pass = the check passes (live: the owner, clean); silenced = the other person all "
+            "written as silence; danger = in the file and passed")
+    splices(("R",), lambda r: r["set"] == "splice" and "R" in r,
+            "## (c) the floor raised: R s of mine at +20 dB, 5 s of another at -10 dB to my speech, me 40 s")
+    json.dump(out, open(WORK / "report_save6.json", "w"), indent=1, default=float)
+    print("\n".join(lines))
+
+
 if __name__ == "__main__":
     {"embed": stage_embed, "report": stage_report, "timing": stage_timing, "padded": stage_padded,
      "report_padded": stage_report_padded, "wlive": stage_wlive, "wfile": stage_wfile, "splice": stage_splice,
@@ -1366,4 +1573,5 @@ if __name__ == "__main__":
      "trim3": stage_trim3, "report_trim3": stage_report_trim3, "head": stage_head, "report_head": stage_report_head,
      "timing_head": stage_timing_head, "overlap": stage_overlap, "report_overlap": stage_report_overlap,
      "timing_overlap": stage_timing_overlap, "start4": stage_start4, "report_start4": stage_report_start4,
-     "timing_start4": stage_timing_start4}[sys.argv[1]]()
+     "timing_start4": stage_timing_start4, "save6": stage_save6,
+     "report_save6": stage_report_save6}[sys.argv[1]]()

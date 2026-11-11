@@ -2423,7 +2423,7 @@ recording: `4h2+8` refuses the owner 4.2 % clean, 4.8 % Opus. Time, 1 thread, a 
 a piece of 3 s, or of 4 s not on the 2 s grid — no 4 s window lies wholly inside it; the live check's two random
 phrases and the pause after three tries stay in front of it.
 
-### Stage 8, tails: the raw start of the recording, an absolute floor (S3, review 2)
+### Stage 8, tails: the raw start of the recording; what is under its floor written as silence (S3, reviews 2 and 3)
 
 The windows above were cut from `_speech`, which drops every frame under "10th percentile + 6 dB": a relative
 threshold. The engines take the raw start of the file. A way around it: the first 5-10 s someone else, denoised (digital
@@ -2435,7 +2435,7 @@ owner's. Now the first 30 s are checked raw (`voice._start`): out goes only digi
 Opus 24k, white noise over the whole file at SNR 30 / 20; 88 splices per cell: the first K s of the other person's
 speech (pauses gated to digital silence) at d dB above the owner's noise, then the owner's 40 s.
 
-| the way around, owner's file at SNR 30 / 20 | trim (before) | raw start, floor −55 | raw start, floor −60 (the app) |
+| the way around, owner's file at SNR 30 / 20 | trim (before) | raw start, floor −55 | raw start, floor −60 (review 2) |
 |---|---|---|---|
 | K = 5 s, d = 3 / 5 / 8 dB, SNR 30 | 94 / 94 / 92 % | 72 / 41 / 12 % | 10 / 4.5 / 0.8 % |
 | K = 10 s, d = 3 / 5 / 8 dB, SNR 30 | 52 / 48 / 11 % | 3.1 / 1.0 / 0.1 % | 0.1 / 0.1 / 0.3 % |
@@ -2455,8 +2455,38 @@ the start above the floor, 3 dB above the noise of the pauses, under `_speech`'s
 file 27 % clean, 58 % with SNR 30 noise, 97 % with SNR 20, since quiet consonants, breaths and the ends of words lie in
 that band too (p95 1.9-3.0 s, the way around p50 1.6-2.7 s). Settings that spare the owner (4 dB / 2 s) caught 4-35 % of
 the splices and added nothing to the windows at −60. Not closed: a voice mostly under the floor (K = 5 s, d = 3 dB at
-SNR 30: 10 %); a lower floor was not measured. Whether the engines take a voice 35 dB under the owner's: the next section
-(−57 dBFS: XTTS speaks as the owner, Pocket hardly at all).
+SNR 30: 10 %).
+
+Review 3: what is under the floor the check does not hear, yet it stayed in `reference.wav` and the engines took it
+(Qwen3's speaker vector hardly minds the level: the other person's 10 s at −62 dBFS, then the owner, made Qwen3 speak as
+the other person in 96 % of its outputs, quietly, −52 dBFS). Now `save()` writes the frames of the first 30 s more than
+`FLOOR_DB` under the median speech frame (`voice._under_floor`; the median, which a few loud seconds do not move) as
+digital silence, and the check takes all of the start but digital silence: the engines get only what was checked, and a
+file put in the folder by hand is checked whole. Same data and script (stages `save6`, `report_save6`: `save()`'s
+numbers byte for byte, then `_start`, `_windows`). Dangerous = some of the other person still in the file and the check
+passed.
+
+| `FLOOR_DB` under the median | 25 | 30 | 35 (the app) | review 2 |
+|---|---|---|---|---|
+| same person refused, clean / clean (another person per try) | 4.08 % (0.056 %) | 4.02 % (0.058 %) | 4.41 % (0.063 %) | 4.08 % (0.051 %) |
+| Opus 24k / clean | 4.73 % | 4.80 % | 4.99 % | 4.54 % |
+| a 60 s recording, clean / clean | 4.13 % (0.038 %) | 4.13 % (0.053 %) | 4.46 % (0.060 %) | 4.13 % (0.038 %) |
+| the way around, K = 5 s, d = 3 / 5 / 8 dB, SNR 30: dangerous | 78 / 66 / 29 % | 17 / 6.7 / 0.6 % | 1.1 / 0.4 / 0.5 % | 10 / 4.5 / 0.8 % |
+| the way around at SNR 20, or K = 10 s: dangerous | ≤ 5.6 % | ≤ 0.6 % | ≤ 0.5 % | ≤ 0.9 % |
+| 3 / 6 s of the owner 20 dB louder first, then 5 s of the other person 10 dB under the owner: dangerous | 11.7 / 4.1 % | 7.5 / 0.65 % | 3.2 / 0.65 % | — |
+| the owner's own speech written as silence, first 30 s, p95 / max | 2.2 / 2.6 s | 1.1 / 1.5 s | 0.27 / 0.39 s | — |
+
+Files with noise (SNR 20, and SNR 30 at 30-35 dB) lose nothing: the same as review 2. A lower floor is the dangerous one:
+it cuts the other person into shreds (~2 s left in the file at 25) that no window sees whole. 35 costs the owner 0.4 points
+and another person 5 pairs more of 41 157 (26 against 21; ±4.6 by chance alone); 40 was not measured. The other person
+is never silenced whole: with them, the check decides. 3 s louder first is worse than 6 s by where the piece falls on the
+2 s grid (1 s off: 3.5 % in the bench of the 4 s windows), not by the floor.
+
+The clone on that recording (server C, 15 pairs, 3 phrases; median "me − other", outputs closer to the other person,
+output level): before, Qwen3 −0.225, 96 %, −52 dBFS; written as silence, Qwen3 −0.019, 58 %, −21 dBFS: like nobody (cosine
+0.13 to the owner, 0.16 to the other person), its prompt being silence. Pocket before and after hardly speaks (−66 / −80
+dBFS); XTTS speaks as the owner both times (+0.28 / +0.27, its speaker vector over 30 s). In 4 pairs of 15 the other
+person's loudest 0.1-0.6 s stayed in the file (checked): no worse there.
 
 ### Stage 8, tails: does a short piece of someone else in the prompt recolour the clone? (S3, review 2)
 
@@ -2478,7 +2508,7 @@ that server); XTTS: the registry's weights, voice pack environment, GPU. `bench/
 | all theirs | −0.344 | 100 % | −0.457 | 100 % |
 
 It does recolour, and more than the piece's share of the prompt: Pocket goes on from the end of its prompt, XTTS takes
-its GPT latents from the first 6 s. Through the app's check (the prompt followed by 30 s more of the owner, the live
+its GPT latents from the first 6 s. Through the check of review 2 (the prompt followed by 30 s more of the owner, the live
 reading another chapter, stage `gate`), of 15 splices pass: all mine 14; 2 s first / last 14 / 12; 3 s 6 / 5; 4 s 1 / 1;
 all theirs 0. What passes recolours as much: 3 s first, XTTS,
 39 % of the outputs closer to the other person; 3 s last, Pocket, 20 %; the one 4 s splice that passed, all three outputs

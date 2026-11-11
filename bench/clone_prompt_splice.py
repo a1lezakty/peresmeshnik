@@ -13,6 +13,11 @@ Stages, each in its own environment (PYTHONPATH: a copy of the repo):
   score    --work W --speaker S         score.json + the table (the app's env: onnx-asr)
   gate     --data D --work W --speaker S  gate.json: which recordings pass the app's live check (voice.py _start,
                                         _windows), the table again over the outputs of those that pass
+Measure 7 (a quiet other in the first 10 s, before / after voice.save() writes what is under its floor as silence):
+  prompts7 --data D --work W            prompts/*_q62.wav (before), *_q62s.wav (after: voice.save()'s reference.wav)
+  qwen3    --work W --model-dir M       out/qwen3/*.wav (the voice pack's env: faster-qwen3-tts, CUDA)
+  pocket / xtts / qwen3 --variants me,other,q62,q62s: only those prompts
+  score7   --work W --speaker S [--asr MODELS]  score7.json + the table: me - other, loudness, words heard
 """
 from __future__ import annotations
 
@@ -41,7 +46,7 @@ def variants() -> list[str]:
 QUIET_DB, TAIL_S = -57.0, 20.0  # 'quiet': the other's 10 s under the check's floor (-55), then my TAIL_S s at -20
 
 
-def quiet(theirs: np.ndarray, mine: np.ndarray) -> np.ndarray:
+def quiet(theirs: np.ndarray, mine: np.ndarray, quiet_db: float = QUIET_DB) -> np.ndarray:
     """The other's PROMPT_S s scaled so the 95th percentile of its 30 ms frames is QUIET_DB dBFS, the pauses (frames 30 dB
     under that) digital silence; then TAIL_S s of mine at the app's level: what a check dropping frames under its floor
     cannot see. Pocket takes the first 10 s of it (all quiet); XTTS its GPT latents from the first 6 s, the speaker
@@ -52,7 +57,7 @@ def quiet(theirs: np.ndarray, mine: np.ndarray) -> np.ndarray:
     db = 20 * np.log10(np.sqrt(np.mean(fr ** 2, axis=1)) + 1e-12)
     p95 = np.percentile(db, 95)
     fr[db < p95 - 30] = 0
-    x = fr.ravel() * 10 ** ((QUIET_DB - p95) / 20)
+    x = fr.ravel() * 10 ** ((quiet_db - p95) / 20)
     tail = mine[:int(TAIL_S * SR)]
     return np.concatenate([x, tail * (10 ** (-20 / 20) / level(tail))])
 
@@ -147,11 +152,11 @@ def stage_prompts(a) -> None:
 
 
 # ---------- engines
-def todo(work: Path, engine: str):
+def todo(work: Path, engine: str, vs: list[str] | None = None):
     out = work / 'out' / engine
     out.mkdir(parents=True, exist_ok=True)
     for p in json.loads((work / 'pairs.json').read_text()):
-        for v in variants():
+        for v in vs or variants():
             yield p['id'], v, work / 'prompts' / f'{p["id"]}_{v}.wav', out
 
 
@@ -160,7 +165,7 @@ def stage_pocket(a) -> None:
 
     from peresmeshnik.local.pocket import PocketTts
     eng = PocketTts(a.model_dir, threads=a.threads, model_id='pocket-tts-en', int8=True)  # as clone.make_engine
-    for pid, v, wav, out in todo(Path(a.work), 'pocket'):
+    for pid, v, wav, out in todo(Path(a.work), 'pocket', a.variants):
         if all((out / f'{pid}_{v}_{k}.wav').exists() for k in range(len(PHRASES))):
             continue
         t0 = time.perf_counter()
@@ -180,7 +185,7 @@ def stage_xtts(a) -> None:
     xtts = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(xtts)  # as the voice pack's runner loads it
     eng = xtts.Engine(a.model_dir, device=a.device, threads=a.threads)
-    for pid, v, wav, out in todo(Path(a.work), 'xtts'):
+    for pid, v, wav, out in todo(Path(a.work), 'xtts', a.variants):
         if all((out / f'{pid}_{v}_{k}.wav').exists() for k in range(len(PHRASES))):
             continue
         t0 = time.perf_counter()
@@ -279,9 +284,104 @@ def stage_gate(a) -> None:
                   f'{np.percentile(d, 90):+.3f} | {np.mean(d < 0):.0%} |' if len(d) else '- | - | - | - |'))
 
 
+# ---------- measure 7: a quiet other (-62) in the first 10 s, before / after voice.save()
+Q7_DB, V7 = -62.0, ('me', 'other', 'q62', 'q62s')
+
+
+def p95_db(x: np.ndarray, sr: int) -> float:
+    """95th percentile of the 30 ms frames' level, dBFS (digital silence counted as -120)."""
+    f = x[:len(x) // (sr * 3 // 100) * (sr * 3 // 100)].reshape(-1, sr * 3 // 100)
+    return float(np.percentile(20 * np.log10(np.sqrt(np.mean(f.astype(np.float64) ** 2, axis=1)) + 1e-6), 95))
+
+
+def stage_prompts7(a) -> None:
+    """'q62': the other's 10 s at p95 -62 dBFS, pauses digital silence, then my 20 s at -20, as the old save() wrote it
+    (its gain, PCM_16); 'q62s': the same through voice.save() itself (its reference.wav)."""
+    from peresmeshnik import voice
+    libri, work = Path(a.data), Path(a.work)
+    ch = chapters(libri)
+    for p in json.loads((work / 'pairs.json').read_text()):
+        mine = speech(ch[p['me']][p['prompt_ch'][0]], PROMPT_S + TAIL_S + 1)[int(PROMPT_S * SR):]
+        theirs = speech(ch[p['other']][p['prompt_ch'][1]], PROMPT_S + 1)
+        x = quiet(theirs, mine, Q7_DB)
+        report = voice.check(x, SR)
+        gain = min(10 ** ((voice.TARGET_DB - report.level_db) / 20), 10 ** (-1 / 20) / float(np.max(np.abs(x))))
+        sf.write(work / 'prompts' / f'{p["id"]}_q62.wav', np.clip(x * gain, -1, 1), SR, subtype='PCM_16')
+        v = voice.save(x, SR, p['id'], 'en', root=work / 'profiles7')
+        y = sf.read(v.path / 'reference.wav', dtype='float32')[0]
+        sf.write(work / 'prompts' / f'{p["id"]}_q62s.wav', y, SR, subtype='PCM_16')
+        b = sf.read(work / 'prompts' / f'{p["id"]}_q62.wav', dtype='float32')[0]
+        n = int(PROMPT_S * SR)
+        nz = np.flatnonzero(y[:n])
+        print(f'{p["id"]}: before first 10 s p95 {p95_db(b[:n], SR):.1f} dBFS, rest {p95_db(b[n:], SR):.1f}; after: '
+              f'{len(nz)} non-zero samples in the first 10 s' + (f' (from {nz[0] / SR:.2f} s)' if len(nz) else ''),
+              flush=True)
+
+
+def stage_qwen3(a) -> None:
+    """Qwen3 as the voice pack's runner loads local/qwen3.py: its vector from the first REF_S s (condition()), no
+    Chatterbox (a runaway is cut at the guard and counted)."""
+    import importlib.util
+    from types import SimpleNamespace
+
+    import torch
+    spec = importlib.util.spec_from_file_location('qwen3', Path(a.repo) / 'peresmeshnik/local/qwen3.py')
+    qwen3 = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(qwen3)
+    eng = qwen3.Engine(a.model_dir, device=a.device or 'cuda', threads=a.threads)
+    for pid, v, wav, out in todo(Path(a.work), 'qwen3', a.variants):
+        if all((out / f'{pid}_{v}_{k}.wav').exists() for k in range(len(PHRASES))):
+            continue
+        t0, r0 = time.perf_counter(), eng.runaways
+        voice = SimpleNamespace(state=eng.condition(*sf.read(wav, dtype='float32')))
+        for k, text in enumerate(PHRASES):
+            torch.manual_seed(1000 * k + int(pid.split('-')[0]))
+            y = np.concatenate([np.zeros(0, np.float32), *eng.synth(text, 'en', voice)])
+            sf.write(out / f'{pid}_{v}_{k}.wav', y, qwen3.SR)
+        print(f'qwen3 {pid} {v} {time.perf_counter() - t0:.1f} s runaways {eng.runaways - r0}', flush=True)
+
+
+def stage_score7(a) -> None:
+    from peresmeshnik.voice import Speaker, _to, wer
+    work, spk = Path(a.work), Speaker(Path(a.speaker), threads=a.threads)
+    asr = None
+    if a.asr:
+        import os
+        os.environ['PERESMESHNIK_MODELS'] = a.asr
+        from peresmeshnik.local.asr import OnnxAsr
+        asr = OnnxAsr('parakeet-tdt-0.6b-v3', threads=a.threads, live=False)
+    pairs, rows = json.loads((work / 'pairs.json').read_text()), []
+    for p in pairs:
+        me, other = (spk.embed(*sf.read(work / 'refs' / f'{p["id"]}_{w}.wav', dtype='float32')) for w in ('me', 'other'))
+        for eng in ('qwen3', 'pocket', 'xtts'):
+            for v in V7:
+                for k, text in enumerate(PHRASES):
+                    f = work / 'out' / eng / f'{p["id"]}_{v}_{k}.wav'
+                    if not f.exists():
+                        continue
+                    x, sr = sf.read(f, dtype='float32')
+                    e = spk.embed(x, sr)
+                    rows.append({'engine': eng, 'pair': p['id'], 'variant': v, 'k': k, 'me': float(e @ me),
+                                 'other': float(e @ other), 'p95_db': p95_db(x, sr), 'sec': len(x) / sr,
+                                 'wer': wer(text, asr.recognize(_to(x, sr, 16_000)).text) if asr else None})
+    (work / 'score7.json').write_text(json.dumps(rows, indent=1))
+    print('| engine | variant | n | median me-other | p10 | p90 | closer to other | p95 dBFS | sec | WER |')
+    print('|---|---|---|---|---|---|---|---|---|---|')
+    for eng in ('qwen3', 'pocket', 'xtts'):
+        for v in V7:
+            r = [x for x in rows if x['engine'] == eng and x['variant'] == v]
+            if not r:
+                continue
+            d = np.array([x['me'] - x['other'] for x in r])
+            w = f'{np.median([x["wer"] for x in r]):.2f}' if asr else '-'
+            print(f'| {eng} | {v} | {len(d)} | {np.median(d):+.3f} | {np.percentile(d, 10):+.3f} | '
+                  f'{np.percentile(d, 90):+.3f} | {np.mean(d < 0):.0%} | {np.median([x["p95_db"] for x in r]):.1f} | '
+                  f'{np.median([x["sec"] for x in r]):.1f} | {w} |')
+
+
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
-    ap.add_argument('stage', choices=('prompts', 'pocket', 'xtts', 'score', 'gate'))
+    ap.add_argument('stage', choices=('prompts', 'pocket', 'xtts', 'score', 'gate', 'prompts7', 'qwen3', 'score7'))
     ap.add_argument('--data', help='LibriSpeech/dev-clean')
     ap.add_argument('--work', required=True)
     ap.add_argument('--model-dir')
@@ -290,9 +390,11 @@ def main(argv=None) -> None:
     ap.add_argument('--device', default=None)
     ap.add_argument('--threads', type=int, default=2)
     ap.add_argument('--pairs-per-gender', type=int, default=8)
+    ap.add_argument('--variants', type=lambda s: s.split(','), help='only these prompts (engine stages)')
+    ap.add_argument('--asr', help='models root with parakeet-tdt-0.6b-v3 (score7: words heard)')
     a = ap.parse_args(argv)
     {'prompts': stage_prompts, 'pocket': stage_pocket, 'xtts': stage_xtts, 'score': stage_score,
-     'gate': stage_gate}[a.stage](a)
+     'gate': stage_gate, 'prompts7': stage_prompts7, 'qwen3': stage_qwen3, 'score7': stage_score7}[a.stage](a)
 
 
 if __name__ == '__main__':

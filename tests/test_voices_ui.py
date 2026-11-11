@@ -332,3 +332,26 @@ def test_keep_their_voice_only_where_the_engine_keeps_one(tmp_path, monkeypatch)
     for engine[:] in (['xtts-v2', ''], ['qwen3-tts', ''], [None, 'no clone of their voice here']):
         t.sync()
         assert not t.remember.isVisible(), engine
+
+
+def test_my_voice_deleted_while_the_wizard_is_open(tmp_path, monkeypatch):
+    """COMMON 21:53 tail: Voices… deletes my voice (and its take) while the wizard holds the take: the page forgets it
+    (Next does not take a voice that is gone), Finish promotes nothing and the settings name no voice."""
+    from test_clone_wizard import speech_like
+    page, s = wizard_page(tmp_path, monkeypatch)
+    monkeypatch.setattr(QMessageBox, 'question', lambda *a, **k: QMessageBox.StandardButton.Yes)  # Delete: yes
+    monkeypatch.setattr('peresmeshnik.audio.mic.record', lambda sec, dev, sr, progress: speech_like(sec, sr))
+    page.record()
+    pump(lambda: not page.running)
+    assert page.voice.name == 'me.new' and s.local.voice == 'me.new'
+    d = voices.VoicesDialog(s)
+    voice.save(*speech(), 'me', 'ru', '', voice.voices_dir())  # the saved voice, deleted with its take
+    d.refresh()
+    d.list.setCurrentRow(0)
+    d.delete()
+    assert not (voice.voices_dir() / 'me.new').exists()
+    page.initializePage()  # Back, then here again
+    assert page.voice is None and 'deleted' in page.out.text()
+    page.voice = type('V', (), {'name': 'me.new'})()  # or straight to Finish, the page still holding it
+    page.commit()
+    assert page.voice is None and s.local.voice == '' and not (voice.voices_dir() / 'me').exists()

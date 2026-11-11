@@ -681,6 +681,8 @@ class VoicePage(QWizardPage):
         if why:
             for x in (self.stock, self.prompt, self.own, self.record_button, self.import_button, self.check_button):
                 x.setVisible(False)
+        if self._gone():
+            self.out.setText('Your voice was deleted (Voices…): record it again, or choose a stock voice.')
         if self.voice is None and s.local.voice and (voice.voices_dir() / s.local.voice / 'voice.json').exists():
             try:
                 self.voice = voice.load(s.local.voice)
@@ -940,11 +942,22 @@ class VoicePage(QWizardPage):
         self._buttons()
 
     def commit(self) -> None:
-        """The wizard finished: a new take becomes the profile."""
+        """The wizard finished: a new take becomes the profile; one deleted meanwhile (Voices…: Delete of my voice takes
+        its take too) is not, and the settings do not name it."""
         from peresmeshnik import voice
-        if self.voice is not None and self.voice.name == self.draft:
+        if self._gone():
+            self.w.s.local.voice = ''
+        elif self.voice is not None and self.voice.name == self.draft:
             self.voice = voice.promote(self.draft, self.name)
             self.w.s.local.voice = self.name
+
+    def _gone(self) -> bool:
+        """The voice this page holds was deleted in Voices… while the wizard was open: forgotten here."""
+        from peresmeshnik import voice
+        if self.voice is None or (voice.voices_dir() / self.voice.name / 'voice.json').exists():
+            return False
+        self.voice = None
+        return True
 
     def rollback(self) -> None:
         """The wizard was cancelled: the saved profile stays as it was; a voice pack install stops (it resumes later)."""

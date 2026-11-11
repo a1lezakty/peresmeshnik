@@ -51,6 +51,19 @@ move a direction you keep on this computer to the cloud, the app asks first (its
 that runs here brings it back. Where your cloned voice does not speak the language here (without an NVIDIA GPU:
 Polish, Turkish, Chinese, Japanese, Korean, Arabic), a stock voice speaks instead, and the wizard says so.
 
+**The other person's voice.** "Them → me" speaks in the voice of the person talking, where a cloned voice speaks your
+language on this computer (as for your own voice): from their first 3 seconds of clear speech, closer after 5, 10 and 20
+s; until then a stock voice, and for the whole call where this computer cannot keep up with it (it says so). Only you
+hear it, in your headphones: it never goes into the call (only your own confirmed voice does). What is taken from their
+voice, who is speaking (a speaker vector) and the clone made from their clear phrases, stays in this computer's memory
+for the call and goes when translation goes off (with Pocket TTS their speech itself is let go once the voice is final,
+after 20 s; Qwen3-TTS of the NVIDIA voice pack holds its sample until the call ends). With them → me on your own server
+it is that server's memory instead, and it goes when your computer disconnects (a dropped connection too). It is written
+to disk only when you keep it: tray → Keep the voice of the person in this call…, with their agreement, with one person
+on their side and after 10 s of their speech; with the NVIDIA voice pack it cannot be kept. With two people or more on
+their side, each phrase is said in the voice of whoever said it, and one not known yet in a stock voice. Off: tray →
+Their own voice (them → me), or `their_voice = false` under `[local]` in the settings.
+
 Speech recognition of Turkish, Chinese and Korean on this computer is Whisper on an NVIDIA GPU, through a CUDA build of
 onnxruntime: the macOS and Windows apps have none, so there these three are recognized in the cloud. From source on
 Linux with an NVIDIA GPU they can run here ([below](#trying-it-from-source-linux)).
@@ -96,7 +109,7 @@ macOS 14 Sonoma or later on Apple Silicon (M1 and newer).
    **BlackHole 2ch** as the microphone. On macOS older than 14.4 also BlackHole 16ch (`blackhole-16ch`) as
    the call app's speaker: the app takes the call's sound from there.
 4. Start Peresmeshnik: its icon is in the menu bar (no Dock icon). The installer puts only the app on the computer;
-   the wizard's **Components** page lists what to download (0.6–2.8 GB for a pair, typically 1.2–1.8 GB), ticked
+   the wizard's **Components** page lists what to download (0.6–2.8 GB for a pair, typically 1.2–1.9 GB), ticked
    where it suits this computer and the pair, with each one's size and license; nothing downloads before Download.
    A direction in the cloud needs your Gemini key ([above](#peresmeshnik)).
 5. macOS asks once for two permissions, both in System Settings → Privacy & Security: **Microphone**
@@ -145,7 +158,7 @@ Windows 10 version 2004 or later, or Windows 11 (x64).
    **CABLE Output** as the microphone.
 4. Start Peresmeshnik from the Start menu: its icon is in the notification area (Windows may put it behind the
    ^ arrow at first; drag it out to keep it in view). The installer puts only the app on the computer; the
-   wizard's **Components** page lists what to download (0.6–2.8 GB for a pair, typically 1.2–1.8 GB), ticked where it
+   wizard's **Components** page lists what to download (0.6–2.8 GB for a pair, typically 1.2–1.9 GB), ticked where it
    suits this computer and the pair, with each one's size and license; nothing downloads before Download. A direction in the
    cloud needs your Gemini key ([above](#peresmeshnik)). Use headphones: through speakers the microphone hears the
    translation.

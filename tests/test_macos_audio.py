@@ -43,6 +43,13 @@ def bh():
     need(blackhole(), 'needs BlackHole 2ch and 16ch')
 
 
+@pytest.fixture(autouse=True)
+def speakers_stand_in(monkeypatch):
+    """CI's Mac has no output but BlackHole: 2ch stands in for the headphones here, which the app refuses for real
+    (app.CALL_OUTPUTS: the call's microphone, tests/test_live.py checks that)."""
+    monkeypatch.setattr('peresmeshnik.app.CALL_OUTPUTS', ('BlackHole 16ch',))
+
+
 @pytest.fixture
 def helper_ok():
     need(helper_built(), 'needs the tap helper: PERESMESHNIK_TAP or native/macos/tap/build (swiftc)')

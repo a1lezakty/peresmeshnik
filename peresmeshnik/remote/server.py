@@ -441,6 +441,9 @@ class Server:
                 if slot.conn is not None:  # the client's new connection for this side: the old one is dead to it (a
                     slot.conn.ws.transport.abort()  # Wi-Fi drop without a reset: this server has not noticed yet)
                     self._cut(slot)
+                if (engines := slot.engines) is not None:  # a new call: their voices of the last one go (again: a
+                    from peresmeshnik.voices import live  # clause its pause closed may have come after _cut's reset)
+                    live.forget(engines.directions[0][0])
             else:
                 slot = self.slots[side] = Slot(side, device, key)
                 slot.sha = sha
@@ -594,6 +597,8 @@ class Server:
         if (side := slot.engines) is not None:
             side.inp.feed(pause(side.directions[0][0]))
             side.interrupt()
+            from peresmeshnik.voices import live
+            live.forget(side.directions[0][0])  # the next call on these warm engines may be someone else: their voices go
 
     def _expire(self, slot: Slot) -> None:
         if slot.conn is None:

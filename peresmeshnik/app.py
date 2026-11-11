@@ -57,6 +57,7 @@ MAX_CLONE_RTF = 1.0  # seconds of synthesis per second of speech, warm: above, t
 #                      has no lag limit) and the stock voice speaks; the RTX 3060 runs it at 0.4-0.5 (BENCH), a GTX 10xx
 #                      is not measured
 OURS = 'peresmeshnik_'  # every PipeWire device the app makes starts with this
+CALL_OUTPUTS = ('BlackHole',)  # macOS: the call's devices (2ch its microphone, 16ch its speaker < 14.4), never headphones
 MIC_SINK = 'peresmeshnik_mic_sink'  # = audio/virtual_mic_linux.SINK, without importing it on other OSes
 MIC_SOURCE = 'peresmeshnik_mic'  # = audio/virtual_mic_linux.SOURCE ("Peresmeshnik Mic")
 BARGE_IN_WORDS = 3  # my clause has this many words: I talk over their voice (fewer: "yeah", "ага" while listening)
@@ -150,9 +151,9 @@ class Headphones:
                     name = next((d['name'] for d in outs if d['name'] in known and d['name'] != exclude and not d['virtual']), '')
                 if not name:
                     raise RuntimeError('no output device')
-                if name.startswith('BlackHole'):  # 2ch is the call's microphone, 16ch the call's speaker (< 14.4)
-                    raise RuntimeError(f'the default output is {name}, a device of the call: choose your headphones in the '
-                                       'settings or the system')
+            if name.startswith(CALL_OUTPUTS):  # 2ch is the call's microphone, 16ch the call's speaker (< 14.4): saved too
+                raise RuntimeError(f'the {"saved" if name == self.sink else "default"} output is {name}, a device of the '
+                                   'call: choose your headphones in the settings or the system')
             if name == capture_macos.CALL_DEVICE and capture_macos.path() == 'blackhole':  # the call would hear itself
                 raise RuntimeError(f'the headphones are {name}, the call app\'s speaker: choose your real headphones in the '
                                    'settings or the system')
@@ -160,8 +161,8 @@ class Headphones:
             return name
         names = [line.split('\t')[1] for line in pactl('list', 'short', 'sinks').splitlines() if '\t' in line]
         crash.private(*names)
-        if self.sink in names:
-            return self.sink
+        if self.sink in names:  # saved: never one of ours either (the translation would go into the call)
+            return not_ours(self.sink, 'saved output')
         return not_ours(pactl('get-default-sink').strip(), 'default output')
 
     def play(self, pcm: np.ndarray, sample_rate: int) -> None:
@@ -521,6 +522,8 @@ class Side:
     auto = False  # the translation is down (cloud/fallback.py: on_mode): the call's own sound passes meanwhile
     _live_lock = threading.Lock()  # the hotkey (control thread) against on_mode (the side's events thread); one for all
     # sides (a switch is rare) and a class default, so a side made without __init__ (tests) has it
+    echo = None  # the side made without __init__ (tests) attaches the other person's voice without the echo check
+    raw_mic = None  # them: () -> my microphone goes into the call as it is (the loopback while me -> them loads)
 
     def __init__(self, name: str, s: config.Settings, inp, out, overlay, on_error=lambda text: None, echo=None):
         """`echo`: an audio.echo.EchoGate on the input (our own speech coming back from the other side is not translated)."""
@@ -541,6 +544,9 @@ class Side:
         else:  # Gemini speaks; the local path makes the subtitles and speaks when the cloud fails (cloud/fallback.py)
             self.directions.append((self._cloud(s), True, True))
         d, captions, speech = self.directions[0]
+        if getattr(out, 'to_call', False) and getattr(getattr(d, 'tts', None), 'them', False):  # RESEARCH-clone 6.2
+            d.close()
+            raise RuntimeError("the other person's cloned voice is heard only in your headphones, never in the call")
         if name == 'me' and not getattr(d, 'supports_live', False):  # "translation <-> live voice" crossfaded (S2)
             from peresmeshnik.audio.mic import LiveSwitch
             self.directions[0] = (LiveSwitch(d), captions, speech)
@@ -554,7 +560,10 @@ class Side:
         kw = {'asr': pair.asr, 'mt': pair.mt, 'settings': s}  # languages.direction's ids: its '*' and NVIDIA GPU rules
         if self.name == 'them':
             from peresmeshnik.pipeline import MAX_LAG_S
+            from peresmeshnik.voices import live
             d = make_local(self.src, self.tgt, tts=pair.tts, max_lag_s=MAX_LAG_S, **kw)  # the queue policy: subtitles keep the rest
+            return live.attach(self._stock(d, s), s, self.echo, lambda why: self.on_error(  # in their own voice once
+                f'note: {ARROW[self.name]}: a stock voice speaks instead of their voice ({why})'), self.raw_mic)  # made
         elif pair.voice == 'stock':  # a stock voice: chosen where the clone falls behind (an 8 GB Mac, BENCH), or the
             d = make_local(self.src, self.tgt, tts=pair.tts, **kw)  # clone cannot speak the language
         else:
@@ -852,6 +861,7 @@ class Controller:
         self._vmic = self._call = self._router = self._loop = self._call_watch = None
         self._events = None  # Linux: PulseEvents
         self._loop_on = False  # Linux: the microphone loop is wanted (translation off); loaded while the call app records
+        self._raw_mic = False  # the call hears my microphone as it is (a loop), not through our output
         self._loop_lock = threading.Lock()  # Linux: the loop is checked by the control thread and the sound events'
         self._down = threading.Lock()  # Linux: held while the sound server is gone (from _sound_gone to _sound_back)
         self._devices_n = self._sides_n = 0  # Linux: our devices made so many times; the sides made after the n-th
@@ -889,6 +899,22 @@ class Controller:
             from peresmeshnik.audio.virtual_mic_windows import VirtualMic
             self._vmic = VirtualMic()
         return self._vmic
+
+    def them_voice(self) -> tuple[tuple | None, str]:
+        """For the tray's "keep their voice": (the voice of the person in this call, '') as voices/live.LiveVoice.them()
+        gives it, or (None, why not, for the user)."""
+        from peresmeshnik.voices import live
+        for x in list(self.sides):
+            if getattr(x, 'name', 'them') != 'them':
+                continue
+            if (lv := getattr(getattr(x.directions[0][0], 'tts', None), 'live', None)) is not None:
+                return lv.them()
+            if (engine := getattr(x, 'engine', 'local')) != 'local':
+                return None, (f'them → me runs {"in the cloud" if engine == "cloud" else "on your server"}: their voice '
+                              'is made only when it runs on this computer')
+            _, why = live.engine(self.settings or config.load())
+            return None, f'their voice is not made on this computer: {why or "it is not downloaded (Components…)"}'
+        return None, 'them → me is not running'
 
     def set_translation(self, on: bool) -> concurrent.futures.Future:
         self.wanted = on  # the user's choice: a sound server back does not undo an "off" made while it was gone
@@ -1042,6 +1068,7 @@ class Controller:
         call hears the user as is; translation on: our me -> them direction speaks there instead."""
         if not self.devices or self._vmic is None:  # only the app's own devices (startup), not files or tests
             return
+        self._raw_mic = on  # past our echo reference: their voice takes no sample meanwhile (voices/live.py)
         if sys.platform in ('darwin', 'win32'):
             return self._loop_helper(on)
         self._loop_on = on
@@ -1213,6 +1240,8 @@ class Controller:
                                                     max_delay_s=s.local.echo_max_delay_s,
                                                     **({'rho_on': s.local.mic_echo_rho_on} if name == 'me' else {}))
         side = Side(name, s, inp, self._output(name, s), self.overlay.side(name), self.on_state, echo=gate)
+        if name == 'them':
+            side.raw_mic = lambda: self._raw_mic
         side.on_failure = lambda why, e: self.submit(self._restart, side, why, e)
         if name == 'me':  # I talk over their voice: barge-in on the them -> me side of now; does the call hear me?
             side.on_talk = lambda: ([x.interrupt() for x in self.sides if x.name == 'them'],

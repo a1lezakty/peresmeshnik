@@ -39,7 +39,7 @@ def before_stage6(reg: dict) -> dict:
     into it): a language here has none but its stand-ins."""
     out = {}
     for k, m in reg.items():
-        langs = m.langs if m.role in ('vad', 'clone') else tuple(p for p in m.langs if set(p.split('-')) <= {'en', 'ru'})
+        langs = m.langs if m.role in ('vad', 'clone', 'speaker') else tuple(p for p in m.langs if set(p.split('-')) <= {'en', 'ru'})
         if langs:
             out[k] = dataclasses.replace(m, langs=langs)
     return out

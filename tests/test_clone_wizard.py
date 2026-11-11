@@ -229,7 +229,10 @@ def test_stock_voice_instead_of_the_clone(page, monkeypatch):
     s = page.w.s
     assert page.isComplete() and page.check_button.isHidden() and s.local.clone == voice.STOCK
     ids = needed_models(s)
-    assert s.local.tts[s.their_lang] in ids and 'xtts-v2' not in ids
+    assert s.local.tts[s.their_lang] in ids
+    s.local.their_voice = False  # with it the clone engine is there only for the other person's voice (S2)
+    assert 'xtts-v2' not in needed_models(s)
+    s.local.their_voice = True
     made = []
     monkeypatch.setattr(pipeline, 'make_local', lambda *a, **k: made.append((a, k)) or type('D', (), {'warm_up': lambda self: None})())
     side = app.Side.__new__(app.Side)

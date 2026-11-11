@@ -66,8 +66,11 @@ def test_a_pair_on_stand_in_models_needs_only_its_own(monkeypatch):
     s.local.mt.update({'de-ja': 'mt-many', 'ja-de': 'mt-many'})  # a multilingual model: both languages in its langs
     s.local.tts.update(de='tts-de', ja='tts-ja')
     assert all(languages.direction(s, side, has_gpu=True).local for side in languages.SIDES)
-    assert languages.needed_models(s) == ['silero-vad', 'asr-ja', 'mt-many', 'tts-de', 'asr-de', 'clone-ja',
-                                          'tts-ja']  # the stock voice: the clone's fallback (S2)
+    assert languages.needed_models(s) == ['silero-vad', 'asr-ja', 'mt-many', 'tts-de', 'clone-de', 'wespeaker-resnet34',
+                                          'asr-de', 'clone-ja', 'tts-ja']  # them -> me: in their voice (S2); me -> them:
+    # the stock voice, the clone's fallback
+    s.local.their_voice = False
+    assert 'clone-de' not in languages.needed_models(s)
     no_clones(monkeypatch, *stand_ins, stub('clone-de', 'clone', 'de'))  # no clone engine has Japanese: the stock voice
     me = languages.direction(s, 'me_to_them', has_gpu=True)
     assert me.local and me.voice == 'stock' and me.tts == 'tts-ja' and 'cannot speak Japanese' in me.notes[0]
@@ -110,6 +113,8 @@ def test_readme_pair_sizes_are_the_registrys(monkeypatch):
     cloud) is the registry's: the smallest and largest, and the quartiles as "typically"."""
     from pathlib import Path
     monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
+    monkeypatch.setattr(models, 'hf_token', lambda: None)  # their voice in Kyutai's gated weights: not without a token
+    monkeypatch.setattr(models, 'is_fetched', lambda m, base=None: False)
     xs = []
     for a in languages.LANGS:
         for b in set(languages.LANGS) - {a}:
@@ -343,6 +348,7 @@ def test_qwen3_brings_its_fallback_engine():
     downloaded with it, it takes over a voice whose clause breaks down (voice pack, local/qwen3.py); XTTS-v2 stays for
     Polish, Turkish, Arabic."""
     s = config.Settings(me_to_them='local')
+    s.local.their_voice = False  # my voice alone (theirs beside it on the card: test_live)
     assert models.get('qwen3-tts').fallback == 'chatterbox-mtl'
     import unittest.mock as um
     with um.patch.object(languages, 'gpu', lambda engine='': True), \
@@ -370,6 +376,7 @@ def test_qwen3_speaks_where_the_voice_packs_addon_is_and_the_card_has_8_gb(monke
     engine = languages.clone_engine
     assert engine('en') == engine('ru') == engine('zh') == ('qwen3-tts', '') and engine('pl') == ('xtts-v2', '')
     s = config.Settings(me_to_them='local')
+    s.local.their_voice = False  # my voice alone (theirs beside it on the card: test_live)
     assert {'qwen3-tts', 'chatterbox-mtl'} <= set(languages.needed_models(s)) and 'xtts-v2' not in languages.needed_models(s)
     has['gpu'] = '6'
     assert engine('en') == ('xtts-v2', '')

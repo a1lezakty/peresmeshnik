@@ -2529,3 +2529,79 @@ revoke at 8, 9.7 and 11.4 s into the call so it falls at different points of the
 The cut comes within `REVOKE_S` (5 s) as designed: the server reads the paired devices every 5 s, so the wait is
 anywhere from 0 to 5 s plus one round trip. The client takes 'auth' as permanent (`protocol.PERMANENT`): it does not
 try again until paired anew.
+
+## Stage 8: them → me in the other person's voice (S2)
+
+Measured 2026-11-10 on the C server's i7-13700 (4 physical cores 8, 10, 12, 14; 2 threads per engine; CUDA hidden) with
+`bench/their_voice.py`: the app's them side in real time (Silero VAD, Parakeet, the default en → ru MT, Piper `dmitri`),
+their voice by `voices/live.py` with the registry's Pocket-ru (int8) and S3's WeSpeaker ResNet34. The call: two
+LibriSpeech dev-clean speakers, turns of 30, 30, 10, 10 and then six of 5 s (whole utterances, so 160–178 s), 0.7 s
+between turns, English into Russian. "Call app": the same audio through Opus 24 kbit/s there and back (ffmpeg) with
+white noise 20 dB below the speech. The judge is the same WeSpeaker: each spoken clause against 15 s of the speaker's
+other utterances — Russian speech against English, so lower than same-language numbers (not comparable with ECAPA's in
+RESEARCH-clone). "Voice": from a clause's end to its voice starting. Dropped: the them → me queue policy (a voice later
+than 4 s after its clause is not said; its subtitle stays).
+
+**Re-measured 2026-11-11 after review r2** (the same calls, cores and models; the code of PR #29 at cb0d0c7 + the bench
+fix): the them side's speech had gone out labelled 22.05 kHz (Piper's, read once when the workers started) though
+TheirVoice speaks 24 kHz, so its lags and the queue's drops were overstated; and a clause not known in time, or a new
+person's short word, now goes to the stock voice, not to the voice of who spoke before. S3's bench ran on other cores of
+C meanwhile: CPU per audio second is ~0.4 higher than on 11-10 for the stock voice alone too.
+
+| call | right voice | first clone (of the call) | similarity: own / other's / stock | voice: median (max) | dropped | CPU s per audio s | short / late / people |
+|---|---|---|---|---|---|---|---|
+| **M+F 1272+1462** | **43/43** | 6.2 s, 2 stock clauses | 0.32 / 0.07 / 0.11 | 1.6 s (3.7) | 8/55 | 2.36 | 6 / 1 / 2 |
+| M+F 1272+1462, stock voice only | — | — | — / — / 0.14 | — | 4/54 | 1.94 | — |
+| **M+F 174+2277** | **39/39** | 4.9 s, 1 | 0.22 / 0.09 / 0.10 | 1.6 s (3.7) | 4/46 | 2.28 | 0 / 1 / 2 |
+| **F+F 1673+3536** | **40/40** | 5.4 s, 1 | 0.31 / 0.18 / 0.08 | 2.3 s (3.7) | 4/49 | 2.47 | 2 / 1 / 2 |
+| F+F 1673+3536, stock voice only | — | — | — / — / 0.04 | — | 6/50 | 2.10 | — |
+| **M+F 1272+1462, call app** | **43/43** | 7.0 s, 3 | 0.22 / 0.07 / 0.11 | 1.7 s (4.0) | 8/56 | 2.32 | 8 / 1 / 2 |
+| M+F 1272+1462, call app, stock voice only | — | — | — / — / 0.12 | — | 6/57 | 1.88 | — |
+| **F+F 1673+3536, call app** | **37/37** | 7.1 s, 2 | 0.19 / 0.14 / 0.01 | 1.9 s (3.8) | 6/48 | 2.46 | 2 / 1 / 4 |
+
+- **Dropped: 4–8 of ~50 with the clone against 4–6 with the stock voice** (11-10: 8–14), every run sped up when behind
+  (42–47 clauses). The clone's pace is the stock voice's: 0.061–0.071 against 0.057–0.082 s per character at speed 1.
+  The "37 % slower" of 11-10 was the bench's own: before `faster` the clone did not speed up, and its pace was still
+  multiplied by the speed asked for.
+- **No clause in the other person's voice**; one clause per run waited past WAIT_S (0.5 s: their voice was being made)
+  and was said in the stock voice ("late"). Clauses under 1 s are matched to the people known (none in the wrong voice).
+- "Keep their voice" at the end of each call: refused, "2 people speak in this call" (review r2 6); the kept voice's way
+  back (`voice.save_them` -> `live.kept`) is tests/test_live.py's.
+
+The table of 11-10 below is kept for the decisions it made (per clause, not per call; `faster`); its "voice", "dropped"
+and pace are overstated (above).
+
+| call | right voice | first clone (of the call) | similarity: own / other's / stock | voice: median (max) | dropped | CPU s per audio s |
+|---|---|---|---|---|---|---|
+| M+F 1272+1462, one voice per call, the switch after 3 clauses in a row (RESEARCH §4.1) | 25/42 | 6.2 s, 2 stock clauses | 0.22 / 0.12 / 0.21 | 1.8 s (3.9) | 9/53 | 1.59 |
+| **M+F 1272+1462, each clause in its speaker's voice** | **42/42** | 6.2 s, 2 | 0.29 / 0.06 / 0.21 | 1.8 s (3.9) | 8/53 | 1.58 |
+| M+F 1272+1462, stock voice only | — | — | — / — / 0.11 | — | 4/53 | 1.42 |
+| **M+F 174+2277** | **36/36** | 4.9 s, 1 | 0.25 / 0.12 / 0.08 | 1.5 s (3.6) | 8/46 | 1.63 |
+| **F+F 1673+3536** | **36/36** | 5.4 s, 1 | 0.31 / 0.18 / 0.06 | 2.3 s (4.0) | 12/50 | 1.96 |
+| F+F 1673+3536, stock voice only | — | — | — / — / 0.03 | — | 5/52 | 1.70 |
+| M+F 1272+1462, call app | 40/40 | 6.2 s, 2 | 0.21 / 0.08 / 0.21 | 1.9 s (3.9) | 14/57 | 1.72 |
+| M+F 1272+1462, call app, stock voice only | — | — | — / — / 0.12 | — | 6/57 | 1.46 |
+| F+F 1673+3536, call app | 31/31 | 7.1 s, 2 | 0.18 / 0.13 / 0.01 | 1.9 s (3.9) | 14/48 | 2.02 |
+| **M+F 1272+1462, call app, the clone sped up when behind** | **42/42** | 6.2 s, 2 | 0.24 / 0.06 / 0.18 | 1.7 s (3.8) | 11/56 | 1.86 |
+| **F+F 1673+3536, call app, sped up** | **34/34** | 7.1 s, 2 | 0.19 / 0.14 / 0.03 | 1.9 s (4.0) | 10/48 | 2.41 |
+
+- **Whose voice: per clause, not per call.** A clause's speaker vector is known before its translation is (the worker
+  took 0 of ~50 clauses longer than the 0.5 s the speaker waits); with "the switch after 3 clauses in a row" turns of
+  5–10 s were said 2–3 clauses in the other person's voice (0.03–0.15 to the right speaker, below the stock voice).
+  Each clause in its own speaker's voice: no clause in the wrong one, the two women too. In noise WeSpeaker made 4
+  people of 2 (a clause below 0.45 to both); still no clause went to the other person's voice.
+- **The first clone** speaks 4.9–7.1 s into the call, its voice made from 3.7–5.0 s of their speech; before it 1–2
+  clauses in the stock voice, and 1 at the start of the second person's first turn. Clauses under 1 s (1–8 per call)
+  are said in the voice of the clause before them.
+- **The clone is recognisable:** 0.18–0.31 to the person against 0.06–0.18 to the other one; the stock voice is 0.01–0.21
+  (0.21 where a man is compared with `dmitri`). English voice into Russian is where Pocket-ru is weakest (RESEARCH-clone
+  10.4); a voice of the same language would come out closer.
+- **The price is clauses dropped**: the clone speaks at the pace of its sample, here 37 % slower than Piper (0.088
+  against 0.064 s per character of the translation), and Pocket has no speed of its own (11-10; re-measured above, that pace was the bench's). The pipeline asks a voice that
+  is behind to speak up to 1.4× faster: for the clone `voices/live.faster` does it at the same pitch (WSOLA, 40 ms
+  frames), which brought the clauses dropped in the call-app runs from 14 to 10–11 of ~50, against 6 with the stock voice;
+  the similarity stayed. These are audiobook readers, denser than a conversation.
+- The voice kept at the end of the call (`them()` → S3's `voice.save_them` → `live.kept`) comes back with the same
+  state, so a kept voice speaks from the first clause of the next call (`kept_roundtrip` in every run since it was added).
+- The echo check (no clause into the sample while our voice played into the call) did not trigger here: there is no
+  me → them side in this bench (tests/test_live.py covers it).

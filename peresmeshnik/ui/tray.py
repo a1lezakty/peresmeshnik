@@ -128,6 +128,9 @@ class Tray(QObject):
         m.addAction('Voices…', self.open_voices)
         m.addAction('Components…', self.open_components)
         self.remember = m.addAction('Keep the voice of the person in this call…', self.remember_voice)
+        self.their_voice = m.addAction('Their own voice (them → me)')  # [local] their_voice: in my headphones only (S2)
+        self.their_voice.setCheckable(True)
+        self.their_voice.toggled.connect(self._their_voice_chosen)
         self.show_latency = m.addAction('Show latency')  # per clause in the subtitles: end of speech -> subtitle, -> voice
         self.show_latency.setCheckable(True)
         self.show_latency.toggled.connect(self._latency_chosen)
@@ -164,6 +167,9 @@ class Tray(QObject):
         self.show_latency.blockSignals(True)
         self.show_latency.setChecked(s.ui.show_latency)
         self.show_latency.blockSignals(False)
+        self.their_voice.blockSignals(True)
+        self.their_voice.setChecked(s.local.their_voice)
+        self.their_voice.blockSignals(False)
         if hasattr(overlay := getattr(self.ctl, 'overlay', None), 'set_show_latency'):
             overlay.set_show_latency(s.ui.show_latency)
         for groups in (self.engines, self.langs):
@@ -221,6 +227,20 @@ class Tray(QObject):
     def open_report(self) -> None:
         if reports := _reports():
             self._show(ReportDialog(reports[-1]))
+
+    def _their_voice_chosen(self, on: bool) -> None:
+        """Them -> me in the voice of the person talking, or in the stock voice: from the next start of the translation
+        (a running one restarts)."""
+        from peresmeshnik import models
+        from peresmeshnik.voices import live
+        s = config.load()
+        s.local.their_voice = on
+        config.save(s)
+        self.sync()
+        self.restart()
+        if on and (e := live.engine(s)[0]) and not models.is_fetched(models.get(e)):
+            self.message(f'{SIDES["them_to_me"]}: their voice ({e}) is not downloaded: a stock voice speaks for them; '
+                         'Components… in this menu downloads it')
 
     def _latency_chosen(self, on: bool) -> None:
         s = config.load()
@@ -384,11 +404,8 @@ class Tray(QObject):
                 '(Gemini Live). Switch to the cloud for this pair? A pair that runs here brings it back.'):
             self.sync()
             return
-        todo = [m for m in map(models.get, languages.needed_models(s)) if not models.is_fetched(m)]
-        if clone := [m for m in todo if m.role == 'clone']:  # nobody chose it here: Components… downloads it
-            todo = [m for m in todo if m not in clone]
-            notes.append(f'{SIDES["me_to_them"]}: your cloned voice ({clone[0].id}, {models.size(clone[0]) / 1e9:.1f} GB) is '
-                         'not downloaded: a stock voice speaks; Components… in this menu downloads it')
+        todo, more = clone_notes(s, [m for m in map(models.get, languages.needed_models(s)) if not models.is_fetched(m)])
+        notes += more
         lic = ', '.join(dict.fromkeys(p.license for m in todo for p in models.parts(m)))  # a pair through English: both
         restricted = list(dict.fromkeys(f'{p.id} ({p.license}, {p.license_url})' for m in todo for p in models.parts(m)
                                         if p.consent))
@@ -519,21 +536,48 @@ class Tray(QObject):
         self._show(ComponentsDialog(config.load(), translating=lambda: bool(getattr(self.ctl, 'on', False))))
 
     def remember_voice(self) -> None:
-        """Keep the voice of the person in this call (S2: Controller.them_voice() -> ({model id: (state, sha256 of the
-        weights)}, language, seconds of their speech) or None while there is none yet), only with their agreement."""
+        """Keep the voice of the person in this call, only with their agreement (S2: Controller.them_voice() ->
+        (({model id: (state, sha256 of the weights)}, language, seconds of their speech), '') or (None, why not)). The
+        voice kept is the one of when the user said they agreed, not of when the dialog opened."""
         from peresmeshnik.ui.voices import RememberDialog
-        live = self.ctl.them_voice()
-        if not live:
-            self.message('Their voice is not ready yet: it takes a few seconds of their speech.')
+        _, why = self.ctl.them_voice()
+        if why:
+            self.message(f'Their voice cannot be kept now: {why}.')
             return
         d = RememberDialog()
         if d.exec():
+            live, why = self.ctl.them_voice()
+            if why:
+                self.message(f'Their voice was not kept: {why}.')
+                return
             d.keep(*live)
             self.message('Kept: their voice is in Voices…, heard only by you.')
 
     def _quit(self) -> None:
         from PySide6.QtWidgets import QApplication
         QApplication.quit()
+
+
+def clone_notes(s, todo: list) -> tuple[list, list[str]]:
+    """A pair's models to download (`todo`, registry rows) -> (those without the clone engines, the notes): nobody chose
+    a clone here, Components… downloads it; said per side, mine or theirs (S2: the other person's voice). The speaker
+    model waits with them: without a clone it is not needed."""
+    from peresmeshnik import models
+    from peresmeshnik.voice import SPEAKER
+    from peresmeshnik.voices import live
+    if not (clone := [m for m in todo if m.role == 'clone']):
+        return todo, []
+    me = languages.direction(s, 'me_to_them')
+    mine = me.tts if s.me_to_them == 'local' and me.voice == 'clone' else None
+    their = live.engine(s)[0] if s.them_to_me == 'local' else None
+    notes = []
+    for key, engine, what in (('me_to_them', mine, 'your cloned voice'), ('them_to_me', their, 'their voice')):
+        if engine and (key == 'me_to_them' or engine != mine) and (  # one engine for both: said once, as mine
+                ms := [m for m in clone if m.id in (engine, models.get(engine).fallback)]):
+            notes.append(f'{SIDES[key]}: {what} ({ms[0].id}, {sum(map(models.size, ms)) / 1e9:.1f} GB) is not '
+                         f'downloaded: a stock voice speaks{" for them" if key == "them_to_me" else ""}; Components… in '
+                         'this menu downloads it')
+    return [m for m in todo if m not in clone and m.id != SPEAKER], notes
 
 
 def _reports() -> list[Path]:

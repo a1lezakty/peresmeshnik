@@ -111,6 +111,7 @@ def _uses(s) -> dict[str, tuple[str, str, bool]]:
     """What the chosen setup runs each model on, per part: id -> (why, instead, required). Required: Silero VAD, a local
     side's ASR, MT and stock voice, a cloud side's local subtitles and its fallback voice; `instead` then says how not to
     need it. The clone and its voice check are a choice: without them a stock voice speaks."""
+    from peresmeshnik.voices import live
     reg = models.registry()
     use = {'silero-vad': ('tells speech from silence: every setup needs it', 'needed for every setup', True)}
     for side in languages.SIDES:
@@ -139,6 +140,11 @@ def _uses(s) -> dict[str, tuple[str, str, bool]]:
                                    'nothing speaks for you: choose cloud for me → them', False))
             use.setdefault('wespeaker-resnet34', ('confirms at the microphone that the voice is yours',
                                                   'your voice cannot be confirmed: a stock voice speaks into the call', False))
+        if side == 'them_to_me' and not cloud and (e := live.engine(s)[0]):  # their voice, only in my headphones (S2)
+            use.setdefault(e, (f'{arrow}: speaks {lang} in the voice of the person talking', 'a stock voice speaks for '
+                               'them (or turn their voice off: their_voice under [local] in the settings)', False))
+            use.setdefault('wespeaker-resnet34', ('tells who in the call is speaking, for their voice',
+                                                  'a stock voice speaks for them', False))
     return use
 
 

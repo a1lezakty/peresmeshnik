@@ -137,8 +137,8 @@ def test_tray_voices_and_keeping_a_contacts_voice(tmp_path, monkeypatch):
     s = config.Settings()
     s.local.voice = voice.save(*speech(), 'me', 'ru', 'text').name
     config.save(s)
-    live = [None]
-    ctl = type('Ctl', (), {'live': False, 'on': True, 'them_voice': lambda self: live[0]})()
+    live = [(None, 'not enough of their speech yet: 2 of 10 s')]
+    ctl = type('Ctl', (), {'live': False, 'on': True, 'them_voice': lambda self: live.pop(0) if len(live) > 1 else live[0]})()
     t = tray_mod.Tray(ctl)
     t.restart = lambda: None
     said = []
@@ -150,20 +150,56 @@ def test_tray_voices_and_keeping_a_contacts_voice(tmp_path, monkeypatch):
     d.delete()
     assert config.load().local.voice == '' and voice.profiles() == []
     t.remember_voice()
-    assert said == ['Their voice is not ready yet: it takes a few seconds of their speech.']
-    live[0] = ({'pocket-tts-en': (np.ones(4, np.float32), 'sha')}, 'en', 12.0)
+    assert said == ['Their voice cannot be kept now: not enough of their speech yet: 2 of 10 s.']
 
     def agree(dialog):
         dialog.name.setText('Bob')
         dialog.agreed.setChecked(True)
         return True
     monkeypatch.setattr(voices.RememberDialog, 'exec', agree)
+    alone = ({'pocket-tts-en': (np.ones(4, np.float32), 'sha')}, 'en', 12.0)
+    live[:] = [(alone, ''), (None, '2 people speak in this call: a voice can be kept in a call with one of them only')]
+    t.remember_voice()  # someone else spoke while the dialog was open: the voice of then is not kept silently
+    assert voice.profiles() == [] and said[-1] == ('Their voice was not kept: 2 people speak in this call: a voice can '
+                                                   'be kept in a call with one of them only.')
+    live[:] = [(alone, '')]
     t.remember_voice()
     (v,) = voice.profiles()
     assert v.meta['kind'] == 'them' and v.meta['name'] == 'Bob' and said[-1].startswith('Kept')
     t.ctl = type('Ctl', (), {'live': False, 'on': False})()  # no S2 hook, translation off: not offered
     t.sync()
     assert not t.remember.isVisible()
+
+
+def test_tray_their_own_voice_switch_and_what_is_not_downloaded(tmp_path, monkeypatch):
+    """FIXES-s2 r2 11, 8: "Their own voice (them -> me)" in the tray sets [local] their_voice (a running translation
+    restarts, and a missing engine is said); a pair's missing clone engines are said per side: theirs as theirs, the
+    speaker model waits with them."""
+    from peresmeshnik import languages, models
+    from peresmeshnik.ui import tray as tray_mod
+    from peresmeshnik.voices import live
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    monkeypatch.setattr(config, 'config_dir', lambda: tmp_path)
+    monkeypatch.setenv('PERESMESHNIK_MODELS', str(tmp_path / 'models'))
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
+    config.save(config.Settings(my_lang='ru', their_lang='en'))
+    t = tray_mod.Tray(type('Ctl', (), {'live': False, 'on': False})())
+    said, restarts = [], []
+    t.message, t.restart = said.append, lambda: restarts.append(1)
+    assert t.their_voice.isChecked()
+    t.their_voice.setChecked(False)
+    assert config.load().local.their_voice is False and restarts == [1] and said == []
+    t.their_voice.setChecked(True)
+    assert config.load().local.their_voice is True and 'their voice (pocket-tts-ru' in said[-1]
+    s = config.Settings(my_lang='ru', their_lang='en', them_to_me='local', me_to_them='cloud')
+    todo = [models.get(i) for i in languages.needed_models(s)]
+    assert {'pocket-tts-ru', 'wespeaker-resnet34'} <= {m.id for m in todo}
+    rest, notes = tray_mod.clone_notes(s, todo)
+    assert {m.id for m in rest} == {m.id for m in todo} - {'pocket-tts-ru', 'wespeaker-resnet34'}
+    assert notes == ['Them → me: their voice (pocket-tts-ru, 0.4 GB) is not downloaded: a stock voice speaks for them; '
+                     'Components… in this menu downloads it']  # not "Me → them: your cloned voice"
+    monkeypatch.setattr(live, 'engine', lambda s: (None, 'off'))
+    assert tray_mod.clone_notes(s, [m for m in todo if m.id != 'pocket-tts-ru'])[1] == []
 
 
 def test_models_page_asks_for_the_hugging_face_token(monkeypatch):

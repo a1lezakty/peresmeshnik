@@ -25,6 +25,17 @@ version is the top of its GitHub release notes (`.github/workflows/release.yml`)
 - On an NVIDIA GPU XTTS-v2 as before; with the voice pack's addon **Qwen3 + Chatterbox** (Components…, only when ticked:
   75 MB of packages and 5.7 GB of models, a card of 8 GB) Qwen3-TTS speaks en ru de fr es it pt zh ja ko (streaming, the
   first sound in ~0.1 s), Chatterbox Multilingual saying again a clause it does not stop on.
+- **The other person in their own voice:** "them → me" clones the voice of the person talking from their first 3 s of
+  clear speech (made again at 5, 10 and 20 s, between phrases), only into your headphones; who is speaking and their
+  clone stay in memory for the call, on disk only when you keep it (tray: Keep the voice of the person in this call…,
+  with their agreement, one person on their side, after 10 s of their speech). With two people on their side each
+  phrase is in the voice of whoever said it, one not known yet in a stock voice, and a kept voice speaks from the
+  first phrase. Phrases with our own speech around them (its echo from their side, my microphone going into the call
+  as it is while my side loads) never go into their voice. When the voice falls behind it speaks faster at the same
+  pitch; a computer too slow for it gets the stock voice, said why. Its download: the clone engine of your language
+  (as for your voice; Russian on the CPU 0.44 GB) and the 27 MB speaker model. With the NVIDIA voice pack it lives
+  only during the call. Off: tray → Their own voice (them → me), or `[local] their_voice = false`: the stock voice as
+  before, nothing more downloaded.
 
 ## 0.3.0
 

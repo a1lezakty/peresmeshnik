@@ -335,6 +335,78 @@ def test_warm_session(tmp_path, made):
     assert made[1].closed and not any(srv.voices.iterdir())  # the server stops: the warm ones go too
 
 
+def test_a_warm_side_forgets_their_voices_when_the_client_leaves(tmp_path, made):
+    """FIXES-s2 r2 2: the next call on warm engines may be someone else: the people of the last one, their speech and
+    voices go when its client leaves (the engine stays loaded); the next hello starts with nobody."""
+    from test_live import AmpSpeaker, FakeClone, FakeStock, speech
+
+    from peresmeshnik.voices import live
+    srv = start(tmp_path / 'server', warm_s=30)
+    try:
+        token = srv.pairing.add('laptop')
+        d = RemoteDirection(srv.address, 'them', 'en', 'ru', token, srv.fp)
+        assert d.ready.wait(10)
+        lv = live.LiveVoice(FakeClone, AmpSpeaker, 'pocket-tts-ru', 'en')
+        made[0].tts = live.TheirVoice(FakeStock(), lv)
+        for i in range(3):
+            lv.offer(speech(1.2, 0.3, i), 'a', 0, 1.2)
+        until(lambda: lv.speaking is not None and lv.speaking.voice is not None)
+        d.close()
+        until(lambda: srv.slots['them'].conn is None)
+        until(lambda: lv.people == [] and lv.speaking is None)
+        assert lv.engine is not None  # warm: loaded still
+        d = RemoteDirection(srv.address, 'them', 'en', 'ru', token, srv.fp)
+        assert d.ready.wait(10) and d.server['warm'] is True and len(made) == 1 and lv.people == []
+        d.close()
+        lv.close()
+    finally:
+        srv.stop()
+        srv.thread.join(10)
+
+
+def test_the_clause_a_leaving_client_cut_is_nobodys_in_the_next_call(tmp_path, monkeypatch):
+    """FIXES-s2 r3 2: the client leaves mid-phrase; the pause the server feeds closes that clause later than _cut's
+    reset, so the next hello on the warm side forgets again, and a clause heard before a reset is nobody's: through the
+    real pipeline (stub models), the second call starts with nobody."""
+    from test_live import AmpSpeaker, FakeClone, speech
+    from test_pipeline import EnergyVad, ToneTts, UpperMt, WordAsr
+
+    from peresmeshnik.pipeline import LocalDirection
+    from peresmeshnik.voices import live
+    voices = []
+
+    def local(side, s):
+        d = LocalDirection(EnergyVad(), WordAsr(), UpperMt(), ToneTts(), side.src, side.tgt)
+        lv = live.LiveVoice(FakeClone, AmpSpeaker, 'pocket-tts-ru', 'en')
+        d.tts, d.on_clause = live.TheirVoice(d.tts, lv), lv.offer
+        voices.append(lv)
+        return d
+    monkeypatch.setattr(app.Side, '_local', local)
+    srv = start(tmp_path / 'server', warm_s=30)
+    try:
+        token = srv.pairing.add('laptop')
+        d = RemoteDirection(srv.address, 'them', 'en', 'ru', token, srv.fp)
+        assert d.ready.wait(10)
+        x = speech(2.0, 0.3)
+        for i in range(0, len(x), FRAME):  # their phrase, and the client goes in the middle of it
+            d.feed(x[i:i + FRAME])
+        time.sleep(0.3)
+        d.close()
+        until(lambda: srv.slots['them'].conn is None)
+        d = RemoteDirection(srv.address, 'them', 'en', 'ru', token, srv.fp)
+        assert d.ready.wait(10) and d.server['warm'] is True and len(voices) == 1
+        lv = voices[0]
+        until(lambda: lv.stats['clauses'] >= 1, 10)  # the cut clause came
+        until(lambda: lv._q.empty())
+        time.sleep(0.2)
+        assert lv.people == [] and lv.speaking is None
+        d.close()
+        lv.close()
+    finally:
+        srv.stop()
+        srv.thread.join(10)
+
+
 @pytest.mark.parametrize('noticed', [True, False])
 def test_a_drop_reconnects_to_the_warm_side(srv, made, noticed, monkeypatch):
     """The client's one new connection after a drop gets the same engines; the clause the drop cut is closed by a pause

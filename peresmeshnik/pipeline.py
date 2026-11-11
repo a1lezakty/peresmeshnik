@@ -84,6 +84,11 @@ side has no subtitles of what was dropped; them -> me takes MAX_LAG_S."""
         self._events: queue.Queue = queue.Queue()
         self._fed, self._fed_wall = 0, 0.0  # samples fed so far and when the last chunk arrived
         self._start = 0  # where the current clause starts, samples
+        # them -> me (voices/live.py): each clause the ASR heard words in, (its audio, text, start and end time) -> the
+        # voice to say it in (handed to tts.synth for this clause); the VAD segment's audio is kept only while someone
+        # listens: _seg from sample _seg0
+        self.on_clause = None
+        self._seg, self._seg0 = [], 0
         self._play_end = 0.0  # when the speech put out so far has played, if played back to back
         self._play_lock = threading.Lock()  # _play_end: the speech thread adds to it, interrupt() resets it
         self._stop = threading.Event()  # close(): drop what is queued instead of saying it
@@ -166,8 +171,10 @@ side has no subtitles of what was dropped; them -> me takes MAX_LAG_S."""
                 pos = self.vad.pos
                 if kind == 'start':
                     stream, seg0, partial_s = self.asr.stream(self.src), pos - len(x), 0.0
-                    self._start = seg0
-                    prev, sent = [], 0
+                    self._start = self._seg0 = seg0
+                    prev, sent, self._seg = [], 0, []
+                if self.on_clause is not None:
+                    self._seg.append(x)
                 t = time.perf_counter()
                 partial = stream.feed(x, partial=not catch_up)
                 partial_s += time.perf_counter() - t
@@ -210,6 +217,10 @@ side has no subtitles of what was dropped; them -> me takes MAX_LAG_S."""
             return n
         c = {'clause': n, 'reason': reason, 'start_s': round(start / SAMPLE_RATE, 2), 'end_s': round(end / SAMPLE_RATE, 2),
              'end_wall': self._wall(end), 'asr_partial_ms': round(1000 * partial_s), 'asr_final_ms': round(1000 * final_s), 'text': text}
+        if self.on_clause is not None and self._seg:  # its audio goes; a cut's rest starts the next clause
+            seg = np.concatenate(self._seg)
+            self._seg, a0, self._seg0 = [seg[end - self._seg0:]], self._seg0, end
+            c['voice'] = self.on_clause(seg[max(start - a0, 0):end - a0], text, self._wall(start), c['end_wall'])
         if self.realtime:  # the clause's end known (VAD pause or cut), its final text
             c |= {'vad_lag_s': round(decided - c['end_wall'], 3), 'asr_lag_s': round(decided + final_s - c['end_wall'], 3)}
             self._events.put(Latency(n, 'vad', c['vad_lag_s']))
@@ -244,11 +255,12 @@ side has no subtitles of what was dropped; them -> me takes MAX_LAG_S."""
             self._spoken.put(c)
 
     def _speak(self):
-        st, sr = self.stats, self.tts.sample_rate
+        st = self.stats
         while (c := self._spoken.get()) is not None:
             if self._stop.is_set():
                 continue
-            end_wall, translation = c.pop('end_wall'), c.pop('translation')
+            sr = self.tts.sample_rate  # per clause: the them side's voice is put in after the workers start (S2)
+            end_wall, translation, voice = c.pop('end_wall'), c.pop('translation'), c.pop('voice', self.voice)
             t, samples, start = time.perf_counter(), 0, 0.0
             speed = 1.0
             if self.realtime:  # lags are real: the queue policy applies
@@ -263,7 +275,7 @@ side has no subtitles of what was dropped; them -> me takes MAX_LAG_S."""
                     speed = round(1 + (MAX_SPEED - 1) * min(1.0, (lag - FAST_AFTER_S) / max(self.max_lag_s - FAST_AFTER_S, 1e-3)), 3)
                     c['speed'] = speed
             cut = self._cut
-            for chunk in self.tts.synth(translation, self.tgt, self.voice, **({'speed': speed} if speed != 1.0 else {})):
+            for chunk in self.tts.synth(translation, self.tgt, voice, **({'speed': speed} if speed != 1.0 else {})):
                 if self._stop.is_set() or self._cut != cut:
                     break  # closes synth(), which reads away the rest of the request
                 now = time.perf_counter()

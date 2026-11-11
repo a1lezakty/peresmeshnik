@@ -513,6 +513,38 @@ def test_a_new_call_on_warm_engines_leaves_nothing_of_the_last_in_the_runner(pac
     v.close()
 
 
+def test_a_contacts_recording_speaks_from_their_first_clause_and_goes_from_the_runner_when_deleted(pack, monkeypatch,
+                                                                                                    tmp_path):
+    """BRIEF-s2-keep-nvidia: a contact kept as their speech; the next call's runner makes their voice from it as soon as
+    it is up, so their first clause speaks in it. Deleted in Voices… during the call: forgotten at once, here and in
+    the runner (Qwen3's state holds the sample), while the voice of someone else in the call stays."""
+    import test_live
+    from test_live import AmpSpeaker, speech
+
+    from peresmeshnik import models, voice
+    from peresmeshnik.voices import live as lv
+    root = tmp_path / 'voices'
+    monkeypatch.setattr(voice, 'voices_dir', lambda: root)
+    anna = voice.save_them('Anna', 'en', 12.0, {voice.SPEAKER: (test_live.B, models.get(voice.SPEAKER).fingerprint)},
+                           root, (np.full(9 * 16_000, 0.25, np.float32), 16_000))
+    v = lv.LiveVoice(lambda: pack, AmpSpeaker, 'xtts-v2', 'en', lv.kept('xtts-v2'))
+    first = v.offer(speech(1.2, 0.1), 'b', 0, 1.2)  # Anna (B) speaks first
+    assert first.known.wait(10) and first.person.kept
+    kept = first.person.voice
+    assert np.allclose(say(pack, 'hi', kept), 0.25, atol=1e-3)  # the stub speaks the mean of its sample
+    a = [v.offer(speech(1.2, 0.3, i), 'a', 0, 1.2) for i in range(3)]  # someone else, made in this call
+    a[-1].known.wait(5)
+    test_live.time.sleep(0.5)  # its voice is made after the clause is known
+    other = v.people[-1].voice
+    voice.discard(anna.name, root)
+    v.deleted()
+    after = v.offer(speech(1.2, 0.1, 5), 'b', 0, 1.2)
+    assert after.known.wait(5) and not after.person.kept  # gone: someone new
+    assert list(pack.synth('hi', 'en', kept)) == []  # gone from the runner: that clause's error
+    assert len(say(pack, 'hi', other)) == 3 * 2400  # the other voice of the call stays
+    v.close()
+
+
 def test_condition_from_another_thread_waits_for_the_stream(pack, me):
     """FIXES addon 1: voices/live.py conditions the other person's voice on its own thread while the speak thread reads a
     synth's stream from the same runner: one request at a time on the pipe (condition waits for the stream's end), both

@@ -9,7 +9,7 @@ import pytest
 if sys.platform.startswith('linux') and not os.environ.get('DISPLAY'):
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 pytest.importorskip('PySide6')
-from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox  # noqa: E402
 from test_clone_wizard import pump  # noqa: E402
 from test_voice_profiles import Asr, Speaker, speech  # noqa: E402
 
@@ -82,8 +82,15 @@ def test_keep_a_contacts_voice_only_as_agreed(tmp_path):
     assert not d.save.isEnabled()  # not without their agreement
     d.agreed.setChecked(True)
     assert d.save.isEnabled()
-    v = d.keep({'pocket-tts-en': (np.zeros(3, np.float32), 'sha')}, 'en', 5.0, tmp_path)
+    v = d.keep({'pocket-tts-en': (np.zeros(3, np.float32), 'sha')}, 'en', 5.0, root=tmp_path)
     assert v.meta['kind'] == 'them' and v.meta['name'] == 'Анна' and voice.why_not_mine(v)
+    assert not (v.path / 'sample.wav').exists() and 'not as a recording' in d.findChildren(QLabel)[0].text()
+    d = voices.RememberDialog(heard=True)  # the NVIDIA voice pack: 10 s of their speech, said so before they agree
+    assert '10 s of their speech is saved on this computer' in d.findChildren(QLabel)[0].text()
+    d.name.setText('Bob')
+    d.agreed.setChecked(True)
+    v = d.keep({}, 'en', 12.0, (np.full(16_000, 0.1, np.float32), 16_000), tmp_path)
+    assert (v.path / 'sample.wav').is_file() and '1 s of it recorded' in voices.described(v)
 
 
 def test_wizard_voice_page_confirms_the_take(tmp_path, monkeypatch):
@@ -159,7 +166,8 @@ def test_tray_voices_and_keeping_a_contacts_voice(tmp_path, monkeypatch):
         dialog.agreed.setChecked(True)
         return True
     monkeypatch.setattr(voices.RememberDialog, 'exec', agree)
-    alone = ({'pocket-tts-en': (np.ones(4, np.float32), 'sha')}, 'en', 12.0)
+    alone = ({'wespeaker-resnet34': (np.ones(4, np.float32), 'sha')}, 'en', 12.0, (np.full(16_000, 0.1, np.float32),
+                                                                                  16_000))  # the voice pack's
     live[:] = [(alone, ''), (None, '2 people speak in this call: a voice can be kept in a call with one of them only')]
     t.remember_voice()  # someone else spoke while the dialog was open: the voice of then is not kept silently
     assert voice.profiles() == [] and said[-1] == ('Their voice was not kept: 2 people speak in this call: a voice can '
@@ -168,10 +176,11 @@ def test_tray_voices_and_keeping_a_contacts_voice(tmp_path, monkeypatch):
     t.remember_voice()
     (v,) = voice.profiles()
     assert v.meta['kind'] == 'them' and v.meta['name'] == 'Bob' and said[-1].startswith('Kept')
+    assert (v.path / 'sample.wav').is_file()
     t.open_voices()  # Bob's voice deleted during the call: the running them side forgets it now (my voice's did not)
     t.windows[-1].list.setCurrentRow(0)
     t.windows[-1].delete()
-    assert voice.profiles() == [] and gone == [1]
+    assert voice.profiles() == [] and gone == [1] and not v.path.exists()  # their recording too
     t.ctl = type('Ctl', (), {'live': False, 'on': False})()  # no S2 hook, translation off: not offered
     t.sync()
     assert not t.remember.isVisible()
@@ -324,8 +333,9 @@ def test_settings_lists_only_my_voices(root, tmp_path, monkeypatch):
 
 
 def test_keep_their_voice_only_where_the_engine_keeps_one(tmp_path, monkeypatch):
-    """COMMON 23:49: "Keep the voice…" while translating with S2's them_voice(), only where the them side's clone engine
-    keeps a voice (Pocket TTS: its state); not with an engine of the NVIDIA voice pack (XTTS, Qwen3), nor with none."""
+    """"Keep the voice…" while translating with S2's them_voice(), where the them side clones their voice: Pocket TTS
+    (its state) and an engine of the NVIDIA voice pack (XTTS, Qwen3: 10 s of their speech, the user 11.11); not with
+    none."""
     from peresmeshnik import languages
     from peresmeshnik.ui import tray as tray_mod
     monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
@@ -335,9 +345,12 @@ def test_keep_their_voice_only_where_the_engine_keeps_one(tmp_path, monkeypatch)
     monkeypatch.setattr(languages, 'clone_engine', lambda lang, side='me_to_them', **k: asked.append((lang, side)) or engine)
     t = tray_mod.Tray(type('Ctl', (), {'live': False, 'on': True, 'them_voice': lambda self: None})())
     assert t.remember.isVisible() and asked[-1] == (config.load().my_lang, 'them_to_me')
-    for engine[:] in (['xtts-v2', ''], ['qwen3-tts', ''], [None, 'no clone of their voice here']):
+    for engine[:] in (['xtts-v2', ''], ['qwen3-tts', '']):
         t.sync()
-        assert not t.remember.isVisible(), engine
+        assert t.remember.isVisible(), engine
+    engine[:] = [None, 'no clone of their voice here']
+    t.sync()
+    assert not t.remember.isVisible()
     engine[:] = ['pocket-tts-de', '']
     s = config.load()
     s.local.their_voice = False  # S2's live.engine: their voice off, nothing to keep

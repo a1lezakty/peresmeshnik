@@ -260,9 +260,10 @@ class VoicePackClone:
         it then is that clause's error (left out, as any)."""
         return self._ask({'cmd': 'condition', 'pcm': _b64(pcm), 'sr': sr})['state']
 
-    def forget_states(self) -> None:
-        """Every voice condition() made goes from the runner's memory (voices/live.py: a new call on warm engines)."""
-        self._ask({'cmd': 'forget'})
+    def forget_states(self, ids: list[str] | None = None) -> None:
+        """The voices condition() made go from the runner's memory: `ids` (voices/live.py: a contact's voice deleted
+        during the call), else every one (a new call on warm engines)."""
+        self._ask({'cmd': 'forget', **({'states': ids} if ids else {})})
 
     def stats(self) -> dict:
         """What the runner sees now: VRAM free and the peak so far (bench/voice_pack.py)."""

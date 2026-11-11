@@ -29,6 +29,9 @@ from peresmeshnik import config, voice
 READ_S = 8.0  # the live reading: two short phrases at a normal pace, 3-4 s each
 THEIRS = ('This voice is heard only by you, in your headphones; it never speaks into the call. It is kept as the clone '
           "engine's state, not as a recording of their speech, and stays on this computer.")
+THEIRS_HEARD = ('This voice is heard only by you, in your headphones; it never speaks into the call. 10 s of their speech '
+                'is saved on this computer: the NVIDIA voice pack makes their voice from it in your next calls. Delete it '
+                'in Voices…')
 
 
 def described(v) -> str:
@@ -36,7 +39,8 @@ def described(v) -> str:
     m, c = v.meta, v.meta.get('consent') or {}
     when = (c.get('at') or m.get('created', ''))[:10]
     if m['kind'] == 'them':
-        return f'{m["name"]}: someone you talk to, {m["lang"]}, {m["seconds"]:.0f} s of their speech, kept {when}'
+        rec = f', {m["sample"]["seconds"]:.0f} s of it recorded' if m.get('sample') else ''
+        return f'{m["name"]}: someone you talk to, {m["lang"]}, {m["seconds"]:.0f} s of their speech{rec}, kept {when}'
     if why := voice.why_not_mine(v):
         return f'Your voice: {m["lang"]}, {m["seconds"]:.0f} s, {why}'
     how = {'mic-live': 'recorded here', 'import+mic-match': 'from a file'}.get(c.get('how'), '')
@@ -284,15 +288,16 @@ class VoicesDialog(QDialog):
 
 class RememberDialog(QDialog):
     """Keep the voice of the person in this call (S2's live profile), under a name, only once the user says the person
-    agreed. The tray: `if d.exec(): d.keep(states, lang, seconds)`."""
+    agreed. The tray: `if d.exec(): d.keep(states, lang, seconds, sample)`. `heard`: the NVIDIA voice pack's, kept as
+    10 s of their speech (the text says so)."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, heard: bool = False):
         super().__init__(parent)
         self.setWindowTitle('Peresmeshnik: keep this voice')
         self.name = QLineEdit()
         self.name.setPlaceholderText('Whose voice is it (shown only to you)')
         self.agreed = QCheckBox('They agreed that I keep their voice for our next calls')
-        text = QLabel(THEIRS)
+        text = QLabel(THEIRS_HEARD if heard else THEIRS)
         text.setWordWrap(True)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         self.save = buttons.button(QDialogButtonBox.StandardButton.Save)
@@ -308,7 +313,8 @@ class RememberDialog(QDialog):
     def _ok(self, *_) -> None:
         self.save.setEnabled(bool(self.name.text().strip()) and self.agreed.isChecked())
 
-    def keep(self, states: dict, lang: str, seconds: float, root=None):
-        """{model id: (state, sha256 of the weights)} -> the saved profile (voice.save_them), only as agreed."""
+    def keep(self, states: dict, lang: str, seconds: float, sample=None, root=None):
+        """{model id: (state, sha256 of the weights)} (and the voice pack's (pcm, sr)) -> the saved profile
+        (voice.save_them), only as agreed."""
         assert self.agreed.isChecked() and self.name.text().strip()
-        return voice.save_them(self.name.text().strip(), lang, seconds, states, root)
+        return voice.save_them(self.name.text().strip(), lang, seconds, states, root, sample)

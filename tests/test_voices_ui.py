@@ -167,36 +167,33 @@ def test_tray_voices_and_keeping_a_contacts_voice(tmp_path, monkeypatch):
 
 
 def test_models_page_asks_for_the_hugging_face_token(monkeypatch):
-    """A gated model (Kyutai's Pocket TTS, `token = "hf"`) missing: the models page shows its page and the token field;
-    the token goes to models.save_hf_token (S1's: its own file); once fetched, the box goes."""
-    from types import SimpleNamespace
-
-    from peresmeshnik import models
+    """A gated model (Kyutai's Pocket TTS, `token = "hf"`) to download: the Components page shows its page and the token
+    field; the token goes to models.save_hf_token (S1's: its own file); once fetched, the box goes."""
+    from peresmeshnik import components, models
+    from peresmeshnik.ui import components as box_mod
     from peresmeshnik.ui import wizard
-    pocket = SimpleNamespace(id='pocket-tts-en', token='hf', size=1, consent=False, license='CC-BY-4.0',
-                             license_url='https://x', via=(), url='https://huggingface.co/kyutai/pocket-tts/resolve/abc/')
-    monkeypatch.setattr(models, 'get', lambda i: pocket)
-    monkeypatch.setattr(models, 'parts', lambda m: [m])
-    monkeypatch.setattr(models, 'size', lambda m: 1)
+
+    def pocket(installed):
+        return components.Component('pocket-tts-en', 'Your cloned voice: pocket-tts-en', 0 if installed else 1, 'CC-BY-4.0',
+                                    'https://huggingface.co/kyutai/pocket-tts', 'speaks', installed, 0, True, token=True)
     fetched, saved = [False], []
-    monkeypatch.setattr(models, 'is_fetched', lambda m, base=None: fetched[0])
+    monkeypatch.setattr(components, 'listing', lambda s: [pocket(fetched[0])])
     monkeypatch.setattr(models, 'hf_token', lambda: saved[-1] if saved else '', raising=False)
     monkeypatch.setattr(models, 'save_hf_token', saved.append, raising=False)
-    monkeypatch.setattr(wizard, 'needed_models', lambda s: ['pocket-tts-en'])
-    monkeypatch.setattr(wizard.languages, 'optional_models', lambda s: [])
     opened = []
-    monkeypatch.setattr(wizard.QDesktopServices, 'openUrl', lambda u: opened.append(u.toString()))
+    monkeypatch.setattr(box_mod.QDesktopServices, 'openUrl', lambda u: opened.append(u.toString()))
     page = wizard.ModelsPage(type('W', (), {'s': config.Settings()})())
     page.initializePage()
-    assert not page.hf.isHidden() and page.hf.token.placeholderText() == 'hf_…'
-    page.hf.open.click()
+    hf = page.box.hf
+    assert not hf.isHidden() and hf.token.placeholderText() == 'hf_…'
+    hf.open.click()
     assert opened == ['https://huggingface.co/kyutai/pocket-tts']
-    page.hf.token.setText(' hf_secret ')
-    page.hf.save.click()
-    assert saved == ['hf_secret'] and page.hf.token.text() == '' and 'saved' in page.hf.token.placeholderText()
+    hf.token.setText(' hf_secret ')
+    hf.save.click()
+    assert saved == ['hf_secret'] and hf.token.text() == '' and 'saved' in hf.token.placeholderText()
     fetched[0] = True
-    page._finished('')
-    assert page.hf.isHidden()
+    page.box.refresh()
+    assert hf.isHidden()
 
 
 def wizard_page(tmp_path, monkeypatch):

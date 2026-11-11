@@ -22,7 +22,8 @@ runs from source. Not yet tried in a real call (see below).
   clicks; it cannot stop someone who edits the app's files. A voice recorded in 0.3.0 is confirmed once the same way.
   Tray → **Voices…** lists and deletes the voices. Cloned from a 30–60 s recording. On any computer, a Mac too: Kyutai's
   Pocket TTS on the CPU in English, French, German, Spanish, Portuguese, Italian (its weights need your Hugging Face
-  token, of an account that accepted Kyutai's conditions on huggingface.co/kyutai/pocket-tts) and Russian. On an NVIDIA
+  token, of an account that accepted Kyutai's conditions on huggingface.co/kyutai/pocket-tts: paste it in the wizard's
+  Components or "Your voice" page or in Voices…; saved empty, it is forgotten) and Russian. On an NVIDIA
   GPU with 6 GB or more (Windows, Linux; on Windows also a recent driver, see below) XTTS-v2 in 13 languages. Elsewhere
   a stock voice or the cloud speaks for you.
 - A hotkey switches between translation and your live voice.
@@ -94,8 +95,9 @@ macOS 14 Sonoma or later on Apple Silicon (M1 and newer).
    its pkg): the virtual microphone that the other side hears. In your call app choose
    **BlackHole 2ch** as the microphone. On macOS older than 14.4 also BlackHole 16ch (`blackhole-16ch`) as
    the call app's speaker: the app takes the call's sound from there.
-4. Start Peresmeshnik: its icon is in the menu bar (no Dock icon). The setup wizard downloads the models
-   (they are not in the app): 0.6–2.8 GB for a pair, typically 1.2–1.8 GB; the wizard shows the exact size first.
+4. Start Peresmeshnik: its icon is in the menu bar (no Dock icon). The installer puts only the app on the computer;
+   the wizard's **Components** page lists what to download (0.6–2.8 GB for a pair, typically 1.2–1.8 GB), ticked
+   where it suits this computer and the pair, with each one's size and license; nothing downloads before Download.
    A direction in the cloud needs your Gemini key ([above](#peresmeshnik)).
 5. macOS asks once for two permissions, both in System Settings → Privacy & Security: **Microphone**
    (what you say is translated) and, when translation is first turned on, **Screen & System Audio Recording →
@@ -142,8 +144,9 @@ Windows 10 version 2004 or later, or Windows 11 (x64).
    administrator, restart Windows): the virtual microphone that the other side hears. In your call app choose
    **CABLE Output** as the microphone.
 4. Start Peresmeshnik from the Start menu: its icon is in the notification area (Windows may put it behind the
-   ^ arrow at first; drag it out to keep it in view). The setup wizard downloads the models (they are not in the
-   app): 0.6–2.8 GB for a pair, typically 1.2–1.8 GB; the wizard shows the exact size first. A direction in the
+   ^ arrow at first; drag it out to keep it in view). The installer puts only the app on the computer; the
+   wizard's **Components** page lists what to download (0.6–2.8 GB for a pair, typically 1.2–1.8 GB), ticked where it
+   suits this computer and the pair, with each one's size and license; nothing downloads before Download. A direction in the
    cloud needs your Gemini key ([above](#peresmeshnik)). Use headphones: through speakers the microphone hears the
    translation.
 5. While translation is on, the app records the call app's own sound and turns it almost all the way down on your
@@ -195,10 +198,11 @@ What stays when you stop using it: `~/.config/Peresmeshnik` (settings with your 
 `~/.local/share/Peresmeshnik` (your voices, logs, crash reports, the clone's venv if you made it there) and
 `~/.cache/Peresmeshnik` (the models).
 
-**Models pile up.** The app does not delete models: every pair you try keeps its own in the `models` folder of the
-cache folder above (macOS `~/Library/Caches/Peresmeshnik/models`, Windows `%LOCALAPPDATA%\Peresmeshnik\Cache\models`,
-Linux `~/.cache/Peresmeshnik/models`), one folder per model. Delete the ones you no longer need; choosing a pair again
-downloads them again.
+**Models of other pairs** stay on disk until you remove them: tray → **Components…** lists everything downloaded
+with its size on disk and a Remove button (the voice pack too), and what you can still download. They are in the
+`models` folder of the cache folder above (macOS `~/Library/Caches/Peresmeshnik/models`, Windows
+`%LOCALAPPDATA%\Peresmeshnik\Cache\models`, Linux `~/.cache/Peresmeshnik/models`), one folder per model; choosing a pair
+again downloads its models again.
 
 ## Your own server: a weak laptop, a strong computer
 

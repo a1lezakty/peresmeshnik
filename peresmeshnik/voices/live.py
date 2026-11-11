@@ -188,7 +188,8 @@ class LiveVoice:
     def deleted(self) -> None:
         """A contact's voice deleted in Voices… during the call: the voices kept from earlier calls are read again, and a
         person known by one that is gone is forgotten now (their next clause: the stock voice, then a voice of this call,
-        as for anyone new)."""
+        as for anyone new). A voice made in this call, kept from it in Voices… or not, lives until the call ends, as every
+        voice of the call does: deleting its saved copy only stops the next calls from knowing it."""
         self._q.put(DELETED)
 
     def them(self) -> tuple[tuple[dict, str, float] | None, str]:

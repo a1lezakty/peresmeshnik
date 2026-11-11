@@ -538,6 +538,8 @@ class Tray(QObject):
                 saved.local.voice = s.local.voice
                 config.save(saved)
                 self.restart()
+            elif hasattr(self.ctl, 'their_voices_deleted'):  # a contact's voice: the running them side forgets it now
+                self.ctl.their_voices_deleted()
         self._show(VoicesDialog(s, changed, translating=lambda: bool(getattr(self.ctl, 'on', False))))
 
     def open_components(self) -> None:

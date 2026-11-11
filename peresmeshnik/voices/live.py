@@ -53,6 +53,7 @@ OURS = -4.5  # echo.bands' loudest band of a block where we spoke into the call 
 OURS_S = 0.25  # this much of our speech in a clause's echo window: it may carry our voice, not into their sample
 KEEP_S = 10.0  # their clean speech before "keep their voice" keeps it (a voice of 3 s is a first guess)
 RESET = object()  # LiveVoice.reset() in its worker's queue
+DELETED = object()  # LiveVoice.deleted() in its worker's queue
 RTF_AFTER_S = 4.0  # their cloned voice's speed is checked once, after this much of it (me -> them: a ~4 s test phrase)
 
 
@@ -184,6 +185,12 @@ class LiveVoice:
             p = None
         return p.voice if p is not None else None
 
+    def deleted(self) -> None:
+        """A contact's voice deleted in Voices… during the call: the voices kept from earlier calls are read again, and a
+        person known by one that is gone is forgotten now (their next clause: the stock voice, then a voice of this call,
+        as for anyone new)."""
+        self._q.put(DELETED)
+
     def them(self) -> tuple[tuple[dict, str, float] | None, str]:
         """For the tray's "keep their voice" (voice.save_them), taken once the user said they agreed: (({model id:
         (state, sha256 of its weights)}: the engine's and the speaker vector's, their language, seconds of their speech),
@@ -261,6 +268,9 @@ class LiveVoice:
             if item is RESET:
                 self._forget()
                 continue
+            if item is DELETED:
+                self._deleted()
+                continue
             pcm, c, sample = item
             try:
                 if pcm is not None and not self.dead and not self._closed:
@@ -284,6 +294,14 @@ class LiveVoice:
                     self.engine.forget_states()
                 except Exception as e:  # a dead runner: nothing of them in it any more
                     self.fail(e)
+
+    def _deleted(self) -> None:
+        """deleted() in the worker."""
+        self._kept = kept(self.engine_id)
+        left = [v for v, _, _ in self._kept]
+        self.people = [p for p in self.people if not p.kept or any(np.array_equal(p.vec, v) for v in left)]
+        if not any(p is self.speaking for p in self.people):
+            self.speaking = None
 
     def _add(self, pcm: np.ndarray, c: Clause | None = None, sample: bool = True) -> None:
         """Whose clause it is, and its audio into that person's sample when `sample` (long enough, none of our voice)

@@ -138,7 +138,9 @@ def test_tray_voices_and_keeping_a_contacts_voice(tmp_path, monkeypatch):
     s.local.voice = voice.save(*speech(), 'me', 'ru', 'text').name
     config.save(s)
     live = [(None, 'not enough of their speech yet: 2 of 10 s')]
-    ctl = type('Ctl', (), {'live': False, 'on': True, 'them_voice': lambda self: live.pop(0) if len(live) > 1 else live[0]})()
+    gone = []
+    ctl = type('Ctl', (), {'live': False, 'on': True, 'them_voice': lambda self: live.pop(0) if len(live) > 1 else live[0],
+                           'their_voices_deleted': lambda self: gone.append(1)})()
     t = tray_mod.Tray(ctl)
     t.restart = lambda: None
     said = []
@@ -166,6 +168,10 @@ def test_tray_voices_and_keeping_a_contacts_voice(tmp_path, monkeypatch):
     t.remember_voice()
     (v,) = voice.profiles()
     assert v.meta['kind'] == 'them' and v.meta['name'] == 'Bob' and said[-1].startswith('Kept')
+    t.open_voices()  # Bob's voice deleted during the call: the running them side forgets it now (my voice's did not)
+    t.windows[-1].list.setCurrentRow(0)
+    t.windows[-1].delete()
+    assert voice.profiles() == [] and gone == [1]
     t.ctl = type('Ctl', (), {'live': False, 'on': False})()  # no S2 hook, translation off: not offered
     t.sync()
     assert not t.remember.isVisible()

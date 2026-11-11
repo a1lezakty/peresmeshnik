@@ -159,7 +159,8 @@ def _pack(s, gpu: Gpu, needed: set[str]) -> list[Component]:
                      'a stock voice speaks instead of yours' if gpu_clone else '', no, consent=True,
                      _fetch=lambda progress, cancel: voicepack.install(progress, cancel),
                      _remove=lambda: voicepack.uninstall())]  # under the pack's lock: not while its addon installs
-    if add := spec.get('addon'):
+    # the addon's row: only with its models in this registry (a build or a test whose registry lacks them: none)
+    if (add := spec.get('addon')) and all(i in models.registry() for i in add['models']):
         low = f'the addon needs {add["vram_gb"]} GB of GPU memory; this computer has {languages.gpu_text(gpu.vram)}' \
             if gpu.vram < add.get('vram_gb', 0) else ''
         ms, base = [models.get(i) for i in add['models']], models.root()

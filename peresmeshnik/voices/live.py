@@ -302,7 +302,7 @@ class LiveVoice:
 def faster(chunks, speed: float, sr: int = OUT_SR):
     """The speech of `chunks` `speed` times faster at the same pitch (WSOLA): 40 ms Hann frames at half overlap, each
     taken from the input where it best continues the one before (within 5 ms of where the pace puts it). The clone
-    has no speed of its own and speaks at its sample's pace (BENCH stage 8: 37 % slower than Piper); the pipeline asks
+    has no speed of its own and speaks at its sample's pace (BENCH stage 8: about Piper's); the pipeline asks
     for this when the voice is behind (pipeline.MAX_SPEED)."""
     if speed <= 1.0:
         yield from chunks

@@ -2542,6 +2542,35 @@ other utterances — Russian speech against English, so lower than same-language
 RESEARCH-clone). "Voice": from a clause's end to its voice starting. Dropped: the them → me queue policy (a voice later
 than 4 s after its clause is not said; its subtitle stays).
 
+**Re-measured 2026-11-11 after review r2** (the same calls, cores and models; the code of PR #29 at cb0d0c7 + the bench
+fix): the them side's speech had gone out labelled 22.05 kHz (Piper's, read once when the workers started) though
+TheirVoice speaks 24 kHz, so its lags and the queue's drops were overstated; and a clause not known in time, or a new
+person's short word, now goes to the stock voice, not to the voice of who spoke before. S3's bench ran on other cores of
+C meanwhile: CPU per audio second is ~0.4 higher than on 11-10 for the stock voice alone too.
+
+| call | right voice | first clone (of the call) | similarity: own / other's / stock | voice: median (max) | dropped | CPU s per audio s | short / late / people |
+|---|---|---|---|---|---|---|---|
+| **M+F 1272+1462** | **43/43** | 6.2 s, 2 stock clauses | 0.32 / 0.07 / 0.11 | 1.6 s (3.7) | 8/55 | 2.36 | 6 / 1 / 2 |
+| M+F 1272+1462, stock voice only | — | — | — / — / 0.14 | — | 4/54 | 1.94 | — |
+| **M+F 174+2277** | **39/39** | 4.9 s, 1 | 0.22 / 0.09 / 0.10 | 1.6 s (3.7) | 4/46 | 2.28 | 0 / 1 / 2 |
+| **F+F 1673+3536** | **40/40** | 5.4 s, 1 | 0.31 / 0.18 / 0.08 | 2.3 s (3.7) | 4/49 | 2.47 | 2 / 1 / 2 |
+| F+F 1673+3536, stock voice only | — | — | — / — / 0.04 | — | 6/50 | 2.10 | — |
+| **M+F 1272+1462, call app** | **43/43** | 7.0 s, 3 | 0.22 / 0.07 / 0.11 | 1.7 s (4.0) | 8/56 | 2.32 | 8 / 1 / 2 |
+| M+F 1272+1462, call app, stock voice only | — | — | — / — / 0.12 | — | 6/57 | 1.88 | — |
+| **F+F 1673+3536, call app** | **37/37** | 7.1 s, 2 | 0.19 / 0.14 / 0.01 | 1.9 s (3.8) | 6/48 | 2.46 | 2 / 1 / 4 |
+
+- **Dropped: 4–8 of ~50 with the clone against 4–6 with the stock voice** (11-10: 8–14), every run sped up when behind
+  (42–47 clauses). The clone's pace is the stock voice's: 0.061–0.071 against 0.057–0.082 s per character at speed 1.
+  The "37 % slower" of 11-10 was the bench's own: before `faster` the clone did not speed up, and its pace was still
+  multiplied by the speed asked for.
+- **No clause in the other person's voice**; one clause per run waited past WAIT_S (0.5 s: their voice was being made)
+  and was said in the stock voice ("late"). Clauses under 1 s are matched to the people known (none in the wrong voice).
+- "Keep their voice" at the end of each call: refused, "2 people speak in this call" (review r2 6); the kept voice's way
+  back (`voice.save_them` -> `live.kept`) is tests/test_live.py's.
+
+The table of 11-10 below is kept for the decisions it made (per clause, not per call; `faster`); its "voice", "dropped"
+and pace are overstated (above).
+
 | call | right voice | first clone (of the call) | similarity: own / other's / stock | voice: median (max) | dropped | CPU s per audio s |
 |---|---|---|---|---|---|---|
 | M+F 1272+1462, one voice per call, the switch after 3 clauses in a row (RESEARCH §4.1) | 25/42 | 6.2 s, 2 stock clauses | 0.22 / 0.12 / 0.21 | 1.8 s (3.9) | 9/53 | 1.59 |
@@ -2568,7 +2597,7 @@ than 4 s after its clause is not said; its subtitle stays).
   (0.21 where a man is compared with `dmitri`). English voice into Russian is where Pocket-ru is weakest (RESEARCH-clone
   10.4); a voice of the same language would come out closer.
 - **The price is clauses dropped**: the clone speaks at the pace of its sample, here 37 % slower than Piper (0.088
-  against 0.064 s per character of the translation), and Pocket has no speed of its own. The pipeline asks a voice that
+  against 0.064 s per character of the translation), and Pocket has no speed of its own (11-10; re-measured above, that pace was the bench's). The pipeline asks a voice that
   is behind to speak up to 1.4× faster: for the clone `voices/live.faster` does it at the same pitch (WSOLA, 40 ms
   frames), which brought the clauses dropped in the call-app runs from 14 to 10–11 of ~50, against 6 with the stock voice;
   the similarity stayed. These are audiobook readers, denser than a conversation.

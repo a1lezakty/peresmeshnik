@@ -57,6 +57,7 @@ MAX_CLONE_RTF = 1.0  # seconds of synthesis per second of speech, warm: above, t
 #                      has no lag limit) and the stock voice speaks; the RTX 3060 runs it at 0.4-0.5 (BENCH), a GTX 10xx
 #                      is not measured
 OURS = 'peresmeshnik_'  # every PipeWire device the app makes starts with this
+CALL_OUTPUTS = ('BlackHole',)  # macOS: the call's devices (2ch its microphone, 16ch its speaker < 14.4), never headphones
 MIC_SINK = 'peresmeshnik_mic_sink'  # = audio/virtual_mic_linux.SINK, without importing it on other OSes
 MIC_SOURCE = 'peresmeshnik_mic'  # = audio/virtual_mic_linux.SOURCE ("Peresmeshnik Mic")
 BARGE_IN_WORDS = 3  # my clause has this many words: I talk over their voice (fewer: "yeah", "ага" while listening)
@@ -150,7 +151,7 @@ class Headphones:
                     name = next((d['name'] for d in outs if d['name'] in known and d['name'] != exclude and not d['virtual']), '')
                 if not name:
                     raise RuntimeError('no output device')
-            if name.startswith('BlackHole'):  # 2ch is the call's microphone, 16ch the call's speaker (< 14.4): saved too
+            if name.startswith(CALL_OUTPUTS):  # 2ch is the call's microphone, 16ch the call's speaker (< 14.4): saved too
                 raise RuntimeError(f'the {"saved" if name == self.sink else "default"} output is {name}, a device of the '
                                    'call: choose your headphones in the settings or the system')
             if name == capture_macos.CALL_DEVICE and capture_macos.path() == 'blackhole':  # the call would hear itself

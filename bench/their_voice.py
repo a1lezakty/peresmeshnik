@@ -198,14 +198,16 @@ def main() -> None:
         'people': len(v.people), 'stats': v.stats, 'dead': v.dead,
         'cpu_s_per_audio_s': round(cpu / (len(pcm) / SAMPLE_RATE), 3),
     }
-    if not a.stock and (got := v.them()):  # S3's "keep their voice", then a next call knows it at once
-        import tempfile
+    if not a.stock:  # S3's "keep their voice" (refused with two people on their side), then a next call knows it
+        got, summary['keep'] = v.them()
+        if got:
+            import tempfile
 
-        from peresmeshnik import voice as profiles
-        with tempfile.TemporaryDirectory() as tmp:
-            profiles.save_them('bench', got[1], got[2], got[0], root=Path(tmp))
-            back = live.kept(a.engine, Path(tmp))
-            summary['kept_roundtrip'] = len(back) == 1 and np.array_equal(back[0][1], got[0][a.engine][0])
+            from peresmeshnik import voice as profiles
+            with tempfile.TemporaryDirectory() as tmp:
+                profiles.save_them('bench', got[1], got[2], got[0], root=Path(tmp))
+                back = live.kept(a.engine, Path(tmp))
+                summary['kept_roundtrip'] = len(back) == 1 and np.array_equal(back[0][1], got[0][a.engine][0])
     (a.out / 'summary.json').write_text(json.dumps(summary, ensure_ascii=False, indent=1))
     print(json.dumps(summary, ensure_ascii=False))
 

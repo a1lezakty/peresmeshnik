@@ -452,3 +452,96 @@ def test_onnxruntime_errors_give_the_stock_voice(monkeypatch, tmp_path):
     d = side._local(s)
     assert isinstance(d, FakeDirection) and not isinstance(d, Warm) and 'out of memory' in side.errors[0]
 
+
+
+def live(state):
+    """A voice made during the call, as voices/live.py's LiveProfile: no folder, the engine's state."""
+    return types.SimpleNamespace(name='them', engine='xtts', path=None, state=state)
+
+
+def test_a_voice_from_a_sample_speaks_without_a_folder(pack, me):
+    """voices/live.py: condition(pcm, sr) gives the runner's id of the voice's state; a synth by it speaks in that voice
+    (the stub says the sample's mean), a profile folder as before."""
+    a, b = (pack.condition(np.full(16_000, x, np.float32), 16_000) for x in (0.25, 0.5))
+    assert isinstance(a, str) and a != b
+    assert np.all(say(pack, 'hello', live(a)) == np.float32(0.25)) and len(say(pack, 'hello', live(b))) == 3 * 2400
+    assert np.all(say(pack, 'hello', live(b)) == np.float32(0.5)) and np.all(say(pack, 'hello', me) == np.float32(0.05))
+    gen = pack.synth('slow', 'en', live(a))  # barge-in as with a folder
+    next(gen)
+    gen.close()
+    assert np.all(say(pack, 'hi', live(a)) == np.float32(0.25))
+
+
+def test_a_state_the_runner_no_longer_has_is_a_clause_error(pack, tmp_path, caplog):
+    """The runner keeps its last MAX_STATES (one a synth used stays); an older one, or one of a runner before (a
+    restart), is that clause's error: left out with the reason, the clone goes on."""
+    limit = int(re.search(r'^MAX_STATES = (\d+)', RUNNER.read_text(), re.M)[1])
+    a, b = (pack.condition(np.full(2400, x, np.float32), 24_000) for x in (0.25, 0.5))
+    say(pack, 'hi', live(a))  # used: newer than b now
+    for _ in range(limit - 1):
+        pack.condition(np.full(2400, 0.1, np.float32), 24_000)
+    assert np.all(say(pack, 'hi', live(a)) == np.float32(0.25))
+    assert list(pack.synth('hi', 'en', live(b))) == [] and 'no voice state' in caplog.text  # b: dropped
+    assert len(say(pack, 'hi', live(a))) == 3 * 2400  # it goes on
+    other = VoicePackClone(tmp_path / 'xtts-v2', cmd=STUB, log=tmp_path / 'other.log')
+    try:
+        assert list(other.synth('hi', 'en', live(a))) == []  # another runner's id: not a voice there
+    finally:
+        other.close()
+
+
+def test_condition_from_another_thread_waits_for_the_stream(pack, me):
+    """FIXES addon 1: voices/live.py conditions the other person's voice on its own thread while the speak thread reads a
+    synth's stream from the same runner: one request at a time on the pipe (condition waits for the stream's end), both
+    replies whole, instead of a JSON line read as a chunk's length (a hang, the runner killed)."""
+    import threading
+    gen = pack.synth('hello', 'en', me)
+    first = next(gen)  # the stream is open: its other chunks are still in the pipe
+    got = []
+    t = threading.Thread(target=lambda: got.append(pack.condition(np.full(16_000, 0.25, np.float32), 16_000)))
+    t.start()
+    t.join(0.5)
+    assert t.is_alive() and not got  # waits for the stream
+    rest = list(gen)
+    t.join(10)
+    assert not t.is_alive() and isinstance(got[0], str)
+    assert len(first) + sum(map(len, rest)) == 3 * 2400 and np.all(np.concatenate([first, *rest]) == np.float32(0.05))
+    assert np.all(say(pack, 'hi', live(got[0])) == np.float32(0.25))  # the voice it made speaks
+
+
+class FastTts:
+    """A clone that keeps up: 0.1 s of speech at once."""
+    sample_rate = 24_000
+
+    def __init__(self, name):
+        self.name = name
+
+    def synth(self, text, lang, voice=None, speed=1.0):
+        yield np.full(self.sample_rate // 10, 0.1, np.float32)
+
+    def close(self):
+        pass
+
+
+def test_qwen3_that_does_not_start_gives_way_to_xtts(monkeypatch, tmp_path):
+    """FIXES addon 6: the addon's Qwen3-TTS chosen, its runner does not start (CloneUnavailable): the next engine,
+    XTTS-v2, speaks my cloned voice, said why; not the stock voice."""
+    from peresmeshnik import languages, models
+    side, s, made, _ = me_side(monkeypatch, tmp_path, key=False)
+    monkeypatch.setattr(languages, 'addon_here', lambda: True)
+    monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(8.0, (572, 83), 8.6))
+    monkeypatch.setattr(models, 'is_fetched', lambda m, base=None: True)
+    monkeypatch.setattr('peresmeshnik.voice.mine', lambda name, root=None: Voice(name, 'xtts', tmp_path))
+    assert languages.direction(s, 'me_to_them').tts == 'qwen3-tts'
+    tried = []
+
+    def make(model_id, model_dir, threads=2):
+        tried.append(model_id)
+        if model_id == 'qwen3-tts':
+            raise CloneUnavailable('the voice pack: ModuleNotFoundError: faster_qwen3_tts')
+        return FastTts(model_id)
+    monkeypatch.setattr(clone, 'make_engine', make)
+    d = side._local(s)
+    assert tried == ['qwen3-tts', 'xtts-v2'] and made[0].name == 'xtts-v2' and d.warm == 1
+    assert side.errors == ['note: me → them: xtts-v2 speaks your cloned voice: qwen3-tts did not start (the voice pack: '
+                           'ModuleNotFoundError: faster_qwen3_tts)']

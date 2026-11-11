@@ -4,6 +4,7 @@ understands and that sounds like the speaker, and where the thresholds go.
     python bench/voice_check.py refs OUT                  # here: references from the bench set + degraded copies
     python bench/voice_check.py clone OUT --model-dir D   # GPU box (voice pack + speechbrain): enroll, say the
                                                           # test phrases in the other language, similarity
+    python bench/voice_check.py qwen3 OUT --model-dir D   # GPU box (voice pack + addon): the same on Qwen3-TTS
     python bench/voice_check.py judge OUT                 # here: the app's ASR (GigaAM / Parakeet) -> WER, table
 
 References (~40 s each): 4 LibriSpeech test-clean speakers (CC-BY-4.0) and 4 chapters of the Russian
@@ -143,6 +144,43 @@ def clone_main(out: Path, model_dir: Path):
     (out / 'clone.json').write_text(json.dumps(rows, ensure_ascii=False, indent=1), encoding='utf-8')
 
 
+def qwen3_main(out: Path, model_dir: Path):
+    """The clone pass on Qwen3-TTS (the voice pack's addon): its similarity is the cosine of its own speaker vectors
+    (qwen3.Engine.similarity), another scale than XTTS's. -> OUT/clone-qwen3.json and the numbers per case."""
+    import shutil
+
+    from peresmeshnik.local import qwen3
+    rows = json.loads((out / 'refs.json').read_text(encoding='utf-8'))
+    eng = qwen3.Engine(model_dir)
+
+    def emb(x, sr):
+        e = eng._vector(x, sr).float().cpu().numpy().ravel()
+        return e / np.linalg.norm(e)
+    clean = {r['ref']: sf.read(out / 'refs' / r['wav'], dtype='float32')[0] for r in rows if r['case'] == 'clean'}
+    ref_q = {k: emb(v[:qwen3.REF_S * SR], SR) for k, v in clean.items()}  # as latents(): the first 10 s
+    (out / 'clone-qwen3').mkdir(exist_ok=True)
+    for r in rows:
+        v = out / 'voices-qwen3' / f'{r["ref"]}_{r["case"]}'
+        v.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(out / 'refs' / r['wav'], v / 'reference.wav')
+        lang = OTHER[r['lang']]
+        audio = [np.concatenate(list(eng.synth(text, lang, v))) for text in voice.TEST_PHRASES[lang]]
+        for i, pcm in enumerate(audio):
+            sf.write(out / 'clone-qwen3' / f'{v.name}_{i}.wav', pcm, eng.sample_rate)
+        pcm = np.concatenate(audio)
+        e = emb(pcm, eng.sample_rate)
+        r |= {'out_lang': lang, 'sim_app': round(eng.similarity(v, pcm, eng.sample_rate), 3),  # vs its own recording
+              'sim_qwen3': round(float(e @ ref_q[r['ref']]), 3),
+              'imp_qwen3': [round(float(e @ ref_q[k]), 3) for k in clean if k[:2] == r['lang'] and k != r['ref']]}
+        print(r, flush=True)
+    (out / 'clone-qwen3.json').write_text(json.dumps(rows, ensure_ascii=False, indent=1), encoding='utf-8')
+    for case in dict.fromkeys(r['case'] for r in rows):
+        own = [r['sim_app'] for r in rows if r['case'] == case]
+        print(f'{case}: vs own recording min {min(own):.2f} median {np.median(own):.2f}')
+    imp = [x for r in rows if r['case'] == 'clean' for x in r['imp_qwen3']]
+    print(f'another speaker (clean): median {np.median(imp):.2f} p90 {np.percentile(imp, 90):.2f} max {max(imp):.2f}')
+
+
 def judge_main(out: Path):
     from peresmeshnik import config
     from peresmeshnik.local.asr import OnnxAsr
@@ -171,8 +209,9 @@ def judge_main(out: Path):
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
-    ap.add_argument('cmd', choices=['refs', 'clone', 'judge'])
+    ap.add_argument('cmd', choices=['refs', 'clone', 'qwen3', 'judge'])
     ap.add_argument('out', type=Path)
     ap.add_argument('--model-dir', type=Path)
     a = ap.parse_args()
-    {'refs': lambda: refs_main(a.out), 'clone': lambda: clone_main(a.out, a.model_dir), 'judge': lambda: judge_main(a.out)}[a.cmd]()
+    {'refs': lambda: refs_main(a.out), 'clone': lambda: clone_main(a.out, a.model_dir),
+     'qwen3': lambda: qwen3_main(a.out, a.model_dir), 'judge': lambda: judge_main(a.out)}[a.cmd]()

@@ -568,7 +568,14 @@ class Side:
             model_dir = models.path(pair.tts)  # there: _clone_not_ready looked
             try:  # pair.tts: languages.clone_engine's for this computer and the language
                 v = voice.mine(s.local.voice)  # M-20: only my own voice, confirmed at the microphone; a contact's never
-                tts = make_engine(pair.tts, model_dir, threads=s.local.threads)
+                try:
+                    tts = make_engine(pair.tts, model_dir, threads=s.local.threads)
+                except RuntimeError as e:  # the addon's Qwen3 did not start: the next engine (XTTS-v2), not the stock voice
+                    nxt = languages.clone_engine(self.tgt, skip=(pair.tts,))[0] if models.get(pair.tts).addon else None
+                    if not nxt or _clone_not_ready(s, self.tgt, nxt):
+                        raise
+                    self.on_error(f'note: {ARROW[self.name]}: {nxt} speaks your cloned voice: {pair.tts} did not start ({e})')
+                    tts = make_engine(nxt, models.path(nxt), threads=s.local.threads)
             except (RuntimeError, OSError, ValueError) as e:  # not my confirmed voice (voice.NotMine), no CUDA, no runner
                 return self._fallback(s, e)
             d = make_local(self.src, self.tgt, tts=tts, voice=v, **kw)

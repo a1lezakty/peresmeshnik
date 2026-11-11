@@ -58,19 +58,19 @@ Linux with an NVIDIA GPU they can run here ([below](#trying-it-from-source-linux
 <!-- languages:begin (generated: python -m peresmeshnik.languages) -->
 | Language | Speech recognition | Stock voice | Your cloned voice | Cloud (Gemini Live) |
 |---|---|---|---|---|
-| English | parakeet-tdt-0.6b-v3 | piper-en_US-john-medium | xtts-v2 (NVIDIA GPU) or pocket-tts-en | ✔ |
-| Русский (Russian) | gigaam-v3-e2e-ctc | piper-ru_RU-dmitri-medium | xtts-v2 (NVIDIA GPU) or pocket-tts-ru | ✔ |
+| English | parakeet-tdt-0.6b-v3 | piper-en_US-john-medium | qwen3-tts (NVIDIA GPU, voice pack addon) or xtts-v2 (NVIDIA GPU) or pocket-tts-en | ✔ |
+| Русский (Russian) | gigaam-v3-e2e-ctc | piper-ru_RU-dmitri-medium | qwen3-tts (NVIDIA GPU, voice pack addon) or xtts-v2 (NVIDIA GPU) or pocket-tts-ru | ✔ |
 | Українська (Ukrainian) | parakeet-tdt-0.6b-v3 | piper-uk_UA-ukrainian_tts-medium | — (cloud or a stock voice) | ✔ |
-| Deutsch (German) | parakeet-tdt-0.6b-v3 | piper-de_DE-thorsten-medium | xtts-v2 (NVIDIA GPU) or pocket-tts-de | ✔ |
-| Français (French) | fastconformer-fr-pc | piper-fr_FR-siwis-medium | xtts-v2 (NVIDIA GPU) or pocket-tts-fr | ✔ |
-| Español (Spanish) | parakeet-tdt-0.6b-v3 | piper-es_MX-ald-medium | xtts-v2 (NVIDIA GPU) or pocket-tts-es | ✔ |
-| Italiano (Italian) | parakeet-tdt-0.6b-v3 | piper-it_IT-paola-medium | xtts-v2 (NVIDIA GPU) or pocket-tts-it | ✔ |
-| Português (Portuguese) | parakeet-tdt-0.6b-v3 | piper-pt_BR-faber-medium | xtts-v2 (NVIDIA GPU) or pocket-tts-pt | ✔ |
+| Deutsch (German) | parakeet-tdt-0.6b-v3 | piper-de_DE-thorsten-medium | qwen3-tts (NVIDIA GPU, voice pack addon) or xtts-v2 (NVIDIA GPU) or pocket-tts-de | ✔ |
+| Français (French) | fastconformer-fr-pc | piper-fr_FR-siwis-medium | qwen3-tts (NVIDIA GPU, voice pack addon) or xtts-v2 (NVIDIA GPU) or pocket-tts-fr | ✔ |
+| Español (Spanish) | parakeet-tdt-0.6b-v3 | piper-es_MX-ald-medium | qwen3-tts (NVIDIA GPU, voice pack addon) or xtts-v2 (NVIDIA GPU) or pocket-tts-es | ✔ |
+| Italiano (Italian) | parakeet-tdt-0.6b-v3 | piper-it_IT-paola-medium | qwen3-tts (NVIDIA GPU, voice pack addon) or xtts-v2 (NVIDIA GPU) or pocket-tts-it | ✔ |
+| Português (Portuguese) | parakeet-tdt-0.6b-v3 | piper-pt_BR-faber-medium | qwen3-tts (NVIDIA GPU, voice pack addon) or xtts-v2 (NVIDIA GPU) or pocket-tts-pt | ✔ |
 | Polski (Polish) | parakeet-tdt-0.6b-v3 | piper-pl_PL-gosia-medium | xtts-v2 (NVIDIA GPU) | ✔ |
 | Türkçe (Turkish) | — (cloud; whisper-large-v3-turbo from source with onnxruntime-gpu on an NVIDIA GPU) | piper-tr_TR-dfki-medium | xtts-v2 (NVIDIA GPU) | ✔ |
-| 中文 (Chinese) | — (cloud; whisper-large-v3-turbo from source with onnxruntime-gpu on an NVIDIA GPU) | — (cloud) | xtts-v2 (NVIDIA GPU) | ✔ |
-| 日本語 (Japanese) | parakeet-tdt_ctc-0.6b-ja | piper-ja_JP-hi_fi_captain-medium | xtts-v2 (NVIDIA GPU) | ✔ |
-| 한국어 (Korean) | — (cloud; whisper-large-v3-turbo from source with onnxruntime-gpu on an NVIDIA GPU) | piper-ko_KR-kss-medium | xtts-v2 (NVIDIA GPU) | ✔ |
+| 中文 (Chinese) | — (cloud; whisper-large-v3-turbo from source with onnxruntime-gpu on an NVIDIA GPU) | — (cloud) | qwen3-tts (NVIDIA GPU, voice pack addon) or xtts-v2 (NVIDIA GPU) | ✔ |
+| 日本語 (Japanese) | parakeet-tdt_ctc-0.6b-ja | piper-ja_JP-hi_fi_captain-medium | qwen3-tts (NVIDIA GPU, voice pack addon) or xtts-v2 (NVIDIA GPU) | ✔ |
+| 한국어 (Korean) | — (cloud; whisper-large-v3-turbo from source with onnxruntime-gpu on an NVIDIA GPU) | piper-ko_KR-kss-medium | qwen3-tts (NVIDIA GPU, voice pack addon) or xtts-v2 (NVIDIA GPU) | ✔ |
 | العربية (Arabic) | fastconformer-ar-pcd | — (cloud) | xtts-v2 (NVIDIA GPU) | ✔ |
 
 Translation on this computer: any pair of the 14 (142 of the 182 through English).
@@ -159,7 +159,14 @@ Windows 10 version 2004 or later, or Windows 11 (x64).
    taken with all of its sound, other tabs too.
 6. Without an NVIDIA GPU, what you say is spoken to the other side by the cloud (Gemini) or, on this computer, by a
    stock voice. Your own cloned voice needs an NVIDIA GPU with 6 GB or more; it adds the clone model (1.9 GB, up to
-   4.7 GB with the pair's models) and the voice pack the wizard installs (3.7 GB to download, 8.2 GB on disk).
+   4.7 GB with the pair's models) and the voice pack the wizard installs (3.7 GB to download, 8.2 GB on disk). With a
+   card of 8 GB, the pack's addon **Qwen3 + Chatterbox** (tray → Components…, only when you tick it: 75 MB of packages
+   into the same pack, 170 MB on disk, and its two models, 5.7 GB) speaks English, Russian, German, French, Spanish,
+   Italian, Portuguese, Chinese, Japanese and Korean with Qwen3-TTS (the first sound in ~0.1 s), Chatterbox
+   Multilingual saying again a clause Qwen3 does not stop on; Polish, Turkish and Arabic stay with XTTS-v2. Without the
+   addon, or on a 6 GB card, XTTS-v2 speaks them all. With both directions cloned on one card, the other person's voice
+   takes what is left beside yours: on 8 GB yours is Qwen3-TTS (with Chatterbox up to ~5.9 GB), theirs XTTS-v2 (~2 GB);
+   where nothing fits beside, theirs is Pocket TTS on the CPU or a stock voice, said why.
 
 The hotkey Ctrl+Alt+Space switches between translation and your live voice (Settings to change it; a combo that
 Windows keeps for itself, such as Alt+Tab or Win+Space, or that another app has taken is refused with the reason).
@@ -189,6 +196,11 @@ Your cloned voice runs in a venv of its own (PyTorch and coqui-tts, ~7 GB with C
 (every package pinned and checked by its SHA-256, and so is the setuptools that builds the two packages that come as source,
 docopt and unidic-lite; with CPU-only PyTorch: `requirements-linux.txt` in both places and `--index-strategy unsafe-best-match`), then start the
 app with `PERESMESHNIK_VOICE_CMD="$HOME/.local/share/Peresmeshnik/clone-venv/bin/python voice-runner/voice_runner.py"`.
+The voice pack's addon Qwen3 + Chatterbox (an NVIDIA GPU with 8 GB) goes into the same venv:
+`uv pip install -p ~/.local/share/Peresmeshnik/clone-venv/bin/python --no-deps --require-hashes -r voice-runner/requirements-linux-addon-cuda.txt --build-constraints voice-runner/requirements-linux-addon-cuda.txt`
+(the whole venv pinned, `--no-deps` because chatterbox-tts asks for torch 2.6 and the pack has 2.8; CPU-only:
+`requirements-linux-addon.txt` and `--index-strategy unsafe-best-match`), then start the app with
+`PERESMESHNIK_VOICE_ADDON=1` too: only then is Qwen3-TTS chosen.
 Turkish, Chinese and Korean speech recognition on an NVIDIA GPU (Whisper, 1.6 GB more) needs onnxruntime with CUDA in
 the app's own environment, in place of the CPU one (CUDA 12 and cuDNN 9 installed): `uv pip uninstall onnxruntime`,
 `uv pip install onnxruntime-gpu==1.31.1`, then start with `uv run --no-sync peresmeshnik app` (a plain `uv run` puts
@@ -302,6 +314,14 @@ Apache-2.0, BSD-3-Clause; [docs/MODELS.md](docs/MODELS.md)); the XTTS-v2 model i
 an NVIDIA GPU with 6 GB of memory or more, compute capability 6.1 or newer (GeForce GTX 10xx and later; a GTX 10xx is
 not measured: the app measures the clone at start and uses the stock voice if the card is slower than real time) and
 driver 570.65 or newer (528.33 to 570.64: not checked, may work); the wizard checks before the download.
+Its addon Qwen3 + Chatterbox (Components…, only when ticked; a card of 8 GB) adds to the pack, with what they pull in
+(checked in the packages' own metadata and license files, 2026-11-11): faster-qwen3-tts, chatterbox-tts,
+resemble-perth, pyloudnorm, conformer, onnxruntime, zipp, setuptools 69.5.1 (MIT); qwen-tts-hf, transformers 5.16.1,
+huggingface-hub 1.33.0, accelerate, diffusers, s3tokenizer, onnx, flatbuffers, ml-dtypes (its Eigen headers MPL-2.0),
+importlib-metadata, lazy-importer (Apache-2.0); sox, omegaconf, httpx, httpcore (BSD-3-Clause) — no GPL, AGPL or LGPL
+([docs/MODELS.md](docs/MODELS.md)); not pykakasi (GPL-3.0: Chatterbox's Japanese romanization) or gradio. The models
+are Qwen3-TTS 0.6B Base (Apache-2.0) and Chatterbox Multilingual (MIT; every sound it makes carries Resemble AI's
+inaudible Perth watermark).
 
 ---
 

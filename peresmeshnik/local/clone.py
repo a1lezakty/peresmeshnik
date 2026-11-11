@@ -68,6 +68,10 @@ class XttsClone(xtts.Engine):
         return Voice(name=v.name, engine='xtts', path=v.path, meta=v.meta)
 
 
+def _b64(pcm: np.ndarray) -> str:
+    return base64.b64encode(np.asarray(pcm, '<f4').tobytes()).decode()
+
+
 def voice_cmd() -> list[str] | None:
     """How to start the voice pack's runner: $PERESMESHNIK_VOICE_CMD, else the installed pack of this app version in
     <data dir>/voice-pack (local/voicepack.py) with its own python.exe; None: no such pack here."""
@@ -132,6 +136,7 @@ class VoicePackClone:
     def __init__(self, model_dir: Path | str, threads: int = 2, cmd: list[str] | None = None, start_s: float = 120.0,
                  reply_s: float = 30.0, log: Path | None = None):
         self._errors = 0
+        self._lock = threading.Lock()  # one request on the pipe at a time: a synth for its whole stream (FIXES addon 1)
         cmd = [*(cmd or voice_cmd() or []), '--model-dir', str(model_dir), '--threads', str(threads)]
         self._log, self.reply_s, self._hung = log or config.data_dir() / 'logs' / 'voice-runner.log', reply_s, False
         try:  # a file, not the app's stderr: a windowed .exe has none and the runner's first traceback would kill it
@@ -206,46 +211,58 @@ class VoicePackClone:
         return r
 
     def synth(self, text: str, lang: str, voice: Voice | None = None) -> Iterator[np.ndarray]:
+        """`voice`: a profile, or one with `state` (condition()'s id: a voice of the other person in a call)."""
         if voice is None:
             raise ValueError('the clone engine speaks only in an enrolled voice')
-        rid = self._send({'cmd': 'synth', 'text': text, 'lang': lang, 'voice': str(voice.path)})
-        try:
-            while n := self._u32():
-                if n == ERR:
-                    r = json.loads(self._wait(self._p.stdout.readline) or b'{}')
-                    if not r:  # it died or was killed (hung) right then: the clone's death, said now
-                        raise self._exited()
-                    self._errors += 1  # it lives on: this clause is lost, not the clone (L-43)
-                    if self._errors >= self.MAX_ERRORS:
-                        raise RuntimeError(f'the voice pack: {r.get("error")}')
-                    log.warning('the voice pack could not say a clause, it is left out: %s', r.get('error'))
-                    return
-                yield np.frombuffer(self._read(n), '<f4')
-            self._errors = 0
-        except GeneratorExit:  # the caller stopped (barge-in): the runner stops at its next chunk; the rest is read away
-            self._send({'cmd': 'stop', 'id': rid})
-            while n := self._u32():
-                if n == ERR:
-                    self._wait(self._p.stdout.readline)
-                    break
-                self._read(n)
-            raise
+        st = getattr(voice, 'state', None)
+        with self._lock:  # the whole stream: condition() from the other person's thread waits for its end
+            rid = self._send({'cmd': 'synth', 'text': text, 'lang': lang,
+                              **({'state': st} if st is not None else {'voice': str(voice.path)})})
+            try:
+                while n := self._u32():
+                    if n == ERR:
+                        r = json.loads(self._wait(self._p.stdout.readline) or b'{}')
+                        if not r:  # it died or was killed (hung) right then: the clone's death, said now
+                            raise self._exited()
+                        self._errors += 1  # it lives on: this clause is lost, not the clone (L-43)
+                        if self._errors >= self.MAX_ERRORS:
+                            raise RuntimeError(f'the voice pack: {r.get("error")}')
+                        log.warning('the voice pack could not say a clause, it is left out: %s', r.get('error'))
+                        return
+                    yield np.frombuffer(self._read(n), '<f4')
+                self._errors = 0
+            except GeneratorExit:  # the caller stopped (barge-in): the runner stops at its next chunk; the rest read away
+                self._send({'cmd': 'stop', 'id': rid})
+                while n := self._u32():
+                    if n == ERR:
+                        self._wait(self._p.stdout.readline)
+                        break
+                    self._read(n)
+                raise
+
+    def _ask(self, req: dict) -> dict:
+        """One request and its reply, alone on the pipe."""
+        with self._lock:
+            self._send(req)
+            return self._reply()
 
     def latents(self, voice: Voice, fresh: bool = False) -> Path:
         """Conditioning of a profile, computed by the runner and cached as `xtts.pt` next to the recording."""
-        self._send({'cmd': 'latents', 'voice': str(voice.path), 'fresh': fresh})
-        self._reply()
+        self._ask({'cmd': 'latents', 'voice': str(voice.path), 'fresh': fresh})
         return Path(voice.path) / 'xtts.pt'
 
     def similarity(self, voice: Voice, pcm: np.ndarray, sr: int) -> float:
-        b = base64.b64encode(np.asarray(pcm, '<f4').tobytes()).decode()
-        self._send({'cmd': 'similarity', 'voice': str(voice.path), 'pcm': b, 'sr': sr})
-        return float(self._reply()['similarity'])
+        return float(self._ask({'cmd': 'similarity', 'voice': str(voice.path), 'pcm': _b64(pcm), 'sr': sr})['similarity'])
+
+    def condition(self, pcm: np.ndarray, sr: int) -> str:
+        """A voice from a sample, no profile folder (voices/live.py): the runner's id of its state, for synth() as a
+        voice's `state`. It lives in the runner's memory (its last MAX_STATES): gone with this runner, and a synth with
+        it then is that clause's error (left out, as any)."""
+        return self._ask({'cmd': 'condition', 'pcm': _b64(pcm), 'sr': sr})['state']
 
     def stats(self) -> dict:
         """What the runner sees now: VRAM free and the peak so far (bench/voice_pack.py)."""
-        self._send({'cmd': 'info'})
-        return self._reply()
+        return self._ask({'cmd': 'info'})
 
     def enroll(self, pcm: np.ndarray, sample_rate: int, transcript: str | None = None, name: str = 'me',
                lang: str = 'ru', root: Path | None = None) -> Voice:

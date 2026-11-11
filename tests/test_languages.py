@@ -331,26 +331,77 @@ def test_clone_engine_on_this_computer_asks_the_card_once(monkeypatch):
     monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(8.0, (572, 83), 8.6))
     monkeypatch.setattr(models, 'hf_token', lambda: 'hf_test')
     monkeypatch.setattr(languages, 'pack_here', lambda: True)
-    assert languages.clone_engine('en') == ('xtts-v2', '')  # Qwen3-TTS after it until the voice pack has its packages
+    monkeypatch.setattr(languages, 'addon_here', lambda: False)
+    assert languages.clone_engine('en') == ('xtts-v2', '')  # Qwen3-TTS only with the voice pack's addon
     monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(4.0, (572, 83), 8.6))
     assert languages.clone_engine('en') == ('pocket-tts-en', '')  # too small a card: Pocket TTS on the CPU
     assert 'at least 6 GB' in languages.clone_engine('pl')[1]
 
 
 def test_qwen3_brings_its_fallback_engine():
-    """Qwen3-TTS on an NVIDIA GPU (once it is the first clone engine): Chatterbox Multilingual (its `fallback`) is
+    """Qwen3-TTS on an NVIDIA GPU (with the voice pack's addon): Chatterbox Multilingual (its `fallback`) is
     downloaded with it, it takes over a voice whose clause breaks down (voice pack, local/qwen3.py); XTTS-v2 stays for
     Polish, Turkish, Arabic."""
     s = config.Settings(me_to_them='local')
     assert models.get('qwen3-tts').fallback == 'chatterbox-mtl'
     import unittest.mock as um
     with um.patch.object(languages, 'gpu', lambda engine='': True), \
+            um.patch.object(models, 'is_fetched', lambda m, base=None: True), \
             um.patch.object(languages, 'nvidia_once', lambda: languages.Gpu(8.0, (572, 83), 8.6)), \
-            um.patch.object(languages, 'clone_engines', lambda: ['qwen3-tts', 'xtts-v2']):
+            um.patch.object(languages, 'pack_here', lambda: True), um.patch.object(languages, 'addon_here', lambda: True):
         ids = languages.needed_models(s)
         assert {'qwen3-tts', 'chatterbox-mtl'} <= set(ids) and 'xtts-v2' not in ids
         s.their_lang = 'pl'
         assert 'xtts-v2' in languages.needed_models(s) and 'chatterbox-mtl' not in languages.needed_models(s)
+
+
+def test_qwen3_speaks_where_the_voice_packs_addon_is_and_the_card_has_8_gb(monkeypatch):
+    """Stage 8: Qwen3-TTS (before XTTS-v2 in the registry) only with the pack's addon "Qwen3 + Chatterbox" and a card of
+    8 GB (its `vram`: with Chatterbox after a breakdown 5.6-5.9 GB); without the addon, or on 6 GB, XTTS-v2 as before;
+    without the pack the engine that needs only the pack (the wizard offers the pack, not the addon)."""
+    card = {'8': languages.Gpu(8.0, (572, 83), 8.6), '6': languages.Gpu(6.0, (572, 83), 8.6)}
+    has = {'gpu': '8', 'pack': True, 'addon': True}
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
+    monkeypatch.setattr(models, 'is_fetched', lambda m, base=None: True)  # the addon's models are there
+    monkeypatch.setattr(languages, 'nvidia_once', lambda: card[has['gpu']])
+    monkeypatch.setattr(languages, 'pack_here', lambda: has['pack'])
+    monkeypatch.setattr(languages, 'addon_here', lambda: has['addon'])
+    monkeypatch.setattr(models, 'hf_token', lambda: 'hf_test')
+    engine = languages.clone_engine
+    assert engine('en') == engine('ru') == engine('zh') == ('qwen3-tts', '') and engine('pl') == ('xtts-v2', '')
+    s = config.Settings(me_to_them='local')
+    assert {'qwen3-tts', 'chatterbox-mtl'} <= set(languages.needed_models(s)) and 'xtts-v2' not in languages.needed_models(s)
+    has['gpu'] = '6'
+    assert engine('en') == ('xtts-v2', '')
+    assert 'at least 8 GB' in languages.clone_why('qwen3-tts', 'en', card['6'])
+    assert languages.clone_why('xtts-v2', 'en', card['6']) == ''
+    has.update(gpu='8', addon=False)
+    assert engine('en') == ('xtts-v2', '')
+    assert languages.not_here('qwen3-tts') == "the voice pack's addon Qwen3 + Chatterbox is not installed (Components…)"
+    assert languages.not_here('xtts-v2') == ''
+    has['pack'] = False
+    assert engine('en') == ('pocket-tts-en', '')  # FIXES 9: the CPU engine where it can
+    assert engine('zh') == ('xtts-v2', '')  # none can: the one that needs only the pack, not the addon's
+    assert languages.not_here('qwen3-tts') == languages.not_here('xtts-v2') == \
+        'the voice pack is not installed (setup wizard, "Your voice")'
+
+
+def test_the_addon_is_here_by_the_pack_or_by_the_runners_own_word(monkeypatch):
+    """Windows: the pack's addon state; a runner of one's own ($PERESMESHNIK_VOICE_CMD: Linux from source, the server):
+    $PERESMESHNIK_VOICE_ADDON=1 says its venv has requirements-linux-addon*.txt."""
+    from peresmeshnik.local import voicepack
+    monkeypatch.delenv('PERESMESHNIK_VOICE_CMD', raising=False)
+    monkeypatch.setenv('PERESMESHNIK_VOICE_ADDON', '1')
+    st = {'addon': 'none'}
+    monkeypatch.setattr(voicepack, 'state', lambda lock=None, where=None, addon=False: st['addon'] if addon else 'ready')
+    assert not languages.addon_here()
+    st['addon'] = 'ready'
+    assert languages.addon_here()
+    monkeypatch.setenv('PERESMESHNIK_VOICE_CMD', '/opt/clone/bin/python voice_runner.py')
+    st['addon'] = 'none'
+    assert languages.addon_here()
+    monkeypatch.delenv('PERESMESHNIK_VOICE_ADDON')
+    assert not languages.addon_here()
 
 
 def test_gated_weights_without_a_token_give_the_stock_voice(monkeypatch):
@@ -388,3 +439,41 @@ def test_an_nvidia_card_without_the_voice_pack_takes_pocket(monkeypatch):
     with pytest.raises(ValueError, match='not a clone engine'):
         make_engine('chatterbox-mtl', '/nowhere')
 
+
+
+def test_the_addon_without_its_models_leaves_xtts(monkeypatch):
+    """FIXES addon 3: the addon's packages are there but Qwen3's (or Chatterbox's) weights are not: XTTS-v2 speaks, ready
+    as it is, not the stock voice; with both downloaded Qwen3-TTS does."""
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
+    monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(12.0, (572, 83), 8.6))
+    monkeypatch.setattr(languages, 'pack_here', lambda: True)
+    monkeypatch.setattr(languages, 'addon_here', lambda: True)
+    have = {'qwen3-tts'}
+    monkeypatch.setattr(models, 'is_fetched', lambda m, base=None: m.id in have)
+    assert languages.clone_engine('ru') == ('xtts-v2', '')  # Chatterbox missing
+    have.add('chatterbox-mtl')
+    assert languages.clone_engine('ru') == ('qwen3-tts', '')
+
+
+def test_both_directions_cloned_share_the_card(monkeypatch):
+    """FIXES addon 5: them -> me's clone passes me -> them's engine (`beside`): on an 8 GB card Qwen3 (with Chatterbox)
+    and XTTS-v2 fit together, two Qwen3 do not, so their voice takes XTTS-v2; where nothing fits beside, the next engine
+    (Pocket on the CPU) or none, said why; on a 24 GB card both are Qwen3."""
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
+    monkeypatch.setattr(languages, 'pack_here', lambda: True)
+    monkeypatch.setattr(languages, 'addon_here', lambda: True)
+    monkeypatch.setattr(models, 'is_fetched', lambda m, base=None: True)
+    monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(8188 / 1024, (572, 83), 8.6))  # 8 GB as reported
+    me, _ = languages.clone_engine('en')
+    assert me == 'qwen3-tts' and languages.clone_engine('ru', 'them_to_me', beside=me) == ('xtts-v2', '')
+    assert languages.clone_engine('ru', 'them_to_me') == ('qwen3-tts', '')  # nothing beside it: the best one
+    monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(6.0, (572, 83), 8.6))
+    assert languages.clone_engine('en') == ('xtts-v2', '')  # Qwen3 needs 8 GB
+    assert languages.clone_engine('pl', 'them_to_me', beside='xtts-v2') == ('xtts-v2', '')  # 2 + 2 GB of 6
+    monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(7.5, (572, 83), 8.6))  # Qwen3 just fits alone
+    assert languages.clone_engine('en') == ('qwen3-tts', '')
+    assert languages.clone_engine('de', 'them_to_me', beside='qwen3-tts')[0] == 'pocket-tts-de'  # XTTS beside: 7.9 GB
+    engine, why = languages.clone_engine('pl', 'them_to_me', beside='qwen3-tts')
+    assert engine is None and 'does not fit on the NVIDIA GPU beside' in why
+    monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(24.0, (572, 83), 8.6))
+    assert languages.clone_engine('ru', 'them_to_me', beside='qwen3-tts') == ('qwen3-tts', '')

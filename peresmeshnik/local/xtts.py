@@ -2,7 +2,8 @@
 
 Imports only numpy, soundfile, torch and coqui-tts (TTS), never `peresmeshnik`: the voice pack's runner
 (voice-runner/voice_runner.py) loads this file on its own Python, where the app's package is not importable;
-`clone.XttsClone` uses the same code in-process. A voice is a profile folder (reference.wav, xtts.pt cache).
+`clone.XttsClone` uses the same code in-process. A voice is a profile folder (reference.wav, xtts.pt cache), or
+anything with `state`: condition()'s, a voice from a sample (the other person in a call, voices/live.py).
 """
 from __future__ import annotations
 
@@ -245,7 +246,10 @@ class Engine:
 
     def latents(self, voice) -> tuple:
         """XTTS conditioning of a profile: cached in memory and as `xtts.pt` next to the recording, with the recording's
-        SHA-256 (voice.json's ref_sha256): another recording there is conditioned again, never spoken from the old one."""
+        SHA-256 (voice.json's ref_sha256): another recording there is conditioned again, never spoken from the old one.
+        A voice with `state` brings its own."""
+        if (state := getattr(voice, 'state', None)) is not None:
+            return state
         key = str(folder(voice))
         if key not in self._latents:
             import torch
@@ -274,6 +278,12 @@ class Engine:
         gpt = self.model.get_gpt_cond_latents(x, COND_SR, length=6, chunk_length=6)
         spk = self.model.get_speaker_embedding(x, COND_SR)
         return {'gpt': gpt.cpu(), 'spk': spk.cpu()}
+
+    def condition(self, pcm: np.ndarray, sr: int) -> tuple:
+        """The state of a voice from a sample, no profile folder: its conditioning on the device, (gpt, spk) as
+        latents()'s; synth() speaks in it from anything with this as `state`."""
+        lat = self._condition(pcm, sr)
+        return lat['gpt'].to(self.device), lat['spk'].to(self.device)
 
     def similarity(self, voice, pcm: np.ndarray, sr: int) -> float:
         """How much `pcm` sounds like the profile: cosine of XTTS's own speaker embeddings (its speaker encoder, no

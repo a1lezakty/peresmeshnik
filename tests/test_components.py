@@ -370,3 +370,48 @@ def test_hugging_face_refusing_does_not_hold_the_wizard(no_token, monkeypatch):
     assert box.missing() == [] and 'accept its conditions' in box.state.text()
     assert not box.hf.isHidden() and box.hf.page == 'https://hf.example/pocket'
     assert 'Without Your cloned voice: pocket-tts-en: a stock voice speaks instead.' in box.without.text()
+
+
+def test_removing_the_pack_goes_through_its_lock(tmp_path, monkeypatch):
+    """FIXES addon 4: Remove of the voice pack is voicepack.uninstall: while its addon installs (the pack's lock taken)
+    it refuses with the reason and leaves the pack as it is; then it removes the pack, its marker first."""
+    monkeypatch.setattr(components, 'sys', SimpleNamespace(platform='win32'))
+    monkeypatch.delenv('PERESMESHNIK_VOICE_CMD', raising=False)
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
+    monkeypatch.setattr(languages, 'nvidia_once', lambda: CARD)
+    monkeypatch.setattr(voicepack, 'folder', lambda: tmp_path / 'voice-pack')
+    monkeypatch.setattr(voicepack, 'lock_file', lambda: lock(tmp_path))
+    (tmp_path / 'voice-pack').mkdir()
+    (tmp_path / 'voice-pack' / '.complete').write_text('x')
+    pack = {c.id: c for c in components.listing(config.Settings(me_to_them='local'), CARD)}[components.VOICE_PACK]
+    assert voicepack._BUSY.acquire(blocking=False)  # the addon's install runs
+    try:
+        with pytest.raises(voicepack.PackError, match='being installed or removed'):
+            pack.remove()
+        assert (tmp_path / 'voice-pack' / '.complete').exists()
+    finally:
+        voicepack._BUSY.release()
+    pack.remove()
+    assert not (tmp_path / 'voice-pack').exists()
+
+
+def test_no_addon_row_without_its_models_in_the_registry(tmp_path, monkeypatch):
+    """The pack's addon section names registry models (qwen3-tts, chatterbox-mtl); a registry without them (another
+    build's, a test's stand-ins) gives no addon row instead of failing the whole list."""
+    monkeypatch.setattr(components, 'sys', SimpleNamespace(platform='win32'))
+    monkeypatch.delenv('PERESMESHNIK_VOICE_CMD', raising=False)
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
+    monkeypatch.setattr(languages, 'nvidia_once', lambda: CARD)
+    monkeypatch.setattr(voicepack, 'folder', lambda: tmp_path / 'voice-pack')
+    f = lambda n: {'url': 'https://x/' + n, 'sha256': '0' * 64, 'size': 1000}  # noqa: E731
+    spec = {'python': f('py.zip'), 'pip': f('pip.whl'), 'wheels': [f('torch.whl')], 'archives': [], 'installed_bytes': 8e9,
+            'addon': {'wheels': [f('qwen.whl')], 'archives': [], 'installed_bytes': 2e9,
+                      'models': ['qwen3-tts', 'chatterbox-mtl'], 'vram_gb': 7.5}}
+    (tmp_path / 'pack-windows.json').write_text(json.dumps(spec))
+    monkeypatch.setattr(voicepack, 'lock_file', lambda: tmp_path / 'pack-windows.json')
+    s = config.Settings(me_to_them='local')
+    assert components.ADDON in {c.id for c in components.listing(s, CARD)}
+    reg = {k: v for k, v in models.registry().items() if k != 'qwen3-tts'}
+    monkeypatch.setattr(models, 'registry', lambda: reg)
+    ids = {c.id for c in components.listing(s, CARD)}
+    assert components.ADDON not in ids and components.VOICE_PACK in ids

@@ -7,7 +7,9 @@ name: voice-pack
 # real XTTS-v2 on that pack's Python (CPU): every language's text tools and a de -> ja pair (tests/test_clone_langs.py).
 # The job linux: the same test in the Linux clone's venv (voice-runner/requirements-linux.txt: CPU torch, every
 # package pinned with its hashes, and the setuptools that builds the sdists docopt and unidic-lite too). The model
-# (1.9 GB) is cached.
+# (1.9 GB) is cached. Both jobs then add the pack's addon Qwen3 + Chatterbox (pack-windows.json `addon`,
+# requirements-linux-addon.txt): its packages import, the pack's Python takes its transformers 5.16.1, XTTS's tests pass
+# on it (Windows: removed and installed again first). Its models (5.7 GB) are not downloaded here.
 on:
   workflow_dispatch:
 
@@ -47,6 +49,19 @@ jobs:
           uv pip install -q -p "$RUNNER_TEMP/clone/bin/python" --index-strategy unsafe-best-match \
             --require-hashes -r voice-runner/requirements-linux.txt --build-constraints voice-runner/requirements-linux.txt
       - name: The clone in the new languages (text tools of each, a de -> ja pair through the runner)
+        env:
+          PERESMESHNIK_CLONE_MODEL: ${{ runner.temp }}/models/xtts-v2
+          PERESMESHNIK_REQUIRE_CLONE: '1'
+        run: |
+          PERESMESHNIK_CLONE_PY="$RUNNER_TEMP/clone/bin/python" \
+            uv run --with num2words==0.5.14 pytest -q -s -rA tests/test_clone_langs.py tests/test_clone.py
+      - name: The addon Qwen3 + Chatterbox into the same venv (requirements-linux-addon.txt, hashes required)
+        run: |
+          uv pip install -q -p "$RUNNER_TEMP/clone/bin/python" --no-deps --index-strategy unsafe-best-match --require-hashes \
+            -r voice-runner/requirements-linux-addon.txt --build-constraints voice-runner/requirements-linux-addon.txt
+          "$RUNNER_TEMP/clone/bin/python" -c "import importlib.metadata as m, faster_qwen3_tts, chatterbox.mtl_tts, perth, sox
+          v = m.version('transformers'); print('transformers', v); assert v == '5.16.1', v"
+      - name: The clone on the addon's transformers
         env:
           PERESMESHNIK_CLONE_MODEL: ${{ runner.temp }}/models/xtts-v2
           PERESMESHNIK_REQUIRE_CLONE: '1'
@@ -140,6 +155,35 @@ jobs:
           st = voicepack.state()
           print('state:', st)
           assert st == 'ready', st
+          EOF
+      - name: The addon Qwen3 + Chatterbox into the installed pack, removed and installed again
+        shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          uv run python - <<'EOF'
+          import subprocess, time
+
+          from peresmeshnik.local import voicepack
+
+          def version():
+              return subprocess.run([str(voicepack.python()), '-c', 'import importlib.metadata as m, transformers; '
+                                     'print(m.version("transformers"), transformers.__version__)'],
+                                    capture_output=True, text=True, check=True).stdout.split()
+
+          for attempt in (1, 2):
+              t0 = time.perf_counter()
+              voicepack.install(lambda stage, done, total, text='': stage == 'installing' and text and
+                                print('   pip:', text, flush=True), addon=True)
+              print(f'addon installed in {time.perf_counter() - t0:.0f} s:', voicepack.state(addon=True), flush=True)
+              assert voicepack.state(addon=True) == voicepack.state() == 'ready'
+              subprocess.run([str(voicepack.python()), '-c', 'import faster_qwen3_tts, chatterbox.mtl_tts, perth, sox, TTS; '
+                              'print("addon imports")'], check=True)
+              assert version() == ['5.16.1', '5.16.1'], version()  # Lib/addon before Lib/site-packages
+              if attempt == 1:
+                  voicepack.uninstall(addon=True)
+                  assert voicepack.state(addon=True) == 'none' and voicepack.state() == 'ready'
+                  assert version() == ['5.22.2', '5.22.2'], version()  # the pack as it was
           EOF
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
         with:

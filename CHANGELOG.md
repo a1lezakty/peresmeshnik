@@ -22,9 +22,9 @@ version is the top of its GitHub release notes (`.github/workflows/release.yml`)
   English to Italian weights download with your Hugging Face token, of an account that accepted Kyutai's conditions
   (without it: a stock voice, said why). Polish, Turkish, Chinese, Japanese, Korean and Arabic without an NVIDIA GPU: a
   stock voice, and the wizard says why.
-- On an NVIDIA GPU XTTS-v2 as before. Qwen3-TTS (streaming, the first sound in ~0.1 s, with Chatterbox Multilingual
-  saying again a clause it does not stop on) is in the voice pack's runner but not chosen yet: the pack does not have
-  its packages.
+- On an NVIDIA GPU XTTS-v2 as before; with the voice pack's addon **Qwen3 + Chatterbox** (Components…, only when ticked:
+  75 MB of packages and 5.7 GB of models, a card of 8 GB) Qwen3-TTS speaks en ru de fr es it pt zh ja ko (streaming, the
+  first sound in ~0.1 s), Chatterbox Multilingual saying again a clause it does not stop on.
 
 ## 0.3.0
 

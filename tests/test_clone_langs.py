@@ -80,6 +80,7 @@ def test_a_pair_without_ru_or_en_speaks_in_the_clone(env, tmp_path, monkeypatch)
     runner of this environment, a voice is conditioned from a recording and says the wizard's test phrase and a
     sentence with numbers in Japanese, and a phrase in German; each is speech of a plausible length."""
     py, model = env
+    monkeypatch.setattr(languages, 'addon_here', lambda: False)  # XTTS itself: with the addon Qwen3-TTS takes Japanese
     s = config.Settings(my_lang='de', their_lang='ja', me_to_them='local')
     d = languages.direction(s, 'me_to_them', has_gpu=True)
     assert (d.voice, d.tts) == ('clone', 'xtts-v2'), d

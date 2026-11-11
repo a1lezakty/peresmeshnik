@@ -4,6 +4,7 @@ pack's runner with the rest of the arguments (`python tests/qwen3_stub.py --kind
 
 Qwen3 says 0.1 in every sample, Chatterbox 0.3, so a test hears whose audio it got. Qwen3 streams 12 chunks of 2000
 samples (1 s), and never stops on a text with 'loop' in it (a runaway); Chatterbox says 1 s at once."""
+import os
 import pickle
 import sys
 import types
@@ -78,13 +79,23 @@ class ChatterboxMultilingualTTS:
         self.ckpt_dir, self.device, self.conds, self.said = ckpt_dir, device, None, []
 
     @classmethod
-    def from_local(cls, ckpt_dir, device):
+    def from_local(cls, ckpt_dir, device):  # as upstream's: MTLTokenizer's Cangjie converter asks the Hub for its file
         if not Path(ckpt_dir).is_dir():
             raise FileNotFoundError(f'{ckpt_dir}/ve.pt')
-        return cls(ckpt_dir, device)
+        m = cls(ckpt_dir, device)
+        hub = sys.modules['chatterbox.models.tokenizers.tokenizer'].hf_hub_download
+        m.cangjie = hub(repo_id='ResembleAI/chatterbox', filename='Cangjie5_TC.json', cache_dir=Path(ckpt_dir))
+        print(f'chatterbox: HF_HUB_OFFLINE={os.environ.get("HF_HUB_OFFLINE")} '
+              f'TRANSFORMERS_OFFLINE={os.environ.get("TRANSFORMERS_OFFLINE")}', file=sys.stderr, flush=True)
+        return m
 
-    def prepare_conditionals(self, wav_fpath, exaggeration=0.5):
-        self.conds = str(wav_fpath)
+    def prepare_conditionals(self, wav_fpath, exaggeration=0.5):  # a file in memory: ('sample', its seconds, its level)
+        if isinstance(wav_fpath, str):
+            self.conds = wav_fpath
+        else:
+            import soundfile as sf
+            x, sr = sf.read(wav_fpath, dtype='float32')
+            self.conds = ('sample', len(x) / sr, round(float(np.mean(x)), 3))
 
     def generate(self, text, language_id, cfg_weight=0.5, **kw):
         self.said.append((text, language_id, self.conds, cfg_weight))
@@ -106,7 +117,13 @@ def fakes() -> dict:
     cb, mtl = types.ModuleType('chatterbox'), types.ModuleType('chatterbox.mtl_tts')
     mtl.ChatterboxMultilingualTTS = ChatterboxMultilingualTTS
     cb.mtl_tts = mtl
-    return {'torch': torch, 'faster_qwen3_tts': fq, 'chatterbox': cb, 'chatterbox.mtl_tts': mtl}
+    models, toks, tok = (types.ModuleType(f'chatterbox.models{n}') for n in ('', '.tokenizers', '.tokenizers.tokenizer'))
+    def hub(repo_id, filename, **kw):
+        raise AssertionError(f'a network call: {repo_id}/{filename}')
+    tok.hf_hub_download = hub
+    cb.models, models.tokenizers, toks.tokenizer = models, toks, tok
+    return {'torch': torch, 'faster_qwen3_tts': fq, 'chatterbox': cb, 'chatterbox.mtl_tts': mtl,
+            'chatterbox.models': models, 'chatterbox.models.tokenizers': toks, 'chatterbox.models.tokenizers.tokenizer': tok}
 
 
 if __name__ == '__main__':

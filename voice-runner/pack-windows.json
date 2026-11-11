@@ -634,5 +634,156 @@
    "folder": "unidic-lite-1.0.8/unidic_lite"
   }
  ],
- "installed_bytes": 8239294578
+ "installed_bytes": 8239294578,
+ "addon": {
+  "wheels": [
+   {
+    "name": "accelerate",
+    "url": "https://files.pythonhosted.org/packages/9f/d2/c581486aa6c4fbd7394c23c47b83fa1a919d34194e16944241daf9e762dd/accelerate-1.12.0-py3-none-any.whl",
+    "sha256": "3e2091cd341423207e2f084a6654b1efcd250dc326f2a37d6dde446e07cabb11",
+    "size": 380935
+   },
+   {
+    "name": "chatterbox-tts",
+    "url": "https://files.pythonhosted.org/packages/54/37/11a7f06983bfd5ebba71eb2caa6660941b17b31f3c49d4a5fe9e1e804d31/chatterbox_tts-0.1.7-py3-none-any.whl",
+    "sha256": "83782500e3ad4e7c919132e9d7eb8755f29f57c5bde5ec48c655ca23a4eb113c",
+    "size": 108543
+   },
+   {
+    "name": "conformer",
+    "url": "https://files.pythonhosted.org/packages/3f/7d/714601ab8d790d77d4158af743895fb999216cb02fc6283ab8e54911a887/conformer-0.3.2-py3-none-any.whl",
+    "sha256": "b957faa683e9e75061257f77407318428f2ad0fb5262bfc2e9b55fc2fffdfa03",
+    "size": 4260
+   },
+   {
+    "name": "diffusers",
+    "url": "https://files.pythonhosted.org/packages/d5/68/a84d929518c9fbd65febcedd7810203bcac393f9cddd0603ec58df7f93f7/diffusers-0.29.0-py3-none-any.whl",
+    "sha256": "4c194d2379644a0f7ef9b4ff12c8cf5de4c6324e811265754f08e2f839b8cedb",
+    "size": 2213650
+   },
+   {
+    "name": "faster-qwen3-tts",
+    "url": "https://files.pythonhosted.org/packages/b3/e5/074b3ca7bb05f2d3564a456bc7620c24e65edeb1288c118a4b0506d55f11/faster_qwen3_tts-0.5.4-py3-none-any.whl",
+    "sha256": "714bfb6d0a70fac177eac48b0a750e04bd597ab9aa86d35c4271aa15d0d1b716",
+    "size": 43858
+   },
+   {
+    "name": "flatbuffers",
+    "url": "https://files.pythonhosted.org/packages/e8/2d/d2a548598be01649e2d46231d151a6c56d10b964d94043a335ae56ea2d92/flatbuffers-25.12.19-py2.py3-none-any.whl",
+    "sha256": "7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4",
+    "size": 26661
+   },
+   {
+    "name": "httpcore",
+    "url": "https://files.pythonhosted.org/packages/7e/f5/f66802a942d491edb555dd61e3a9961140fd64c90bce1eafd741609d334d/httpcore-1.0.9-py3-none-any.whl",
+    "sha256": "2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55",
+    "size": 78784
+   },
+   {
+    "name": "httpx",
+    "url": "https://files.pythonhosted.org/packages/2a/39/e50c7c3a983047577ee07d2a9e53faf5a69493943ec3f6a384bdc792deb2/httpx-0.28.1-py3-none-any.whl",
+    "sha256": "d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad",
+    "size": 73517
+   },
+   {
+    "name": "huggingface-hub",
+    "url": "https://files.pythonhosted.org/packages/fc/16/963096d224b80909432dc16561a615fd33d2d13beef3ce4c63fa25e40867/huggingface_hub-1.33.0-py3-none-any.whl",
+    "sha256": "04e434b06e100eddbce9a6e817d72693a7884b10a79bd67ab48080d5c07eb899",
+    "size": 846435
+   },
+   {
+    "name": "importlib-metadata",
+    "url": "https://files.pythonhosted.org/packages/7f/61/0c0fae37eb561d8fddb788cbae0f227051628d70d67498a8a116c1f547d7/importlib_metadata-10.2.0-py3-none-any.whl",
+    "sha256": "c7a4bf1c7479601f6b8e437cfc14f4f77028ba62a8f34ae95cd93d9774dfba51",
+    "size": 34109
+   },
+   {
+    "name": "lazy-importer",
+    "url": "https://files.pythonhosted.org/packages/0a/28/7ded071d0975dcc6d5d106ffbf7b3ca420f7caa3b8a235fa604b6e37032a/lazy_importer-0.1.0-py3-none-any.whl",
+    "sha256": "bd93fab7bef18e842eea02b839410954d37889140dc64ca4d9680aec6880c739",
+    "size": 12580
+   },
+   {
+    "name": "ml-dtypes",
+    "url": "https://files.pythonhosted.org/packages/ba/db/9c61ec2760b5cbfb1c6558d5c991a6d8fd3271053c32db20506a9a90272b/ml_dtypes-0.6.0-cp312-cp312-win_amd64.whl",
+    "sha256": "2a3e9d53925597fbffafd2a37048dadeddd0bdaba58058f6ae0869ed709a184d",
+    "size": 439333
+   },
+   {
+    "name": "omegaconf",
+    "url": "https://files.pythonhosted.org/packages/4f/bd/0d9f8247b0819385213d09564eda5c52d3673313c2414d51f72883ec24cd/omegaconf-2.4.0-py3-none-any.whl",
+    "sha256": "f141a664c777582405e3cc6e0545ecc79429e79f844995b1a6e71c35946a025c",
+    "size": 254152
+   },
+   {
+    "name": "onnx",
+    "url": "https://files.pythonhosted.org/packages/38/ce/102fd4a0b2a6d111a9c86745e084c4c68c0ee020eaa359a03a8d43e4646f/onnx-1.23.2-cp312-abi3-win_amd64.whl",
+    "sha256": "9b382ba898a7c142a0801d03cf04ecabced96c1543c7b643a86f0928143802de",
+    "size": 7872489
+   },
+   {
+    "name": "onnxruntime",
+    "url": "https://files.pythonhosted.org/packages/45/b2/793b4051d8dc6acb379ead9b72050f0ffa283ca49a6904add2e218b83e2e/onnxruntime-1.31.1-cp312-cp312-win_amd64.whl",
+    "sha256": "ae8a9a351efda685cc59a66226cdefaa37a126c1d66872ca23a2de9425326130",
+    "size": 14888466
+   },
+   {
+    "name": "pyloudnorm",
+    "url": "https://files.pythonhosted.org/packages/aa/b6/65a49a05614b2548edbba3aab118f2ebe7441dfd778accdcdce9f6567f20/pyloudnorm-0.2.0-py3-none-any.whl",
+    "sha256": "9bb69afb904f59d007a7f9ba3d75d16fb8aeef35c44d6df822a9f192d69cf13f",
+    "size": 10879
+   },
+   {
+    "name": "qwen-tts-hf",
+    "url": "https://files.pythonhosted.org/packages/ed/14/57e0ba0b84535102e08f33f1e14a2e0975229f5b878290343705727a3a33/qwen_tts_hf-0.1.1.post1-py3-none-any.whl",
+    "sha256": "ed5b7aae64cf795243369fb5226173f459a45689ea86db1c6d3eb14fc0c2c01d",
+    "size": 115212
+   },
+   {
+    "name": "resemble-perth",
+    "url": "https://files.pythonhosted.org/packages/77/cc/73226dd776f8e9c2975f64f4efc22988fb37e5b185ba5cccd6f2e7196954/resemble_perth-1.0.1-py3-none-any.whl",
+    "sha256": "65e9c37531b1a128a4a56226b75dece4521683cf3611b0b2a5ffe234f00c9342",
+    "size": 34404578
+   },
+   {
+    "name": "s3tokenizer",
+    "url": "https://files.pythonhosted.org/packages/6b/8f/ceddf749baf17405e755643e4d33c7c85bbb609a0c8cf43fc12aaea1c7ab/s3tokenizer-0.3.0-py3-none-any.whl",
+    "sha256": "c9e93b1892a124a2c4d958ab53610a1b4433fcb4172056e2f2bd3c09cfe249a6",
+    "size": 226368
+   },
+   {
+    "name": "setuptools",
+    "url": "https://files.pythonhosted.org/packages/f7/29/13965af254e3373bceae8fb9a0e6ea0d0e571171b80d6646932131d6439b/setuptools-69.5.1-py3-none-any.whl",
+    "sha256": "c636ac361bc47580504644275c9ad802c50415c7522212252c033bd15f301f32",
+    "size": 894566
+   },
+   {
+    "name": "transformers",
+    "url": "https://files.pythonhosted.org/packages/0d/4d/ee3728674c0bbc637bb4af88ccf0be697f92e4e90b55f5dc110c44d61b61/transformers-5.16.1-py3-none-any.whl",
+    "sha256": "2f2d5b98a5ad3718713653734298fa620754ed683702a635ebb587df3ed29c7e",
+    "size": 12080592
+   },
+   {
+    "name": "zipp",
+    "url": "https://files.pythonhosted.org/packages/b8/44/7bd2007260da11cccca29ba2d4c345f1287aa663db38ee7cefeabf6386a5/zipp-4.1.2-py3-none-any.whl",
+    "sha256": "b30cb6cd253122169c47de245ca24a86bac2a5d3802ba15bf7ba6414eb9e144d",
+    "size": 10581
+   }
+  ],
+  "archives": [
+   {
+    "name": "sox",
+    "url": "https://files.pythonhosted.org/packages/3d/a2/d8e0d8fd7abf509ead4a2cb0fb24e5758b5330166bf9223d5cb9f98a7e8d/sox-1.5.0.tar.gz",
+    "sha256": "12c7be5bb1f548d891fe11e82c08cf5f1a1d74e225298f60082e5aeb2469ada0",
+    "size": 63905,
+    "folder": "sox-1.5.0/sox"
+   }
+  ],
+  "installed_bytes": 172443124,
+  "models": [
+   "qwen3-tts",
+   "chatterbox-mtl"
+  ],
+  "vram_gb": 7.5
+ }
 }

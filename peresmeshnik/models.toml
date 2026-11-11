@@ -1118,23 +1118,6 @@ url = "https://huggingface.co/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109
 "ja_JP-hi_fi_captain-medium.onnx.json" = { sha256 = "fe9aeda38318607ba114926d1d7ee7d56295f9af3774a99a42b36f4354cabf27", size = 5301 }
 "MODEL_CARD" = { sha256 = "26dcad3474c39c7fc394c1e57e60121c90832afa9f43e7942faa7c51e1e81905", size = 361 }
 
-[xtts-v2]  # voice clone (coqui-tts); needs the optional voice pack with torch
-role = "clone"
-langs = ["en", "ru", "de", "fr", "es", "it", "pt", "pl", "tr", "zh", "ja", "ko", "ar"]  # all of the 14 but uk; and nl cs hu hi
-license = "CPML-1.0"
-license_url = "https://huggingface.co/coqui/XTTS-v2/blob/main/LICENSE.txt"  # coqui.ai is closed
-note = "Coqui Public Model License: noncommercial use only"
-consent = true
-needs = "gpu"  # keeps up live only on an NVIDIA GPU (BENCH stage 6): languages.clone_why
-url = "https://huggingface.co/coqui/XTTS-v2/resolve/6c2b0d75eae4b7047358e3b6bd9325f857d43f77/"
-[xtts-v2.files]
-"config.json" = { sha256 = "ef262b1454dd2a77e1461b0b2cd53e19b8a7624cc131b837d36df67356bc75e8", size = 4368 }
-"model.pth" = { sha256 = "c7ea20001c6a0a841c77e252d8409f6a74fb423e79b3206a0771ba5989776187", size = 1867929118 }
-"vocab.json" = { sha256 = "928260878a59da8a72a2a5b7687fea29d5106137669d90945430fe17e415304a", size = 361219 }
-"speakers_xtts.pth" = { sha256 = "f0f6137c19a4eab0cbbe4c99b5babacf68b1746e50da90807708c10e645b943b", size = 7754818 }
-"LICENSE.txt" = { sha256 = "190f6d7c19b8984f91b97712b94ce92d2b2e640fc677dacab966e955ece9d043", size = 4014 }
-
-# after xtts-v2 (clone engines in this order): chosen once the voice pack locks faster-qwen3-tts and chatterbox-tts; then before it
 [qwen3-tts]  # Qwen3-TTS 0.6B Base through faster-qwen3-tts in the voice pack (local/qwen3.py): streams, the voice is one vector
 role = "clone"
 langs = ["en", "ru", "de", "fr", "es", "it", "pt", "zh", "ja", "ko"]
@@ -1143,6 +1126,9 @@ license_url = "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base"
 note = "Qwen3-TTS by Alibaba Qwen; Chatterbox Multilingual takes over a voice whose clause breaks down"
 needs = "gpu"  # first audio 0.08-0.12 s on an RTX A4000, about half real time on a CPU (RESEARCH-clone 3.2): languages.clone_why
 fallback = "chatterbox-mtl"
+addon = true  # in the voice pack's addon "Qwen3 + Chatterbox": chosen where it is installed (languages.not_here)
+vram = 7.5  # an 8 GB card (8192 MiB, some report less): Qwen3 2.4 GB, with Chatterbox after a breakdown 5.6-5.9 GB
+vram_peak = 2.4  # Qwen3 alone (faster-qwen3-tts, CUDA graphs), RTX A4000
 url = "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base/resolve/5d83992436eae1d760afd27aff78a71d676296fc/"
 [qwen3-tts.files]
 "config.json" = { sha256 = "2e714c787c8edb98b05432685cddb634add2de4d4e645f653d68251ef72ba011", size = 4494 }
@@ -1164,6 +1150,8 @@ license = "MIT"
 license_url = "https://huggingface.co/ResembleAI/chatterbox"
 note = "Chatterbox Multilingual by Resemble AI: an inaudible watermark (Perth) in every output"
 needs = "gpu"  # 2.2x slower than speech on a CPU (RESEARCH-clone 11.2)
+addon = true
+vram_peak = 3.5  # on top of Qwen3 after a breakdown: 5.6-5.9 GB with it
 url = "https://huggingface.co/ResembleAI/chatterbox/resolve/5bb1f6ee58e50c3b8d408bc82a6d3740c2db6e18/"
 [chatterbox-mtl.files]
 "Cangjie5_TC.json" = { sha256 = "7073fd9de919443ae88e0bd2449917a65fe54898a4413ed1edcc4b67f28bce8c", size = 1920163 }
@@ -1172,6 +1160,23 @@ url = "https://huggingface.co/ResembleAI/chatterbox/resolve/5bb1f6ee58e50c3b8d40
 "s3gen.pt" = { sha256 = "9b9ff07e60b20c136e2b1b3d7563a24604e8d2c4c267888d1ee929dd0151d2a3", size = 1057165844 }
 "t3_mtl23ls_v2.safetensors" = { sha256 = "b1237586127ce98e7800a68e49938eb5092846862aabcb6e17b2fda7889a6c75", size = 2143989752 }
 "ve.pt" = { sha256 = "4b16d836bc598509860f6fa068165a8bb5e9ac84f05582dfcf278a5a372879f1", size = 5698626 }
+
+[xtts-v2]  # voice clone (coqui-tts); needs the optional voice pack with torch
+role = "clone"
+langs = ["en", "ru", "de", "fr", "es", "it", "pt", "pl", "tr", "zh", "ja", "ko", "ar"]  # all of the 14 but uk; and nl cs hu hi
+license = "CPML-1.0"
+license_url = "https://huggingface.co/coqui/XTTS-v2/blob/main/LICENSE.txt"  # coqui.ai is closed
+note = "Coqui Public Model License: noncommercial use only"
+consent = true
+needs = "gpu"  # keeps up live only on an NVIDIA GPU (BENCH stage 6): languages.clone_why
+vram_peak = 2.0  # 1.9-2.0 GB on an RTX A4000 (BENCH stage 6, the runner)
+url = "https://huggingface.co/coqui/XTTS-v2/resolve/6c2b0d75eae4b7047358e3b6bd9325f857d43f77/"
+[xtts-v2.files]
+"config.json" = { sha256 = "ef262b1454dd2a77e1461b0b2cd53e19b8a7624cc131b837d36df67356bc75e8", size = 4368 }
+"model.pth" = { sha256 = "c7ea20001c6a0a841c77e252d8409f6a74fb423e79b3206a0771ba5989776187", size = 1867929118 }
+"vocab.json" = { sha256 = "928260878a59da8a72a2a5b7687fea29d5106137669d90945430fe17e415304a", size = 361219 }
+"speakers_xtts.pth" = { sha256 = "f0f6137c19a4eab0cbbe4c99b5babacf68b1746e50da90807708c10e645b943b", size = 7754818 }
+"LICENSE.txt" = { sha256 = "190f6d7c19b8984f91b97712b94ce92d2b2e640fc677dacab966e955ece9d043", size = 4014 }
 
 # Kyutai Pocket TTS (100M): a cloned voice live on any CPU, Mac too (local/pocket.py, onnxruntime: our graph, these
 # weights). A model per language; the weights with voice cloning are in a gated repo: the user accepts its conditions

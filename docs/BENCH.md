@@ -798,6 +798,15 @@ Another speaker's recording against the clone (English pairs): XTTS median 0.11,
 babble partner), ECAPA median 0.05, max 0.17. The Russian chapters are probably one reader (ECAPA between
 chapters up to 0.42), so they are not used as other speakers.
 
+**Qwen3-TTS** (the voice pack's addon; `bench/voice_check.py qwen3`, C, RTX A4000, the addon's CUDA lock,
+2026-11-11): its similarity is the cosine of its own speaker vector (x-vector), the very one its clone speaks from.
+The same 8 references × 5 cases, cloned into the other language: against its own recording min / median clean
+0.99 / 0.99, noise14 0.98 / 0.99, babble14 0.98 / 0.98, reverb 0.98 / 0.99, phone 0.97 / 0.97; another speaker's
+recording (the English pairs) 0.92-0.97, median 0.94. Seven FLEURS voices (3 English, 4 Russian, both genders,
+clean): own 0.96-0.99, another speaker 0.87-0.97 (median 0.92); one clone is closer to another woman's recording
+(0.972) than to its own (0.962). No threshold tells them apart, so `voice.check_clone` judges a Qwen3 clone by WER
+only (`NO_SIM`) and its verdict does not say it sounds like the recording. WER of these clones was not measured here.
+
 Thresholds (`voice.py`): WER fail > 0.25, warn > 0.10; similarity fail < 0.25, warn < 0.35. On the 40
 clones: 1 fail (noise14, WER 0.28), 3 warnings (phone, WER 0.14), 36 good; 80 % of the other-speaker
 pairs fall under 0.25. XTTS copies the channel too: noise, reverb and a phone band leave the clone

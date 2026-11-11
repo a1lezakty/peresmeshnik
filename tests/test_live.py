@@ -249,6 +249,25 @@ def test_a_voice_pack_voice_speaks_in_the_call_and_is_not_offered_to_keep():
     assert v.voice() is not None and v.them() is None
 
 
+def test_an_engine_still_loading_when_translation_goes_off_is_freed_after_it(monkeypatch):
+    """No voice pack runner outlives the call: close() waits CLOSE_WAIT_S, and a worker still loading the engine then
+    frees it itself instead of going through the clauses left."""
+    class Engine(FakeClone):
+        closed = False
+
+        def close(self):
+            Engine.closed = True
+    eng = Engine()
+    monkeypatch.setattr(live, 'CLOSE_WAIT_S', 0.01)
+    v = live.LiveVoice(lambda: time.sleep(0.3) or eng, AmpSpeaker, 'xtts-v2', 'en')
+    for i in range(5):
+        v.offer(speech(1.2, 0.3, i), 'a', 0, 1.2)
+    v.close()
+    assert v._thread.is_alive() and not Engine.closed  # still loading
+    v._thread.join(5)
+    assert Engine.closed and v.engine is None and eng.made == []
+
+
 def test_an_engine_that_takes_a_voice_only_from_a_folder_is_closed_at_once():
     class Pack:  # XTTS through the voice pack: no condition()
         closed = False

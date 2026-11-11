@@ -39,6 +39,7 @@ SAME = 0.45
 WAIT_S = 0.5  # the speak worker waits this long to know whose clause it is (the worker is making a voice), then guesses
 OUT_SR = 24_000  # the side's audio: the clone engines' (Pocket, XTTS); the stock voice is resampled to it
 GAP = np.zeros(SAMPLE_RATE // 10, np.float32)  # between clauses in the sample
+CLOSE_WAIT_S = 5.0  # translation off: waited for the worker this long; one still loading the engine frees it itself
 RTF_AFTER_S = 4.0  # their cloned voice's speed is checked once, after this much of it (me -> them: a ~4 s test phrase)
 
 
@@ -94,6 +95,7 @@ class LiveVoice:
         self.ref, self.pad = (echo.ref, float(echo.delays[-1]) + 0.2) if echo is not None else (None, 0.0)
         self.stats = {'clauses': 0, 'short': 0, 'echo': 0, 'noisy': 0, 'made': 0, 'late': 0}
         self._q: queue.Queue = queue.Queue()
+        self._closed = False
         self._thread = threading.Thread(target=self._work, args=(make_engine, make_speaker), name='their-voice',
                                         daemon=True)
         self._thread.start()
@@ -146,10 +148,11 @@ class LiveVoice:
                 self.note(self.dead)
 
     def close(self) -> None:
+        """Translation off: the worker drops the clauses left and frees the engine (a voice pack's runner) on its way
+        out, also one it is still loading when this returns: nothing of the call outlives it."""
+        self._closed = True
         self._q.put(None)
-        self._thread.join(5)
-        if self.engine is not None and hasattr(self.engine, 'close'):
-            self.engine.close()
+        self._thread.join(CLOSE_WAIT_S)
 
     # the worker
     def _work(self, make_engine, make_speaker) -> None:
@@ -164,7 +167,7 @@ class LiveVoice:
         while (item := self._q.get()) is not None:
             pcm, c = item
             try:
-                if pcm is not None and not self.dead:
+                if pcm is not None and not self.dead and not self._closed:
                     self._add(pcm, c)
             except Exception as e:
                 self.fail(e)
@@ -172,6 +175,10 @@ class LiveVoice:
                 if not c.known.is_set():
                     c.person = self.speaking
                     c.known.set()
+        if self._closed and (engine := self.engine) is not None:
+            self.engine = None
+            if hasattr(engine, 'close'):
+                engine.close()
 
     def _add(self, pcm: np.ndarray, c: Clause | None = None) -> None:
         if (snr := clean(pcm)) is None:

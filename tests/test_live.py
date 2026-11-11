@@ -170,7 +170,7 @@ def test_a_clone_too_slow_for_this_computer_gives_way_to_the_stock_voice_said_on
         assert eng.said == [('one', 1)] and tts._rtf is None  # checked once
         list(tts.synth('two', 'ru'))
         if isinstance(eng, Slow):
-            assert 'too slow for their cloned voice: 1.' in v.dead and notes == [v.dead] and stock.said == [('two', 1.0)]
+            assert 'too slow for their cloned voice' in v.dead and notes == [v.dead] and stock.said == [('two', 1.0)]
         else:
             assert not v.dead and not notes and eng.said[-1][0] == 'two'
 

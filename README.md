@@ -54,10 +54,14 @@ Polish, Turkish, Chinese, Japanese, Korean, Arabic), a stock voice speaks instea
 **The other person's voice.** "Them → me" speaks in the voice of the person talking, where a cloned voice speaks your
 language on this computer (as for your own voice): from their first 3 seconds of clear speech, closer after 5, 10 and 20
 s; until then a stock voice, and for the whole call where this computer cannot keep up with it (it says so). Only you
-hear it, in your headphones: it never goes into the call (only your own confirmed voice does), and it is forgotten when
-translation goes off unless you keep it (tray: Keep the voice of the person in this call…, with their agreement; with
-the NVIDIA voice pack it is kept only during the call). With two people or more on their side, each phrase is said in
-the voice of whoever said it. Off: `their_voice = false` under `[local]` in the settings.
+hear it, in your headphones: it never goes into the call (only your own confirmed voice does). What is taken from their
+voice, who is speaking (a speaker vector) and the clone made from their clear phrases, stays in this computer's memory
+for the call and goes when translation goes off (with Pocket TTS their speech itself is let go once the voice is final,
+after 20 s; Qwen3-TTS of the NVIDIA voice pack holds its sample until the call ends). It is written to disk only when
+you keep it: tray → Keep the voice of the person in this call…, with their agreement, with one person on their side and
+after 10 s of their speech; with the NVIDIA voice pack it cannot be kept. With two people or more on their side, each
+phrase is said in the voice of whoever said it, and one not known yet in a stock voice. Off: tray → Their own voice
+(them → me), or `their_voice = false` under `[local]` in the settings.
 
 Speech recognition of Turkish, Chinese and Korean on this computer is Whisper on an NVIDIA GPU, through a CUDA build of
 onnxruntime: the macOS and Windows apps have none, so there these three are recognized in the cloud. From source on

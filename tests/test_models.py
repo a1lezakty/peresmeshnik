@@ -326,6 +326,7 @@ def test_a_gated_model_sends_the_token_to_hugging_face_only(tmp_path, monkeypatc
         with pytest.raises(models.Gated, match='403') as e:
             models.fetch('gated', tmp_path / 'cache')
         assert seen == [('hub', 'Bearer wrong')] and 'account of your token' in str(e.value)  # refused: not retried
+        assert 'public gated repos you can access" ticked' in str(e.value)  # a fine-grained token without it: 403 too
         monkeypatch.setenv('HF_TOKEN', 'env-wrong')  # $HF_TOKEN comes before the file (FIXES 8): the message says so
         with pytest.raises(models.Gated, match='the HF_TOKEN environment variable'):
             models.fetch('gated', tmp_path / 'cache')

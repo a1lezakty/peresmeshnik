@@ -249,10 +249,12 @@ def _fetch(model_id: str, base: Path | None, progress, retries: int) -> Path:
                 _download(m.url + name, part, f['size'], progress, token)
                 err = 'connection closed early'
             except urllib.error.HTTPError as e:
-                if token and e.code in (401, 403):  # a wrong token, or its account did not accept: retrying won't help
+                if token and e.code in (401, 403):  # a wrong token, its account did not accept, or a fine-grained token
+                    # without the gated repos box (Hugging Face makes fine-grained ones by default): retrying won't help
                     whose = 'the HF_TOKEN environment variable' if os.environ.get('HF_TOKEN', '').strip() else 'your token'
                     raise Gated(f'Hugging Face refused {m.id} ({e.code}): accept its conditions on {m.license_url} with '
-                                f'the account of {whose}, or check that token', m.license_url) from None
+                                f'the account of {whose}, or check that token (a fine-grained one needs "Read access to '
+                                'contents of all public gated repos you can access" ticked)', m.license_url) from None
                 err = str(e)
             except (OSError, http.client.HTTPException) as e:  # URLError, timeouts, resets, IncompleteRead
                 err = str(e)

@@ -343,3 +343,13 @@ def test_a_gated_model_sends_the_token_to_hugging_face_only(tmp_path, monkeypatc
     finally:
         for s in (cdn, hub):
             s.shutdown()
+
+
+def test_the_uninstaller_asks_about_the_hugging_face_token():
+    """The token outlives an uninstall unless the user says so: the Windows uninstaller asks about the very file the app
+    keeps it in (config_dir: %LOCALAPPDATA%\\Peresmeshnik, the uninstaller's Dir)."""
+    from pathlib import Path
+    iss = (Path(__file__).parents[1] / 'packaging/windows/Peresmeshnik.iss').read_text(encoding='utf-8')
+    name = models.hf_token_file().name
+    assert f"FileExists(Dir + '\\{name}')" in iss and f"DeleteFile(Dir + '\\{name}')" in iss
+    assert 'Remove your Hugging Face token too?' in iss

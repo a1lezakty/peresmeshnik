@@ -165,8 +165,9 @@ Windows 10 version 2004 or later, or Windows 11 (x64).
    Italian, Portuguese, Chinese, Japanese and Korean with Qwen3-TTS (the first sound in ~0.1 s), Chatterbox
    Multilingual saying again a clause Qwen3 does not stop on; Polish, Turkish and Arabic stay with XTTS-v2. Without the
    addon, or on a 6 GB card, XTTS-v2 speaks them all. With both directions cloned on one card, the other person's voice
-   takes what is left beside yours: on 8 GB yours is Qwen3-TTS (with Chatterbox up to ~5.9 GB), theirs XTTS-v2 (~2 GB);
-   where nothing fits beside, theirs is Pocket TTS on the CPU or a stock voice, said why.
+   takes what is left beside yours, counting a runner process for each (~0.5 GB of CUDA context) and ~0.6 GB for the
+   desktop: on 8 GB yours is Qwen3-TTS (with Chatterbox up to ~5.9 GB) and theirs Pocket TTS on the CPU (or a stock
+   voice, said why); on 12 GB theirs is XTTS-v2 (~2 GB); on 16 GB both are Qwen3-TTS; on 6 GB both are XTTS-v2.
 
 The hotkey Ctrl+Alt+Space switches between translation and your live voice (Settings to change it; a combo that
 Windows keeps for itself, such as Alt+Tab or Win+Space, or that another app has taken is refused with the reason).

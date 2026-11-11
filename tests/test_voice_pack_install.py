@@ -11,6 +11,7 @@ import shutil
 import sys
 import threading
 import time
+import types
 import zipfile
 from pathlib import Path
 
@@ -458,3 +459,25 @@ def test_the_real_lock_has_the_addon():
     assert 1e7 < add['installed_bytes'] < 1e9
     del spec['addon']
     assert voicepack.identity() == hashlib.sha256((json.dumps(spec, indent=1) + '\n').encode()).hexdigest()
+
+
+def test_a_folder_held_open_a_moment_is_moved_away_on_windows(monkeypatch, tmp_path):
+    """COMMON 04:51 (CI Windows): right after a cancelled install a file of voice-pack.tmp is still open for a moment (the
+    pip just killed, an antivirus scanning what it wrote): its rename is tried again; on Linux and macOS the error at once."""
+    d, rename, held = tmp_path / 'voice-pack.tmp', Path.rename, [2]
+
+    def busy(self, target):
+        if held[0]:
+            held[0] -= 1
+            raise PermissionError(13, 'Access is denied')
+        return rename(self, target)
+    monkeypatch.setattr(Path, 'rename', busy)
+    monkeypatch.setattr(voicepack, 'os', types.SimpleNamespace(name='nt'))
+    (d / 'Lib').mkdir(parents=True)
+    voicepack._discard(d)
+    assert held == [0] and not d.exists() and not list(tmp_path.glob('voice-pack.tmp.old-*'))
+    monkeypatch.setattr(voicepack, 'os', types.SimpleNamespace(name='posix'))
+    (d / 'Lib').mkdir(parents=True)
+    held[0] = 1
+    with pytest.raises(PermissionError):
+        voicepack._discard(d)

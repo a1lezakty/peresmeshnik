@@ -977,7 +977,9 @@ def test_choose_then_a_refused_clone_still_changes_the_pair(tmp_path, monkeypatc
     t.ask = lambda text, choose=True: 'choose'
     t.switch_pair('de', 'ja')
     settle(0.2)
+    from peresmeshnik.ui.components import ComponentsBox
     d = t.windows[-1]
-    monkeypatch.setattr(d.box, 'missing', lambda: [])
+    monkeypatch.setattr(ComponentsBox, 'missing', lambda self: [])  # the class's: no Qt object holds a patched method
     d.box.finished.emit('Your cloned voice: pocket-tts-de: Hugging Face refused it (403)')
     assert wait_for(lambda: calls) and (config.load().my_lang, config.load().their_lang) == ('de', 'ja')
+    d.close()  # no window left open past the test (macOS and Windows crashed at exit with one)

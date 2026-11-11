@@ -332,6 +332,7 @@ def test_keep_their_voice_only_where_the_engine_keeps_one(tmp_path, monkeypatch)
     for engine[:] in (['xtts-v2', ''], ['qwen3-tts', ''], [None, 'no clone of their voice here']):
         t.sync()
         assert not t.remember.isVisible(), engine
+    t.icon.hide()
 
 
 def test_my_voice_deleted_while_the_wizard_is_open(tmp_path, monkeypatch):

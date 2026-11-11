@@ -590,6 +590,13 @@ WIN_S = 8.0
 # 12 s at 0.40 (a 4 s window of mine scores lower: p5 0.51 against 0.55 at 8 s; another person's p99 0.41 against
 # 0.42) 36/23/3.5/0.9 %; the same person refused 4.1 % clean (3.8 %), another person passing a try 0.056 % (0.063 %)
 HEAD_S, HEAD_WIN_S, HEAD_HOP_S, HEAD_MATCH = 12.0, 4.0, 2.0, 0.40
+# what the engines take is the file's raw start, pauses and all (Pocket and Qwen3 its first 10 s, XTTS 6 s and its speaker
+# vector 30 s): checked as it is, not through the relative trim of _speech (a voice of someone else turned down to just
+# above the noise of my pauses fell under it whole, FIXES-s3-tails r2 1). Out goes only what is silent however quiet the
+# room: digital silence, and frames below FLOOR_DB once the recording's loudest speech is set to LEVEL_DB. BENCH (stage 8
+# tails, raw start): 5 s of another person 3 dB above the noise of my pauses (SNR 30) passed 94 % with the trim, 10 %
+# here at -60 (72 % at -55), <= 0.9 % at SNR 20; the same person refused 4.08 % clean as before, another person 0.051 %
+START_S, LEVEL_DB, FLOOR_DB = 30.0, -20.0, -60.0
 TRIES, PAUSES_S = 3, (60, 300, 1500, 3600)  # failed checks in a row before a pause; the pauses after them, growing
 
 
@@ -603,6 +610,22 @@ def _to(pcm: np.ndarray, sr: int, to: int) -> np.ndarray:
     x = np.asarray(pcm, np.float32)
     x = x.mean(axis=1) if x.ndim > 1 else x
     return x if sr == to else np.interp(np.arange(0, len(x), sr / to), np.arange(len(x)), x).astype(np.float32)
+
+
+def _start(pcm: np.ndarray, sr: int) -> np.ndarray:
+    """What is checked of a recording: its raw first START_S without digital silence and the frames below FLOOR_DB at
+    LEVEL_DB, then the speech of what follows (_speech's)."""
+    x = np.asarray(pcm, np.float32)
+    x = x - x.mean()
+    f = _frames(x, sr)
+    db = 10 * np.log10(np.mean(f ** 2, axis=1) + 1e-12)
+    live = db[db > -100]  # digital silence: out
+    if not len(live):
+        return x[:0]
+    n = int(START_S * 1000 / 30)  # frames of the start
+    keep = (db[:n] > -100) & (db[:n] + LEVEL_DB - float(np.percentile(live, 95)) > FLOOR_DB)
+    rest = _speech(x[n * len(f[0]):], sr) if len(f) > n else x[:0]  # a short one joins the last window
+    return np.concatenate([f[:n][keep].reshape(-1), rest]).astype(np.float32)
 
 
 def _windows(x: np.ndarray, sr: int) -> list[tuple[np.ndarray, float]]:
@@ -699,7 +722,7 @@ def confirm_live(ref: Voice, pcm: np.ndarray, sr: int, said: list[str], asr, spe
     heard = asr.recognize(_to(pcm, sr, SAMPLE_RATE), lang=ref.meta.get('lang')).text
     err = wer(' '.join(said), heard)
     live = speaker.embed(_speech(pcm, sr, edges=True), sr)
-    sims = [(float(speaker.embed(w, rsr) @ live), m) for w, m in _windows(_speech(x.mean(axis=1), rsr), rsr)]
+    sims = [(float(speaker.embed(w, rsr) @ live), m) for w, m in _windows(_start(x.mean(axis=1), rsr), rsr)]
     sim, worst = min(sims, key=lambda s: s[0] - s[1])  # the window furthest below its threshold (or nearest to it)
     low = sim < worst
     why = ([f'the words heard are not the ones on the screen ({err:.0%} differ): read them as written'] if err > LIVE_WER

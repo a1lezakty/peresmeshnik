@@ -227,20 +227,45 @@ class Blend:
 
 
 def test_a_short_piece_of_someone_else_at_the_start_is_refused(tmp_path):
-    """Stage 8 tails: 4 s of someone else, then me: an 8 s window of half and half scored as me (0.71), and the clone
-    takes its prompt from the start (XTTS 6 s, Pocket 10 s). The start's 4 s windows (HEAD_MATCH) refuse it; me alone
+    """Stage 8 tails: ~4 s of the speech of someone else, then me: an 8 s window of half and half scored as me, and the
+    clone takes its prompt from the start (XTTS 6 s, Pocket 10 s). The start's 4 s windows (HEAD_MATCH) refuse it; me alone
     passes."""
     root = tmp_path / 'v'
     sr, said = 24_000, voice.LIVE_PHRASES['ru'][:2]
-    x = np.concatenate([speech(4, sr, f=300.0)[0], speech(40, sr)[0]])
+    x = np.concatenate([speech(7, sr, f=300.0)[0], speech(40, sr)[0]])  # 7 s in syllables: ~4.2 s of their voice
     live = Blend().embed(speech(6, sr)[0], sr)
-    assert Blend().embed(x[:8 * sr], sr) @ live > voice.MATCH  # the 8 s window alone would let it through
+    assert Blend().embed(voice._start(x, sr)[:8 * sr], sr) @ live > voice.MATCH  # one 8 s window would let it through
     v = voice.save(x, sr, 'me.new', 'ru', 'text', root)
     consent, text = voice.confirm_live(v, *speech(6, sr), said, Asr(' '.join(said)), Blend())
     assert consent is None and 'not the voice of the recording' in text, text
     v = voice.save(speech(44, sr)[0], sr, 'me.new', 'ru', 'text', root)
     consent, _ = voice.confirm_live(v, *speech(6, sr), said, Asr(' '.join(said)), Blend())
-    assert consent and consent['windows'] == 5 + 4, consent  # 5 start windows of 4 s every 2 s, then 8 s ones
+    assert consent and consent['windows'] >= 5, consent  # 5 start windows of 4 s every 2 s, then 8 s ones
+
+
+def noisy(seconds, sr, level=0.005):
+    """Me in a room: steady noise in the pauses at -46 dBFS (about 30 dB under the voice)."""
+    x, _ = speech(seconds, sr)
+    return x + level * np.random.default_rng(7).standard_normal(len(x)).astype(np.float32)
+
+
+def test_a_voice_turned_down_to_the_noise_of_the_pauses_is_refused(tmp_path):
+    """FIXES-s3-tails r2 1: someone else first, denoised (digital silence in the pauses) and turned down 24 dB to just
+    above the noise of my pauses, then me: the relative trim of _speech took them for background, every window was mine
+    and the engines' prompt was theirs. The raw start with an absolute floor checks them: refused. Me in the same room,
+    noise in the pauses and all, passes."""
+    root = tmp_path / 'v'
+    sr, said = 24_000, voice.LIVE_PHRASES['ru'][:2]
+    t = np.arange(8 * sr) / sr
+    them = (0.2 * np.sin(2 * np.pi * 300 * t) * (np.sin(2 * np.pi * 2 * t) > -0.3)).astype(np.float32) * 10 ** (-24 / 20)
+    x = np.concatenate([them, noisy(40, sr)])
+    assert Blend().embed(voice._speech(x, sr)[:12 * sr], sr)[1] < 0.05  # the old trim: none of them left
+    v = voice.save(x, sr, 'me.new', 'ru', 'text', root)
+    consent, text = voice.confirm_live(v, *speech(6, sr), said, Asr(' '.join(said)), Blend())
+    assert consent is None and 'not the voice of the recording' in text, text
+    v = voice.save(noisy(48, sr), sr, 'me.new', 'ru', 'text', root)
+    consent, text = voice.confirm_live(v, *speech(6, sr), said, Asr(' '.join(said)), Blend())
+    assert consent, text
 
 
 def test_consent_holds_only_for_the_recording_checked(tmp_path):

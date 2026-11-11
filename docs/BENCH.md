@@ -2423,6 +2423,41 @@ recording: `4h2+8` refuses the owner 4.2 % clean, 4.8 % Opus. Time, 1 thread, a 
 a piece of 3 s, or of 4 s not on the 2 s grid — no 4 s window lies wholly inside it; the live check's two random
 phrases and the pause after three tries stay in front of it.
 
+### Stage 8, tails: the raw start of the recording, an absolute floor (S3, review 2)
+
+The windows above were cut from `_speech`, which drops every frame under "10th percentile + 6 dB": a relative
+threshold. The engines take the raw start of the file. A way around it: the first 5-10 s someone else, denoised (digital
+silence in the pauses) and turned down to just above the noise of the owner's pauses, then the owner with steady noise
+in the pauses: the threshold sits on that noise, the other person's frames fall under it whole, every window is the
+owner's. Now the first 30 s are checked raw (`voice._start`): out goes only digital silence and the frames below
+`FLOOR_DB` once the recording's p95 frame is set to −20 dBFS; after 30 s, `_speech` as before. Same data and script
+(`bench/speaker_threshold.py`, stages `start4`, `report_start4`, `timing_start4`, calling `voice.py` itself); files clean,
+Opus 24k, white noise over the whole file at SNR 30 / 20; 88 splices per cell: the first K s of the other person's
+speech (pauses gated to digital silence) at d dB above the owner's noise, then the owner's 40 s.
+
+| the way around, owner's file at SNR 30 / 20 | trim (before) | raw start, floor −55 | raw start, floor −60 (the app) |
+|---|---|---|---|
+| K = 5 s, d = 3 / 5 / 8 dB, SNR 30 | 94 / 94 / 92 % | 72 / 41 / 12 % | 10 / 4.5 / 0.8 % |
+| K = 10 s, d = 3 / 5 / 8 dB, SNR 30 | 52 / 48 / 11 % | 3.1 / 1.0 / 0.1 % | 0.1 / 0.1 / 0.3 % |
+| K = 5 s, d = 3 / 5 / 8 dB, SNR 20 | 91 / 91 / 76 % | 0.6 / 0.9 / 0.4 % | (as −55: nothing under it) |
+
+| file / live: same person refused (another person passing a try) | trim (`4h2+8`) | raw start, −60 |
+|---|---|---|
+| clean / clean | 4.08 % (0.056 %) | 4.08 % (0.051 %) |
+| clean / white noise, SNR 20 | 11.1 % | 10.9 % |
+| Opus 24k / clean | 4.54 % (0.027 %) | 4.54 % (0.049 %, at −55) |
+| white noise SNR 30 in the file / clean | 4.99 % (0.073 %) | 5.77 % (0.068 %) |
+| white noise SNR 20 in the file / clean | 7.71 % (0.085 %) | 8.36 % (0.058 %) |
+
+A 60 s recording: 4.13 % clean (0.038 %), 9.1 % with SNR 20 noise in the file (7.7 % before). Time, a 60 s recording,
+1 thread: 5.0 s against 4.9 s (`_start` itself 15 ms). Measured and dropped: a refusal of "hidden sound" (more than 1 s of
+the start above the floor, 3 dB above the noise of the pauses, under `_speech`'s threshold). It refused the owner's own
+file 27 % clean, 58 % with SNR 30 noise, 97 % with SNR 20, since quiet consonants, breaths and the ends of words lie in
+that band too (p95 1.9-3.0 s, the way around p50 1.6-2.7 s). Settings that spare the owner (4 dB / 2 s) caught 4-35 % of
+the splices and added nothing to the windows at −60. Not closed: a voice mostly under the floor (K = 5 s, d = 3 dB at
+SNR 30: 10 %); a lower floor was not measured. Whether the engines take a voice 35 dB under the owner's: the next section
+(−57 dBFS: XTTS speaks as the owner, Pocket hardly at all).
+
 ## Stage 8: Pocket TTS on onnxruntime, both sides cloned at once on 4 cores (S1)
 
 Measured 2026-11-10 on the C server's i7-13700 (Linux, onnxruntime 1.31.1, CUDA hidden), the app's own engine

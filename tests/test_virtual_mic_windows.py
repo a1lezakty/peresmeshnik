@@ -63,6 +63,15 @@ def cpu(p: subprocess.Popen) -> float:
     return t.user + t.system
 
 
+def live(chunks: list, sr: int = SR_OUT) -> None:
+    """Until a recorder's helper gives sound (0.2 s of it): a busy runner starts it late, and a fixed wait then lets the
+    test play into a recording not begun yet (the round trip's tone came 1.41 s of 1.5 once)."""
+    end = time.monotonic() + 10
+    while sum(map(len, chunks)) < sr // 5:
+        assert time.monotonic() < end, 'the recorder gave nothing'
+        time.sleep(0.01)
+
+
 def tone(seconds: float, sr: int, f: float = 440.0, level: float = 0.3) -> np.ndarray:
     return (level * np.sin(2 * np.pi * f * np.arange(int(sr * seconds)) / sr)).astype(np.float32)
 
@@ -412,7 +421,7 @@ def test_round_trip():
     vm = VirtualMic()
     rec = Recorder(vm.call_mic['uid'], SR_OUT)
     try:
-        time.sleep(0.3)
+        live(rec.chunks)
         t = np.arange(int(SR_IN * 3)) / SR_IN
         x = (0.3 * np.sin(2 * np.pi * 440 * t) * (t < 1.5)).astype(np.float32)  # 1.5 s tone, 1.5 s silence
         t0 = time.perf_counter()
@@ -433,7 +442,9 @@ def test_round_trip():
     assert np.argmax(np.abs(np.fft.rfft(seg))) * SR_OUT / len(seg) == pytest.approx(440, abs=3)
     assert (on[-1] - on[0]) / SR_OUT == pytest.approx(1.5, abs=0.05)  # whole tone, nothing dropped
     assert np.sqrt(np.mean(seg ** 2)) == pytest.approx(0.3 / np.sqrt(2), rel=0.1)  # level kept
-    assert 2.9 < wall < 4.0  # played in real time (3.64 s seen on a busy runner)
+    # real time by the samples above (the whole tone, nothing dropped, its level); the wall time says only that it was
+    # not played faster than that, and that drain() returned: a busy runner takes longer (3.64 and 4.9 s seen)
+    assert 2.9 < wall < 15
 
 
 class Timed:
@@ -470,23 +481,23 @@ def test_flush_leaves_silence():
     vm = VirtualMic()
     rec = Timed(vm.call_mic['uid'])
     try:
-        time.sleep(0.4)
-        vm.play(tone(3.0, SR_IN), SR_IN)
+        live(rec.chunks)
+        vm.play(tone(6.0, SR_IN), SR_IN)
         time.sleep(1.0)
         vm.flush()
-        time.sleep(2.5)
+        time.sleep(4.0)
         y = rec.stop()
     finally:
         vm.remove()
-    # by the recording's own samples, not by when its chunks came (they come with jitter: 0.3 s once on the runner)
+    # the tone's own samples, not its span or when they came: a busy runner leaves gaps in it (its span 1.8-2.3 s and
+    # rms 0.13-0.15 over the span were seen), so the sound is counted, as record() counts it (PR #31)
     loud = np.flatnonzero(np.abs(y) > 0.01)
-    s0, s1 = loud[0], loud[-1]
-    said, rest = (s1 - s0) / SR_OUT, y[s1 + 1:]
-    say(f'\nflush: {said:.2f} s of the 3 s tone heard (flushed after 1 s), rms {np.sqrt(np.mean(y[s0:s1] ** 2)):.3f}; '
-        f'then {len(rest) / SR_OUT:.1f} s of silence (max {np.abs(rest).max() if len(rest) else 0:.4f})')
-    assert np.sqrt(np.mean(y[s0:s1] ** 2)) > 0.15  # it was playing
-    assert 0.6 < said < 1.5  # it stopped at the flush (the tone is 3 s)
-    assert len(rest) > 1.2 * SR_OUT  # and nothing after it: no last buffer left looping
+    heard, rms, rest = len(loud) / SR_OUT, np.sqrt(np.mean(y[loud] ** 2)), y[loud[-1] + 1:]
+    say(f'\nflush: {heard:.2f} s of the 6 s tone heard (flushed after 1 s, span {(loud[-1] - loud[0]) / SR_OUT:.2f} s), '
+        f'rms {rms:.3f}; then {len(rest) / SR_OUT:.1f} s of silence (max {np.abs(rest).max() if len(rest) else 0:.4f})')
+    assert rms > 0.15  # it was playing, at its level (0.3 peak: 0.21)
+    assert 0.3 < heard < 3.0  # it stopped at the flush: about 1 s of the 6 s tone (plus what the cable held)
+    assert len(rest) > 1.5 * SR_OUT  # and nothing after it: no last buffer left looping
 
 
 @win

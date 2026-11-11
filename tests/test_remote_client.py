@@ -6,6 +6,7 @@ import os
 import queue
 import threading
 import time
+import types
 
 import numpy as np
 import pytest
@@ -381,17 +382,20 @@ def test_close_while_the_server_loads(server):
 
 
 def test_input_before_ready_keeps_only_the_last_seconds(server, monkeypatch):
-    monkeypatch.setattr(client, 'KEEP_S', 0.3)
+    """The capture goes on while the server loads its models: of what came meanwhile only the last KEEP_S goes up once
+    it is ready, in order, then the rest as it comes. By the input's own stamps on a clock of the test's (the client's
+    time.monotonic only; its loop keeps the real one), not the runner's pace (0.164 s of 0.3 once on macOS)."""
+    now, step = [1000.0], 1 / 32  # exact in binary: the window's edge falls on a frame, never beside it by rounding
+    monkeypatch.setattr(client, 'time', types.SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(client, 'KEEP_S', 10 * step)
     server.ready_delay = 0.8
     d = direction(server)
-    fed = []  # feed time of frame i (value i / 1000)
-    while not d.ready.is_set() or len(fed) < 60:  # the capture goes on while the server loads its models
-        fed.append(time.monotonic())
-        d.feed(frame(len(fed) / 1000))
-        time.sleep(0.02)
-    until(lambda: values(server.conns[0].audio)[-1:] == [len(fed) / 1000])
-    got = values(server.conns[0].audio)
-    assert got == [i / 1000 for i in range(round(got[0] * 1000), len(fed) + 1)]  # in order, none lost after the first
-    before = [t for t in fed[round(got[0] * 1000) - 1:] if t < d.ready_at]
-    assert 0.2 <= before[-1] - before[0] <= 0.35  # of the 0.8 s fed while loading, the last KEEP_S went up
+    for i in range(1, 41):  # 1.25 s of capture while it loads
+        now[0] += step
+        d.feed(frame(i / 1000))
+    assert d.ready.wait(5) and d.ready_at == now[0]  # the clock stands from here: the window is fixed
+    for i in range(41, 51):  # then as it comes
+        d.feed(frame(i / 1000))
+    until(lambda: values(server.conns[0].audio)[-1:] == [50 / 1000])
+    assert values(server.conns[0].audio) == [i / 1000 for i in range(30, 51)]  # 30..40: the last KEEP_S (10 steps)
     d.close()

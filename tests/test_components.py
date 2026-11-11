@@ -379,9 +379,12 @@ def test_the_hugging_face_token_where_the_clone_waits_for_it(no_token):
 
 def test_a_token_from_the_environment_is_said(no_token, monkeypatch):
     """00:50: HF_TOKEN set: the field says so (it goes before the saved one)."""
+    from PySide6.QtWidgets import QWidget
+
     from peresmeshnik.ui.components import HfTokenBox
     monkeypatch.setenv('HF_TOKEN', 'hf_from_env')
-    box = HfTokenBox()
+    window = QWidget()  # as in the app: inside a window (shown on its own, it crashed the test process at exit)
+    box = HfTokenBox(window)
     box.show_for('https://huggingface.co/kyutai/pocket-tts')
     assert 'HF_TOKEN' in box.token.placeholderText() and models.hf_token() == 'hf_from_env'
 

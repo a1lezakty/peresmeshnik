@@ -490,6 +490,29 @@ def test_a_state_the_runner_no_longer_has_is_a_clause_error(pack, tmp_path, capl
         other.close()
 
 
+def test_a_new_call_on_warm_engines_leaves_nothing_of_the_last_in_the_runner(pack):
+    """FIXES-s2 r3 1: the runner keeps the states condition() made (Qwen3's with the raw sample); a new call on warm
+    engines (voices/live.py reset(), the server's warm side) makes it forget them all: the last call's voices are not
+    there to speak with any more, and a new one is made as before."""
+    import test_live
+    from test_live import AmpSpeaker, speech
+
+    from peresmeshnik.voices import live as lv
+    v = lv.LiveVoice(lambda: pack, AmpSpeaker, 'xtts-v2', 'en')
+    a = [v.offer(speech(1.2, 0.3, i), 'a', 0, 1.2) for i in range(3)]
+    a[-1].known.wait(5)
+    test_live.time.sleep(0.5)  # its voice is made after the clause is known
+    old = v.people[0].voice
+    assert old is not None and len(say(pack, 'hi', old)) == 3 * 2400  # the runner speaks in it
+    v.reset()
+    b = [v.offer(speech(1.2, 0.1, i), 'b', v._since + 1, v._since + 2.2) for i in range(3)]
+    b[-1].known.wait(5)
+    test_live.time.sleep(0.5)
+    assert list(pack.synth('hi', 'en', old)) == []  # gone from the runner: that clause's error
+    assert len(v.people) == 1 and len(say(pack, 'hi', v.people[0].voice)) == 3 * 2400  # B's, made anew
+    v.close()
+
+
 def test_condition_from_another_thread_waits_for_the_stream(pack, me):
     """FIXES addon 1: voices/live.py conditions the other person's voice on its own thread while the speak thread reads a
     synth's stream from the same runner: one request at a time on the pipe (condition waits for the stream's end), both

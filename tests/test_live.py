@@ -236,7 +236,7 @@ def test_a_clone_too_slow_for_this_computer_gives_way_to_the_stock_voice_said_on
             v._add(speech(1.2, 0.3, i))
         tts = live.TheirVoice(stock, v)
         list(tts.synth('one', 'ru'))
-        assert eng.said == [('one', 1)] and tts._rtf is None  # checked once
+        assert eng.said == [('one', 1)] and v.rtf is None  # checked once
         list(tts.synth('two', 'ru'))
         if isinstance(eng, Slow):
             assert 'too slow for their cloned voice' in v.dead and notes == [v.dead] and stock.said == [('two', 1.0)]
@@ -509,3 +509,75 @@ def test_saved_headphones_are_checked_as_the_default_is(monkeypatch):
     assert app.Headphones('AirPods').resolve() == 'AirPods'
     with pytest.raises(RuntimeError, match='saved output is BlackHole 2ch, a device of the call'):
         app.Headphones('BlackHole 2ch').resolve()
+
+
+def test_a_new_call_on_warm_engines_checks_the_clone_again_and_drops_the_last_calls_clauses(monkeypatch):
+    """FIXES-s2 r3 3, 2: reset() lets a clone found too slow (or failed) in the call before be checked again, its speed
+    counted anew; a clause heard before the reset (the pause after the last call closes it, offered later) is nobody's."""
+    class Slow(FakeClone):
+        def synth(self, text, lang, voice=None):
+            time.sleep(0.15)
+            yield from super().synth(text, lang, voice)
+    monkeypatch.setattr(live, 'RTF_AFTER_S', 0.1)
+    v, stock = voice_of(Slow()), FakeStock()
+    for i in range(3):
+        v._add(speech(1.2, 0.3, i))
+    tts = live.TheirVoice(stock, v)
+    list(tts.synth('one', 'ru'))
+    assert 'too slow' in v.dead and v.rtf is None
+    v._forget()
+    assert v.dead == '' and v.rtf == [0.0, 0.0] and v.people == []
+    w = live.LiveVoice(FakeClone, AmpSpeaker, 'pocket-tts-ru', 'en')
+    before = time.perf_counter()
+    w.reset()
+    old = w.offer(speech(1.5, 0.3), 'their last words', before - 1.5, before)  # A's, closed after the reset
+    new = [w.offer(speech(1.2, 0.3, i), 'b', w._since + 1, w._since + 2.2) for i in range(3)]
+    new[-1].known.wait(5)
+    assert old.known.is_set() and old.person is None and len(w.people) == 1 and w.people[0].seconds == pytest.approx(3.6)
+    w.close()
+
+
+def test_a_short_word_like_someone_known_is_not_said_in_their_voice():
+    """FIXES-s2 r3 4: under MIN_CLAUSE_S a match needs SHORT_SAME (0.55; measured), not SAME: a new person's "yes" at 0.5
+    to A is said in the stock voice, while a clause of 1.2 s at 0.5 is A's."""
+    near = (0.5 * A + np.sqrt(0.75) * C).astype(np.float32)  # 0.5 to A
+
+    class Near(AmpSpeaker):
+        def embed(self, pcm, sr):
+            return near if np.abs(pcm).max() > 0.45 else super().embed(pcm, sr)
+    eng = FakeClone()
+    v = live.LiveVoice(lambda: eng, Near, 'pocket-tts-ru', 'en')
+    v._q.put(None)
+    v._thread.join()
+    for i in range(3):
+        v._add(speech(1.2, 0.3, i))  # A: made
+    yes = live.Clause()
+    v._add(speech(0.5, 0.6), yes, sample=False)
+    assert yes.person is None and v.voice(yes) is None
+    long = live.Clause()
+    v._add(speech(1.2, 0.6), long, sample=False)
+    assert long.person is v.people[0]
+
+
+def test_a_kept_voice_waits_for_nothing_while_the_engine_loads():
+    """FIXES-s2 r3 5: with a kept contact a voice exists from the start, but the engine is not loaded yet: no wait, the
+    stock voice says the clause, and nothing fails."""
+    v = live.LiveVoice(lambda: time.sleep(0.5) or FakeClone(), AmpSpeaker, 'pocket-tts-ru', 'en',
+                       [(B, np.full(3, 7.0, np.float32), 14.0)])
+    c = v.offer(speech(1.2, 0.1), 'b', 0, 1.2)
+    stock = FakeStock()
+    t = time.perf_counter()
+    list(live.TheirVoice(stock, v).synth('hello', 'ru', c))
+    assert time.perf_counter() - t < 0.1 and stock.said == [('hello', 1.0)] and not v.dead
+    v.close()
+
+
+def test_my_raw_microphone_in_the_call_is_said_as_the_reason():
+    """FIXES-s2 r3 6: me -> them did not start, my microphone goes into the call as it is the whole call: no sample, and
+    "keep their voice" says why instead of "not enough of their speech"."""
+    v = voice_of(raw=lambda: True)
+    for i in range(5):
+        v.offer(speech(1.2, 0.3, i), 'a', 0, 1.2)
+    assert v.stats['raw'] == 5
+    assert v.them() == (None, 'your microphone goes into the call as it is (me → them is not running): their voice '
+                              'takes no sample meanwhile')

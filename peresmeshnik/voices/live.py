@@ -38,6 +38,10 @@ BEST_S = 10.0  # the sample: their cleanest clauses up to this long (longer soun
 # cosine of a clause's speaker vector to a person's mean vector: the same person. ponytail: S3's threshold (5 s live vs
 # a file, same-gender strangers pass <= 0.64 %); clauses are shorter but of one call, BENCH stage 8 S2 checks it
 SAME = 0.45
+# a clause shorter than MIN_CLAUSE_S: matched only above this (review r3 4; C, LibriSpeech dev-clean, 6 speakers, 0.3-0.9 s
+# pieces against a person's 20 s mean vector: another person passes 0.45 in 0.15-0.46 % of 2635 pairs, 0.55 in none;
+# the same person passes 0.55 in 11 % under 0.6 s and 55 % at 0.6-1 s), below it the stock voice says it
+SHORT_SAME = 0.55
 WAIT_S = 0.5  # the speak worker waits this long to know whose clause it is (the worker is making a voice), then the
 # stock voice says it
 OUT_SR = 24_000  # the side's audio: the clone engines' (Pocket, XTTS); the stock voice is resampled to it
@@ -107,7 +111,9 @@ class LiveVoice:
         self.speaking: Person | None = None  # who said the last clause the worker went through
         self.speaker = None
         self.gate, self.raw = echo, raw  # raw(): my microphone goes into the call as it is, not through our output
-        self.stats = {'clauses': 0, 'short': 0, 'echo': 0, 'noisy': 0, 'made': 0, 'late': 0}
+        self.rtf: list | None = [0.0, 0.0]  # their voice's synthesis and audio seconds until checked (None: checked)
+        self._since = -np.inf  # reset() at: a clause heard before it is the call before's
+        self.stats = {'clauses': 0, 'short': 0, 'echo': 0, 'noisy': 0, 'made': 0, 'late': 0, 'raw': 0}
         self._q: queue.Queue = queue.Queue()
         self._closed = False
         self._thread = threading.Thread(target=self._work, args=(make_engine, make_speaker, LiveVoice._closing),
@@ -121,7 +127,10 @@ class LiveVoice:
 
     def reset(self) -> None:
         """A new call on the same engines (a server's warm side): the people of the last one, their speech and their
-        voices go, in order after its clauses; the engine stays loaded."""
+        voices go (the voice pack's runner forgets its states too), and so does the clone's failure or slowness: the next
+        call checks it again; the engine stays loaded. A clause heard before this (one the pause after the last call
+        closes, offered later) is nobody's."""
+        self._since = time.perf_counter()
         self._q.put(RESET)
 
     # the pipeline's listen worker: only checks and enqueues
@@ -130,6 +139,9 @@ class LiveVoice:
         c = Clause()
         self.stats['clauses'] += 1
         sample = True
+        if t1 <= self._since:  # the call before's, closed by its pause after reset(): not into this call's people
+            self._q.put((None, c, False))
+            return c
         if len(pcm) < MIN_CLAUSE_S * SAMPLE_RATE:
             self.stats['short'] += 1
             sample = False
@@ -144,6 +156,7 @@ class LiveVoice:
         in it (the gate zeroes our echo alone, double talk passes). The window is where our speech can sound in it: at
         the gate's delay once it has found one, else over all the delays it searches; or my raw microphone goes there."""
         if self.raw is not None and self.raw():
+            self.stats['raw'] += 1
             return True
         g = self.gate
         if g is None:
@@ -158,8 +171,9 @@ class LiveVoice:
     # the speak worker
     def voice(self, clause: Clause | None = None) -> LiveProfile | None:
         """The voice to say `clause` in: its person's; None (the stock voice says it): theirs is not made yet, nobody
-        knows whose it is (a new person's short word), or not within WAIT_S. No voice made yet: no wait at all."""
-        if self.dead or not any(p.voice is not None for p in list(self.people)):
+        knows whose it is (a new person's short word), or not within WAIT_S. No voice made yet, or the engine not loaded
+        yet (a kept voice: the worker loading it, or waiting for the last call's to be freed): no wait at all."""
+        if self.dead or self.engine is None or not any(p.voice is not None for p in list(self.people)):
             return None
         if clause is None:
             p = self.speaking
@@ -183,6 +197,9 @@ class LiveVoice:
             return None, ('with the NVIDIA voice pack their voice lives only during the call, in the pack\'s own memory: '
                           'it cannot be kept')
         here = [p for p in list(self.people) if p.said >= READY_S[0]]
+        if not here and self.stats['raw'] and self.raw is not None and self.raw():
+            return None, ('your microphone goes into the call as it is (me → them is not running): their voice takes no '
+                          'sample meanwhile')
         if len(here) > 1:
             return None, f'{len(here)} people speak in this call: a voice can be kept in a call with one of them only'
         p = here[0] if here else None
@@ -242,7 +259,7 @@ class LiveVoice:
             self.fail(e)
         while (item := self._q.get()) is not None:
             if item is RESET:
-                self.people, self.speaking = self._known(), None
+                self._forget()
                 continue
             pcm, c, sample = item
             try:
@@ -257,6 +274,17 @@ class LiveVoice:
             if hasattr(engine, 'close'):
                 engine.close()
 
+    def _forget(self) -> None:
+        """reset() in the worker, after the call before's clauses."""
+        self.people, self.speaking, self.rtf = self._known(), None, [0.0, 0.0]
+        if self.engine is not None:  # loaded: a failure in the call before (too slow, a crash in it) is checked again;
+            self.dead = ''  # one of loading stays
+            if hasattr(self.engine, 'forget_states'):  # the voice pack: the runner holds their states
+                try:
+                    self.engine.forget_states()
+                except Exception as e:  # a dead runner: nothing of them in it any more
+                    self.fail(e)
+
     def _add(self, pcm: np.ndarray, c: Clause | None = None, sample: bool = True) -> None:
         """Whose clause it is, and its audio into that person's sample when `sample` (long enough, none of our voice)
         and it is clean. A clause that is not for a sample is only matched: it makes nobody new."""
@@ -265,7 +293,7 @@ class LiveVoice:
         sample = sample and snr is not None
         v, sec = self.speaker.embed(pcm, SAMPLE_RATE), len(pcm) / SAMPLE_RATE
         p = max(self.people, key=lambda q: q.similarity(v), default=None)
-        if p is None or p.similarity(v) < SAME:
+        if p is None or p.similarity(v) < (SAME if sec >= MIN_CLAUSE_S else SHORT_SAME):
             p = Person(np.zeros_like(v)) if sample else None
             if p is not None:
                 self.people.append(p)
@@ -336,7 +364,6 @@ class TheirVoice:
 
     def __init__(self, stock, live: LiveVoice):
         self.stock, self.live = stock, live
-        self._rtf: list | None = [0.0, 0.0]  # their voice's synthesis and audio seconds until checked (None: checked)
 
     def synth(self, text: str, lang: str, voice=None, speed: float = 1.0):
         """`voice`: the clause's Clause (LiveVoice.offer, through the pipeline); None: a clause of whoever spoke last."""
@@ -360,14 +387,14 @@ class TheirVoice:
         the computer cannot keep up with it and the stock voice speaks the rest of the call, said (as me -> them)."""
         t = time.perf_counter()
         for c in chunks:
-            if self._rtf is not None:
-                self._rtf[0] += time.perf_counter() - t
-                self._rtf[1] += len(c) / sr if np.any(c) else 0  # not the pause after it (app.clone_rtf)
+            if (r := self.live.rtf) is not None:
+                r[0] += time.perf_counter() - t
+                r[1] += len(c) / sr if np.any(c) else 0  # not the pause after it (app.clone_rtf)
             yield c
             t = time.perf_counter()
-        if self._rtf is not None and self._rtf[1] >= RTF_AFTER_S:
+        if (r := self.live.rtf) is not None and r[1] >= RTF_AFTER_S:
             from peresmeshnik.app import MAX_CLONE_RTF
-            rtf, self._rtf = self._rtf[0] / self._rtf[1], None
+            rtf, self.live.rtf = r[0] / r[1], None
             if rtf > MAX_CLONE_RTF:
                 self.live.fail(f'this computer is too slow for their cloned voice: {rtf:.1f} s of synthesis per second '
                                'of speech')

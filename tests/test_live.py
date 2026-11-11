@@ -191,6 +191,31 @@ def test_their_voice_never_goes_into_the_call(monkeypatch):
     app.Side('them', config.Settings(), None, type('Phones', (), {'play': lambda *a: None})(), None)
 
 
+def test_their_engine_shares_the_card_with_my_cloned_voice(monkeypatch):
+    """FIXES-s1-addon 5 and its reserve (a runner per side): both directions cloned here, mine Qwen3-TTS. On an 8 GB card
+    theirs is Pocket TTS on the CPU (no NVIDIA engine fits beside), on 12 GB XTTS-v2, on 24 GB Qwen3 too, and the same in
+    what is downloaded; my voice in the cloud: theirs Qwen3 on 8 GB."""
+    from peresmeshnik import languages, models
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
+    monkeypatch.setattr(languages, 'pack_here', lambda: True)
+    monkeypatch.setattr(languages, 'addon_here', lambda: True)
+    monkeypatch.setattr(models, 'is_fetched', lambda m, base=None: True)
+    monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(8188 / 1024, (572, 83), 8.6))  # 8 GB as reported
+    s = config.Settings(my_lang='ru', their_lang='en', them_to_me='local', me_to_them='local')
+    assert languages.direction(s, 'me_to_them').tts == 'qwen3-tts' and live.engine(s) == ('pocket-tts-ru', '')
+    need = languages.needed_models(s)
+    assert {'qwen3-tts', 'pocket-tts-ru', 'wespeaker-resnet34'} <= set(need) and 'xtts-v2' not in need
+    s.me_to_them = 'cloud'
+    assert live.engine(s) == ('qwen3-tts', '')
+    s.me_to_them = 'local'
+    monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(12.0, (572, 83), 8.6))
+    assert live.engine(s) == ('xtts-v2', '') and 'xtts-v2' in languages.needed_models(s)
+    monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(24.0, (572, 83), 8.6))
+    assert live.engine(s) == ('qwen3-tts', '')
+    s.local.their_voice = False
+    assert live.engine(s)[0] is None
+
+
 def test_attach_leaves_the_stock_voice_when_off_or_not_downloaded(monkeypatch, tmp_path):
     from peresmeshnik import models
     monkeypatch.setattr(models, 'root', lambda: tmp_path)

@@ -348,6 +348,7 @@ def test_qwen3_brings_its_fallback_engine():
     downloaded with it, it takes over a voice whose clause breaks down (voice pack, local/qwen3.py); XTTS-v2 stays for
     Polish, Turkish, Arabic."""
     s = config.Settings(me_to_them='local')
+    s.local.their_voice = False  # my voice alone (theirs beside it on the card: test_live)
     assert models.get('qwen3-tts').fallback == 'chatterbox-mtl'
     import unittest.mock as um
     with um.patch.object(languages, 'gpu', lambda engine='': True), \
@@ -375,6 +376,7 @@ def test_qwen3_speaks_where_the_voice_packs_addon_is_and_the_card_has_8_gb(monke
     engine = languages.clone_engine
     assert engine('en') == engine('ru') == engine('zh') == ('qwen3-tts', '') and engine('pl') == ('xtts-v2', '')
     s = config.Settings(me_to_them='local')
+    s.local.their_voice = False  # my voice alone (theirs beside it on the card: test_live)
     assert {'qwen3-tts', 'chatterbox-mtl'} <= set(languages.needed_models(s)) and 'xtts-v2' not in languages.needed_models(s)
     has['gpu'] = '6'
     assert engine('en') == ('xtts-v2', '')

@@ -48,7 +48,11 @@ def test_the_pairs_models_ticked_other_pairs_to_remove(base):
     assert vad.installed and vad.size == 0 and vad.on_disk > 1000 and 'every setup' in vad.why
     assert not asr.installed and asr.size == models.get(asr.id).size and asr.license == 'CC-BY-4.0'
     assert 'hears English' in asr.why and asr.required and 'choose cloud for this direction' in asr.instead  # FIXES 2
-    assert vad.required and all(c.required for i, c in rows.items() if i in need)  # no clone here: all of it runs the pair
+    their, who = rows['pocket-tts-ru'], rows['wespeaker-resnet34']  # them -> me in their voice (S2): ticked, a choice
+    assert their.recommended and not their.required and 'voice of the person talking' in their.why
+    assert who.recommended and not who.required and 'who in the call is speaking' in who.why
+    assert vad.required and all(c.required for i, c in rows.items() if i in need - {their.id, who.id})  # the rest runs
+    # the pair
     old = rows['opus-mt-de-ru']
     assert old.installed and not old.recommended and 'not used' in old.why
     clone = rows['xtts-v2']  # me -> them in the cloud: offered, not ticked; no NVIDIA GPU here: why not
@@ -298,6 +302,7 @@ def test_another_pairs_default_follows_the_pair(monkeypatch):
     monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
     monkeypatch.setattr(languages, 'nvidia_once', lambda: CARD)
     s = config.Settings(my_lang='ru', their_lang='en', me_to_them='cloud')
+    s.local.their_voice = False  # their voice (S2) would bring a clone engine of its own
     box = ComponentsBox(s)
     box.refresh()
     assert 'xtts-v2' not in {c.id for c in box.todo()}

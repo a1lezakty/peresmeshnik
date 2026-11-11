@@ -310,12 +310,10 @@ def attach(d, s, echo=None, note=None):
     """Their voice on the them side `d` (a LocalDirection with its stock voice), when `[local] their_voice` is on and a
     clone engine speaks the language here (languages.clone_engine) with its weights and the speaker vector model
     downloaded; else `d` as it was (logged: the stock voice speaks, as before). `note(why)`: LiveVoice's."""
-    from peresmeshnik import languages, models
+    from peresmeshnik import models
     from peresmeshnik.local.clone import make_engine
-    if not s.local.their_voice:
-        return d
-    engine_id, why = languages.clone_engine(s.my_lang, 'them_to_me')
-    if why:
+    engine_id, why = engine(s)
+    if not engine_id:
         log.info('their voice: the stock voice speaks (%s)', why)
         return d
     try:
@@ -329,6 +327,19 @@ def attach(d, s, echo=None, note=None):
                      s.their_lang, kept(engine_id), echo, note)
     d.tts, d.on_clause = TheirVoice(d.tts, live), live.offer
     return d
+
+
+def engine(s) -> tuple[str | None, str]:
+    """(the clone engine their voice is made in with settings `s` on this computer, '') or (None, why not): the side
+    (attach), languages.needed_models and the Components page ask it, nobody else (languages.clone_engine's answer).
+    With my own voice cloned here too, its engine goes `beside`: both must fit the NVIDIA card (mine Qwen3-TTS: on 8 GB
+    theirs Pocket TTS on the CPU, on 12 GB XTTS-v2)."""
+    from peresmeshnik import languages
+    if not s.local.their_voice:
+        return None, 'their voice is off ([local] their_voice)'
+    me = languages.direction(s, 'me_to_them')
+    beside = me.tts if s.me_to_them == 'local' and me.voice == 'clone' else ''
+    return languages.clone_engine(s.my_lang, 'them_to_me', beside=beside)
 
 
 def kept(engine_id: str, root=None) -> list:

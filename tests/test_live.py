@@ -57,10 +57,10 @@ class FakeStock:
         yield np.zeros(2205, np.float32)
 
 
-def voice_of(engine=None, kept=(), echo=None):
+def voice_of(engine=None, kept=(), echo=None, note=None):
     """A LiveVoice whose worker has loaded its engines and stopped: clauses go through _add() right here."""
     engine = engine or FakeClone()
-    v = live.LiveVoice(lambda: engine, AmpSpeaker, 'pocket-tts-ru', 'en', kept, echo)
+    v = live.LiveVoice(lambda: engine, AmpSpeaker, 'pocket-tts-ru', 'en', kept, echo, note)
     v._q.put(None)
     v._thread.join()
     return v
@@ -150,6 +150,29 @@ def test_their_voice_speaks_stock_until_made_then_clone_and_stock_after_a_failur
     assert v.dead and stock.said[-1] == ('three', 1.0)
     list(tts.synth('four', 'ru'))
     assert eng.said[-1][0] == 'three' and stock.said[-1][0] == 'four'
+
+
+def test_a_clone_too_slow_for_this_computer_gives_way_to_the_stock_voice_said_once(monkeypatch):
+    """As me -> them (app.MAX_CLONE_RTF), timed on the call's own clauses: their voice's synthesis slower than real time
+    -> the stock voice for the rest of the call, and the tray hears why, once; a clone fast enough stays."""
+    class Slow(FakeClone):
+        def synth(self, text, lang, voice=None):
+            time.sleep(0.15)  # for its 0.1 s
+            yield from super().synth(text, lang, voice)
+    monkeypatch.setattr(live, 'RTF_AFTER_S', 0.1)
+    for eng in (FakeClone(), Slow()):
+        notes, stock = [], FakeStock()
+        v = voice_of(eng, note=notes.append)
+        for i in range(3):
+            v._add(speech(1.2, 0.3, i))
+        tts = live.TheirVoice(stock, v)
+        list(tts.synth('one', 'ru'))
+        assert eng.said == [('one', 1)] and tts._rtf is None  # checked once
+        list(tts.synth('two', 'ru'))
+        if isinstance(eng, Slow):
+            assert 'too slow for their cloned voice: 1.' in v.dead and notes == [v.dead] and stock.said == [('two', 1.0)]
+        else:
+            assert not v.dead and not notes and eng.said[-1][0] == 'two'
 
 
 def test_their_voice_never_goes_into_the_call(monkeypatch):

@@ -560,7 +560,8 @@ class Side:
             from peresmeshnik.pipeline import MAX_LAG_S
             from peresmeshnik.voices import live
             d = make_local(self.src, self.tgt, tts=pair.tts, max_lag_s=MAX_LAG_S, **kw)  # the queue policy: subtitles keep the rest
-            return live.attach(self._stock(d, s), s, self.echo)  # in their own voice once it is made (S2)
+            return live.attach(self._stock(d, s), s, self.echo, lambda why: self.on_error(  # in their own voice once
+                f'note: {ARROW[self.name]}: a stock voice speaks instead of their voice ({why})'))  # it is made (S2)
         elif pair.voice == 'stock':  # a stock voice: chosen where the clone falls behind (an 8 GB Mac, BENCH), or the
             d = make_local(self.src, self.tgt, tts=pair.tts, **kw)  # clone cannot speak the language
         else:

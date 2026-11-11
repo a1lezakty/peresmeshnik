@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -38,6 +39,7 @@ SAME = 0.45
 WAIT_S = 0.5  # the speak worker waits this long to know whose clause it is (the worker is making a voice), then guesses
 OUT_SR = 24_000  # the side's audio: the clone engines' (Pocket, XTTS); the stock voice is resampled to it
 GAP = np.zeros(SAMPLE_RATE // 10, np.float32)  # between clauses in the sample
+RTF_AFTER_S = 4.0  # their cloned voice's speed is checked once, after this much of it (me -> them: a ~4 s test phrase)
 
 
 @dataclass
@@ -79,11 +81,12 @@ def clean(pcm: np.ndarray) -> float | None:
 class LiveVoice:
     """Collects the voices of the call (see the module). `make_engine()` and `make_speaker()` run on its worker:
     the clone engine (`condition(pcm, sr) -> state`, `synth(text, lang, voice)`) and voice.Speaker. `kept`: voices
-    from earlier calls, [(speaker vector, engine state, seconds)]. `echo`: the side's audio.echo.EchoGate.
+    from earlier calls, [(speaker vector, engine state, seconds)]. `echo`: the side's audio.echo.EchoGate. `note(why)`:
+    said once when the clone fails and the stock voice takes over.
     Clauses go to the worker in order (those without audio for the sample too): who said one is decided in order."""
 
-    def __init__(self, make_engine, make_speaker, engine_id: str = '', lang: str = '', kept=(), echo=None):
-        self.engine, self.engine_id, self.lang, self.dead = None, engine_id, lang, ''
+    def __init__(self, make_engine, make_speaker, engine_id: str = '', lang: str = '', kept=(), echo=None, note=None):
+        self.engine, self.engine_id, self.lang, self.dead, self.note = None, engine_id, lang, '', note
         self.people: list[Person] = [Person(np.asarray(v, np.float32), s, voice=LiveProfile('them', engine_id, None, {
             'kind': 'them'}, state=st), made_at=s, kept=True) for v, st, s in kept]
         self.speaking: Person | None = None  # who said the last clause the worker went through
@@ -139,6 +142,8 @@ class LiveVoice:
         if not self.dead:
             self.dead = str(why) or type(why).__name__
             log.warning('their voice: the clone failed, the stock voice speaks: %s', why)
+            if self.note is not None:
+                self.note(self.dead)
 
     def close(self) -> None:
         self._q.put(None)
@@ -242,13 +247,15 @@ class TheirVoice:
 
     def __init__(self, stock, live: LiveVoice):
         self.stock, self.live = stock, live
+        self._rtf: list | None = [0.0, 0.0]  # their voice's synthesis and audio seconds until checked (None: checked)
 
     def synth(self, text: str, lang: str, voice=None, speed: float = 1.0):
         """`voice`: the clause's Clause (LiveVoice.offer, through the pipeline); None: a clause of whoever spoke last."""
         if (v := self.live.voice(voice if isinstance(voice, Clause) else None)) is not None:
             said, eng = False, self.live.engine
             try:
-                for chunk in self._at(faster(eng.synth(text, lang, v), speed, eng.sample_rate), eng.sample_rate):
+                for chunk in self._at(faster(self._timed(eng.synth(text, lang, v), eng.sample_rate), speed,
+                                             eng.sample_rate), eng.sample_rate):
                     said = True
                     yield chunk
                 return
@@ -258,6 +265,23 @@ class TheirVoice:
                     return
         yield from self._at(self.stock.synth(text, lang, **({'speed': speed} if speed != 1.0 else {})),
                             self.stock.sample_rate)
+
+    def _timed(self, chunks, sr: int):
+        """The clone's chunks, its synthesis time counted until RTF_AFTER_S of speech: slower than app.MAX_CLONE_RTF,
+        the computer cannot keep up with it and the stock voice speaks the rest of the call, said (as me -> them)."""
+        t = time.perf_counter()
+        for c in chunks:
+            if self._rtf is not None:
+                self._rtf[0] += time.perf_counter() - t
+                self._rtf[1] += len(c) / sr if np.any(c) else 0  # not the pause after it (app.clone_rtf)
+            yield c
+            t = time.perf_counter()
+        if self._rtf is not None and self._rtf[1] >= RTF_AFTER_S:
+            from peresmeshnik.app import MAX_CLONE_RTF
+            rtf, self._rtf = self._rtf[0] / self._rtf[1], None
+            if rtf > MAX_CLONE_RTF:
+                self.live.fail(f'this computer is too slow for their cloned voice: {rtf:.1f} s of synthesis per second '
+                               'of speech')
 
     @staticmethod
     def _at(chunks, sr: int):
@@ -275,10 +299,10 @@ class TheirVoice:
         return getattr(self.stock, '_p', None)
 
 
-def attach(d, s, echo=None):
+def attach(d, s, echo=None, note=None):
     """Their voice on the them side `d` (a LocalDirection with its stock voice), when `[local] their_voice` is on and a
     clone engine speaks the language here (languages.clone_engine) with its weights and the speaker vector model
-    downloaded; else `d` as it was (logged: the stock voice speaks, as before)."""
+    downloaded; else `d` as it was (logged: the stock voice speaks, as before). `note(why)`: LiveVoice's."""
     from peresmeshnik import languages, models
     from peresmeshnik.local.clone import make_engine
     if not s.local.their_voice:
@@ -295,7 +319,7 @@ def attach(d, s, echo=None):
         return d
     threads = s.local.threads
     live = LiveVoice(lambda: make_engine(engine_id, model_dir, threads), lambda: Speaker(spk_dir), engine_id,
-                     s.their_lang, kept(engine_id), echo)
+                     s.their_lang, kept(engine_id), echo, note)
     d.tts, d.on_clause = TheirVoice(d.tts, live), live.offer
     return d
 

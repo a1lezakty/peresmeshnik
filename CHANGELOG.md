@@ -29,9 +29,10 @@ version is the top of its GitHub release notes (`.github/workflows/release.yml`)
   clear speech (made again at 5, 10 and 20 s, between phrases), only into your headphones, forgotten after the call
   unless you keep it; with two people on their side each phrase is in the voice of whoever said it, and a kept voice
   speaks from the first phrase. Our own speech coming back from their side never goes into their voice. When the voice
-  falls behind it speaks faster at the same pitch. Its download: the clone engine of your language (as for your voice;
-  Russian on the CPU 0.44 GB) and the 27 MB speaker model. With the NVIDIA voice pack it lives only during the call.
-  `[local] their_voice = false`: the stock voice as before, nothing more downloaded.
+  falls behind it speaks faster at the same pitch; a computer too slow for it gets the stock voice, said why. Its
+  download: the clone engine of your language (as for your voice; Russian on the CPU 0.44 GB) and the 27 MB speaker
+  model. With the NVIDIA voice pack it lives only during the call. `[local] their_voice = false`: the stock voice as
+  before, nothing more downloaded.
 
 ## 0.3.0
 

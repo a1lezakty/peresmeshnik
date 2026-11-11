@@ -177,7 +177,16 @@ class Tray(QObject):
                 for a in group.actions():
                     a.setChecked(a.data()[1] == getattr(s, key))
         self.live.setChecked(self.ctl.live)
-        self.remember.setVisible(bool(getattr(self.ctl, 'on', False)) and hasattr(self.ctl, 'them_voice'))
+        self.remember.setVisible(bool(getattr(self.ctl, 'on', False)) and hasattr(self.ctl, 'them_voice')
+                                 and self._keeps_their_voice(s))
+
+    @staticmethod
+    def _keeps_their_voice(s) -> bool:
+        """Whether the them side's clone engine here keeps a voice to take to the next call: Pocket TTS (its state) yes;
+        an engine of the NVIDIA voice pack (XTTS, Qwen3) not (COMMON 23:49), nor no engine at all."""
+        from peresmeshnik import languages
+        engine = languages.clone_engine(s.my_lang, 'them_to_me')[0]
+        return bool(engine) and not languages.needs_gpu(engine)
 
     def hotkey_note(self, combo: str, why: str, announce: bool = False) -> None:
         """The hotkey in the menu item; why there is none in its tooltip, on the wizard's hotkey page and, with

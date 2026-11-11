@@ -315,3 +315,20 @@ def test_settings_lists_only_my_voices(root, tmp_path, monkeypatch):
     d = tray_mod.SettingsDialog(tray_mod.Tray(type('Ctl', (), {'live': False, 'on': False})()))
     items = [(d.voice.itemText(i), d.voice.itemData(i)) for i in range(d.voice.count())]
     assert items == [('none', ''), ('Petrov', 'Petrov'), ('me', 'me')], items
+
+
+def test_keep_their_voice_only_where_the_engine_keeps_one(tmp_path, monkeypatch):
+    """COMMON 23:49: "Keep the voice…" while translating with S2's them_voice(), only where the them side's clone engine
+    keeps a voice (Pocket TTS: its state); not with an engine of the NVIDIA voice pack (XTTS, Qwen3), nor with none."""
+    from peresmeshnik import languages
+    from peresmeshnik.ui import tray as tray_mod
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    monkeypatch.setattr(config, 'config_dir', lambda: tmp_path)
+    engine = ['pocket-tts-de', '']
+    asked = []
+    monkeypatch.setattr(languages, 'clone_engine', lambda lang, side='me_to_them', **k: asked.append((lang, side)) or engine)
+    t = tray_mod.Tray(type('Ctl', (), {'live': False, 'on': True, 'them_voice': lambda self: None})())
+    assert t.remember.isVisible() and asked[-1] == (config.load().my_lang, 'them_to_me')
+    for engine[:] in (['xtts-v2', ''], ['qwen3-tts', ''], [None, 'no clone of their voice here']):
+        t.sync()
+        assert not t.remember.isVisible(), engine

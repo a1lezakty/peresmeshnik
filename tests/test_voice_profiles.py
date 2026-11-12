@@ -585,6 +585,24 @@ def test_the_me_side_falls_back_when_its_clone_does_not_sound_like_me(monkeypatc
         in side.errors[0]
 
 
+def test_the_room_before_the_first_word_is_cut(tmp_path):
+    """FIXES-s3-40 9: Record pressed, then 3 s of the room before the first word: the 4 s head windows held mostly it
+    (BENCH: the owner refused 63 / 78 % at SNR 30 / 20). save() cuts it, all but LEAD_S, when it is the room alone
+    (steady); anything else before the first word (here a tone over the room, someone's quiet voice) stays and is checked
+    as it is: a cut stopping inside it would leave the rest beside my speech."""
+    sr, root = 24_000, tmp_path / 'v'
+    room = 0.005 * np.random.default_rng(1).standard_normal(3 * sr).astype(np.float32)  # the noise of noisy()'s pauses
+    alone = len(voice.read_audio(voice.save(noisy(40, sr), sr, 'a', 'ru', 'text', root).path / 'reference.wav')[0])
+    y = voice.read_audio(voice.save(np.concatenate([room, noisy(40, sr)]), sr, 'b', 'ru', 'text', root).path
+                         / 'reference.wav')[0]
+    assert 0 <= len(y) - alone <= (voice.LEAD_S + 0.03) * sr, (len(y) - alone) / sr
+    t = np.arange(sr) / sr
+    room[sr:2 * sr] += (0.01 * np.sin(2 * np.pi * 300 * t)).astype(np.float32)  # 6 dB over the room: not steady
+    y = voice.read_audio(voice.save(np.concatenate([room, noisy(40, sr)]), sr, 'c', 'ru', 'text', root).path
+                         / 'reference.wav')[0]
+    assert len(y) >= alone + 3 * sr - 0.03 * sr, (len(y) - alone) / sr
+
+
 def test_a_recording_with_little_speech_after_its_start_is_refused(tmp_path):
     """FIXES-s3-40 6: under ~16 s of it there is nothing after the start to compare it with (its windows were compared with
     themselves): refused, record a longer one; not a failed try."""

@@ -643,6 +643,16 @@ HEAD_REST = 0.60
 # whoever is there (the owner's files: 6.5 s at the least, p1 6.9; another person's 10 s at -62 dBFS leaves 0.27 s, 98 %
 # under 3 s; BENCH)
 PROMPT_S, PROMPT_MIN_S = 10.0, 3.0
+# the room before the first word (Record pressed, a second to start) is not my voice, yet the engines would take it into
+# their prompt and the 4 s head windows would hold mostly it: save() cuts it, all but LEAD_S before the first frame of
+# speech (check()'s: above the noise of the pauses + 6 dB), only when it is the room alone: steady (its frames within
+# STEADY_DB, p10-p90) and no digital silence in it. Anything else there (a breath, a voice, a file put together) stays and
+# is checked as it is: a cut that stops inside someone else's quiet voice leaves the rest of it in my first 10 s beside my
+# speech, where the checks of the start pass it (BENCH: cut at the first frame of speech whatever came before, their 10 s
+# at -62 dBFS then me passed 41 %, some of them in the file 17 %). What is cut reaches neither the check nor the engines.
+# BENCH (FIXES-s3-40 9): 3 s of the room before the first word at SNR 30 / 20 refused the owner 63 / 78 %, cut 7.1 / 9.7 %
+# (none: 6.0 / 8.6 %); the splices as before it
+LEAD_S, STEADY_DB = 0.3, 4.0
 RECORD_AGAIN = 'record your voice again alone, with nobody else talking (setup wizard, "Your voice")'
 START_NOW = 'start reading right away, in your usual voice, with no sounds before the first word'
 TRIES, PAUSES_S = 3, (60, 300, 1500, 3600)  # failed checks in a row before a pause; the pauses after them, growing
@@ -670,6 +680,20 @@ def _under_floor(x: np.ndarray, sr: int) -> np.ndarray:
     if not len(speech):
         return np.zeros(min(len(f), int(START_S * 1000 / 30)), bool)
     return db[:int(START_S * 1000 / 30)] < float(np.median(speech)) - FLOOR_DB
+
+
+def _onset(x: np.ndarray, sr: int) -> int:
+    """The sample save() starts the recording at: LEAD_S before its first frame of speech when all before it is the room
+    (steady, no digital silence), else 0."""
+    f = _frames(x - x.mean(), sr)
+    db = 10 * np.log10(np.mean(f ** 2, axis=1) + 1e-12)
+    live = db[db > -100]
+    on = db > max(float(np.percentile(live, 10)) + 6 if len(live) else -120.0, -60.0)
+    k = int(np.argmax(on)) - round(LEAD_S * 1000 / 30) if on.any() else 0
+    silent = np.mean(_frames(np.asarray(x, np.float32)[:k * f.shape[1]], sr) ** 2, axis=1) <= 1e-10  # as _start: raw
+    if k <= 0 or silent.any() or np.ptp(np.percentile(db[:k], [10, 90])) > STEADY_DB:
+        return 0
+    return k * f.shape[1]
 
 
 def _start(pcm: np.ndarray, sr: int) -> np.ndarray:
@@ -819,14 +843,15 @@ def confirm_live(ref: Voice, pcm: np.ndarray, sr: int, said: list[str], asr, spe
 # --- the clone made from my recording speaks in the voice of my live reading (BRIEF-s3-clone-output-check) ---
 # The end-to-end net behind the recording's checks above: before my voice is confirmed (where its engine can be made then),
 # and else the first time an engine is made from it (vet_clone), the clone says the two test phrases of the language it
-# speaks; one speaker vector of both against the live reading's (consent['live']). BENCH (stage 8, before 0.3.0: 88 own
-# recordings x 3 live readings, Pocket / XTTS / Qwen3 / Chatterbox as the app runs them, phrases in en and, from an
-# English reading, ru and de): the owner's lowest p1 0.205 (Qwen3 into Russian; XTTS 0.25, Pocket 0.32, Chatterbox
-# 0.35), refused at 0.20: 0.8 % more there, 0.4 % into German, none elsewhere. It cannot tell a blend of 3-4 s of
-# someone else from my own clone (their spread overlaps: those the recording's start refuses), but it refuses a clone
-# that says nothing or nobody (Pocket on a silent start: 80 % of such files) and whatever an engine makes of a file the
-# checks above passed
-CLONE_MATCH = 0.20
+# speaks; one speaker vector of both against the live reading's (consent['live']). It catches a clone that says nothing
+# or garbage, not a splice: the start against the rest (head_rest) does that (their spreads overlap: a clone of 3-4 s of
+# someone else scores like my own). BENCH (stage 8, before 0.3.0 and FIXES-s3-40 10: Pocket / XTTS / Qwen3 / Chatterbox
+# as the app runs them; 88 own LibriSpeech recordings x 3 English live readings, the clone in en / ru / de; 62 Russian
+# speakers of mTEDx x 3 Russian live readings, the clone in en / ru): the owner's lowest 0.131 (Pocket, a Russian reading
+# and English clone; next 0.184), 0.149 (Qwen3, English reading, Russian clone). At 0.10, the floor of "nothing or
+# garbage", not one own refusal more in any engine and direction (at 0.20: +1.1 % and +0.8 % there); it refuses 27 % of
+# Pocket's clones of a near-silent start and 7-20 % of whole clones of another person (Pocket, Qwen3, Chatterbox)
+CLONE_MATCH = 0.10
 CLONE_WHY = ("the voice made from your recording does not sound like you (similarity {sim:.2f}): someone else's speech "
              'may be in it; ' + RECORD_AGAIN)
 SAID_NOTHING = 'the voice made from your recording said next to nothing in the test: try again'
@@ -933,6 +958,7 @@ def save(pcm: np.ndarray, sr: int, name: str, lang: str, transcript: str | None 
     for old in path.glob('*.pt'):  # engine caches of an older recording
         old.unlink()
     y = np.clip(x * gain, -1, 1)
+    y = y[_onset(y, sr):]  # the room before the first word: neither checked nor taken by the engines
     under = _under_floor(y, sr)
     fl = sr * 30 // 1000
     y[:len(under) * fl].reshape(-1, fl)[under] = 0  # the engines get only what is checked

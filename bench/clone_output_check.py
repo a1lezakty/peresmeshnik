@@ -16,6 +16,12 @@ language). Also each live reading cloned by itself (`live` outputs): the output 
 
 Stages (PYTHONPATH: a copy of the repo; each engine in its own environment):
   recs    --data D --work W --speaker S   profiles/, lives/, refs/, recs.json with the live check per (recording, live)
+          [--mid: the splice set only, the other person's K s at 12-30 s of the file (MID_V) where XTTS takes its speaker
+          vector from and the live check has only the rest's 8 s windows: FIXES-s3-40 12]
+  recs_ru --data D --work W --speaker S   the same of Russian speakers (FIXES-s3-40 10: a Russian live reading, the
+          clone speaking English): mTEDx ru-ru train (D: its data/train; one speaker a talk), 40 s of a talk from its
+          RU_FROM_S as the recording, 3 x 8 s of it at RU_AT of the talk as the live readings (one session: the clone's
+          check is what is measured); the engines then with --no-lives
   pocket  --work W --model-dir M [--shard i/n]
   xtts    --work W --model-dir M [--device cuda:0]
   qwen3   --work W --model-dir M [--device cuda:0]          (no Chatterbox fallback: a runaway is counted, cut)
@@ -40,7 +46,9 @@ from clone_prompt_splice import PROMPT_S, SR, chapters, genders, level, quiet, s
 
 RECORD_S, LIVE_S, LIVES = 40.0, 8.0, 3
 SPLICE_V = ['me', 'other', 'start2', 'start3', 'start4', 'end2', 'end3', 'end4', 'quiet']
-LANGS = {'clean': ('en', 'ru', 'de'), 'splice': ('en',)}  # Pocket: en only (its weights here)
+MID_V = {'mid3': (3, 14.0), 'mid4': (4, 14.0), 'mid4l': (4, 22.0), 'mid8': (8, 14.0)}  # --mid: their K s at T s of the file
+LANGS = {'clean': ('en', 'ru', 'de'), 'splice': ('en',), 'ru': ('en', 'ru')}  # Pocket: en only (its weights here)
+RU_FROM_S, RU_AT = 120.0, (0.4, 0.6, 0.8)  # mTEDx: the recording from the talk's 3rd minute, the live readings there
 
 
 def at(x: np.ndarray, db: float = -20.0) -> np.ndarray:
@@ -75,7 +83,7 @@ def stage_recs(a) -> None:
         recs.append(meta | {'id': rid, 'lives': lids, 'margin': gate})
 
     # clean: the owner's own reading as it is
-    for s in sorted(ch, key=int):
+    for s in [] if a.mid else sorted(ch, key=int):
         cs = sorted(ch[s])
         if len(cs) < 2:
             continue
@@ -104,7 +112,13 @@ def stage_recs(a) -> None:
             lives[lid] = spk.embed(_speech(sf.read(work / 'lives' / f'{lid}.wav', dtype='float32')[0], SR, edges=True), SR)
         for who, s, c in (('me', me, cm[1]), ('other', other, co[1])):
             sf.write(work / 'refs' / f'{pid}_{who}.wav', speech(ch[s][c], 30.0), SR)
-        for v in SPLICE_V:
+        for v in ['me', *MID_V] if a.mid else SPLICE_V:
+            if v in MID_V:
+                k, t = MID_V[v]
+                o, piece = int((t - PROMPT_S) * SR), theirs[:k * SR] * (level(rest) / level(theirs[:k * SR]))
+                keep(f's{pid}_{v}', np.concatenate([at(mine[:int(PROMPT_S * SR)]), rest[:o], piece, rest[o + len(piece):]]),
+                     {'set': 'splice', 'pair': pid, 'me': me, 'other': other, 'gender': g[me], 'variant': v}, [lid])
+                continue
             if v == 'quiet':
                 x = quiet(theirs, mine[int(PROMPT_S * SR):])[:int(PROMPT_S * SR)]
             else:
@@ -120,6 +134,59 @@ def stage_recs(a) -> None:
         r = [x for x in recs if x['set'] == st]
         m = [v for x in r for v in x['margin'].values()]
         print(f'{st}: {len(r)} recordings, {len(m)} (recording, live) checks, refused {np.mean(np.array(m) < 0):.1%}')
+
+
+def at_sr(x: np.ndarray, sr: int) -> np.ndarray:
+    """x (mono) at SR, band-limited (FFT)."""
+    n = int(len(x) * SR / sr)
+    return x.astype(np.float32) if sr == SR else (np.fft.irfft(np.fft.rfft(x)[:n // 2 + 1], n) * SR / sr).astype(np.float32)
+
+
+def stage_recs_ru(a) -> None:
+    from peresmeshnik import voice
+    from peresmeshnik.voice import Speaker, _prompt, _speech, _start, _windows
+    d, work = Path(a.data), Path(a.work)
+    spk = Speaker(Path(a.speaker), threads=a.threads)
+    for sub in ('lives', 'profiles'):
+        (work / sub).mkdir(parents=True, exist_ok=True)
+    seg: dict[str, list[tuple[float, float]]] = {}
+    for line in open(d / 'txt/segments'):
+        _, talk, s0, s1 = line.split()
+        seg.setdefault(talk, []).append((float(s0), float(s1)))
+    recs, lives = [], {}
+    for talk in sorted(seg):
+        f = d / 'wav' / f'{talk}.flac'
+        try:
+            info = sf.info(f)
+            ss = sorted(seg[talk])
+            start = next(s0 for s0, _ in ss if s0 >= RU_FROM_S)
+            x, sr = sf.read(f, dtype='float64', start=int(start * info.samplerate), frames=int(RECORD_S * info.samplerate),
+                            always_2d=True)
+            lids = []
+            for k, frac in enumerate(RU_AT):
+                s0 = next(s0 for s0, _ in ss if s0 >= max(frac * ss[-1][1], start + RECORD_S))
+                y, _ = sf.read(f, dtype='float64', start=int(s0 * sr), frames=int(LIVE_S * sr), always_2d=True)
+                if len(y) < LIVE_S * sr:
+                    continue
+                lid = f'{talk}-{k}'
+                sf.write(work / 'lives' / f'{lid}.wav', at_sr(y.mean(axis=1), sr), SR)
+                lives[lid] = spk.embed(_speech(sf.read(work / 'lives' / f'{lid}.wav', dtype='float32')[0], SR, edges=True), SR)
+                lids.append(lid)
+        except (StopIteration, RuntimeError, OSError, ValueError) as e:  # too short, not downloaded, cut off
+            print(f'{talk}: skipped ({type(e).__name__})', flush=True)
+            continue
+        if len(x) < RECORD_S * sr or not lids:
+            continue
+        v = voice.save(at_sr(x.mean(axis=1), sr), SR, f'r{talk}', 'ru', root=work / 'profiles')
+        y, rsr = sf.read(v.path / 'reference.wav', dtype='float32')
+        vecs = [(spk.embed(w, rsr), m) for w, m in _windows(_start(y, rsr), rsr)]
+        recs.append({'set': 'ru', 'me': talk, 'id': f'r{talk}', 'lives': lids, 'prompt_s': len(_prompt(y, rsr)) / rsr,
+                     'margin': {lid: float(min(e @ lives[lid] - m for e, m in vecs)) for lid in lids}})
+        print(f'ru {talk}: {len(recs)} recordings', flush=True)
+    (work / 'recs.json').write_text(json.dumps(recs, indent=1))
+    np.savez(work / 'lives.npz', **lives)
+    m = [v for x in recs for v in x['margin'].values()]
+    print(f'ru: {len(recs)} recordings, {len(m)} (recording, live) checks, refused by the windows {np.mean(np.array(m) < 0):.1%}')
 
 
 # ---------- engines
@@ -341,32 +408,41 @@ def stage_report(a) -> None:
     for r in R:
         vecs = [(V[k], float(k.split('/')[-1])) for k in V.files if k.startswith(f'win/{r["id"]}/')]
         p = [V[f'prompt/{r["id"]}']] if f'prompt/{r["id"]}' in V.files else []
-        hr[r['id']] = voice.head_rest(vecs + [(e, voice.HEAD_MATCH) for e in p])
+        rest = [e for e, m in vecs if m != voice.HEAD_MATCH]
+        hr[r['id']] = voice.head_rest([e for e, m in vecs if m == voice.HEAD_MATCH] + p, rest) if rest else -1.0
+        if r.get('prompt_s', voice.PROMPT_S) < voice.PROMPT_MIN_S:  # a silent prompt: refused as head-rest
+            hr[r['id']] = -1.0
         for lid in r['lives']:
             m = r['margin'][lid] >= 0 and all(float(e @ lives[lid]) >= voice.HEAD_MATCH for e in p)
             ok_rec[(r['id'], lid)] = (r['margin'][lid] >= 0, m, m and hr[r['id']] >= voice.HEAD_REST)
     out = {(x['engine'], x['rec'], x['live'], x['lang'], x['k']): x['cos_live'] for x in rows}
-    cl = [(r['id'], lid) for r in R if r['set'] == 'clean' for lid in r['lives']]
-    print(f'## the owner ({len({c[0] for c in cl})} recordings, {len(cl)} checks): refused by the windows / + the prompt '
-          f'/ + head-rest {voice.HEAD_REST}; then + the clone at {voice.CLONE_MATCH} (two phrases), per engine and language')
-    print(' / '.join(f'{np.mean([not ok_rec[c][j] for c in cl]):.1%}' for j in range(3))
-          + f'; head-rest of the owner: min {min(hr[c[0]] for c in cl):.3f}')
-    print('| engine | lang | refused | added by the clone | cosine p1 | min |')
-    print('|---|---|---|---|---|---|')
-    for e in E:
-        for lg in LANGS['clean']:
-            c = [(ok_rec[k][2], out.get((e, *k, lg, 'cat'))) for k in cl]
-            if all(x is None for _, x in c):
-                continue
-            cos = np.array([x for _, x in c if x is not None])
-            print(f'| {e} | {lg} | {np.mean([not (g and x is not None and x >= voice.CLONE_MATCH) for g, x in c]):.1%} | '
-                  f'{np.mean([g and (x is None or x < voice.CLONE_MATCH) for g, x in c]):.1%} | {np.percentile(cos, 1):.3f} | '
-                  f'{cos.min():.3f} |')
+    T = sorted({0.10, 0.12, 0.14, 0.16, voice.CLONE_MATCH, 0.20})
+    for own in [x for x in ('clean', 'ru') if any(r['set'] == x for r in R)]:
+        cl = [(r['id'], lid) for r in R if r['set'] == own for lid in r['lives']]
+        print(f'## the owner, set {own} ({len({c[0] for c in cl})} recordings, {len(cl)} checks): refused by the windows / '
+              f'+ the prompt / + head-rest {voice.HEAD_REST}; then + the clone at {voice.CLONE_MATCH} (two phrases), per '
+              f'engine and language; added by the clone at each threshold')
+        print(' / '.join(f'{np.mean([not ok_rec[c][j] for c in cl]):.1%}' for j in range(3))
+              + f'; head-rest of the owner: min {min(hr[c[0]] for c in cl):.3f}')
+        print('| engine | lang | refused | added by the clone | cosine p1 | min | ' + ' | '.join(f'+ at {t:.2f}' for t in T) + ' |')
+        print('|---|---|---|---|---|---|' + '---|' * len(T))
+        for e in E:
+            for lg in LANGS[own]:
+                c = [(ok_rec[k][2], out.get((e, *k, lg, 'cat'))) for k in cl]
+                if all(x is None for _, x in c):
+                    continue
+                cos = np.array([x for _, x in c if x is not None])
+                print(f'| {e} | {lg} | {np.mean([not (g and x is not None and x >= voice.CLONE_MATCH) for g, x in c]):.1%} | '
+                      f'{np.mean([g and (x is None or x < voice.CLONE_MATCH) for g, x in c]):.1%} | '
+                      f'{np.percentile(cos, 1):.3f} | {cos.min():.3f} | '
+                      + ' | '.join(f'{np.mean([g and (x is None or x < t) for g, x in c]):.1%}' for t in T) + ' |')
+    if not any(r['set'] == 'splice' for r in R):
+        return
     print('\n## splices (15 pairs, the owner\'s live reading of another chapter): passing of 15 at each step; '
           'the two outputs per engine closer to the other person among the passing')
     print('| piece | windows | + prompt, head-rest | ' + ' | '.join(f'+ {e}' for e in E) + ' |')
     print('|---|---|---|' + '---|' * len(E))
-    for v in SPLICE_V:
+    for v in dict.fromkeys(r['variant'] for r in R if r['set'] == 'splice'):
         rs = [(r['id'], r['lives'][0]) for r in R if r['set'] == 'splice' and r['variant'] == v]
         cells = []
         for e in E:
@@ -428,7 +504,7 @@ def stage_timing(a) -> None:
 
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
-    ap.add_argument('stage', choices=('recs', 'pocket', 'xtts', 'qwen3', 'cbox', 'score', 'report', 'timing'))
+    ap.add_argument('stage', choices=('recs', 'recs_ru', 'pocket', 'xtts', 'qwen3', 'cbox', 'score', 'report', 'timing'))
     ap.add_argument('--engine', choices=('pocket', 'xtts', 'qwen3'), help='timing: which engine')
     ap.add_argument('--data', help='LibriSpeech/dev-clean')
     ap.add_argument('--work', required=True)
@@ -440,8 +516,9 @@ def main(argv=None) -> None:
     ap.add_argument('--shard', default='0/1', help='i/n: every n-th job from the i-th (engine stages)')
     ap.add_argument('--reverse', action='store_true', help='the jobs from the last (a second process on the same ones)')
     ap.add_argument('--no-lives', action='store_true', help='only the recordings, not the live readings cloned')
+    ap.add_argument('--mid', action='store_true', help='recs: the splice set only, their piece at 12-30 s (MID_V)')
     a = ap.parse_args(argv)
-    {'recs': stage_recs, 'pocket': stage_pocket, 'xtts': stage_xtts, 'qwen3': stage_qwen3, 'cbox': stage_cbox,
+    {'recs': stage_recs, 'recs_ru': stage_recs_ru, 'pocket': stage_pocket, 'xtts': stage_xtts, 'qwen3': stage_qwen3, 'cbox': stage_cbox,
      'score': stage_score, 'report': stage_report, 'timing': stage_timing}[a.stage](a)
 
 

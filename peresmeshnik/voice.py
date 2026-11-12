@@ -14,6 +14,10 @@ Two checks, each with a verdict for the user ("good" / "record again, because ..
 recording (length, speech time, level, clipping, background), and after cloning `check_clone()`: the
 clone says test phrases in the language it will speak, the app's ASR must understand them (WER) and,
 where the engine can tell, they must sound like the recording (speaker similarity). Thresholds: BENCH.
+
+Whose voice it is (M-20): `confirm_live()` - two random phrases read at the microphone against every window of the
+recording, and the recording's start against its own rest; then `confirm_clone()` / `vet_clone()` - the clone made from
+it says a test phrase, heard against that live reading. `mine()` / `why_not_mine()`: the one gate of "speaks as me".
 """
 from __future__ import annotations
 
@@ -620,6 +624,22 @@ HEAD_S, HEAD_WIN_S, HEAD_HOP_S, HEAD_MATCH = 12.0, 4.0, 2.0, 0.40
 # (17 % at 30: a lower floor cuts them into shreds the windows miss); the same person refused 4.41 % clean (4.08 %),
 # another person 0.063 % (0.056 %); of my own speech p95 0.3 s goes silent
 START_S, FLOOR_DB = 30.0, 35.0
+# the start the engines take, against the rest of the same recording: a short piece of someone else there passes the live
+# check in a 4 s window now and then (3 s cut to the second: 33-36 %), yet the same recording's own voice tells it at once
+# (one session, one microphone). Each head window's cosine with the mean vector of the 8 s windows after it.
+# BENCH (stage 8, before 0.3.0; stage `report_headrest`, the file as save() writes it): the owner's files 0.58-0.69 at the
+# lowest (p1 0.62-0.70; clean, Opus, noise in the file at SNR 30 / 20, 40 and 60 s), refused not once more at 0.60 (at
+# 0.65: +1 point clean); splices of another person's first 3 s pass 2.2-3.0 % (36 % before), 4-6 s 0 % (up to 23 %)
+HEAD_REST = 0.60
+# with them one window more: the engines' own prompt as they hear it, the sound of the file's first PROMPT_S (all of it but
+# digital silence: Pocket, Qwen3, Chatterbox take their voice from there, XTTS its first 6 s). A voice of someone else at
+# the floor leaves 1-5 s there that the 4 s windows, filled up with my speech after it, do not hear, yet Qwen3 and
+# Chatterbox speak from it (BENCH: the other person's 10 s at -57 dBFS, then me: cosine to them 0.44-0.56, to me 0.20).
+# A prompt of less than PROMPT_MIN_S of sound is refused too: the clone would speak from a few frames of silence or of
+# whoever is there (the owner's files: 6.5 s at the least, p1 6.9; another person's 10 s at -62 dBFS leaves 0.27 s, 98 %
+# under 3 s; BENCH)
+PROMPT_S, PROMPT_MIN_S = 10.0, 3.0
+RECORD_AGAIN = 'record your voice again alone, with nobody else talking (setup wizard, "Your voice")'
 TRIES, PAUSES_S = 3, (60, 300, 1500, 3600)  # failed checks in a row before a pause; the pauses after them, growing
 
 
@@ -751,7 +771,10 @@ def confirm_live(ref: Voice, pcm: np.ndarray, sr: int, said: list[str], asr, spe
     heard = asr.recognize(_to(pcm, sr, SAMPLE_RATE), lang=ref.meta.get('lang')).text
     err = wer(' '.join(said), heard)
     live = speaker.embed(_speech(pcm, sr, edges=True), sr)
-    sims = [(float(speaker.embed(w, rsr) @ live), m) for w, m in _windows(_start(x.mean(axis=1), rsr), rsr)]
+    vecs = [(speaker.embed(w, rsr), m) for w, m in _windows(_start(x.mean(axis=1), rsr), rsr)]
+    if len(p := _prompt(x.mean(axis=1), rsr)) >= rsr // 2:  # the engines' prompt, heard as a window of the head
+        vecs.append((speaker.embed(p, rsr), HEAD_MATCH))
+    sims = [(float(e @ live), m) for e, m in vecs]
     sim, worst = min(sims, key=lambda s: s[0] - s[1])  # the window furthest below its threshold (or nearest to it)
     low = sim < worst
     why = ([f'the words heard are not the ones on the screen ({err:.0%} differ): read them as written'] if err > LIVE_WER
@@ -760,13 +783,116 @@ def confirm_live(ref: Voice, pcm: np.ndarray, sr: int, said: list[str], asr, spe
         why.append(f'the background is loud (your speech only {r.snr_db:.0f} dB above it): try again somewhere quiet')
     if low and ref.meta.get('quality', {}).get('band_db', 0.0) < BAND_DB:
         why.append('the recording sounds like a phone call: one from a better microphone matches more reliably')
-    _tried(not why, ref.path.parent)
+    _tried(not why, ref.path.parent)  # the recording's own start (below) is no try: another reading cannot change it
+    if len(p) < PROMPT_MIN_S * rsr:
+        why.append(f'the first {PROMPT_S:.0f} s of the recording, where the clone takes your voice from, are almost silent '
+                   f'({len(p) / rsr:.1f} s of sound): start speaking right away, and {RECORD_AGAIN}')
+    elif (head := head_rest(vecs)) < HEAD_REST:
+        why.append(f'the start of the recording does not sound like the rest of it (similarity {head:.2f}): someone '
+                   f'else may be speaking there; {RECORD_AGAIN}')
     if why:
         return None, 'Not confirmed: ' + '; '.join(why) + '.'
     import hashlib
     how = 'mic-live' if ref.meta.get('source') == 'mic' else 'import+mic-match'
     return {'how': how, 'at': _now(), 'wer': round(err, 3), 'similarity': round(min(s for s, _ in sims), 3), 'windows': len(sims),
-            'ref_sha256': hashlib.sha256(data).hexdigest()}, ''
+            'ref_sha256': hashlib.sha256(data).hexdigest(), 'live': [round(float(e), 5) for e in live]}, ''
+
+
+# --- the clone made from my recording speaks in the voice of my live reading (BRIEF-s3-clone-output-check) ---
+# The end-to-end net behind the recording's checks above: before my voice is confirmed (where its engine can be made then),
+# and else the first time an engine is made from it (vet_clone), the clone says the two test phrases of the language it
+# speaks; one speaker vector of both against the live reading's (consent['live']). BENCH (stage 8, before 0.3.0: 88 own
+# recordings x 3 live readings, Pocket / XTTS / Qwen3 / Chatterbox as the app runs them, phrases in en and, from an
+# English reading, ru and de): the owner's lowest p1 0.205 (Qwen3 into Russian; XTTS 0.25, Pocket 0.32, Chatterbox
+# 0.35), refused at 0.20: 0.8 % more there, 0.4 % into German, none elsewhere. It cannot tell a blend of 3-4 s of
+# someone else from my own clone (their spread overlaps: those the recording's start refuses), but it refuses a clone
+# that says nothing or nobody (Pocket on a silent start: 80 % of such files) and whatever an engine makes of a file the
+# checks above passed
+CLONE_MATCH = 0.20
+CLONE_WHY = ("the voice made from your recording does not sound like you (similarity {sim:.2f}): someone else's speech "
+             'may be in it; ' + RECORD_AGAIN)
+
+
+def _speaker() -> Speaker:
+    """The live check's speaker vector model (downloaded with it: languages.needed_models). A test replaces it."""
+    from peresmeshnik import models
+    return Speaker(models.path(SPEAKER))
+
+
+def clone_match(tts, v: Voice, lang: str, live, speaker: Speaker | None = None) -> float:
+    """The clone `tts` says the test phrases of `lang` in my profile `v`: the cosine of one speaker vector of both (0.3 s
+    apart) with the live reading's `live` (consent['live']). Nothing said: 0."""
+    gap, parts = np.zeros(int(0.3 * tts.sample_rate), np.float32), []
+    for text in TEST_PHRASES.get(lang, TEST_PHRASES['en']):
+        parts += [*(np.asarray(c, np.float32) for c in tts.synth(text, lang, v)), gap]
+    pcm = np.concatenate(parts[:-1])
+    if np.count_nonzero(pcm) < tts.sample_rate // 2:
+        return 0.0
+    return float((speaker or _speaker()).embed(pcm, tts.sample_rate) @ np.asarray(live, np.float32))
+
+
+def _heard(engine: str, sim: float) -> dict:
+    from peresmeshnik import models
+    return {'model': models.get(engine).fingerprint, 'similarity': round(float(sim), 3)}
+
+
+def confirm_clone(consent: dict, tts, engine: str, v: Voice, lang: str, speaker: Speaker | None = None) -> tuple[dict | None, str]:
+    """After confirm_live passed: the clone `tts` (the registry's `engine`, made from the recording `v`, speaking `lang`)
+    against that live reading: (the consent with the answer kept for `engine`, '') or (None, why, for the user). A
+    refusal is a failed try (wait_s): the clone samples, another try must not be another draw."""
+    sim = clone_match(tts, v, lang, consent['live'], speaker)
+    if sim >= CLONE_MATCH:
+        return consent | {'clones': {**consent.get('clones', {}), engine: _heard(engine, sim)}}, ''
+    _tried(False, v.path.parent)
+    return None, 'Not confirmed: ' + CLONE_WHY.format(sim=sim) + '.'
+
+
+def clone_unlike(v: Voice, engine: str) -> str:
+    """Why the clone `engine` may not speak my profile `v`, as already heard ('' = heard like me, or not heard yet with
+    these weights: vet_clone hears it when it is made)."""
+    from peresmeshnik import models
+    k = ((v.meta.get('consent') or {}).get('clones') or {}).get(engine)
+    if k and k.get('model') == models.get(engine).fingerprint and k['similarity'] < CLONE_MATCH:
+        return CLONE_WHY.format(sim=k['similarity'])
+    return ''
+
+
+def vet_clone(tts, engine: str, v: Voice, lang: str) -> str:
+    """'' when the clone `tts` (the registry's `engine`, made from my confirmed profile `v`) speaks in the voice of my
+    live reading, else why, for the user. Heard once per recording and engine weights: the answer is kept in voice.json
+    (consent['clones'], only onto the recording it heard), then read. The me side calls it after making the engine."""
+    from peresmeshnik import models
+    c = v.meta.get('consent') or {}
+    k = (c.get('clones') or {}).get(engine)
+    if k and k.get('model') == models.get(engine).fingerprint:
+        return clone_unlike(v, engine)
+    if not c.get('live'):  # confirmed by a build before this check: no live reading to hear the clone against
+        return 'it was confirmed before the app checked the voice made from it: confirm it again (Voices…)'
+    sim = clone_match(tts, v, lang, c['live'])
+    try:
+        now = load(v.name, v.path.parent)
+        nc = now.meta.get('consent') or {}
+        if nc.get('ref_sha256') == c.get('ref_sha256') == _sha(v.path / 'reference.wav'):
+            _write(v.path, now.meta | {'consent': nc | {'clones': {**(nc.get('clones') or {}), engine: _heard(engine, sim)}}})
+    except (OSError, ValueError):  # read-only, or gone meanwhile: heard again the next time
+        pass
+    return '' if sim >= CLONE_MATCH else CLONE_WHY.format(sim=sim)
+
+
+def _prompt(x: np.ndarray, sr: int) -> np.ndarray:
+    """What the engines take their voice from: the file's first PROMPT_S but digital silence (save() writes under its floor
+    as such)."""
+    f = _frames(np.asarray(x, np.float32)[:int(PROMPT_S * sr)], sr)
+    return f[np.mean(f ** 2, axis=1) > 1e-10].reshape(-1).astype(np.float32)
+
+
+def head_rest(vecs: list[tuple[np.ndarray, float]]) -> float:
+    """confirm_live's window vectors (vector, threshold; the engines' prompt is one of the head): the lowest cosine of a
+    head window (HEAD_MATCH) with the mean of the rest (MATCH; a recording too short to have any: of all of them)."""
+    head = [e for e, m in vecs if m == HEAD_MATCH]
+    r = np.mean([e for e, m in vecs if m != HEAD_MATCH] or [e for e, _ in vecs], axis=0)
+    return min(float(e @ r) for e in head) / (float(np.linalg.norm(r)) + 1e-12) if head else 1.0
+
 
 def set_consent(name: str, consent: dict | None, root: Path | None = None) -> Voice:
     """Write how my profile `name` was confirmed (confirm_live) into its voice.json: only onto the recording that

@@ -211,10 +211,10 @@ def test_wizard_asks_for_the_right_models(monkeypatch):
     monkeypatch.setattr(models, 'hf_token', lambda: 'hf_test')  # Kyutai's gated weights: with the user's token
     monkeypatch.setattr(languages, 'pack_here', lambda: True)  # with an NVIDIA GPU below: its voice pack is here too
     assert needed_models(s) == ['silero-vad', 'gigaam-v3-e2e-ctc', 'opus-mt-ru-en', 'pocket-tts-en',
-                                s.local.tts[s.their_lang]]
+                                s.local.tts[s.their_lang], 'wespeaker-resnet34']  # my voice confirmed and its clone heard
     monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
     assert needed_models(s) == ['silero-vad', 'gigaam-v3-e2e-ctc', 'opus-mt-ru-en', 'xtts-v2',
-                                s.local.tts[s.their_lang]]  # the stock voice: the clone's fallback
+                                s.local.tts[s.their_lang], 'wespeaker-resnet34']  # the stock voice: the clone's fallback
 
 
 def test_hotkey_combos():

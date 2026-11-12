@@ -421,6 +421,9 @@ def needed_models(s) -> list[str]:
             if d.voice == 'clone':  # the clone's fallback (~60 MB): the stock voice when the clone cannot speak (S2)
                 ids += [i for i in [pick(s.local.tts, d.tgt)] if i]
                 ids += [i for i in [_fallback_engine(d.tts)] if i]  # its own fallback engine (Qwen3: Chatterbox)
+                if side == 'me_to_them':  # my voice is confirmed with it, and the clone heard against that (voice.vet_clone)
+                    from peresmeshnik.voice import SPEAKER
+                    ids.append(SPEAKER)
             if side == 'them_to_me':  # the other person's voice and who is speaking (S2)
                 from peresmeshnik.voice import SPEAKER
                 from peresmeshnik.voices import live

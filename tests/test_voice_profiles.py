@@ -21,7 +21,7 @@ def confirmed(name, root):
     """What a passed live check writes: the consent of this very recording."""
     sha = hashlib.sha256((root / name / 'reference.wav').read_bytes()).hexdigest()
     return voice.set_consent(name, {'how': 'mic-live', 'at': '', 'wer': 0.0, 'similarity': 0.9, 'windows': 5,
-                                    'ref_sha256': sha}, root)
+                                    'ref_sha256': sha, 'live': [1.0, 0.0]}, root)
 
 
 def test_mine_only_confirmed_me(tmp_path):
@@ -276,8 +276,8 @@ def at_db(x, db):
 def test_what_the_check_does_not_hear_the_engines_do_not_get(tmp_path):
     """FIXES-s3-tails r3 1: someone else's 10 s at -62 dBFS (pauses digital silence), then me: under the floor, the check
     did not hear them, yet the engines took the raw start (Qwen3's vector hardly minds the level). save() writes it as
-    digital silence: the file's start is what was checked. A file put in the folder by hand, the quiet voice in it, is
-    checked whole: refused."""
+    digital silence: the file's start is what was checked, and a start that silent is refused (the engines would speak
+    from it: PROMPT_MIN_S). A file put in the folder by hand, the quiet voice in it, is checked whole: refused."""
     import soundfile as sf
     root = tmp_path / 'v'
     sr, said = 24_000, voice.LIVE_PHRASES['ru'][:2]
@@ -286,7 +286,7 @@ def test_what_the_check_does_not_hear_the_engines_do_not_get(tmp_path):
     y, _ = sf.read(v.path / 'reference.wav')
     assert not y[:int(9.97 * sr)].any() and y[10 * sr:].any()  # all but the frame where my voice begins
     consent, text = voice.confirm_live(v, *speech(6, sr), said, Asr(' '.join(said)), Blend())
-    assert consent, text
+    assert consent is None and 'are almost silent (0.0 s of sound): start speaking right away' in text, text
     sf.write(v.path / 'reference.wav', x * 0.5, sr, subtype='FLOAT')  # by hand, not through save()
     consent, text = voice.confirm_live(v, *speech(6, sr), said, Asr(' '.join(said)), Blend())
     assert consent is None and 'not the voice of the recording' in text, text
@@ -425,3 +425,157 @@ def test_the_live_reading_loses_only_the_silence_at_its_edges():
     x = np.concatenate([room[0], room[1], room[2], tone, room[3], tone, room[4]])  # 1.5 s, 2 s, 0.5 s, 2 s, 0.5 s
     assert len(voice._speech(x, sr, edges=True)) / sr == pytest.approx(4.5, abs=0.1)
     assert len(voice._speech(x, sr)) / sr == pytest.approx(4.0, abs=0.1)
+
+
+# --- the start of the recording like its rest; the clone made from it like the live reading (BRIEF-s3-clone-output-check)
+
+class Turned:
+    """The live reading [1, 0]; a 4 s window of the recording's head at `head` degrees off it, an 8 s window of the rest
+    at `rest` degrees the other way: each passes against the live reading, the head and the rest differ by both."""
+    def __init__(self, head, rest):
+        self.head, self.rest, self.calls = np.radians(head), -np.radians(rest), 0
+
+    def embed(self, pcm, sr):
+        self.calls += 1
+        a = 0.0 if self.calls == 1 else self.head if len(pcm) <= 4.5 * sr else self.rest
+        return np.array([np.cos(a), np.sin(a)])
+
+
+@pytest.mark.parametrize('head, rest, ok', [(30, 0, True), (60, 60, False)])
+def test_a_start_unlike_the_rest_of_the_recording_is_refused(tmp_path, head, rest, ok):
+    """Someone else's 3 s cut into the start can pass the live reading's 4 s window (0.40); the start against the rest of
+    the same recording (one session) tells it: refused, not counted as a failed try (another reading cannot help)."""
+    root = tmp_path / 'v'
+    v = voice.save(*speech(), 'me', 'ru', 'text', root)
+    said = voice.live_phrases('ru')
+    consent, why = voice.confirm_live(v, *speech(6, 24_000), said, Asr(' '.join(said)), Turned(head, rest))
+    assert (consent is not None) == ok, why
+    if not ok:
+        assert 'the start of the recording does not sound like the rest of it (similarity -0.50)' in why
+        assert voice.RECORD_AGAIN in why and 'not the voice of the recording' not in why
+        assert json.loads((tmp_path / 'voice-checks.json').read_text())['fails'] == 0
+    else:
+        assert consent['live'] == [1.0, 0.0] and consent['windows'] >= 6
+
+
+class Tone:
+    """A clone that says a tone of `f` Hz for `sec` s (Pitch: 180 Hz is me, anything else someone else)."""
+    sample_rate = 24_000
+
+    def __init__(self, f=180.0, sec=2.0):
+        self.f, self.sec, self.said = f, sec, []
+
+    def synth(self, text, lang, voice=None, speed=1.0):
+        self.said.append((text, lang))
+        t = np.arange(int(self.sec * self.sample_rate)) / self.sample_rate
+        yield (0.2 * np.sin(2 * np.pi * self.f * t)).astype(np.float32)
+
+
+@pytest.mark.parametrize('f, sec, ok', [(180.0, 2.0, True), (300.0, 2.0, False), (180.0, 0.2, False)])
+def test_the_clone_of_the_recording_is_heard_against_the_live_reading(tmp_path, f, sec, ok):
+    """After the live check: the clone says a test phrase in their language; a voice not mine (or nothing said) is
+    refused and counted as a try (it samples: another try is another draw); mine keeps its answer in the consent."""
+    root = tmp_path / 'v'
+    voice.save(*speech(), 'me', 'ru', 'text', root)
+    v = confirmed('me', root)
+    tts = Tone(f, sec)
+    consent, why = voice.confirm_clone(dict(v.meta['consent']), tts, 'pocket-tts-en', v, 'en', Pitch())
+    assert tts.said == [(p, 'en') for p in voice.TEST_PHRASES['en']] and (consent is not None) == ok, why
+    if ok:
+        assert consent['clones']['pocket-tts-en']['similarity'] == 1.0 and not voice.clone_unlike(
+            voice.set_consent('me', consent, root), 'pocket-tts-en')
+    else:
+        assert 'the voice made from your recording does not sound like you' in why and voice.RECORD_AGAIN in why
+        assert json.loads((tmp_path / 'voice-checks.json').read_text())['fails'] == 1
+
+
+def test_a_clone_is_heard_once_per_engine_and_the_answer_kept(tmp_path, monkeypatch):
+    """The me side makes an engine not heard at confirmation (installed later, my server's): vet_clone hears it once,
+    keeps the answer on this recording, then only reads it; one unlike me is refused there and in _clone_not_ready."""
+    from peresmeshnik import config
+    from peresmeshnik.cloud import fallback
+    root = tmp_path / 'v'
+    monkeypatch.setattr(voice, 'voices_dir', lambda: root)
+    monkeypatch.setattr(voice, '_speaker', Pitch)
+    voice.save(*speech(), 'me', 'ru', 'text', root)
+    v = confirmed('me', root)
+    mine, other = Tone(), Tone(300.0)
+    assert voice.vet_clone(mine, 'xtts-v2', v, 'en') == '' and len(mine.said) == 2
+    v = voice.load('me', root)
+    assert voice.vet_clone(other, 'xtts-v2', v, 'en') == '' and not other.said  # kept: not heard again
+    assert 'does not sound like you' in voice.vet_clone(other, 'pocket-tts-en', v, 'en') and len(other.said) == 2
+    v = voice.load('me', root)
+    assert v.meta['consent']['clones']['pocket-tts-en']['similarity'] == 0.0 and voice.why_not_mine(v) == ''
+    s = config.Settings()
+    s.local.voice = 'me'
+    monkeypatch.setattr('peresmeshnik.languages.clone_why', lambda engine, lang='': '')
+    assert 'does not sound like you' in fallback._clone_not_ready(s, 'en', 'pocket-tts-en')  # the stock voice instead
+    old = dict(v.meta['consent'])
+    old.pop('live')
+    voice.set_consent('me', old | {'clones': {}}, root)  # confirmed by a build before this check
+    assert 'confirm it again' in voice.vet_clone(mine, 'qwen3-tts', voice.load('me', root), 'en')
+    sf_ = __import__('soundfile')
+    sf_.write(root / 'me' / 'reference.wav', speech(35)[0], 16_000)  # another take: nothing kept for it
+    assert voice.why_not_mine(voice.load('me', root))
+
+
+def test_the_me_side_falls_back_when_its_clone_does_not_sound_like_me(monkeypatch, tmp_path):
+    """app.Side._local: the clone made, its test phrase not my voice: the stock voice speaks, the tray says why."""
+    from test_voice_pack import me_side
+    monkeypatch.setattr(voice, '_speaker', Pitch)
+    side, s, made, _ = me_side(monkeypatch, tmp_path, Tone(300.0), key=False)
+    d = side._local(s)
+    assert made[-1] is None and d.warm == 1 and len(side.errors) == 1, side.errors
+    assert 'a stock voice speaks instead of your cloned voice (the voice made from your recording does not sound like you' \
+        in side.errors[0]
+
+
+def test_what_the_engines_take_of_the_start_is_heard_whole(tmp_path):
+    """Someone else 30 dB under me, 3.6 s alone in the first 10 s (the rest silence): in the 4 s windows my speech after
+    it outweighs them, yet Qwen3 and Chatterbox take their voice from just that sound. The engines' prompt (_prompt) is a
+    window of its own: refused."""
+    sr, root = 16_000, tmp_path / 'v'
+    t = np.arange(int(1.8 * sr)) / sr
+    other, gap = (0.2 * 10 ** (-30 / 20) * np.sin(2 * np.pi * 300 * t)).astype(np.float32), np.zeros(3 * sr, np.float32)
+    x = np.concatenate([other, gap, other, gap, gap[:int(0.4 * sr)], speech(40, sr)[0]])  # the first 10 s: 3.6 s of them
+    v = voice.save(x, sr, 'me', 'ru', 'text', root)
+    y = voice.read_audio(v.path / 'reference.wav')[0]
+    assert all((Pitch().embed(w, sr) == [1.0, 0.0]).all() for w, _ in voice._windows(voice._start(y, sr), sr))  # unseen
+    assert (Pitch().embed(voice._prompt(y, sr), sr) == [0.0, 1.0]).all()  # what the engines hear of it
+    said = voice.live_phrases('ru')
+    consent, why = voice.confirm_live(v, *speech(6, 24_000), said, Asr(' '.join(said)), Pitch())
+    assert consent is None and 'the start of the recording does not sound like the rest of it' in why
+
+
+def test_the_cloud_fallback_does_not_speak_a_clone_unlike_me(tmp_path, monkeypatch):
+    """Me -> them in the cloud, my clone its fallback (Pocket here): made at the first fallback, heard there (vet_clone)
+    and not spoken when unlike my live voice; the answer is kept, so _clone_not_ready gives the stock voice next time."""
+    from pathlib import Path
+
+    from test_languages_ui import Direction
+
+    from peresmeshnik import config, languages, models, pipeline
+    from peresmeshnik.cloud import fallback, gemini
+    from peresmeshnik.local import clone
+    root = tmp_path / 'v'
+    monkeypatch.setattr(voice, 'voices_dir', lambda: root)
+    monkeypatch.setattr(voice, '_speaker', Pitch)
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
+    monkeypatch.setattr(models, 'path', lambda i: Path('/models') / i)
+    monkeypatch.setattr(models, 'hf_token', lambda: 'hf_test')
+    monkeypatch.setattr(clone, 'voice_cmd', lambda: None)
+    monkeypatch.setattr(clone, 'make_engine', lambda i, d, threads=2: Tone(300.0))
+    monkeypatch.setattr(gemini, 'GeminiDirection', lambda src, tgt, *a, **k: Direction(src, tgt))
+    monkeypatch.setattr(pipeline, 'make_local', lambda src, tgt, **k: Direction(src, tgt))
+    voice.save(*speech(), 'me', 'ru', 'text', root)
+    confirmed('me', root)
+    s = config.Settings()
+    s.me_to_them, s.my_lang, s.their_lang, s.local.voice = 'cloud', 'ru', 'en', 'me'
+    assert fallback.local_voice('me', s) == ('pocket-tts-en', '')
+    fb = fallback.make('me', s, 'a-key')
+    try:
+        fb.muted.load()
+        assert 'the voice made from your recording does not sound like you' in str(fb.muted.error)
+    finally:
+        fb.close()
+    assert 'does not sound like you' in fallback._clone_not_ready(s, 'en', 'pocket-tts-en') and fallback.stock('me', s)

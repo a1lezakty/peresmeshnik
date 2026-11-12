@@ -1,8 +1,10 @@
 """The voices (tray "Voices…"): my own voice and the voices of people I talk to that I chose to keep (voice.json v2),
 delete them. My voice speaks into the call only once confirmed: `ConfirmBox` (here and on the wizard's voice page) shows
 two random phrases, records them at the microphone and checks them (voice.confirm_live: the app's ASR heard them, the
-speaker vector is each window of the recording's). `RememberDialog`: keep the voice of the person in this call (S2's live profile), only
-with their agreement. Recording, downloads and checks take seconds: worker threads, answers come back as signals."""
+speaker vector is each window of the recording's, its start is like its rest), then the clone this computer speaks with
+says the test phrases, heard against that reading (hear_clone). `RememberDialog`: keep the voice of the person in this
+call (S2's live profile), only with their agreement. Recording, downloads and checks take seconds: worker threads,
+answers come back as signals."""
 from __future__ import annotations
 
 import threading
@@ -60,10 +62,40 @@ def check_models(s: config.Settings, lang: str, say=lambda text: None):
     return OnnxAsr(asr, s.local.threads, live=False), voice.Speaker(models.path(voice.SPEAKER))
 
 
+def clone_here(s: config.Settings) -> str:
+    """The clone engine "me → them" speaks with on this computer, when it can be made now: the live check then hears
+    it (voice.confirm_clone). '' = none now: a stock voice, my server's clone, or its model, token or voice pack not here
+    yet; such a clone is heard the first time it is made (voice.vet_clone)."""
+    from peresmeshnik import languages, models
+    d = languages.direction(s, 'me_to_them')
+    if s.me_to_them == 'remote' or d.voice != 'clone' or languages.clone_why(d.tts, d.tgt) or languages.not_here(d.tts):
+        return ''
+    return d.tts if models.is_fetched(models.get(d.tts)) else ''
+
+
+def hear_clone(s: config.Settings, consent: dict, v, engine: str, spk, say=lambda text: None) -> tuple[dict | None, str]:
+    """confirm_live's consent, then the clone `engine` made from the recording `v` says a test phrase in their language
+    (voice.confirm_clone). The engine does not start or breaks off (no CUDA, out of memory, the runner died): the consent
+    as it is, the clone is heard when it is first made (voice.vet_clone), and the call says those errors."""
+    from peresmeshnik import models
+    from peresmeshnik.local.clone import make_engine
+    say('Your live voice matches. Now the voice made from your recording says two test phrases… '
+        '(the first time it starts: up to a minute)')
+    tts = None
+    try:
+        tts = make_engine(engine, models.path(engine), threads=s.local.threads)
+        return voice.confirm_clone(consent, tts, engine, v, s.their_lang, spk)
+    except Exception:
+        return consent, ''
+    finally:
+        getattr(tts, 'close', lambda: None)()  # the voice pack's process and its VRAM
+
+
 class _Sig(QObject):
     done = Signal(object)  # (consent | None, text)
     say = Signal(str)
     progress = Signal(float)
+    spin = Signal()  # a step of unknown length (the clone starts): the bar runs
 
 
 class ConfirmBox(QWidget):
@@ -96,6 +128,7 @@ class ConfirmBox(QWidget):
         self._sig.done.connect(self._finished)
         self._sig.say.connect(self.out.setText)
         self._sig.progress.connect(lambda x: self.bar.setValue(int(x)))
+        self._sig.spin.connect(lambda: self.bar.setRange(0, 0))
         self.button.clicked.connect(self.start)
         self._new_phrases()
 
@@ -132,7 +165,11 @@ class ConfirmBox(QWidget):
             sr = 24_000
             pcm = record(READ_S, self.s.ui.mic or None, sr, self._sig.progress.emit)
             asr, spk = check_models(self.s, self.lang, self._sig.say.emit)
-            consent, why = voice.confirm_live(voice.load(self.name, self.root), pcm, sr, self.said, asr, spk)
+            v = voice.load(self.name, self.root)
+            consent, why = voice.confirm_live(v, pcm, sr, self.said, asr, spk)
+            if consent and (engine := clone_here(self.s)):  # the clone this computer speaks with: heard before it is mine
+                self._sig.spin.emit()
+                consent, why = hear_clone(self.s, consent, v, engine, spk, self._sig.say.emit)
             if consent:  # only onto the recording it checked (voice.set_consent: ValueError if another one is there)
                 voice.set_consent(self.name, consent, self.root)
             self._sig.done.emit((consent, why))
@@ -150,6 +187,7 @@ class ConfirmBox(QWidget):
         consent, why = r
         self.running = False
         self.busy.emit(False)
+        self.bar.setRange(0, int(READ_S))
         self.bar.setVisible(False)
         self.button.setEnabled(True)
         if consent:
@@ -157,7 +195,7 @@ class ConfirmBox(QWidget):
             self.button.setEnabled(False)
             self.confirmed.emit(consent)
         else:
-            self.out.setText(f'⚠ {why} Try again with the new phrases.')
+            self.out.setText(f'⚠ {why}' if voice.RECORD_AGAIN in why else f'⚠ {why} Try again with the new phrases.')
             self._new_phrases()
 
 

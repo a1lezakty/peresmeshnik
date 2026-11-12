@@ -275,7 +275,7 @@ def me_side(monkeypatch, tmp_path, clone_error=None, key=True, meta=None):
     monkeypatch.setattr(models, 'path', lambda model_id: tmp_path)
     (tmp_path / 'reference.wav').write_bytes(b'my recording')
     sha = __import__('hashlib').sha256(b'my recording').hexdigest()  # voice.json v2: mine, confirmed on this recording
-    meta = {'kind': 'me', 'consent': {'how': 'mic-live', 'ref_sha256': sha}} if meta is None else meta
+    meta = {'kind': 'me', 'consent': {'how': 'mic-live', 'ref_sha256': sha, 'live': [1.0, 0.0]}} if meta is None else meta
     monkeypatch.setattr(voice, 'load', lambda name, root=None: Voice(name, 'xtts', tmp_path, meta))
     made = []
 
@@ -608,14 +608,14 @@ def test_condition_from_another_thread_waits_for_the_stream(pack, me):
 
 
 class FastTts:
-    """A clone that keeps up: 0.1 s of speech at once."""
+    """A clone that keeps up: 1 s of speech at once (voice.vet_clone hears a phrase said, not 0.1 s)."""
     sample_rate = 24_000
 
     def __init__(self, name):
         self.name = name
 
     def synth(self, text, lang, voice=None, speed=1.0):
-        yield np.full(self.sample_rate // 10, 0.1, np.float32)
+        yield np.full(self.sample_rate, 0.1, np.float32)
 
     def close(self):
         pass
@@ -629,7 +629,7 @@ def test_qwen3_that_does_not_start_gives_way_to_xtts(monkeypatch, tmp_path):
     monkeypatch.setattr(languages, 'addon_here', lambda: True)
     monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(8.0, (572, 83), 8.6))
     monkeypatch.setattr(models, 'is_fetched', lambda m, base=None: True)
-    monkeypatch.setattr('peresmeshnik.voice.mine', lambda name, root=None: Voice(name, 'xtts', tmp_path))
+    monkeypatch.setattr('peresmeshnik.voice.mine', lambda name, root=None: Voice(name, 'xtts', tmp_path, {'consent': {'live': [1.0, 0.0]}}))
     assert languages.direction(s, 'me_to_them').tts == 'qwen3-tts'
     tried = []
 

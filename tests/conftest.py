@@ -41,6 +41,20 @@ class Range(http.server.BaseHTTPRequestHandler):
         pass
 
 
+class SameVoice:
+    """The speaker vector model for tests: every voice is the same one (voice.vet_clone hears the clone as me)."""
+    def embed(self, pcm, sr):
+        import numpy as np
+        return np.array([1.0, 0.0])
+
+
+@pytest.fixture(autouse=True)
+def same_voice(monkeypatch):
+    """No speaker model in tests: voice._speaker() is SameVoice (tests of the check itself set their own)."""
+    from peresmeshnik import voice
+    monkeypatch.setattr(voice, '_speaker', SameVoice)
+
+
 @pytest.fixture
 def server(tmp_path, monkeypatch):
     monkeypatch.setattr(models, 'RETRY_PAUSE_S', 0.0)

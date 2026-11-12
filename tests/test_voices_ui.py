@@ -381,3 +381,41 @@ def test_my_voice_deleted_while_the_wizard_is_open(tmp_path, monkeypatch):
     page.voice = type('V', (), {'name': 'me.new'})()  # or straight to Finish, the page still holding it
     page.commit()
     assert page.voice is None and s.local.voice == '' and not (voice.voices_dir() / 'me').exists()
+
+
+@pytest.mark.parametrize('f', [180.0, 300.0])
+def test_the_confirmation_hears_the_clone_this_computer_speaks_with(root, monkeypatch, f):
+    """After the live reading matches: the clone engine "me → them" speaks with here is made and says a test phrase in
+    their language (the bar runs meanwhile); not my voice: not confirmed, and the box says to record again, not to read
+    again. A clone that cannot start here: confirmed, it is heard when it is first made."""
+    from test_voice_profiles import Pitch, Tone
+
+    from peresmeshnik.local import clone
+    s = config.Settings()
+    s.their_lang = 'en'
+    monkeypatch.setattr('peresmeshnik.audio.mic.record', lambda sec, dev, sr, progress: speech(sec, sr)[0])
+    monkeypatch.setattr(voices, 'clone_here', lambda s: 'pocket-tts-en')
+    monkeypatch.setattr('peresmeshnik.models.path', lambda i: root)
+    made = []
+    monkeypatch.setattr(clone, 'make_engine', lambda i, d, threads=2: made.append(Tone(f)) or made[-1])
+    box = voices.ConfirmBox(s, 'me')
+    monkeypatch.setattr(voices, 'check_models', lambda s, lang, say: (Asr(' '.join(box.said)), Pitch()))
+    box.start()
+    pump(lambda: not box.running)
+    meta = voice.load('me').meta
+    assert made and made[0].said == [(p, 'en') for p in voice.TEST_PHRASES['en']]
+    if f == 180.0:
+        assert box.out.text().startswith('✔ Confirmed') and meta['consent']['clones']['pocket-tts-en']['similarity'] == 1.0
+    else:
+        assert 'the voice made from your recording does not sound like you' in box.out.text() and meta['consent'] is None
+        assert 'Try again with the new phrases' not in box.out.text() and box.bar.maximum() == int(voices.READ_S)
+
+    def broken(i, d, threads=2):
+        raise clone.CloneUnavailable('no CUDA GPU')
+    monkeypatch.setattr(clone, 'make_engine', broken)
+    monkeypatch.setattr(voice, 'wait_s', lambda root=None: 0.0)
+    box.start()
+    pump(lambda: not box.running)
+    if f == 300.0:  # refused before: now confirmed, the clone not heard yet (vet_clone hears it when it is made)
+        c = voice.load('me').meta['consent']
+        assert box.out.text().startswith('✔ Confirmed') and not c.get('clones') and c['live']

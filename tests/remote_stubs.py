@@ -48,7 +48,7 @@ def start(folder, host='127.0.0.1', port=0, **kw):
     return srv
 
 
-CONFIRMED = {'version': 2, 'kind': 'me', 'name': 'me', 'consent': {'how': 'mic-live'}}  # voice.json v2 (S3); its
+CONFIRMED = {'version': 2, 'kind': 'me', 'name': 'me', 'consent': {'how': 'mic-live', 'live': [1.0, 0.0]}}  # voice.json v2 (S3); its
 # consent names the recording it checked (ref_sha256): profile() fills it in
 
 

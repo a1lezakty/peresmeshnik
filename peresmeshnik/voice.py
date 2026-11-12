@@ -198,6 +198,10 @@ def check(pcm: np.ndarray, sr: int) -> Report:
         r.warnings.append(f'{r.seconds:.0f} s recorded, only the first {MAX_S:.0f} s are used')
     if r.speech_s < MIN_SPEECH_S:
         r.errors.append(f'only {r.speech_s:.0f} s of speech, need at least {MIN_SPEECH_S:.0f} s: talk more, pause less')
+    elif r.seconds >= MIN_S and not _windows(_start(_written(raw[:int(MAX_S * sr)], sr, r.level_db)[0], sr), sr,
+                                             split=True)[1]:  # as confirm_live will see it: told now, not there
+        r.errors.append(f'too little speech after its first {HEAD_S:.0f} s for the live check to compare its start with: '
+                        f'talk longer (45-60 s), pause less')
     if r.clipped > MAX_CLIPPED:
         r.errors.append(f'clipping in {r.clipped:.2%} of samples: lower the mic gain or move back a little')
     if level < QUIET_DB:
@@ -941,6 +945,18 @@ def set_consent(name: str, consent: dict | None, root: Path | None = None) -> Vo
     return load(name, root)
 
 
+def _written(x: np.ndarray, sr: int, level_db: float) -> tuple[np.ndarray, float]:
+    """(the samples save() writes of the recording `x`, mono and at most MAX_S, its speech at `level_db`; the gain):
+    at TARGET_DB and not clipped, the room before the first word cut, what is under the floor digital silence."""
+    gain = min(10 ** ((TARGET_DB - level_db) / 20), 10 ** (-1 / 20) / (float(np.max(np.abs(x))) or 1.0))
+    y = np.clip(x * gain, -1, 1)
+    y = y[_onset(y, sr):]  # the room before the first word: neither checked nor taken by the engines
+    under = _under_floor(y, sr)
+    fl = sr * 30 // 1000
+    y[:len(under) * fl].reshape(-1, fl)[under] = 0  # the engines get only what is checked
+    return y, gain
+
+
 def save(pcm: np.ndarray, sr: int, name: str, lang: str, transcript: str | None = None,
          root: Path | None = None, source: str = 'file') -> Voice:
     """Write my voice `<root>/<name>/reference.wav` + `voice.json` (v2, kind 'me', not confirmed: confirm_live);
@@ -949,22 +965,16 @@ def save(pcm: np.ndarray, sr: int, name: str, lang: str, transcript: str | None 
     x = np.asarray(pcm, dtype=np.float32)
     x = (x.mean(axis=1) if x.ndim > 1 else x)[:int(MAX_S * sr)]
     report = check(x, sr)  # of what is kept: at most MAX_S
-    peak = float(np.max(np.abs(x))) or 1.0
-    gain = min(10 ** ((TARGET_DB - report.level_db) / 20), 10 ** (-1 / 20) / peak)
+    y, gain = _written(x, sr, report.level_db)
     base = root or voices_dir()
     path = base / name
     path.mkdir(parents=True, exist_ok=True)
     _private(base, path)
     for old in path.glob('*.pt'):  # engine caches of an older recording
         old.unlink()
-    y = np.clip(x * gain, -1, 1)
-    y = y[_onset(y, sr):]  # the room before the first word: neither checked nor taken by the engines
-    under = _under_floor(y, sr)
-    fl = sr * 30 // 1000
-    y[:len(under) * fl].reshape(-1, fl)[under] = 0  # the engines get only what is checked
     sf.write(path / 'reference.wav', y, sr, subtype='PCM_16')
     meta = {'version': VERSION, 'id': name, 'name': name, 'kind': 'me', 'lang': lang, 'created': _now(),
-            'consent': None, 'source': source, 'seconds': report.seconds, 'engines': {},
+            'consent': None, 'source': source, 'seconds': round(len(y) / sr, 2), 'engines': {},
             'transcript': transcript or '', 'sample_rate': sr, 'gain_db': round(20 * np.log10(gain), 1),
             'quality': {k: v for k, v in asdict(report).items() if k not in ('errors', 'warnings')}}
     _write(path, meta)

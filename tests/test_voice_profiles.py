@@ -593,14 +593,35 @@ def test_the_room_before_the_first_word_is_cut(tmp_path):
     sr, root = 24_000, tmp_path / 'v'
     room = 0.005 * np.random.default_rng(1).standard_normal(3 * sr).astype(np.float32)  # the noise of noisy()'s pauses
     alone = len(voice.read_audio(voice.save(noisy(40, sr), sr, 'a', 'ru', 'text', root).path / 'reference.wav')[0])
-    y = voice.read_audio(voice.save(np.concatenate([room, noisy(40, sr)]), sr, 'b', 'ru', 'text', root).path
-                         / 'reference.wav')[0]
+    v = voice.save(np.concatenate([room, noisy(40, sr)]), sr, 'b', 'ru', 'text', root)
+    y = voice.read_audio(v.path / 'reference.wav')[0]
     assert 0 <= len(y) - alone <= (voice.LEAD_S + 0.03) * sr, (len(y) - alone) / sr
+    assert v.meta['seconds'] == round(len(y) / sr, 2) < v.meta['quality']['seconds'] == 43.0  # what is kept (r2 3)
     t = np.arange(sr) / sr
     room[sr:2 * sr] += (0.01 * np.sin(2 * np.pi * 300 * t)).astype(np.float32)  # 6 dB over the room: not steady
     y = voice.read_audio(voice.save(np.concatenate([room, noisy(40, sr)]), sr, 'c', 'ru', 'text', root).path
                          / 'reference.wav')[0]
     assert len(y) >= alone + 3 * sr - 0.03 * sr, (len(y) - alone) / sr
+
+
+@pytest.mark.parametrize('loud_s', [15, 17])
+def test_a_recording_the_live_check_cannot_compare_is_refused_when_recorded(tmp_path, loud_s):
+    """FIXES-s3-40 r2 1: a good microphone, its pauses near silence: check() counts 15 s of speech, yet save() writes the
+    pauses as digital silence and 15 s are left, a start of 12 s with nothing after it to compare it with. The recording
+    is refused when it is made (enroll, as the wizard), not at the live check; one it keeps the live check can compare."""
+    sr, root = 16_000, tmp_path / 'v'
+    t = np.arange(sr) / sr
+    tone = (0.2 * np.sin(2 * np.pi * 180 * t)).astype(np.float32)
+    hush = (1e-4 * np.random.default_rng(0).standard_normal(sr)).astype(np.float32)  # -80 dBFS
+    x = np.concatenate([tone, hush] * (30 - loud_s) + [tone] * (2 * loud_s - 30))  # 30 s, loud_s of them speech
+    r, v = voice.enroll(x, sr, 'me', 'ru', 'text', root=root)
+    assert r.speech_s >= voice.MIN_SPEECH_S and r.ok is (loud_s > 15) and (v is not None) is r.ok, r.errors
+    if not r.ok:
+        assert 'too little speech after its first 12 s' in voice.verdict(r)
+        return
+    said = voice.live_phrases('ru')
+    consent, why = voice.confirm_live(v, *speech(6, 24_000), said, Asr(' '.join(said)), Pitch())
+    assert 'too little speech' not in why and consent is not None, why
 
 
 def test_a_recording_with_little_speech_after_its_start_is_refused(tmp_path):

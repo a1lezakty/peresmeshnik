@@ -125,10 +125,11 @@ def hear_clone(s: config.Settings, consent: dict, v, engine: str, spk, say=lambd
     end = time.monotonic() + CLONE_CHECK_S
     while t.is_alive() and not stop() and time.monotonic() < end:
         t.join(0.2)
+    got = out[:]  # before quit: the thread broken off by it (_Stopped) is no reason
     quit.set()
-    if out and not isinstance(out[0], Exception):
-        return out[0]
-    why = f'it did not start: {out[0]}' if out else 'stopped' if stop() else f'it took over {CLONE_CHECK_S:.0f} s'
+    if got and not isinstance(got[0], Exception):
+        return got[0]
+    why = f'it did not start: {got[0]}' if got else 'stopped' if stop() else f'it took over {CLONE_CHECK_S:.0f} s'
     log.warning('the clone %s was not tested at the confirmation: %s', engine, why)
     return consent, f'The voice made from your recording was not tested now ({why}): it is tested the first time it speaks.'
 

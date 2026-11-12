@@ -2679,7 +2679,10 @@ near-silent start (at 0.20: 80 %) and 7-20 % of whole clones of another person b
 none: its 30 s vector is mostly the owner). My own server: its sides are app.Side's (`remote.server.ServerSide`), so the
 clone it makes from the profile sent is heard there too (`vet_clone`, at a session's start, 2-4 s); the answer goes with
 the session's copy of the profile, so each session hears it again; a profile with a refusal kept is not sent at all
-(`fallback.my_voice`: the server's stock voice). Not measured: real laptop microphones; a room that is not steady before
+(`fallback.my_voice`: the server's stock voice). A clone's test given up at the confirmation (the user's Stop, past
+`CLONE_CHECK_S` 180 s, translation started) confirms the voice without `clones` and starts the count of failed tries
+again, as a passed try: that clone is heard the first time it speaks (`vet_clone`). The clone's check is the floor of
+"nothing or garbage"; the gate against a splice is `head_rest`, and it has run by then. Not measured: real laptop microphones; a room that is not steady before
 the first word (a fan that comes and goes, a chair): kept, and checked as it is.
 
 Time (server C, Pocket on 2 threads of an i7-13700, XTTS and Qwen3 on an RTX A4000; three recordings): the start of the

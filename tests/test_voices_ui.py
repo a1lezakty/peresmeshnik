@@ -427,6 +427,7 @@ def test_the_clone_test_is_given_up(root, monkeypatch, caplog, how):
     """FIXES-s3-40 7: the clone's test at the confirmation runs in a thread of its own; past CLONE_CHECK_S, at the user's
     Stop, or once translation starts (a second clone on the GPU) it is given up: the consent as it is (the clone heard the
     first time it speaks), said in the box and the log; the engine stops between chunks and is closed."""
+    import threading
     import time
 
     from test_voice_profiles import Pitch, Tone
@@ -453,6 +454,12 @@ def test_the_clone_test_is_given_up(root, monkeypatch, caplog, how):
     on = [False]
     box = voices.ConfirmBox(s, 'me', translating=lambda: on[0])
     monkeypatch.setattr(voices, 'check_models', lambda s, lang, say: (Asr(' '.join(box.said)), Pitch()))
+
+    class Slow(threading.Event):  # r2 2: the engine breaks off (_Stopped) before hear_clone says why: no reason of it
+        def set(self):
+            super().set()
+            time.sleep(0.3)
+    monkeypatch.setattr(voices.threading, 'Event', Slow)
     box.start()
     pump(lambda: box.button.text() == 'Stop the test' and box.button.isEnabled())
     if how == 'stop':
@@ -461,6 +468,7 @@ def test_the_clone_test_is_given_up(root, monkeypatch, caplog, how):
     pump(lambda: not box.running)
     c = voice.load('me').meta['consent']
     assert box.out.text().startswith('✔ Confirmed') and 'was not tested now' in box.out.text() and not c.get('clones')
+    assert ('(it took over 0 s)' if how == 'time' else '(stopped)') in box.out.text(), box.out.text()
     assert box.button.text() == 'Read aloud'
     pump(lambda: closed)
     assert any('was not tested at the confirmation' in r.getMessage() for r in caplog.records)

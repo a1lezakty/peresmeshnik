@@ -9,9 +9,10 @@ version is the top of its GitHub release notes (`.github/workflows/release.yml`)
   the words and matches the voice of every part of the recording; the start of the recording (what the clone takes) must
   sound like the rest of it, and the clone made from it like your live voice: someone else's 3 s or more cut into the
   start are refused (record again alone; 2 s may pass, the clone still speaks in your voice). The quiet room before your
-  first word is cut from the recording. The live reading's speaker vector is kept in `voice.json` and goes with the
-  recording to your own server. A voice recorded or imported in 0.3.0 speaks in a stock voice until confirmed once (tray
-  → Voices…). Tray → **Voices…** lists, confirms and deletes the voices.
+  first word is cut from the recording; one with too little speech after its first 12 s is refused when you make it. The
+  live reading's speaker vector is kept in `voice.json` and goes with the recording to your own server. A voice recorded
+  or imported in 0.3.0 speaks in a stock voice until confirmed once (tray → Voices…). Tray → **Voices…** lists, confirms
+  and deletes the voices.
 - The installer puts only the app on the computer. The wizard's **Components** page (and tray → **Components…**) lists
   what can be downloaded — the pair's models, the clone engines, the NVIDIA voice pack — with size, license and what
   it is for, ticked where it suits this computer and the pair; nothing downloads before Download, an unticked one says

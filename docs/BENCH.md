@@ -2590,14 +2590,97 @@ person, two per pair):
 | last 2 / 3 / 4 s | 12 / 3 / 0 | 9 / 0 / 0 | 9 / 0 / 0 (Pocket 1 of 18, the others 0) |
 | their 10 s at −57 dBFS | 12 (54 of 96 closer: Qwen3 and Chatterbox speak from the 1.4-4.8 s of them the floor leaves) | 0 | 0 |
 
-Kept: `HEAD_REST` 0.60, `PROMPT_S` 10 s, `PROMPT_MIN_S` 3 s in `confirm_live`, and the clone's output as the net behind
-them (`voice.confirm_clone` before the voice is confirmed, where its engine can be made then; else `vet_clone` the first
-time an engine is made from it, the answer kept per recording and engine weights): both test phrases, one vector,
-`CLONE_MATCH` 0.20 — 0.8 % more own refusals for Qwen3 into Russian, 0.4 % into German, none for the other engines and
-languages; it refuses 80 % of Pocket's clones of the quiet start above (next to nothing said), 33-53 % of the other
-person's whole clone by Pocket, Qwen3 and Chatterbox (XTTS none: its 30 s vector is mostly the owner). Not measured:
-an owner speaking Russian into the live reading and the clone speaking English (the reverse of the table); real laptop
-microphones; a recording started 7 s or more after Record (refused: "start speaking right away").
+**2 s of someone else is an accepted residual, not closed:** their first or last 2 s of the first 10 s pass the whole
+rule 8 and 9 times of 15. What the four engines say from such a file is the owner's voice: 1 output of 136 (Pocket)
+closer to the other person than to the owner.
+
+**A piece at 12-30 s, where XTTS takes its speaker vector from** (its GPT latents: the first 6 s; its speaker vector: the
+first 30 s; `head_rest` sees the first 12 s as the head and the 8 s windows after it as the rest). The same 15 pairs,
+their 3 / 4 s at 14 s of the file, 4 s at 22 s, 8 s at 14 s (`clone_output_check.py recs --mid`, XTTS on server C):
+
+| their piece in the file | passing the whole rule, of 15 | XTTS's output, all 15: cosine to the owner / to them (mean) | outputs of the passing closer to them |
+|---|---|---|---|
+| none (all mine) | 14 | 0.60 / 0.18 | 0 of 28 |
+| 3 s at 14 s | 15 | 0.60 / 0.23 | 0 of 30 |
+| 4 s at 14 s / at 22 s | 14 / 14 | 0.60 / 0.24 | 0 of 28 / 0 of 28 |
+| 8 s at 14 s | 3 (the 8 s windows refuse it) | 0.57 / 0.27 | 0 of 6 |
+
+The rest's 8 s windows let 3-4 s of someone else through there, and XTTS hardly hears them: its 30 s vector is mostly
+the owner.
+
+**A live start: the room before the first word, a breath, a cough, a laugh, an "um"** (FIXES-s3-40 9). The 97 owners'
+40 s files of server A's data (clean; white noise in all of the file at SNR 30 / 20, a laptop's), each with 1 / 2 / 3 s
+of their room before the first word (steady noise at the level of their file's pauses, the file's noise on top), a
+breath there (ESC-50 "breathing", 1 s at most, −15 dB to the speech, after 0.5 s of room), or at 2-6 s of the speech a
+cough / laugh / sneeze (ESC-50, 1.5 s at most, other people's: a laugh is a voice, the harder case) or an "um" (the
+owner's own voiced frames held 0.6 s), at the speech's level; checked as `confirm_live` does, against the owner's clean
+live readings of other chapters (1543 pairs; `speaker_threshold.py lead9`, server C). The owner refused in all (by
+head-rest alone), before → after `save()` cuts the room before the first word:
+
+| the owner's file | clean | noise SNR 30 | noise SNR 20 |
+|---|---|---|---|
+| as read | 4.41 % (0) → 4.34 % (0) | 5.83 % (0) → 6.03 % (1.49) | 8.36 % (0) → 8.62 % (1.49) |
+| 1 s of the room first | 4.28 % (0) → 4.67 % (0) | 5.51 % (0) → 5.83 % (0) | 9.33 % (1.30) → 8.75 % (1.49) |
+| 2 s | 6.16 % (1.30) → 4.60 % (0) | 10.56 % (4.28) → 5.96 % (1.49) | 14.13 % (7.58) → 8.94 % (1.49) |
+| 3 s | 40.64 % (38.11) → 5.64 % (1.94) | 62.99 % (59.30) → 7.13 % (1.94) | 78.48 % (74.92) → 9.72 % (1.30) |
+| a breath before the first word | 4.41 % (0) → 4.60 % (0) | 8.88 % (1.94) → 7.26 % (0.65) | 11.80 % (3.76) → 10.50 % (2.46) |
+| a cough at 2-6 s | 4.34 % (0) → 4.21 % (0) | 6.80 % (1.36) → 7.06 % (1.36) | 12.31 % (3.63) → 12.25 % (3.63) |
+| a laugh at 2-6 s | 5.06 % (0) → 5.12 % (0) | 6.55 % (0) → 6.42 % (0) | 14.71 % (4.41) → 15.36 % (4.41) |
+| a sneeze at 2-6 s | 4.34 % (0) → 4.28 % (0) | 6.29 % (0) → 6.55 % (0) | 10.24 % (0.65) → 11.21 % (1.94) |
+| an "um" at 2-6 s | 4.86 % (0) → 4.67 % (0) | 5.96 % (0) → 6.09 % (1.49) | 9.14 % (0.65) → 8.81 % (2.14) |
+
+The room before the first word was the hole: 3 s of it filled the first 4 s window and the engines' prompt (head-rest of
+the owner 0.19-0.34). Fixed in the rule, not the threshold: `save()` starts the file `LEAD_S` 0.3 s before its first
+frame of speech (over the noise of the pauses + 6 dB) when all before it is the room alone: steady (its frames within
+`STEADY_DB` 4 dB, p10-p90) and no digital silence; anything else there stays and is checked as it is. What is cut
+reaches neither the check nor the engines. Three tries before it cut whatever came before the first word (at the first
+frame over the noise; at the first frame within 20 dB of the median speech frame; at the first 0.3 s half of it so): each
+one, stopping inside a quiet voice of someone else, left the rest of it in the first 10 s beside the owner's speech, where
+the checks of the start passed it (their 10 s at −62 dBFS then the owner: 41 % passing, some of them in the file 17 %;
+their 5 s at 3-5 dB over the noise at SNR 30: 21-43 %). Left: one file of 97 at head-rest 0.601 goes under 0.60 once its
+start moves 0.3 s (+0.2 / +0.26 points as read in noise, the 1.49 in every noisy row); one owner whose pauses are as loud
+as their quiet speech keeps their "room" (1.3-1.9 points with 3 s of it); a cough, a laugh, a sneeze or an "um" inside the
+first 12 s add 0.5-2.9 points of head-rest refusals with the noise at SNR 20 (other people's ESC-50 sounds; none clean or
+at SNR 30 but the edge file): the refusal asks to record again with no sounds before the first word.
+
+The splices again with the cut (server A, `prompt8` as above, 88 per cell; family `n` new: their 5 s inside the
+owner's steady noise, 3 / 5 / 8 dB over it, then the owner, the case a cut of the room alone could leave half of):
+their first 3 s after 0 / 1 / 2 s of the owner 0.65 / 0.65 / 0 %, 4-6 s 0 %, stage 4's way around 0 %, `n` 0 %, their
+10 s at −52 / −57 / −62 dBFS 0 / 0 / 0 % — as before the cut. The owner as read: clean 4.41 → 4.34 %, Opus 4.99 → 4.93 %,
+60 s 4.46 → 4.26 %; noise in the file SNR 30 / 20 5.77 / 8.36 → 5.83 / 8.55 %, 60 s SNR 20 9.12 → 9.39 % (the start
+moves by tenths of a second: the windows shift; the edge file above).
+
+**A Russian live reading, the clone speaking English** (FIXES-s3-40 10: the direction a Russian speaker uses). mTEDx
+ru-ru (train, the 62 talks of its first 2.6 GB; one speaker a talk): 40 s of the talk from its 3rd minute as the
+recording (written by `save()`), 8 s at 40 / 60 / 80 % of the talk as 3 live readings (one session, so the live check is
+easier than at a second microphone; the clone's check is what is measured), 186 checks, refused by the recording's
+checks 3.2 % (the windows 2.2 %; head-rest one talk more, 0.58: a 3.3 s pause of the hall inside its first 12 s). The
+clone's two test phrases, one vector, the checks the recording's rule passes, lowest (next):
+
+| Russian live reading | en | ru |
+|---|---|---|
+| Pocket | 0.131 (0.184) | — |
+| XTTS | 0.278 (0.294) | 0.235 (0.298) |
+| Qwen3 | 0.350 (0.362) | 0.524 (0.540) |
+| Chatterbox | 0.373 (0.391) | 0.484 (0.485) |
+
+At the old 0.20 the clone check refused 1.1 % of the owners more here (Pocket into English), at 0.14-0.16 0.5 %, at 0.12
+and under none; with the English readings above the owner's lowest was 0.149 (Qwen3 into Russian, next 0.194).
+
+Kept: `HEAD_REST` 0.60, `PROMPT_S` 10 s, `PROMPT_MIN_S` 3 s in `confirm_live`: the splices are closed (3 s and more) by the
+recording's start against its rest. The clone's output is the net behind them for what the recording's checks cannot
+see, a clone that says nothing or garbage, not a splice detector (`voice.confirm_clone` before the voice is confirmed,
+where its engine can be made then; else `vet_clone` the first time an engine is made from it, the answer kept per
+recording and engine weights; next to nothing said: the stock voice for that session only, nothing kept): both test
+phrases, one vector, `CLONE_MATCH` 0.10, the floor of "nothing or garbage" (it was 0.20): not one own refusal more for
+any engine in any of the 5 directions measured (en → en / ru / de, ru → en / ru); at 0.12 none either, but with 0.011 to
+spare on one output, for 14 languages most of them not measured. At 0.10 it refuses 27 % of Pocket's clones of a
+near-silent start (at 0.20: 80 %) and 7-20 % of whole clones of another person by Pocket, Qwen3 and Chatterbox (XTTS
+none: its 30 s vector is mostly the owner). My own server: its sides are app.Side's (`remote.server.ServerSide`), so the
+clone it makes from the profile sent is heard there too (`vet_clone`, at a session's start, 2-4 s); the answer goes with
+the session's copy of the profile, so each session hears it again; a profile with a refusal kept is not sent at all
+(`fallback.my_voice`: the server's stock voice). Not measured: real laptop microphones; a room that is not steady before
+the first word (a fan that comes and goes, a chair): kept, and checked as it is.
 
 Time (server C, Pocket on 2 threads of an i7-13700, XTTS and Qwen3 on an RTX A4000; three recordings): the start of the
 recording and the prompt cost one vector more (~0.3 s). The clone at confirmation: Pocket made 1.0 s, conditioned 1.75 s,

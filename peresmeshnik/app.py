@@ -575,6 +575,7 @@ class Side:
             if why := _clone_not_ready(s, self.tgt, pair.tts):
                 return self._fallback(s, why)
             model_dir = models.path(pair.tts)  # there: _clone_not_ready looked
+            engine = pair.tts
             try:  # pair.tts: languages.clone_engine's for this computer and the language
                 v = voice.mine(s.local.voice)  # M-20: only my own voice, confirmed at the microphone; a contact's never
                 try:
@@ -584,20 +585,21 @@ class Side:
                     if not nxt or _clone_not_ready(s, self.tgt, nxt):
                         raise
                     self.on_error(f'note: {ARROW[self.name]}: {nxt} speaks your cloned voice: {pair.tts} did not start ({e})')
-                    tts = make_engine(nxt, models.path(nxt), threads=s.local.threads)
+                    tts, engine = make_engine(nxt, models.path(nxt), threads=s.local.threads), nxt
             except (RuntimeError, OSError, ValueError) as e:  # not my confirmed voice (voice.NotMine), no CUDA, no runner
                 return self._fallback(s, e)
             d = make_local(self.src, self.tgt, tts=tts, voice=v, **kw)
             try:
                 d.warm_up()
                 rtf = clone_rtf(tts, self.tgt, v)
+                why = (f'this computer is too slow for the clone: {rtf:.1f} s of synthesis per second of speech'
+                       if rtf > MAX_CLONE_RTF else voice.vet_clone(tts, engine, v, self.tgt))  # in my live voice: heard
             except Exception as e:  # out of (V)RAM on the first phrase, the runner died, onnxruntime's own errors
-                d.close()
+                d.close()  # (and the speaker model of vet_clone missing)
                 return self._fallback(s, e)
-            if rtf > MAX_CLONE_RTF:
+            if why:
                 d.close()
-                return self._fallback(s, f'this computer is too slow for the clone: {rtf:.1f} s of synthesis per second '
-                                      'of speech')
+                return self._fallback(s, why)
             return d
         return self._stock(d, s)
 

@@ -381,3 +381,110 @@ def test_my_voice_deleted_while_the_wizard_is_open(tmp_path, monkeypatch):
     page.voice = type('V', (), {'name': 'me.new'})()  # or straight to Finish, the page still holding it
     page.commit()
     assert page.voice is None and s.local.voice == '' and not (voice.voices_dir() / 'me').exists()
+
+
+@pytest.mark.parametrize('f', [180.0, 300.0])
+def test_the_confirmation_hears_the_clone_this_computer_speaks_with(root, monkeypatch, f):
+    """After the live reading matches: the clone engine "me → them" speaks with here is made and says a test phrase in
+    their language (the bar runs meanwhile); not my voice: not confirmed, and the box says to record again, not to read
+    again. A clone that cannot start here: confirmed, it is heard when it is first made."""
+    from test_voice_profiles import Pitch, Tone
+
+    from peresmeshnik.local import clone
+    s = config.Settings()
+    s.their_lang = 'en'
+    monkeypatch.setattr('peresmeshnik.audio.mic.record', lambda sec, dev, sr, progress: speech(sec, sr)[0])
+    monkeypatch.setattr(voices, 'clone_here', lambda s: 'pocket-tts-en')
+    monkeypatch.setattr('peresmeshnik.models.path', lambda i: root)
+    made = []
+    monkeypatch.setattr(clone, 'make_engine', lambda i, d, threads=2: made.append(Tone(f)) or made[-1])
+    box = voices.ConfirmBox(s, 'me')
+    monkeypatch.setattr(voices, 'check_models', lambda s, lang, say: (Asr(' '.join(box.said)), Pitch()))
+    box.start()
+    pump(lambda: not box.running)
+    meta = voice.load('me').meta
+    assert made and made[0].said == [(p, 'en') for p in voice.TEST_PHRASES['en']]
+    if f == 180.0:
+        assert box.out.text().startswith('✔ Confirmed') and meta['consent']['clones']['pocket-tts-en']['similarity'] == 1.0
+    else:
+        assert 'the voice made from your recording does not sound like you' in box.out.text() and meta['consent'] is None
+        assert 'Try again with the new phrases' not in box.out.text() and box.bar.maximum() == int(voices.READ_S)
+
+    def broken(i, d, threads=2):
+        raise clone.CloneUnavailable('no CUDA GPU')
+    monkeypatch.setattr(clone, 'make_engine', broken)
+    monkeypatch.setattr(voice, 'wait_s', lambda root=None: 0.0)
+    box.start()
+    pump(lambda: not box.running)
+    if f == 300.0:  # refused before: now confirmed, the clone not heard yet (vet_clone hears it when it is made)
+        c = voice.load('me').meta['consent']
+        assert box.out.text().startswith('✔ Confirmed') and not c.get('clones') and c['live']
+        assert 'was not tested now (it did not start: no CUDA GPU)' in box.out.text()
+
+
+@pytest.mark.parametrize('how', ['time', 'stop', 'translating'])
+def test_the_clone_test_is_given_up(root, monkeypatch, caplog, how):
+    """FIXES-s3-40 7: the clone's test at the confirmation runs in a thread of its own; past CLONE_CHECK_S, at the user's
+    Stop, or once translation starts (a second clone on the GPU) it is given up: the consent as it is (the clone heard the
+    first time it speaks), said in the box and the log; the engine stops between chunks and is closed."""
+    import threading
+    import time
+
+    from test_voice_profiles import Pitch, Tone
+
+    from peresmeshnik.local import clone
+    s = config.Settings()
+    s.their_lang = 'en'
+    monkeypatch.setattr('peresmeshnik.audio.mic.record', lambda sec, dev, sr, progress: speech(sec, sr)[0])
+    monkeypatch.setattr(voices, 'clone_here', lambda s: 'pocket-tts-en')
+    monkeypatch.setattr('peresmeshnik.models.path', lambda i: root)
+    if how == 'time':
+        monkeypatch.setattr(voices, 'CLONE_CHECK_S', 0.5)
+    closed = []
+
+    class Endless(Tone):
+        def synth(self, text, lang, voice=None, speed=1.0):
+            while True:
+                time.sleep(0.01)
+                yield np.zeros(240, np.float32)
+
+        def close(self):
+            closed.append(1)
+    monkeypatch.setattr(clone, 'make_engine', lambda i, d, threads=2: Endless())
+    on = [False]
+    box = voices.ConfirmBox(s, 'me', translating=lambda: on[0])
+    monkeypatch.setattr(voices, 'check_models', lambda s, lang, say: (Asr(' '.join(box.said)), Pitch()))
+
+    class Slow(threading.Event):  # r2 2: the engine breaks off (_Stopped) before hear_clone says why: no reason of it
+        def set(self):
+            super().set()
+            time.sleep(0.3)
+    monkeypatch.setattr(voices.threading, 'Event', Slow)
+    box.start()
+    pump(lambda: box.button.text() == 'Stop the test' and box.button.isEnabled())
+    if how == 'stop':
+        box.button.click()
+    on[0] = how == 'translating'
+    pump(lambda: not box.running)
+    c = voice.load('me').meta['consent']
+    assert box.out.text().startswith('✔ Confirmed') and 'was not tested now' in box.out.text() and not c.get('clones')
+    assert ('(it took over 0 s)' if how == 'time' else '(stopped)') in box.out.text(), box.out.text()
+    assert box.button.text() == 'Read aloud'
+    pump(lambda: closed)
+    assert any('was not tested at the confirmation' in r.getMessage() for r in caplog.records)
+
+
+def test_a_voice_whose_clone_was_refused_can_be_confirmed_again(root):
+    """FIXES-s3-40 2: a clone heard unlike my live voice, or a consent from before the clone check (no live vector): not
+    mine, the list says why, and Confirm is offered (not a dead end)."""
+    from test_voice_profiles import confirmed
+    c = dict(confirmed('me', root).meta['consent'])
+    voice.set_consent('me', c | {'clones': {'pocket-tts-en': {'model': 'x', 'similarity': 0.05}}}, root)
+    d = voices.VoicesDialog(config.Settings())
+    d.list.setCurrentRow(0)
+    assert 'does not sound like you (similarity 0.05)' in d.list.item(0).text() and d.confirm_button.isEnabled()
+    c.pop('live')
+    voice.set_consent('me', c, root)
+    d.refresh()
+    d.list.setCurrentRow(0)
+    assert 'confirm it again' in d.list.item(0).text() and d.confirm_button.isEnabled()

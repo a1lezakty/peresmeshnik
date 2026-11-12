@@ -502,8 +502,8 @@ def _clone_not_ready(s, lang: str, engine: str = '') -> str:
         return 'no voice enrolled (setup wizard, "Your voice")'
     from peresmeshnik import voice
     with contextlib.suppress(OSError, ValueError):  # missing or broken: said where it is loaded, as before
-        if why := voice.why_not_mine(voice.load(s.local.voice)):  # M-20: a contact's voice never speaks as me
-            return why
+        if why := voice.why_not_mine(voice.load(s.local.voice)):  # M-20: a contact's voice never speaks as me; nor
+            return why  # one whose clone was heard unlike my live voice
     if why := languages.not_here(engine):  # an NVIDIA engine's voice pack, a gated model's token
         return why
     try:
@@ -592,16 +592,33 @@ def make(name: str, s, key: str, on_state=lambda text: None, on_respawn=lambda e
         except Exception as e:
             log.warning('me: voice %s: %s', s.local.voice, e)
 
+    def stock_tts(vid: str):  # crash.Respawn: the runner dies, only it starts again
+        from peresmeshnik import crash
+        from peresmeshnik.local.tts import PiperTts
+        return crash.Respawn(lambda: PiperTts(vid, threads=s.local.threads), on_respawn)
+
     def tts():
         if not tts_id:
             raise RuntimeError(why)
-        if piper:  # crash.Respawn: the runner dies, only it starts again
-            from peresmeshnik import crash
-            from peresmeshnik.local.tts import PiperTts
-            return crash.Respawn(lambda: PiperTts(tts_id, threads=s.local.threads), on_respawn)
+        if piper:
+            return stock_tts(tts_id)
         from peresmeshnik import models
         from peresmeshnik.local.clone import make_engine  # Pocket TTS here, or the voice pack's runner
-        return make_engine(tts_id, models.path(tts_id), threads=s.local.threads)
+        t = make_engine(tts_id, models.path(tts_id), threads=s.local.threads)
+        if name == 'me' and voice is not None:  # it speaks in my live voice (voice.vet_clone), as on the local path
+            from peresmeshnik import voice as profiles
+            try:
+                unlike = profiles.vet_clone(t, tts_id, voice, tgt)
+            except BaseException:
+                getattr(t, 'close', lambda: None)()
+                raise
+            if unlike:  # as the local path: the language's stock voice, said why
+                getattr(t, 'close', lambda: None)()
+                if not (vid := languages.pick(s.local.tts, tgt)):
+                    raise RuntimeError(unlike)
+                on_state(f'note: {ARROW[name]}: a stock voice speaks instead of your cloned voice ({unlike})')
+                return stock_tts(vid)
+        return t
 
     def local(t):  # no local path for this pair (models.toml langs): the reason, not a KeyError
         if not d.subtitles:

@@ -17,9 +17,12 @@ runs from source. Not yet tried in a real call (see below).
 - macOS, Windows and Linux. Local models (CPU, Apple Silicon, optional NVIDIA GPU) or cloud
   (Gemini Live), switchable in settings.
 - Voice cloning of **your own voice only**: a recording (or an imported file) speaks for you once you read two random
-  phrases at the microphone and the app hears those words in the voice of every part of the recording; after three
-  failed tries it waits a while. This stops a downloaded recording of someone else from speaking for you in a few
+  phrases at the microphone and the app hears those words in the voice of every part of the recording, the start of the
+  recording (what the clone takes) in the voice of the rest of it, and the clone made from it in your live voice; after
+  three failed tries it waits a while. This stops a downloaded recording of someone else from speaking for you in a few
   clicks; it cannot stop someone who edits the app's files. A voice recorded in 0.3.0 is confirmed once the same way.
+  The live reading's speaker vector (256 numbers, not its sound) is kept in the voice's `voice.json` and goes with the
+  recording to your own server.
   Tray → **Voices…** lists and deletes the voices. Cloned from a 30–60 s recording. On any computer, a Mac too: Kyutai's
   Pocket TTS on the CPU in English, French, German, Spanish, Portuguese, Italian (its weights need your Hugging Face
   token (type Read), of an account that accepted Kyutai's conditions on huggingface.co/kyutai/pocket-tts: paste it in

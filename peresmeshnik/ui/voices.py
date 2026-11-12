@@ -1,11 +1,15 @@
 """The voices (tray "Voices…"): my own voice and the voices of people I talk to that I chose to keep (voice.json v2),
 delete them. My voice speaks into the call only once confirmed: `ConfirmBox` (here and on the wizard's voice page) shows
 two random phrases, records them at the microphone and checks them (voice.confirm_live: the app's ASR heard them, the
-speaker vector is each window of the recording's). `RememberDialog`: keep the voice of the person in this call (S2's live profile), only
-with their agreement. Recording, downloads and checks take seconds: worker threads, answers come back as signals."""
+speaker vector is each window of the recording's, its start is like its rest), then the clone this computer speaks with
+says the test phrases, heard against that reading (hear_clone: Stop, or translation started, gives it up).
+`RememberDialog`: keep the voice of the person in this call (S2's live profile), only with their agreement. Recording,
+downloads and checks take seconds: worker threads, answers come back as signals."""
 from __future__ import annotations
 
+import logging
 import threading
+import time
 
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import (
@@ -26,7 +30,10 @@ from PySide6.QtWidgets import (
 
 from peresmeshnik import config, voice
 
+log = logging.getLogger('peresmeshnik.ui')
+
 READ_S = 8.0  # the live reading: two short phrases at a normal pace, 3-4 s each
+CLONE_CHECK_S = 180.0  # the clone's test at the confirmation, its start included (BENCH: 5-13 s on a GPU): not waited longer
 THEIRS = ('This voice is heard only by you, in your headphones; it never speaks into the call. It is kept as the clone '
           "engine's state, not as a recording of their speech, and stays on this computer.")
 THEIRS_HEARD = ('This voice is heard only by you, in your headphones; it never speaks into the call. Up to 10 s of their '
@@ -60,10 +67,78 @@ def check_models(s: config.Settings, lang: str, say=lambda text: None):
     return OnnxAsr(asr, s.local.threads, live=False), voice.Speaker(models.path(voice.SPEAKER))
 
 
+def clone_here(s: config.Settings) -> str:
+    """The clone engine "me → them" speaks with on this computer, when it can be made now: the live check then hears
+    it (voice.confirm_clone). '' = none now: a stock voice, its model, token or voice pack not here yet, or my server's
+    clone: that one is heard on the server when a session makes it (voice.vet_clone, the answer kept in the session's
+    copy of the profile only, so heard again each session); one made later here, the first time it is made."""
+    from peresmeshnik import languages, models
+    d = languages.direction(s, 'me_to_them')
+    if s.me_to_them == 'remote' or d.voice != 'clone' or languages.clone_why(d.tts, d.tgt) or languages.not_here(d.tts):
+        return ''
+    return d.tts if models.is_fetched(models.get(d.tts)) else ''
+
+
+class _Stopped(Exception):
+    pass
+
+
+class _Stoppable:
+    """The engine, its speech broken off between chunks once `quit` is set: the test's thread ends and frees it."""
+
+    def __init__(self, tts, quit: threading.Event):
+        self._tts, self._quit, self.sample_rate = tts, quit, tts.sample_rate
+
+    def synth(self, *a):
+        for c in self._tts.synth(*a):
+            if self._quit.is_set():
+                raise _Stopped
+            yield c
+
+
+def hear_clone(s: config.Settings, consent: dict, v, engine: str, spk, say=lambda text: None,
+               stop=lambda: False) -> tuple[dict | None, str]:
+    """confirm_live's consent, then the clone `engine` made from the recording `v` says the test phrases of their language
+    (voice.confirm_clone), in a thread of its own: at most CLONE_CHECK_S, given up when `stop()` (the user's Stop, or
+    translation started: a second clone on the GPU). One that does not start or breaks off (no CUDA, out of memory, the
+    runner died), takes too long or is stopped: the consent as it is, why in the log and to the user; that clone is heard
+    the first time it speaks (voice.vet_clone)."""
+    from peresmeshnik import models
+    from peresmeshnik.local.clone import make_engine
+    say('Your live voice matches. Now the voice made from your recording says two test phrases… '
+        '(the first time it starts: up to a minute)')
+    out, quit = [], threading.Event()
+
+    def run() -> None:
+        tts = None
+        try:
+            tts = make_engine(engine, models.path(engine), threads=s.local.threads)
+            if not quit.is_set():
+                out.append(voice.confirm_clone(consent, _Stoppable(tts, quit), engine, v, s.their_lang, spk))
+        except Exception as e:  # noqa: BLE001 - any of the engine's: said below
+            out.append(e)
+        finally:
+            getattr(tts, 'close', lambda: None)()  # the voice pack's process and its VRAM
+
+    t = threading.Thread(target=run, name='hear-clone', daemon=True)
+    t.start()
+    end = time.monotonic() + CLONE_CHECK_S
+    while t.is_alive() and not stop() and time.monotonic() < end:
+        t.join(0.2)
+    got = out[:]  # before quit: the thread broken off by it (_Stopped) is no reason
+    quit.set()
+    if got and not isinstance(got[0], Exception):
+        return got[0]
+    why = f'it did not start: {got[0]}' if got else 'stopped' if stop() else f'it took over {CLONE_CHECK_S:.0f} s'
+    log.warning('the clone %s was not tested at the confirmation: %s', engine, why)
+    return consent, f'The voice made from your recording was not tested now ({why}): it is tested the first time it speaks.'
+
+
 class _Sig(QObject):
     done = Signal(object)  # (consent | None, text)
     say = Signal(str)
     progress = Signal(float)
+    spin = Signal()  # a step of unknown length (the clone starts): the bar runs
 
 
 class ConfirmBox(QWidget):
@@ -77,6 +152,7 @@ class ConfirmBox(QWidget):
         super().__init__(parent)
         self.s, self.name, self.root, self.translating = s, name, root, translating
         self.running = self.dead = False
+        self._stop = threading.Event()
         self.lang = voice.load(name, root).meta['lang']
         self.phrases = QLabel()
         self.phrases.setWordWrap(True)
@@ -96,6 +172,7 @@ class ConfirmBox(QWidget):
         self._sig.done.connect(self._finished)
         self._sig.say.connect(self.out.setText)
         self._sig.progress.connect(lambda x: self.bar.setValue(int(x)))
+        self._sig.spin.connect(self._clone_test)
         self.button.clicked.connect(self.start)
         self._new_phrases()
 
@@ -109,8 +186,18 @@ class ConfirmBox(QWidget):
         self.said = voice.live_phrases(self.lang)
         self.phrases.setText('<br>'.join(f'<b>{p}</b>' for p in self.said))
 
+    def _clone_test(self) -> None:
+        """The clone speaks (a step of unknown length): the bar runs, the button stops it."""
+        self.bar.setRange(0, 0)
+        self.button.setText('Stop the test')
+        self.button.setEnabled(True)
+
     def start(self) -> None:
-        if not self.said or self.running:
+        if self.running:  # the clone's test: given up, it is heard the first time it speaks
+            self._stop.set()
+            self.button.setEnabled(False)
+            return
+        if not self.said:
             return
         if self.translating():
             self.out.setText('Turn translation off first: the check records from the microphone.')
@@ -118,7 +205,7 @@ class ConfirmBox(QWidget):
         if w := voice.wait_s(self.root):
             self.out.setText(f'Too many tries: wait {max(w / 60, 1):.0f} min before the next one.')
             return
-        self.running = True
+        self.running, self._stop = True, threading.Event()
         self.busy.emit(True)
         self.button.setEnabled(False)
         self.bar.setValue(0)
@@ -132,7 +219,14 @@ class ConfirmBox(QWidget):
             sr = 24_000
             pcm = record(READ_S, self.s.ui.mic or None, sr, self._sig.progress.emit)
             asr, spk = check_models(self.s, self.lang, self._sig.say.emit)
-            consent, why = voice.confirm_live(voice.load(self.name, self.root), pcm, sr, self.said, asr, spk)
+            v = voice.load(self.name, self.root)
+            engine = clone_here(self.s)  # the clone this computer speaks with: heard before it is mine
+
+            def hear(consent):
+                self._sig.spin.emit()
+                return hear_clone(self.s, consent, v, engine, spk, self._sig.say.emit,
+                                  lambda: self._stop.is_set() or self.translating())
+            consent, why = voice.confirm_live(v, pcm, sr, self.said, asr, spk, clone=hear if engine else None)
             if consent:  # only onto the recording it checked (voice.set_consent: ValueError if another one is there)
                 voice.set_consent(self.name, consent, self.root)
             self._sig.done.emit((consent, why))
@@ -150,14 +244,16 @@ class ConfirmBox(QWidget):
         consent, why = r
         self.running = False
         self.busy.emit(False)
+        self.bar.setRange(0, int(READ_S))
         self.bar.setVisible(False)
+        self.button.setText('Read aloud')
         self.button.setEnabled(True)
         if consent:
-            self.out.setText(f'✔ Confirmed: your voice (similarity {consent["similarity"]:.2f}).')
+            self.out.setText(f'✔ Confirmed: your voice (similarity {consent["similarity"]:.2f}).' + (f' {why}' if why else ''))
             self.button.setEnabled(False)
             self.confirmed.emit(consent)
         else:
-            self.out.setText(f'⚠ {why} Try again with the new phrases.')
+            self.out.setText(f'⚠ {why}' if voice.RECORD_AGAIN in why else f'⚠ {why} Try again with the new phrases.')
             self._new_phrases()
 
 

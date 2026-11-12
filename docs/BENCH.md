@@ -2520,7 +2520,91 @@ Residual risk, accepted for 0.3.0 (review 2, 3): a deliberate splice of 3-4 s of
 second, at the start (XTTS) or at the end of the first 10 s (Pocket) of a recording passes the check in 5-6 cases of 15
 at 3 s and 1 at 4 s, and makes the clone a blend of the two voices; on the median the output stays further from the
 other person (cosine 0.38-0.45) than a clone of that person's own recording (0.54-0.61). 2 s barely recolour. Closing it
-for any length and place: check the clone's own output against the live reading (a separate task).
+for any length and place: check the clone's own output against the live reading (a separate task). Closed before 0.3.0:
+the next section.
+
+### Stage 8, before 0.3.0: the clone's output against the live reading; the start of the recording against its rest (S3)
+
+The residual risk above, measured again with everything as the app runs it: each recording written by `voice.save()`,
+checked by `confirm_live`'s own functions, each engine conditioned on the whole saved file as the app does.
+`bench/clone_output_check.py` (server C: i7-13700, RTX A4000) and `bench/speaker_threshold.py` stages `report_headrest`,
+`prompt8`, `report_prompt8` (server A, the data of the sections above).
+
+**The clone's output against the live reading.** 88 own recordings (LibriSpeech dev-clean, the 31 readers with two
+chapters or more, each chapter's first 40 s as read, untrimmed), 3 live readings each (8 s of other chapters), 248
+checks; the 15 pairs of the section above with 2 / 3 / 4 s of the other person first or last in the first 10 s, then 30 s
+more of the owner (and the other person's 10 s at −57 dBFS, "quiet"). Pocket (the app's own Kyutai weights, int8), XTTS,
+Qwen3 (its runaway guard, no Chatterbox), Chatterbox Multilingual on every recording; the app's two test phrases in
+English, and for the own recordings also in Russian and German (the clone speaks their language; the live reading is
+English). One speaker vector of an output against the live reading's:
+
+| own recordings, the live check passed: cosine p1 / min, one phrase · both phrases (one vector) | en | ru | de |
+|---|---|---|---|
+| Pocket | 0.24 / 0.19 · 0.32 / 0.30 | — | — |
+| XTTS | 0.29 / 0.25 · 0.33 / 0.31 | 0.24 / 0.20 · 0.25 / 0.21 | 0.25 / 0.24 · 0.27 / 0.25 |
+| Qwen3 | 0.36 / 0.35 · 0.41 / 0.38 | 0.16 / 0.15 · 0.21 / 0.15 | 0.25 / 0.18 · 0.25 / 0.20 |
+| Chatterbox | 0.39 / 0.36 · 0.45 / 0.42 | 0.31 / 0.28 · 0.35 / 0.32 | 0.31 / 0.26 · 0.41 / 0.30 |
+
+A clone of the other person's own 10 s (then 30 s of the owner, which the live check refuses) scores 0.18-0.42 (median,
+both phrases; max 0.42-0.51): the spread of the owner's own clone overlaps it. At an own refusal of 2 % or less, Pocket still passed
+55-58 % of its outputs closer to the other person than to the owner, and 27 % of the clones of the other person
+entirely: the output alone cannot tell a blend of 3-4 s from the owner's own clone. With the whole file (30 s more of
+the owner after the prompt) the blend is milder than in the section above: XTTS's speaker vector takes 30 s, mostly the
+owner (outputs closer to the other person: 0 / 0 / 7 % for 2 / 3 / 4 s first); Pocket 7-20 %, 53 % at 4 s last.
+
+**The start against the rest of the same recording.** One session, one microphone: the start the engines take is
+compared with the recording's own rest, not only with the live reading. Each head window (the 4 s windows of the first
+12 s) and the engines' prompt (the sound of the file's first 10 s, all of it but digital silence: Pocket, Qwen3 and
+Chatterbox take their voice from there) against the mean vector of the 8 s windows after 12 s (`voice.head_rest`), and
+at least 3 s of sound in that prompt. Server A, the file as `save()` writes it (`FLOOR_DB` 35), 97 own files per
+condition, 1543 own pairs with the clean live reading:
+
+| the owner refused (another person passing, same sex) | the windows (review 3) | + the prompt, head-rest ≥ 0.60, ≥ 3 s of sound |
+|---|---|---|
+| 40 s clean | 4.41 % (0.063 %) | 4.41 % (0.063 %) |
+| 40 s Opus 24k | 4.99 % (0.049 %) | 4.99 % (0.049 %) |
+| 40 s, white noise in the file at SNR 30 / 20 | 5.77 / 8.36 % | 5.77 / 8.36 % |
+| 60 s clean / SNR 20 | 4.46 / 9.12 % | 4.46 / 9.12 % |
+| the live reading at SNR 20 / 10 (40 s clean file) | 12.40 / 28.87 % | 12.40 / 28.87 % |
+
+Not one refusal more in any of the 18 conditions (another person passing: the same). Head-rest of the owner's files:
+0.58-0.69 at the lowest, p1 0.62-0.70; at 0.62 the 60 s file with noise loses 0.9 points, at 0.65 the clean one 1.
+Seconds of sound in the prompt: the owner's files 6.5 s at the least (p1 6.9; with noise in the file 10 s). Splices
+below: 88 per cell, each against the owner's live readings of other chapters (1543 pairs).
+
+| another person's piece, passing (dangerous: some of them still in the file) | the windows (review 3) | + the prompt, head-rest ≥ 0.60, ≥ 3 s of sound |
+|---|---|---|
+| their first 3 s after 0 / 1 / 2 s of the owner | 18 / 33 / 25 % | 0.65 / 0.65 / 0 % |
+| their first 4 s, the same | 0.8 / 15 / 5.4 % | 0 / 0 / 0 % |
+| their first 5 / 6 s | ≤ 1.4 % | 0 % |
+| stage 4's way around (5 / 10 s at 3-8 dB over the owner's noise, SNR 30 / 20) | ≤ 1.1 % | 0 % |
+| their 10 s at −52 / −57 / −62 dBFS, pauses digital, then the owner | 16 / 78 / 94 % (dangerous 16 / 78 / 82 %) | 0 / 0 / 0 % (the windows with the prompt, before head-rest and its 3 s: 0 / 1.3 / 58 %) |
+
+The 15 pairs of server C, the same rule (passing of 15; in brackets the outputs of the passing closer to the other
+person, two per pair):
+
+| piece | the windows | + the prompt, head-rest | + the clone ≥ 0.20, each engine |
+|---|---|---|---|
+| none (all mine) | 14 | 14 | 14 (0 of 28 closer) |
+| first 2 / 3 / 4 s | 14 / 4 / 1 | 8 / 0 / 0 | 8 / 0 / 0 (0 of 16) |
+| last 2 / 3 / 4 s | 12 / 3 / 0 | 9 / 0 / 0 | 9 / 0 / 0 (Pocket 1 of 18, the others 0) |
+| their 10 s at −57 dBFS | 12 (54 of 96 closer: Qwen3 and Chatterbox speak from the 1.4-4.8 s of them the floor leaves) | 0 | 0 |
+
+Kept: `HEAD_REST` 0.60, `PROMPT_S` 10 s, `PROMPT_MIN_S` 3 s in `confirm_live`, and the clone's output as the net behind
+them (`voice.confirm_clone` before the voice is confirmed, where its engine can be made then; else `vet_clone` the first
+time an engine is made from it, the answer kept per recording and engine weights): both test phrases, one vector,
+`CLONE_MATCH` 0.20 — 0.8 % more own refusals for Qwen3 into Russian, 0.4 % into German, none for the other engines and
+languages; it refuses 80 % of Pocket's clones of the quiet start above (next to nothing said), 33-53 % of the other
+person's whole clone by Pocket, Qwen3 and Chatterbox (XTTS none: its 30 s vector is mostly the owner). Not measured:
+an owner speaking Russian into the live reading and the clone speaking English (the reverse of the table); real laptop
+microphones; a recording started 7 s or more after Record (refused: "start speaking right away").
+
+Time (server C, Pocket on 2 threads of an i7-13700, XTTS and Qwen3 on an RTX A4000; three recordings): the start of the
+recording and the prompt cost one vector more (~0.3 s). The clone at confirmation: Pocket made 1.0 s, conditioned 1.75 s,
+both phrases and the vector 2.1 s (about 5 s); XTTS 10.7 s to load, 1.8 s (about 13 s); Qwen3 5.1 s, 0.3 s, 3.7-4.2 s
+(about 9.5 s); the voice pack's runner adds its own start. The wizard shows a running bar and "the voice made from
+your recording says two test phrases". An engine heard later (installed after, my server's): both phrases once, 2-4 s at
+the side's start.
 
 ## Stage 8: Pocket TTS on onnxruntime, both sides cloned at once on 4 cores (S1)
 

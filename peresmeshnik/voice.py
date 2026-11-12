@@ -625,11 +625,11 @@ HEAD_S, HEAD_WIN_S, HEAD_HOP_S, HEAD_MATCH = 12.0, 4.0, 2.0, 0.40
 # another person 0.063 % (0.056 %); of my own speech p95 0.3 s goes silent
 START_S, FLOOR_DB = 30.0, 35.0
 # the start the engines take, against the rest of the same recording: a short piece of someone else there passes the live
-# check in a 4 s window now and then (3 s cut to the second: 33-36 %), yet the same recording's own voice tells it at once
-# (one session, one microphone). Each head window's cosine with the mean vector of the 8 s windows after it.
-# BENCH (stage 8, before 0.3.0; stage `report_headrest`, the file as save() writes it): the owner's files 0.58-0.69 at the
-# lowest (p1 0.62-0.70; clean, Opus, noise in the file at SNR 30 / 20, 40 and 60 s), refused not once more at 0.60 (at
-# 0.65: +1 point clean); splices of another person's first 3 s pass 2.2-3.0 % (36 % before), 4-6 s 0 % (up to 23 %)
+# check in a 4 s window now and then (their first 3 s after 0-2 s of mine: 18-33 %), yet the same recording's own voice
+# tells it at once (one session, one microphone). Each head window's cosine with the mean vector of the 8 s windows after
+# it. BENCH (stage 8, before 0.3.0; `prompt8`, the file as save() writes it): the owner's files 0.58-0.69 at the lowest
+# (p1 0.62-0.70; clean, Opus, noise in the file at SNR 30 / 20, 40 and 60 s), refused not once more at 0.60 (at 0.65: +1
+# point clean); with the prompt below, their first 3 s pass 0-0.65 %, 4-6 s and quiet ones 0 %
 HEAD_REST = 0.60
 # with them one window more: the engines' own prompt as they hear it, the sound of the file's first PROMPT_S (all of it but
 # digital silence: Pocket, Qwen3, Chatterbox take their voice from there, XTTS its first 6 s). A voice of someone else at

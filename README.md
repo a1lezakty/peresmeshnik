@@ -20,7 +20,7 @@ runs from source. Not yet tried in a real call (see below).
   phrases at the microphone and the app hears those words in the voice of every part of the recording, the start of the
   recording (what the clone takes) in the voice of the rest of it, and the clone made from it in your live voice; after
   three failed tries it waits a while. This stops a downloaded recording of someone else from speaking for you in a few
-  clicks; it cannot stop someone who edits the app's files. A voice recorded in 0.3.0 is confirmed once the same way.
+  clicks; it cannot stop someone who edits the app's files. An earlier build's voice is confirmed once the same way.
   The live reading's speaker vector (256 numbers, not its sound) is kept in the voice's `voice.json` and goes with the
   recording to your own server.
   Tray → **Voices…** lists and deletes the voices. Cloned from a 30–60 s recording. On any computer, a Mac too: Kyutai's
@@ -348,7 +348,8 @@ inaudible Perth watermark).
 
 **По-русски.** Пересмешник — переводчик звонков в реальном времени. Собеседника вы слышите
 на своём языке — голосом в наушниках и субтитрами, а он вас — на своём, вашим же клонированным
-голосом (с видеокартой NVIDIA; без неё — стоковым голосом или голосом облака). Облако — Google Gemini с вашим ключом:
+голосом (на любом компьютере — на 7 языках, с видеокартой NVIDIA — на 13; иначе стоковым голосом или
+голосом облака). Облако — Google Gemini с вашим ключом:
 звук стороны в облаке уходит в Google. Работает с любой программой созвона через системные аудиоустройства; macOS, Windows и
 Linux, локальные модели или облако; 14 языков в любой паре (0.3.0). Сейчас в разработке; сборки для macOS и Windows
 — установка выше.

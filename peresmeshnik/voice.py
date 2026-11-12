@@ -401,6 +401,10 @@ def why_not_mine(v: Voice) -> str:
         return 'it is not confirmed as your own voice yet: read two short phrases at the microphone (Voices…)'
     if not (sha := _sha(Path(v.path) / 'reference.wav')) or c.get('ref_sha256') != sha:
         return 'its recording changed after it was confirmed: confirm it again (Voices…)'
+    if not c.get('live'):  # a build before the clone was heard against it: nothing to hear the clone against
+        return 'it was confirmed before the app checked the voice made from it: confirm it again (Voices…)'
+    if low := [k['similarity'] for k in (c.get('clones') or {}).values() if k.get('similarity', 1.0) < CLONE_MATCH]:
+        return CLONE_WHY.format(sim=min(low)) + '; or confirm it again (Voices…)'
     return ''
 
 
@@ -640,6 +644,7 @@ HEAD_REST = 0.60
 # under 3 s; BENCH)
 PROMPT_S, PROMPT_MIN_S = 10.0, 3.0
 RECORD_AGAIN = 'record your voice again alone, with nobody else talking (setup wizard, "Your voice")'
+START_NOW = 'start reading right away, in your usual voice, with no sounds before the first word'
 TRIES, PAUSES_S = 3, (60, 300, 1500, 3600)  # failed checks in a row before a pause; the pauses after them, growing
 
 
@@ -677,9 +682,10 @@ def _start(pcm: np.ndarray, sr: int) -> np.ndarray:
     return np.concatenate([(f[:n][keep] - x.mean()).reshape(-1), rest]).astype(np.float32)
 
 
-def _windows(x: np.ndarray, sr: int) -> list[tuple[np.ndarray, float]]:
+def _windows(x: np.ndarray, sr: int, split: bool = False):
     """(piece, its threshold) of the speech `x`: its first HEAD_S in HEAD_WIN_S pieces every HEAD_HOP_S (HEAD_MATCH),
-    the rest in WIN_S pieces (MATCH), a last one shorter than half of it joining the one before."""
+    the rest in WIN_S pieces (MATCH), a last one shorter than half of it joining the one before. `split`: the pieces as
+    (head, rest), two lists."""
     h, k, n = int(HEAD_S * sr), int(HEAD_WIN_S * sr), int(WIN_S * sr)
     m = min(h, len(x))
     at = list(range(0, max(m - k, 0) + 1, int(HEAD_HOP_S * sr)))
@@ -691,7 +697,7 @@ def _windows(x: np.ndarray, sr: int) -> list[tuple[np.ndarray, float]]:
         rest[-2:] = [np.concatenate(rest[-2:])]
     if rest and len(rest[-1]) < n // 2 and len(x) > h:  # a short tail after the start: the last start window takes it
         head[-1] = (np.concatenate([head[-1][0], rest.pop()]), HEAD_MATCH)
-    return head + [(w, MATCH) for w in rest]
+    return ([w for w, _ in head], rest) if split else head + [(w, MATCH) for w in rest]
 
 
 def _checks(voices: Path) -> Path:
@@ -754,11 +760,14 @@ class Speaker:
         return e / (np.linalg.norm(e) + 1e-12)
 
 
-def confirm_live(ref: Voice, pcm: np.ndarray, sr: int, said: list[str], asr, speaker: Speaker) -> tuple[dict | None, str]:
+def confirm_live(ref: Voice, pcm: np.ndarray, sr: int, said: list[str], asr, speaker: Speaker,
+                 clone=None) -> tuple[dict | None, str]:
     """The live reading `pcm` of the shown `said` against my profile `ref`: (consent for voice.json, '') when the
-    app's ASR (local/asr.OnnxAsr of the profile's language) heard the words and every window of the recording is the
-    reader's voice; else (None, why, for the user). The consent names the recording it checked (ref_sha256): set_consent
-    writes it only onto that one. After TRIES failures in a row it waits (wait_s)."""
+    app's ASR (local/asr.OnnxAsr of the profile's language) heard the words, every window of the recording is the
+    reader's voice and its start is like its rest (head_rest); then `clone`, (consent) -> (consent | None, why), hears
+    the clone made from it (ui.voices.hear_clone). Else (None, why, for the user). The consent names the recording it
+    checked (ref_sha256): set_consent writes it only onto that one. A try counts once all of it is done; the recording's
+    own start is none (another reading cannot change it). After TRIES failed tries in a row it waits (wait_s)."""
     import io
 
     import soundfile as sf
@@ -771,10 +780,11 @@ def confirm_live(ref: Voice, pcm: np.ndarray, sr: int, said: list[str], asr, spe
     heard = asr.recognize(_to(pcm, sr, SAMPLE_RATE), lang=ref.meta.get('lang')).text
     err = wer(' '.join(said), heard)
     live = speaker.embed(_speech(pcm, sr, edges=True), sr)
-    vecs = [(speaker.embed(w, rsr), m) for w, m in _windows(_start(x.mean(axis=1), rsr), rsr)]
+    head, rest = _windows(_start(x.mean(axis=1), rsr), rsr, split=True)
+    head, rest = [speaker.embed(w, rsr) for w in head], [speaker.embed(w, rsr) for w in rest]
     if len(p := _prompt(x.mean(axis=1), rsr)) >= rsr // 2:  # the engines' prompt, heard as a window of the head
-        vecs.append((speaker.embed(p, rsr), HEAD_MATCH))
-    sims = [(float(e @ live), m) for e, m in vecs]
+        head.append(speaker.embed(p, rsr))
+    sims = [(float(e @ live), HEAD_MATCH) for e in head] + [(float(e @ live), MATCH) for e in rest]
     sim, worst = min(sims, key=lambda s: s[0] - s[1])  # the window furthest below its threshold (or nearest to it)
     low = sim < worst
     why = ([f'the words heard are not the ones on the screen ({err:.0%} differ): read them as written'] if err > LIVE_WER
@@ -783,19 +793,27 @@ def confirm_live(ref: Voice, pcm: np.ndarray, sr: int, said: list[str], asr, spe
         why.append(f'the background is loud (your speech only {r.snr_db:.0f} dB above it): try again somewhere quiet')
     if low and ref.meta.get('quality', {}).get('band_db', 0.0) < BAND_DB:
         why.append('the recording sounds like a phone call: one from a better microphone matches more reliably')
-    _tried(not why, ref.path.parent)  # the recording's own start (below) is no try: another reading cannot change it
+    failed = bool(why)  # the reading: a try
     if len(p) < PROMPT_MIN_S * rsr:
         why.append(f'the first {PROMPT_S:.0f} s of the recording, where the clone takes your voice from, are almost silent '
-                   f'({len(p) / rsr:.1f} s of sound): start speaking right away, and {RECORD_AGAIN}')
-    elif (head := head_rest(vecs)) < HEAD_REST:
-        why.append(f'the start of the recording does not sound like the rest of it (similarity {head:.2f}): someone '
-                   f'else may be speaking there; {RECORD_AGAIN}')
+                   f'({len(p) / rsr:.1f} s of sound): {START_NOW}, and {RECORD_AGAIN}')
+    elif not rest:
+        why.append(f'there is too little speech after its first {HEAD_S:.0f} s to compare its start with: record or import '
+                   f'a longer one (45-60 s), pausing less')
+    elif (hr := head_rest(head, rest)) < HEAD_REST:
+        why.append(f'the start of the recording does not sound like the rest of it (similarity {hr:.2f}): someone else '
+                   f'may be speaking there; {START_NOW}, and {RECORD_AGAIN}')
     if why:
+        if failed:
+            _tried(False, ref.path.parent)
         return None, 'Not confirmed: ' + '; '.join(why) + '.'
     import hashlib
     how = 'mic-live' if ref.meta.get('source') == 'mic' else 'import+mic-match'
-    return {'how': how, 'at': _now(), 'wer': round(err, 3), 'similarity': round(min(s for s, _ in sims), 3), 'windows': len(sims),
-            'ref_sha256': hashlib.sha256(data).hexdigest(), 'live': [round(float(e), 5) for e in live]}, ''
+    consent = {'how': how, 'at': _now(), 'wer': round(err, 3), 'similarity': round(min(s for s, _ in sims), 3),
+               'windows': len(sims), 'ref_sha256': hashlib.sha256(data).hexdigest(), 'live': [round(float(e), 5) for e in live]}
+    consent, why = clone(consent) if clone else (consent, '')
+    _tried(consent is not None, ref.path.parent)  # the clone samples: its refusal is a try, another one another draw
+    return consent, why
 
 
 # --- the clone made from my recording speaks in the voice of my live reading (BRIEF-s3-clone-output-check) ---
@@ -811,6 +829,7 @@ def confirm_live(ref: Voice, pcm: np.ndarray, sr: int, said: list[str], asr, spe
 CLONE_MATCH = 0.20
 CLONE_WHY = ("the voice made from your recording does not sound like you (similarity {sim:.2f}): someone else's speech "
              'may be in it; ' + RECORD_AGAIN)
+SAID_NOTHING = 'the voice made from your recording said next to nothing in the test: try again'
 
 
 def _speaker() -> Speaker:
@@ -819,15 +838,15 @@ def _speaker() -> Speaker:
     return Speaker(models.path(SPEAKER))
 
 
-def clone_match(tts, v: Voice, lang: str, live, speaker: Speaker | None = None) -> float:
+def clone_match(tts, v: Voice, lang: str, live, speaker: Speaker | None = None) -> float | None:
     """The clone `tts` says the test phrases of `lang` in my profile `v`: the cosine of one speaker vector of both (0.3 s
-    apart) with the live reading's `live` (consent['live']). Nothing said: 0."""
+    apart) with the live reading's `live` (consent['live']). Nothing said (under 0.5 s of sound): None."""
     gap, parts = np.zeros(int(0.3 * tts.sample_rate), np.float32), []
     for text in TEST_PHRASES.get(lang, TEST_PHRASES['en']):
         parts += [*(np.asarray(c, np.float32) for c in tts.synth(text, lang, v)), gap]
     pcm = np.concatenate(parts[:-1])
     if np.count_nonzero(pcm) < tts.sample_rate // 2:
-        return 0.0
+        return None
     return float((speaker or _speaker()).embed(pcm, tts.sample_rate) @ np.asarray(live, np.float32))
 
 
@@ -838,23 +857,14 @@ def _heard(engine: str, sim: float) -> dict:
 
 def confirm_clone(consent: dict, tts, engine: str, v: Voice, lang: str, speaker: Speaker | None = None) -> tuple[dict | None, str]:
     """After confirm_live passed: the clone `tts` (the registry's `engine`, made from the recording `v`, speaking `lang`)
-    against that live reading: (the consent with the answer kept for `engine`, '') or (None, why, for the user). A
-    refusal is a failed try (wait_s): the clone samples, another try must not be another draw."""
+    against that live reading: (the consent with the answer kept for `engine`, '') or (None, why, for the user; a try
+    that failed, confirm_live counts it)."""
     sim = clone_match(tts, v, lang, consent['live'], speaker)
+    if sim is None:
+        return None, 'Not confirmed: ' + SAID_NOTHING + '.'
     if sim >= CLONE_MATCH:
         return consent | {'clones': {**consent.get('clones', {}), engine: _heard(engine, sim)}}, ''
-    _tried(False, v.path.parent)
     return None, 'Not confirmed: ' + CLONE_WHY.format(sim=sim) + '.'
-
-
-def clone_unlike(v: Voice, engine: str) -> str:
-    """Why the clone `engine` may not speak my profile `v`, as already heard ('' = heard like me, or not heard yet with
-    these weights: vet_clone hears it when it is made)."""
-    from peresmeshnik import models
-    k = ((v.meta.get('consent') or {}).get('clones') or {}).get(engine)
-    if k and k.get('model') == models.get(engine).fingerprint and k['similarity'] < CLONE_MATCH:
-        return CLONE_WHY.format(sim=k['similarity'])
-    return ''
 
 
 def vet_clone(tts, engine: str, v: Voice, lang: str) -> str:
@@ -865,10 +875,11 @@ def vet_clone(tts, engine: str, v: Voice, lang: str) -> str:
     c = v.meta.get('consent') or {}
     k = (c.get('clones') or {}).get(engine)
     if k and k.get('model') == models.get(engine).fingerprint:
-        return clone_unlike(v, engine)
-    if not c.get('live'):  # confirmed by a build before this check: no live reading to hear the clone against
+        return '' if k['similarity'] >= CLONE_MATCH else CLONE_WHY.format(sim=k['similarity'])
+    if not c.get('live'):  # why_not_mine says so first; here too, for a profile loaded around it
         return 'it was confirmed before the app checked the voice made from it: confirm it again (Voices…)'
-    sim = clone_match(tts, v, lang, c['live'])
+    if (sim := clone_match(tts, v, lang, c['live'])) is None:  # once, an engine's hiccup: not kept
+        return SAID_NOTHING
     try:
         now = load(v.name, v.path.parent)
         nc = now.meta.get('consent') or {}
@@ -886,12 +897,11 @@ def _prompt(x: np.ndarray, sr: int) -> np.ndarray:
     return f[np.mean(f ** 2, axis=1) > 1e-10].reshape(-1).astype(np.float32)
 
 
-def head_rest(vecs: list[tuple[np.ndarray, float]]) -> float:
-    """confirm_live's window vectors (vector, threshold; the engines' prompt is one of the head): the lowest cosine of a
-    head window (HEAD_MATCH) with the mean of the rest (MATCH; a recording too short to have any: of all of them)."""
-    head = [e for e, m in vecs if m == HEAD_MATCH]
-    r = np.mean([e for e, m in vecs if m != HEAD_MATCH] or [e for e, _ in vecs], axis=0)
-    return min(float(e @ r) for e in head) / (float(np.linalg.norm(r)) + 1e-12) if head else 1.0
+def head_rest(head: list[np.ndarray], rest: list[np.ndarray]) -> float:
+    """confirm_live's vectors of the head windows (and the engines' prompt) and of the rest's: the lowest cosine of a head
+    one with the mean of the rest's (confirm_live refuses a recording without a rest: nothing apart to compare with)."""
+    r = np.mean(rest, axis=0)
+    return min(float(e @ r) for e in head) / (float(np.linalg.norm(r)) + 1e-12)
 
 
 def set_consent(name: str, consent: dict | None, root: Path | None = None) -> Voice:

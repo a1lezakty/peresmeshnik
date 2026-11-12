@@ -215,6 +215,11 @@ def test_wizard_asks_for_the_right_models(monkeypatch):
     monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
     assert needed_models(s) == ['silero-vad', 'gigaam-v3-e2e-ctc', 'opus-mt-ru-en', 'xtts-v2',
                                 s.local.tts[s.their_lang], 'wespeaker-resnet34']  # the stock voice: the clone's fallback
+    s = config.Settings()  # me -> them in the cloud, my clone its fallback: heard against my live reading first (FIXES-s3-40 8)
+    s.them_to_me = 'cloud'
+    assert languages.direction(s, 'me_to_them').voice == 'clone' and 'wespeaker-resnet34' not in needed_models(s)
+    s.local.voice = 'me'
+    assert needed_models(s)[-1] == 'wespeaker-resnet34'
 
 
 def test_hotkey_combos():

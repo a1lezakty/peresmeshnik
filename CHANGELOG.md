@@ -3,7 +3,16 @@
 Versions are tagged and published by hand after a check by a person (no release is published by CI). The section of a
 version is the top of its GitHub release notes (`.github/workflows/release.yml`).
 
-## Next (not released yet)
+## 0.3.0 — 2026-11-12
+
+The first published version: a real-time translator for calls on macOS 14+ (Apple Silicon) and Windows 10 2004+ / 11,
+from source on Linux. You hear the other side in your language, as a voice in your headphones and as subtitles; they
+hear you in theirs, in your cloned voice (on any computer in 7 languages, in 13 on an NVIDIA GPU), else in a stock voice
+or the cloud's. Each direction runs on this computer or in the cloud (Google Gemini Live, with your own key; its sound
+goes to Google). Everything of 0.1.0 and 0.2.0 below is in it.
+
+Languages: any pair of 14 — English, Russian, Ukrainian, German, French, Spanish, Italian, Portuguese, Polish, Turkish,
+Chinese, Japanese, Korean, Arabic — both ways.
 
 - Your cloned voice speaks into the call only once confirmed: read two random phrases at the microphone; the app hears
   the words and matches the voice of every part of the recording; the start of the recording (what the clone takes) must
@@ -11,15 +20,15 @@ version is the top of its GitHub release notes (`.github/workflows/release.yml`)
   start are refused (record again alone; 2 s may pass, the clone still speaks in your voice). The quiet room before your
   first word is cut from the recording; one with too little speech after its first 12 s is refused when you make it. The
   live reading's speaker vector is kept in `voice.json` and goes with the recording to your own server. A voice recorded
-  or imported in 0.3.0 speaks in a stock voice until confirmed once (tray → Voices…). Tray → **Voices…** lists, confirms
-  and deletes the voices.
+  or imported by an earlier build speaks in a stock voice until confirmed once (tray → Voices…). Tray → **Voices…**
+  lists, confirms and deletes the voices.
 - The installer puts only the app on the computer. The wizard's **Components** page (and tray → **Components…**) lists
   what can be downloaded — the pair's models, the clone engines, the NVIDIA voice pack — with size, license and what
   it is for, ticked where it suits this computer and the pair; nothing downloads before Download, an unticked one says
   what the pair does without it, and anything downloaded can be removed there. A pair or an engine chosen in the tray
   downloads only after Yes to its size (or Choose…); your cloned voice is downloaded only when you tick it.
-- Back to 0.3.0 after this version: its `python -m peresmeshnik.voice list` stops at a kept voice of someone you talk to
-  (`them-…`, it has no `quality`).
+- Back to an earlier build after this version: its `python -m peresmeshnik.voice list` stops at a kept voice of someone
+  you talk to (`them-…`, it has no `quality`).
 - **Your cloned voice without an NVIDIA GPU, on any computer, a Mac too:** Kyutai's Pocket TTS on the CPU (onnxruntime,
   no torch) speaks English, French, German, Spanish, Portuguese and Italian in your voice, and Russian
   (Shtorm-PocketTTS-RU, with stress marks). Your voice starts about 2 s after you finish a phrase; both directions
@@ -42,18 +51,6 @@ version is the top of its GitHub release notes (`.github/workflows/release.yml`)
   saves up to 10 s of their clear speech on this computer (the pack makes their voice from it in the next call; Pocket
   TTS keeps its state, not a recording); delete it in Voices…. Off: tray → Their own voice (them → me), or
   `[local] their_voice = false`: the stock voice as before, nothing more downloaded.
-
-## 0.3.0
-
-The first published version: a real-time translator for calls on macOS 14+ (Apple Silicon) and Windows 10 2004+ / 11,
-from source on Linux. You hear the other side in your language, as a voice in your headphones and as subtitles; they
-hear you in theirs, in your cloned voice on an NVIDIA GPU, else in a stock voice or the cloud's. Each direction runs on
-this computer or in the cloud (Google Gemini Live, with your own key; its sound goes to Google). Everything of 0.1.0 and
-0.2.0 below is in it.
-
-Languages: any pair of 14 — English, Russian, Ukrainian, German, French, Spanish, Italian, Portuguese, Polish, Turkish,
-Chinese, Japanese, Korean, Arabic — both ways.
-
 - **Before anything is downloaded**, the setup wizard says for each direction of the pair whether it runs on this
   computer, why not (no speech recognition, translation or voice for a language), how much it downloads and under
   which licenses. A direction that cannot run here is translated in the cloud (Gemini Live has all 14), with the

@@ -235,6 +235,11 @@ def load_zonos(device, a):
         with open(OUT / a.label / 'spk-encoder.log', 'a') as log:  # reads the file through ffmpeg
             subprocess.run([f'{bin_}/spk-encoder-cli', f'{gguf}/spk-encoder.gguf', '--audio', ref(lang, a.ref_s)[0],
                             str(emb), '--cpu'], check=True, env=env, stdout=log, stderr=subprocess.STDOUT)
+        if shift := os.environ.get('ZONOS_SHIFT'):  # R4: 'dir.npy:dose' moves the unit voice vector toward another
+            path, dose = shift.rsplit(':', 1)       # language's speakers (as ZONOS3's speaker-embedding accent directions)
+            e = np.load(emb)
+            u = e / np.linalg.norm(e) + float(dose) * np.load(path).astype(e.dtype)
+            np.save(emb, (u * np.linalg.norm(e) / np.linalg.norm(u)).astype(e.dtype))
         return base64.b64encode(emb.read_bytes()).decode()
 
     def synth(text, lang, cond, ref_lang):

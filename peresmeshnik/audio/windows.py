@@ -79,15 +79,25 @@ def stand_in_mic() -> str:
 def not_virtual(key: str, what: str = 'microphone') -> str:
     """CABLE Output carries our own translation: as the microphone the app would hear itself. Any other virtual input
     (another cable, Voicemeeter) is not the user's voice either; NVIDIA Broadcast and Krisp are (audio.processed)."""
+    if not key and what == 'microphone' and not stand_in_mic():  # the default input: what Windows has chosen as it
+        d = next((d for d in devices() if d['inputs'] and d['default_input']), None)
+        if d and (is_ours(d) or _virtual(d)):  # the helper would skip it and take the first real input, maybe a silent one
+            raise ValueError(f'Windows\' default microphone is {d["name"]}, not your microphone: choose your real microphone '
+                             'in the settings, or set it back in Settings → System → Sound → Input')
     if not key or what != 'microphone' or key == stand_in_mic():
         return key
     d = next((d for d in devices() if d['inputs'] and key in (d['uid'], d['name'])), None)
     if d and is_ours(d):
         raise ValueError(f'{CABLE_OUT} is the virtual microphone for the call app, not your microphone: choose your real '
                          'microphone in the settings')
-    if d and (d['transport'] == 'virt' or 'VB-Audio' in d['name']) and not processed(d['name']):
+    if d and _virtual(d):
         raise ValueError(f'{d["name"]} is a virtual device, not your microphone: choose your real microphone in the settings')
     return key
+
+
+def _virtual(d: dict) -> bool:
+    """A software device: not the user's voice, unless the real microphone processed (NVIDIA Broadcast, Krisp)."""
+    return (d['transport'] == 'virt' or 'VB-Audio' in d['name']) and not processed(d['name'])
 
 
 def permission() -> str:

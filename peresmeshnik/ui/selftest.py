@@ -232,6 +232,12 @@ def check_mic(source: str, seconds: float = 3.0) -> Result:
         return Result('microphone', False, native().NO_PERMISSION)
     db = 20 * np.log10(np.max(np.sqrt(np.convolve(x ** 2, np.ones(1600) / 1600, 'valid'))) + 1e-9) if len(x) > 1600 else -120.0
     ok = bool(db >= MIN_MIC_DB)
+    if HELPER and len(x) > 1600 and not x.any():  # a real microphone always hisses a little: exact zeros are no sound at all
+        from peresmeshnik.audio.mic import native
+        return Result(f'microphone ({source or "the default input"})', False,
+                      'only exact zeros, not even the hiss of a microphone: a virtual or silent input (choose your real '
+                      f'microphone in the settings), or no permission. {native().NO_PERMISSION}'
+                      + ('' if WINDOWS else ' (started from the Terminal: the Terminal\'s entry)'))
     return Result(f'microphone ({source or "the default input"})', ok,
                   f'loudest 0.1 s at {db:.0f} dBFS' + ('' if ok else ': say something, or check the input'))
 

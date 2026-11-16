@@ -80,15 +80,26 @@ def not_blackhole(key: str, what: str = 'microphone') -> str:
     if key and is_blackhole(key):
         raise ValueError(f'{BLACKHOLE} is the virtual microphone for the call app, not your {what}: choose your real '
                          f'{what} in the settings')
+    if not key and what == 'microphone' and not stand_in_mic():  # the default input: what macOS has chosen as it
+        d = next((d for d in devices() if d['inputs'] and d['default_input']), None)
+        if d and (is_blackhole(d['uid']) or is_blackhole(d['name']) or {d['uid'], d['name']} & set(CALL) or _virtual(d)):
+            # the helper would skip it and take the first real input, which on a user's Mac recorded only zeros
+            raise ValueError(f'macOS\' default input is {d["name"]}, not your microphone: choose your real microphone in '
+                             'the settings, or set it back in System Settings → Sound → Input')
     if not key or what != 'microphone' or key == stand_in_mic():
         return key
     if key in CALL:
         raise ValueError(f'{CALL[0]} carries the call\'s sound, not your microphone: choose your real microphone in the settings')
     d = next((d for d in devices() if d['inputs'] and key in (d['uid'], d['name'])), None)
-    if d and d['transport'] in ('virt', 'grup') and not (d['transport'] == 'virt' and processed(d['name'])):
+    if d and _virtual(d):
         kind = 'an aggregate device' if d['transport'] == 'grup' else 'a virtual device'
         raise ValueError(f'{d["name"]} is {kind}, not your microphone: choose your real microphone in the settings')
     return key
+
+
+def _virtual(d: dict) -> bool:
+    """A virtual device or an aggregate: not the user's voice, unless the real microphone processed (Krisp)."""
+    return d['transport'] in ('virt', 'grup') and not (d['transport'] == 'virt' and processed(d['name']))
 
 
 not_virtual = not_blackhole  # the name shared with audio/windows.py

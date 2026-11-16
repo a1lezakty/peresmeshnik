@@ -109,6 +109,54 @@ def test_call_sound_page_blackhole(monkeypatch):
     assert page.state.text() == '✔ BlackHole 16ch is installed.' and page.button.isHidden()
 
 
+
+def test_devices_page_shows_the_whole_install_hint(monkeypatch):
+    """The BlackHole 2ch hint whole, with macOS' form policy (fields at their size hint): a wrapped QLabel there got the
+    height of its text at the full width, and the hint ended at "brew install" (a user's Mac, 0.3.0). The no-Homebrew
+    way and the restart are in it; BlackHole 2ch as macOS' default input is said too."""
+    from PySide6.QtWidgets import QFormLayout, QProxyStyle, QStyle, QWizard
+
+    from peresmeshnik.ui import selftest, wizard
+
+    class MacForm(QProxyStyle):
+        def styleHint(self, hint, *a):  # noqa: N802 (Qt name)
+            return int(QFormLayout.FieldsStayAtSizeHint.value) if hint == QStyle.SH_FormLayoutFieldGrowthPolicy else \
+                super().styleHint(hint, *a)
+    devs = [MIC, SPEAKERS]
+    monkeypatch.setattr(wizard, 'MACOS', True)
+    monkeypatch.setattr(wizard, 'WINDOWS', False)
+    monkeypatch.setattr(selftest, 'HELPER', True)
+    monkeypatch.setattr(selftest, 'WINDOWS', False)
+    monkeypatch.setattr(sys, 'platform', 'darwin')
+    monkeypatch.setattr(macos, 'devices', lambda: list(devs))
+    monkeypatch.setattr(macos, 'permission', lambda: 'authorized')
+    monkeypatch.delenv('PERESMESHNIK_TEST_MIC', raising=False)
+    style = MacForm('Fusion')
+    w = QWizard()
+    w.setStyle(style)
+    w.s = config.Settings()
+    page = wizard.DevicesPage(w)
+    page.setStyle(style)
+    w.addPage(page)
+    w.resize(706, 560)
+    w.show()
+    try:
+        for _ in range(5):
+            QCoreApplication.processEvents()
+        text, v = page.vmic.text(), page.vmic
+        assert '<code>brew install blackhole-2ch</code>' in text and 'without Homebrew' in text and '.pkg' in text
+        assert 'href="https://existential.audio/blackhole/"' in text and 'restart' in text
+        assert v.height() >= v.heightForWidth(v.width()), (v.width(), v.height(), v.heightForWidth(v.width()))
+        devs.append({**BLACKHOLE, 'default_input': True})  # installed, and macOS took it as its default input
+        devs[0] = {**MIC, 'default_input': False}
+        page.recheck.click()
+        assert page.vmic.text().startswith('✔ BlackHole 2ch is installed')
+        assert "⚠ macOS' default input is BlackHole 2ch, not your microphone" in page.vmic.text()
+        assert 'System Settings → Sound → Input' in page.vmic.text()
+    finally:
+        w.close()
+
+
 MAC = sys.platform == 'darwin'
 
 

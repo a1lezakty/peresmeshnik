@@ -10,6 +10,7 @@ where CABLE Output is the call app's side, my voice comes from a file (the app's
 Elsewhere only the checks that need no Windows run.
 """
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -224,6 +225,13 @@ def test_cable_and_virtual_inputs_are_no_microphone(monkeypatch):
     assert windows.not_virtual(HEADSET['uid']) == HEADSET['uid']
     assert windows.not_virtual(BROADCAST['uid']) == BROADCAST['uid']
     assert windows.not_virtual('') == ''  # the default input: the helper never takes a virtual one by itself
+    for default in (CABLE_OUT, MEETER):  # Windows' default microphone a virtual one: said, not recorded as silence
+        monkeypatch.setattr(windows, 'devices', lambda d=default: [{**HEADSET, 'default_input': False}, {**d, 'default_input': True}])
+        with pytest.raises(ValueError, match=f"Windows' default microphone is {re.escape(default['name'])}, not your microphone"):
+            windows.not_virtual('')
+    monkeypatch.setattr(windows, 'devices', lambda: [HEADSET, {**BROADCAST, 'default_input': True}])
+    assert windows.not_virtual('') == ''  # the real microphone, processed
+    monkeypatch.setattr(windows, 'devices', lambda: devs)
     assert windows.not_virtual(CABLE_OUT['name'], what='headphones') == CABLE_OUT['name']  # not this check's business
     assert selftest.devices('sources') == [(HEADSET['uid'], HEADSET['name']), (BROADCAST['uid'], BROADCAST['name'])]
     assert selftest.devices('sinks') == [(SPEAKERS['name'], SPEAKERS['name'])]  # by name: the headphones go through PortAudio

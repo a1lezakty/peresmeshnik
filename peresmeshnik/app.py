@@ -861,6 +861,7 @@ class Controller:
         self.stuck = False  # quit() did not wait for a side still loading: the process exits without its thread
         self._pool = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix='control')  # no thread until first use
         self._vmic = self._call = self._router = self._loop = self._call_watch = None
+        self._loop_mic = ''  # macOS, Windows: the microphone setting the running loop was started with
         self._events = None  # Linux: PulseEvents
         self._loop_on = False  # Linux: the microphone loop is wanted (translation off); loaded while the call app records
         self._raw_mic = False  # the call hears my microphone as it is (a loop), not through our output
@@ -1135,7 +1136,8 @@ class Controller:
             return
         why = 'error: the call will not hear your microphone while translation is off: '
         try:
-            mic = helper.not_virtual((self.settings or config.load()).ui.mic)
+            self._loop_mic = saved = (self.settings or config.load()).ui.mic
+            mic = helper.not_virtual(saved)
             watch = ['--watch', self._vmic.call_mic['uid']] if sys.platform == 'win32' else []  # macOS: the same device
             self._loop = p = helper.spawn('loop', '--from', mic, '--to', self._vmic.device['uid'], *watch, stdout=subprocess.DEVNULL)
         except Exception as e:
@@ -1161,6 +1163,18 @@ class Controller:
                     self.on_state(why + (helper.NO_PERMISSION if p.returncode == 6 else f'the loop ended ({p.returncode})'))
         threading.Thread(target=watch, name='mic-loop', daemon=True).start()
         ready.wait(3)  # its first word ("idle": set up, waiting for a call): its start belongs to ours, not to the idle
+
+    def mic_changed(self) -> concurrent.futures.Future | None:
+        """Settings saved: with translation off, the microphone loop (macOS, Windows) takes the microphone they name now,
+        or starts if it could not (a virtual default input); a running translation is restarted by the tray itself."""
+        return self.submit(self._reloop)
+
+    def _reloop(self) -> None:
+        if self.on or not self.devices or self._vmic is None or sys.platform not in ('darwin', 'win32'):
+            return
+        if self._loop is not None and self._loop_mic != (self.settings or config.load()).ui.mic:
+            self._loop_helper(False)
+        self._loop_helper(True)  # a loop still on its microphone stays as it is
 
     def _watch_call(self, on: bool) -> None:
         """Windows: CallWatch while me -> them translates into CABLE Input (only the app's own devices, not tests)."""

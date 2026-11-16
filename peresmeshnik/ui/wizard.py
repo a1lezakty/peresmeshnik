@@ -63,6 +63,21 @@ SPEAKERS = ('speaker', 'built-in', 'встроен', 'динамик', 'дина
             'alto-falant', 'altifalant', 'głośnik', 'hoparlör', '扬声器', '揚聲器', 'スピーカー', '스피커', 'مكبر', 'سماع')
 
 
+BLACKHOLE_PKG = ('download the installer of {} (a .pkg) from <a href="https://existential.audio/blackhole/">'
+                 'existential.audio/blackhole</a> and open it')
+BLACKHOLE_THEN = ('The Mac may need a restart before the device shows up (Homebrew says "You must reboot"); then press '
+                  '<b>Check again</b>.')
+
+
+def form(page: QWizardPage) -> QFormLayout:
+    """A form whose wrapped texts are as tall as their lines: macOS' default policy keeps a field at its size hint, and
+    QFormLayout then gives a wrapped QLabel the height of its text at the full width, cutting off the last lines (the
+    BlackHole hint ended at "brew install")."""
+    f = QFormLayout(page)
+    f.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+    return f
+
+
 def loudspeakers(name: str) -> bool:
     """The device's name says loudspeakers (the microphone would hear the translation)."""
     return any(k in name.lower() for k in SPEAKERS)
@@ -115,7 +130,7 @@ class LanguagesPage(QWizardPage):
         self.setTitle('Languages and engines')
         what, self.rec = tier(s.their_lang)
         self.setSubTitle(f'This computer: {what}.')
-        f = QFormLayout(self)
+        f = form(self)
         self.my_lang, self.their_lang = QComboBox(), QComboBox()
         for c, v in ((self.my_lang, s.my_lang), (self.their_lang, s.their_lang)):
             for code, name in LANGS.items():
@@ -254,7 +269,7 @@ class DevicesPage(QWizardPage):
         self.setTitle('Sound devices')
         self.setSubTitle('Translated speech goes to your headphones; your translated voice goes to the virtual microphone '
                          f'"{VMIC}", which you choose in the call app.')
-        self.f = QFormLayout(self)
+        self.f = form(self)
         self.warn = QLabel()
         self.warn.setWordWrap(True)
         self.mic_checked.connect(self._mic_checked)
@@ -341,14 +356,19 @@ class DevicesPage(QWizardPage):
             text, ok = '✔ BlackHole 2ch is installed: in the call app choose the microphone <b>BlackHole 2ch</b>.', True
         except macos.BlackHoleMissing:
             text, ok = ('<b>✘ BlackHole 2ch is not installed.</b> It is the virtual microphone that carries your translated '
-                        'voice to the call app (them → me works without it).<br>Install it: in the Terminal run '
-                        '<code>brew install blackhole-2ch</code>, or download the installer from '
-                        '<a href="https://existential.audio/blackhole/">existential.audio/blackhole</a>. Then press '
-                        '<b>Check again</b> (still not found: restart the Mac).'), False
+                        'voice to the call app (them → me works without it). Install it one of two ways:<br>'
+                        '• with Homebrew, in the Terminal: <code>brew install blackhole-2ch</code><br>'
+                        f'• without Homebrew: {BLACKHOLE_PKG.format("BlackHole 2ch")}<br>'
+                        f'{BLACKHOLE_THEN}'), False
         except Exception as e:  # the helper is missing (a broken install)
             text, ok = f'✘ Cannot list the sound devices: {e}', False
         if ok and macos.permission() in ('denied', 'restricted'):
             text += f'<br>✘ {macos.NO_PERMISSION}.'
+        if ok:
+            try:  # installing BlackHole can make it macOS' default input: "System default" above would be no microphone
+                macos.not_virtual('')
+            except ValueError as e:
+                text += f'<br>⚠ {e}.'
         self.vmic.setText(text)
         self.recheck.setVisible(not ok)
         return ok
@@ -466,9 +486,9 @@ class CallSoundPage(QWizardPage):
             self.state.setText(f'✘ Cannot list the sound devices: {e}')
             return False
         self.state.setText(f'✔ {cm.CALL_DEVICE} is installed.' if ok else
-                           f'<b>✘ {cm.CALL_DEVICE} is not installed.</b> In the Terminal run <code>brew install --cask '
-                           'blackhole-16ch</code>, or download the installer from <a href="https://existential.audio/blackhole/">'
-                           'existential.audio/blackhole</a>; then press <b>Check again</b> (still not found: restart the Mac).')
+                           f'<b>✘ {cm.CALL_DEVICE} is not installed.</b> Install it one of two ways:<br>'
+                           '• with Homebrew, in the Terminal: <code>brew install --cask blackhole-16ch</code><br>'
+                           f'• without Homebrew: {BLACKHOLE_PKG.format(cm.CALL_DEVICE)}<br>{BLACKHOLE_THEN}')
         self.button.setVisible(not ok)
         return ok
 

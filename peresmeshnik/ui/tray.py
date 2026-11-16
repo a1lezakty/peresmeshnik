@@ -505,6 +505,8 @@ class Tray(QObject):
         if self.ctl.on:
             self.ctl.set_translation(False)
             self.ctl.set_translation(True)
+        elif hasattr(self.ctl, 'mic_changed'):  # off: the call hears the microphone just chosen (the loop takes it)
+            self.ctl.mic_changed()
 
     def _show(self, w: QWidget) -> None:
         # keep a reference while it is open or still working (a closed wizard may be downloading models)

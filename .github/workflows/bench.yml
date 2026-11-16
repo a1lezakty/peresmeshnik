@@ -1,0 +1,56 @@
+name: bench
+
+# research-1116-r4 only: CPU time to first audio and RTF of light TTS without published numbers.
+# Manual: dispatched with ref research-1116-r4. Results are printed as JSON lines in the "Run" step.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tts:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            threads: '2 3'
+          - os: ubuntu-24.04
+            threads: '2 4'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      HF_HOME: ${{ github.workspace }}/hf
+      HF_HUB_DISABLE_PROGRESS_BARS: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
+        with:
+          version: '0.13.7'
+          checksum: ${{ runner.os == 'Linux' && 'c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83'
+            || '81b811b57e4624df7ed3aac148e0359100d9962f3d9dce00aec533dc2e086731' }}
+          python-version: '3.12'
+      - name: Machine
+        run: |
+          uname -a; sysctl -n machdep.cpu.brand_string hw.memsize hw.ncpu 2>/dev/null || { nproc; lscpu | head -20; free -g; }; df -h .
+      - name: Install
+        run: |
+          uv venv .venv && . .venv/bin/activate
+          uv pip install pip kittenml supertonic ruaccent soundfile huggingface_hub piper-tts==1.8.0
+          uv pip list | grep -i -E '^(kittenml|supertonic|ruaccent|onnxruntime|torch|piper-tts|misaki) '
+      - name: Run
+        env:
+          THREADS: ${{ matrix.threads }}
+        run: |
+          . .venv/bin/activate
+          cd r4
+          python r4_tts_cpu.py piper en 0 2>>err.log | tail -1 | tee -a results.jsonl || true
+          python r4_tts_cpu.py piper ru 0 2>>err.log | tail -1 | tee -a results.jsonl || true
+          for cfg in "kitten2mini ru" "kitten2mini en" "supertonic3 en" "supertonic3 ru" "kokororu ru"; do
+            for th in $THREADS; do
+              OMP_NUM_THREADS=$th python r4_tts_cpu.py $cfg $th 2>>err.log | tail -1 | tee -a results.jsonl || true
+            done
+          done
+          echo '--- results'; cat results.jsonl
+          echo '--- errors (tail)'; grep -v -i 'warn\|fetching\|unauthenticated' err.log | tail -40

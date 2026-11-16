@@ -1,10 +1,8 @@
 name: bench
 
-# research-1116-r4 only (round 7), manual: dispatched with ref research-1116-r4.
-# Why ZONOS3-Mini runs at RTF ~37 on the macOS runner's CPU (round 6) against 0.61 on the ubuntu runner (round 3):
-# the backbone alone (zonos3-cli --decode-bench, the number Zyphra publishes for an M3: 325 frames/s on CPU, 15 frames
-# = 1 s of audio), with and without ggml's BLAS (Accelerate on Apple), the audio decoder's warm-up decode in
-# zonos3-server (the CPU decoder calls Accelerate's sgemm directly on Apple), and plain float32 sgemm from numpy.
+# research-1116-r4 only (round 8), manual: dispatched with ref research-1116-r4.
+# Exports the ZONOS3-Mini "toward Russian speakers" direction of round 5 (40 FLEURS test clips per language, speakers
+# apart from the dev voices) as base64 in the log, so other streams can use the same 192 numbers.
 on:
   workflow_dispatch:
 
@@ -12,66 +10,39 @@ permissions:
   contents: read
 
 jobs:
-  diag:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-15, ubuntu-24.04]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+  direction:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     env:
+      BENCH_DATA: ${{ github.workspace }}/bench-data
       HF_HOME: ${{ github.workspace }}/hf
       HF_HUB_DISABLE_PROGRESS_BARS: '1'
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
         with:
           version: '0.13.7'
           checksum: '81b811b57e4624df7ed3aac148e0359100d9962f3d9dce00aec533dc2e086731'
           python-version: '3.11'
-      - name: sgemm
+      - name: Data
         run: |
-          uv venv -q -p 3.11 venv && uv pip install -q -p venv/bin/python numpy huggingface_hub
-          venv/bin/python - <<'PY'
-          import time, numpy as np
-          np.show_config(mode='dicts')['Build Dependencies']['blas'] and print('blas:', np.show_config(mode='dicts')['Build Dependencies']['blas'].get('name'))
-          for n in (256, 1024, 2048):
-              a, b = np.random.rand(n, n).astype(np.float32), np.random.rand(n, n).astype(np.float32)
-              a @ b; r = max(1, int(2e9 // (2 * n ** 3)))
-              t = time.perf_counter()
-              for _ in range(r): a @ b
-              print(f'sgemm n={n}: {2 * n ** 3 * r / (time.perf_counter() - t) / 1e9:.0f} GFLOPS')
-          PY
-      - name: Build (default and without ggml BLAS)
+          sudo apt-get -qq update && sudo apt-get -qq install -y ffmpeg > /dev/null
+          uv venv -q -p 3.11 venv-run && uv pip install -q -p venv-run/bin/python numpy soundfile scipy huggingface_hub pyarrow
+          venv-run/bin/python -c "
+          import sys; sys.path.insert(0, 'bench')
+          from data import fleurs
+          print(len(fleurs('en', 'us', split='test')), len(fleurs('ru', 'ru', split='test')))"
+      - name: Speaker encoder
         run: |
           git clone -q https://github.com/Zyphra/ZONOS3-Mini z && git -C z checkout -q 96d9e0ec
           git -C z submodule update -q --init --recursive
-          cd z/servers/ggml
-          for v in "build" "build-noblas -DGGML_BLAS=OFF"; do
-            set -- $v
-            cmake -B "$@" -DCMAKE_BUILD_TYPE=Release > ../../../$1.log 2>&1 && cmake --build $1 -j4 --target zonos3-cli zonos3-server >> ../../../$1.log 2>&1 \
-              || { tail -40 ../../../$1.log; exit 1; }
-            grep -i "BLAS\|Accelerate\|OpenMP found\|ARM feature\|GGML_NATIVE" ../../../$1.log | head -6
-          done
-      - name: Weights
-        run: |
-          venv/bin/python -c "
+          cd z/servers/ggml && cmake -B build -DCMAKE_BUILD_TYPE=Release > ../../../build.log 2>&1 && cmake --build build -j4 --target spk-encoder-cli >> ../../../build.log 2>&1 \
+            || { tail -40 ../../../build.log; exit 1; }
+          cd ../../.. && venv-run/bin/python -c "
           from huggingface_hub import hf_hub_download as h
-          for f in ('backbone-ptq.gguf', 'zac-keep2.gguf', 'spk-encoder.gguf'):
-              h('Zyphra/ZONOS3-Mini', 'gguf/' + f, local_dir='z/servers/ggml')"
-      - name: Backbone decode-bench
+          h('Zyphra/ZONOS3-Mini', 'gguf/spk-encoder.gguf', local_dir='z/servers/ggml')"
+      - name: Direction
         run: |
-          cd z/servers/ggml
-          for b in build build-noblas; do for s in 1 2; do
-            echo "== $b slots=$s"; $b/zonos3-cli gguf/backbone-ptq.gguf --cpu --decode-bench 'Hello.' --slots $s 2>&1 | grep -i "decode-bench\|backend\|error" | tail -3
-          done; done
-      - name: Decoder warm-up in zonos3-server
-        run: |
-          cd z/servers/ggml
-          for b in build build-noblas; do
-            echo "== $b"
-            $b/zonos3-server gguf/backbone-ptq.gguf --port 8199 --cpu --zac-cpu > srv-$b.log 2>&1 & p=$!
-            t=$(date +%s); while [ "$(grep -c 'zac: H=32' srv-$b.log)" -lt 4 ] && [ $(( $(date +%s) - t )) -lt 300 ]; do sleep 2; done
-            echo "server up to 4 warm-up decodes: $(( $(date +%s) - t )) s"
-            kill $p; wait $p 2>/dev/null
-            grep -i "backend\|zac\|threads\|listening" srv-$b.log | cut -c1-220 | head -10
-          done
+          export ZONOS_BIN=$PWD/z/servers/ggml/build ZONOS_GGUF=$PWD/z/servers/ggml/gguf
+          DIR_CLIPS='fleurs/{lang}/test/*.wav' DIR_MAX=40 venv-run/bin/python r4/zonos_dir.py ru_dir_test.npy
+          sha256sum ru_dir_test.npy; echo "B64 $(base64 -w0 ru_dir_test.npy)"

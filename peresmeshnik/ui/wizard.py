@@ -49,7 +49,7 @@ from peresmeshnik.local import voicepack
 from peresmeshnik.remote import pairing
 from peresmeshnik.ui.components import PACK_CONSENT, ComponentsBox, HfTokenBox
 from peresmeshnik.ui.overlay import font_note
-from peresmeshnik.ui.tray import LANGS, MIC_LABEL, SIDES, device_combo, save_key
+from peresmeshnik.ui.tray import LANGS, MIC_LABEL, SIDES, device_combo, fill_combo, save_key
 
 LINUX = sys.platform.startswith('linux')
 log = logging.getLogger('peresmeshnik.ui')
@@ -63,8 +63,8 @@ SPEAKERS = ('speaker', 'built-in', 'встроен', 'динамик', 'дина
             'alto-falant', 'altifalant', 'głośnik', 'hoparlör', '扬声器', '揚聲器', 'スピーカー', '스피커', 'مكبر', 'سماع')
 
 
-BLACKHOLE_PKG = ('download the installer of {} (a .pkg) from <a href="https://existential.audio/blackhole/">'
-                 'existential.audio/blackhole</a> and open it')
+BLACKHOLE_PKG = ('on <a href="https://existential.audio/blackhole/">existential.audio/blackhole</a> enter your e-mail: '
+                 'the site sends the download link of the installer of {} (a .pkg); open it')
 BLACKHOLE_THEN = ('The Mac may need a restart before the device shows up (Homebrew says "You must reboot"); then press '
                   '<b>Check again</b>.')
 
@@ -283,6 +283,10 @@ class DevicesPage(QWizardPage):
         self.headphones.currentIndexChanged.connect(self._echo)
         self.f.addRow('Headphones', self.headphones)
         self.f.addRow(MIC_LABEL, self.mic)
+        self.mic_note = QLabel()  # the microphone "System default" with no real microphone behind it
+        self.mic_note.setWordWrap(True)
+        self.f.addRow('', self.mic_note)
+        self.mic.currentIndexChanged.connect(self._mic_note)
         self.warn = QLabel()
         self.warn.setWordWrap(True)
         self.f.addRow(self.warn)
@@ -293,10 +297,38 @@ class DevicesPage(QWizardPage):
             self.vmic.setOpenExternalLinks(True)
             self.vmic.setTextInteractionFlags(Qt.TextBrowserInteraction)  # the brew command can be copied
             self.recheck = QPushButton('Check again')
-            self.recheck.clicked.connect(lambda: self.check_vmic(probe=True))
+            self.recheck.clicked.connect(self._recheck)
             self.f.addRow('Virtual microphone', self.vmic)
             self.f.addRow('', self.recheck)
+            speaker = QLabel('In the call app the speaker stays your headphones; '
+                             f'<b>{"CABLE Output" if WINDOWS else "BlackHole 2ch"}</b> is chosen there only as the microphone.')
+            speaker.setWordWrap(True)
+            self.f.addRow('', speaker)
             self.check_vmic(probe=not self._probed)  # the microphone tried once, not on every visit to the page
+        self._mic_note()
+
+    def _recheck(self) -> None:
+        """Check again: the virtual microphone, and the lists (a driver installed may be the system's default now)."""
+        fill_combo(self.headphones, 'sinks', self.headphones.currentData() or '')
+        fill_combo(self.mic, 'sources', self.mic.currentData() or '')
+        self.check_vmic(probe=True)
+        self._echo()
+        self._mic_note()
+
+    def _mic_note(self) -> None:
+        """macOS, Windows: "System default" chosen while the system's default input is no microphone (BlackHole 2ch,
+        CABLE Output, VoiceMeeter): said here, with what to do (the app refuses it too)."""
+        text = ''
+        if (MACOS or WINDOWS) and not (self.mic.currentData() or ''):
+            from peresmeshnik.audio.mic import native
+            try:
+                native().not_virtual('')
+            except ValueError as e:
+                text = f'⚠ {e}.'.replace('in the settings', 'above')
+            except Exception as e:  # the helper is missing: said on the virtual microphone's line
+                log.warning('default input: %s', e)
+        self.mic_note.setText(text)
+        self.mic_note.setVisible(bool(text))
 
     def check_vmic(self, probe: bool = False) -> bool:
         return self.check_cable(probe) if WINDOWS else self.check_blackhole()
@@ -316,8 +348,9 @@ class DevicesPage(QWizardPage):
                          'speakers in Settings → System → Sound → Output.')
             if rec['default_input']:
                 text += (f'<br>⚠ <b>{rec["name"]}</b> is Windows\' default microphone: the call app may take it, but every '
-                         'other app hears the translation instead of you. Choose your real microphone in Settings → System '
-                         '→ Sound → Input, and CABLE Output in the call app.')
+                         'other app hears the translation instead of you, and Peresmeshnik offers no "System default" '
+                         'microphone: choose yours above. Choose your real microphone in Settings → System → Sound → '
+                         'Input, and CABLE Output in the call app.')
             if probe:
                 self._probed = True
 
@@ -357,18 +390,13 @@ class DevicesPage(QWizardPage):
         except macos.BlackHoleMissing:
             text, ok = ('<b>✘ BlackHole 2ch is not installed.</b> It is the virtual microphone that carries your translated '
                         'voice to the call app (them → me works without it). Install it one of two ways:<br>'
-                        '• with Homebrew, in the Terminal: <code>brew install blackhole-2ch</code><br>'
+                        '• with Homebrew, in the Terminal: <code>brew install --cask blackhole-2ch</code><br>'
                         f'• without Homebrew: {BLACKHOLE_PKG.format("BlackHole 2ch")}<br>'
                         f'{BLACKHOLE_THEN}'), False
         except Exception as e:  # the helper is missing (a broken install)
             text, ok = f'✘ Cannot list the sound devices: {e}', False
         if ok and macos.permission() in ('denied', 'restricted'):
             text += f'<br>✘ {macos.NO_PERMISSION}.'
-        if ok:
-            try:  # installing BlackHole can make it macOS' default input: "System default" above would be no microphone
-                macos.not_virtual('')
-            except ValueError as e:
-                text += f'<br>⚠ {e}.'
         self.vmic.setText(text)
         self.recheck.setVisible(not ok)
         return ok
@@ -379,7 +407,7 @@ class DevicesPage(QWizardPage):
                           'Use headphones, not loudspeakers (echo).')
 
     def validatePage(self) -> bool:  # noqa: N802
-        self.w.s.ui.headphones, self.w.s.ui.mic = self.headphones.currentData(), self.mic.currentData()
+        self.w.s.ui.headphones, self.w.s.ui.mic = self.headphones.currentData() or '', self.mic.currentData() or ''
         return True
 
 

@@ -841,7 +841,7 @@ def test_settings_window_chooses_the_devices_on_every_os(tmp_path, monkeypatch):
     from peresmeshnik.ui import tray as tray_mod
     monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
     monkeypatch.setattr(config, 'config_dir', lambda: tmp_path)
-    monkeypatch.setattr(selftest, 'devices', lambda kind: [('uid-1', 'My headset'), ('uid-2', 'Desk mic')])
+    monkeypatch.setattr(selftest, 'listing', lambda kind: ([('uid-1', 'My headset'), ('uid-2', 'Desk mic')], True))
     t = tray_mod.Tray(type('Ctl', (), {'live': False, 'on': False})())
     monkeypatch.setattr(tray_mod.sys, 'platform', 'darwin')
     d = tray_mod.SettingsDialog(t)

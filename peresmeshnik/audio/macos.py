@@ -20,7 +20,7 @@ BLACKHOLE = 'BlackHole 2ch'
 BLACKHOLE_UID = 'BlackHole2ch_UID'
 CALL = ('BlackHole 16ch', 'BlackHole16ch_UID')  # the call app's speaker below macOS 14.4 (capture_macos.CALL_DEVICE)
 INSTALL = ('BlackHole 2ch is not installed. It is the virtual microphone that carries your voice to the call app. '
-           'Install it with "brew install blackhole-2ch" in the Terminal, or with the installer from '
+           'Install it with "brew install --cask blackhole-2ch" in the Terminal, or with the installer from '
            'https://existential.audio/blackhole/ — then check again (still not found: restart the Mac).')
 NO_PERMISSION = ('Peresmeshnik may not use the microphone: System Settings → Privacy & Security → Microphone → '
                  'turn Peresmeshnik on')
@@ -81,9 +81,12 @@ def not_blackhole(key: str, what: str = 'microphone') -> str:
         raise ValueError(f'{BLACKHOLE} is the virtual microphone for the call app, not your {what}: choose your real '
                          f'{what} in the settings')
     if not key and what == 'microphone' and not stand_in_mic():  # the default input: what macOS has chosen as it
-        d = next((d for d in devices() if d['inputs'] and d['default_input']), None)
-        if d and (is_blackhole(d['uid']) or is_blackhole(d['name']) or {d['uid'], d['name']} & set(CALL) or _virtual(d)):
-            # the helper would skip it and take the first real input, which on a user's Mac recorded only zeros
+        ins = [d for d in devices() if d['inputs']]
+        no_mic = lambda d: is_blackhole(d['uid']) or is_blackhole(d['name']) or {d['uid'], d['name']} & set(CALL) or virtual(d)  # noqa: E731
+        d = next((d for d in ins if d['default_input']), None)
+        if d and no_mic(d):  # the helper would skip it and take the first real input: on a user's Mac only zeros came
+            if all(no_mic(x) for x in ins):  # a Mac mini with BlackHole only: nothing to choose
+                raise ValueError(f'macOS\' default input is {d["name"]} and there is no microphone: connect a microphone')
             raise ValueError(f'macOS\' default input is {d["name"]}, not your microphone: choose your real microphone in '
                              'the settings, or set it back in System Settings → Sound → Input')
     if not key or what != 'microphone' or key == stand_in_mic():
@@ -91,15 +94,18 @@ def not_blackhole(key: str, what: str = 'microphone') -> str:
     if key in CALL:
         raise ValueError(f'{CALL[0]} carries the call\'s sound, not your microphone: choose your real microphone in the settings')
     d = next((d for d in devices() if d['inputs'] and key in (d['uid'], d['name'])), None)
-    if d and _virtual(d):
+    if d and virtual(d):
         kind = 'an aggregate device' if d['transport'] == 'grup' else 'a virtual device'
         raise ValueError(f'{d["name"]} is {kind}, not your microphone: choose your real microphone in the settings')
     return key
 
 
-def _virtual(d: dict) -> bool:
-    """A virtual device or an aggregate: not the user's voice, unless the real microphone processed (Krisp)."""
-    return d['transport'] in ('virt', 'grup') and not (d['transport'] == 'virt' and processed(d['name']))
+def virtual(d: dict, output: bool = False) -> bool:
+    """A virtual device or an aggregate: not the user's voice, unless the real microphone processed (Krisp). As an
+    output (`output`) only a virtual one: nobody hears what plays into it (BlackHole, Zoom's and Teams' speakers); an
+    aggregate plays on its real devices (a Multi-Output Device) and Krisp's speaker on the real one."""
+    kinds = ('virt',) if output else ('virt', 'grup')
+    return d['transport'] in kinds and not (d['transport'] == 'virt' and processed(d['name']))
 
 
 not_virtual = not_blackhole  # the name shared with audio/windows.py

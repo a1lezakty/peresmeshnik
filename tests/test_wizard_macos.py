@@ -46,7 +46,7 @@ def test_devices_page_without_blackhole_says_how_to_install(monkeypatch):
     page = wizard.DevicesPage(type('W', (), {'s': config.Settings()})())
     page.initializePage()
     text = page.vmic.text()
-    assert 'not installed' in text and 'brew install blackhole-2ch' in text and 'existential.audio/blackhole' in text
+    assert 'not installed' in text and 'brew install --cask blackhole-2ch' in text and 'existential.audio/blackhole' in text
     assert not page.recheck.isHidden()
     assert [page.mic.itemData(i) for i in range(page.mic.count())] == ['', 'BuiltInMicrophoneDevice']
     devs.append(BLACKHOLE)  # installed meanwhile
@@ -144,15 +144,24 @@ def test_devices_page_shows_the_whole_install_hint(monkeypatch):
         for _ in range(5):
             QCoreApplication.processEvents()
         text, v = page.vmic.text(), page.vmic
-        assert '<code>brew install blackhole-2ch</code>' in text and 'without Homebrew' in text and '.pkg' in text
-        assert 'href="https://existential.audio/blackhole/"' in text and 'restart' in text
+        assert '<code>brew install --cask blackhole-2ch</code>' in text and 'without Homebrew' in text and '.pkg' in text
+        assert 'href="https://existential.audio/blackhole/"' in text and 'e-mail' in text and 'restart' in text
         assert v.height() >= v.heightForWidth(v.width()), (v.width(), v.height(), v.heightForWidth(v.width()))
+        assert [page.mic.itemData(i) for i in range(page.mic.count())] == ['', 'BuiltInMicrophoneDevice']
+        assert page.mic_note.isHidden()
         devs.append({**BLACKHOLE, 'default_input': True})  # installed, and macOS took it as its default input
         devs[0] = {**MIC, 'default_input': False}
-        page.recheck.click()
+        page.recheck.click()  # the lists again: "System default" is no microphone now, not offered
         assert page.vmic.text().startswith('✔ BlackHole 2ch is installed')
-        assert "⚠ macOS' default input is BlackHole 2ch, not your microphone" in page.vmic.text()
-        assert 'System Settings → Sound → Input' in page.vmic.text()
+        assert [page.mic.itemData(i) for i in range(page.mic.count())] == ['BuiltInMicrophoneDevice']
+        assert page.mic_note.isHidden()
+        devs[0] = {**MIC, 'inputs': 0}  # a Mac mini: no microphone at all, only BlackHole (the page opened again)
+        page.initializePage()
+        assert page.mic.count() == 0
+        assert not page.mic_note.isHidden(), page.mic_note.text()
+        assert "⚠ macOS' default input is BlackHole 2ch and there is no microphone: connect a microphone" in page.mic_note.text()
+        assert 'In the call app the speaker stays your headphones' in ''.join(
+            x.text() for x in page.findChildren(type(page.vmic)))
     finally:
         w.close()
 

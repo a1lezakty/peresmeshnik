@@ -5,7 +5,7 @@ PROCESSED = ('NVIDIA Broadcast', 'Krisp')  # virtual inputs that are the user's 
 
 def processed(name: str) -> bool:
     """A virtual input that is the real microphone processed (NVIDIA Broadcast, Krisp): the user's voice, allowed."""
-    return any(p.lower() in name.lower() for p in PROCESSED)
+    return any(p in name for p in PROCESSED)  # as the native helpers match it: case-sensitive
 
 
 def c_locale() -> dict:

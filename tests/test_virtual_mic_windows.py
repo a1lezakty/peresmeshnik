@@ -231,6 +231,17 @@ def test_cable_and_virtual_inputs_are_no_microphone(monkeypatch):
             windows.not_virtual('')
     monkeypatch.setattr(windows, 'devices', lambda: [HEADSET, {**BROADCAST, 'default_input': True}])
     assert windows.not_virtual('') == ''  # the real microphone, processed
+    monkeypatch.setattr(windows, 'devices', lambda: [SPEAKERS, CABLE_IN, {**CABLE_OUT, 'default_input': True}, MEETER])
+    with pytest.raises(ValueError, match="CABLE Output .* and there is no microphone: connect a microphone"):
+        windows.not_virtual('')  # no real microphone at all
+    meeter_in = {**DEV, 'uid': '{0.0.0.00000000}.{vmi}', 'name': 'VoiceMeeter Input (VB-Audio VoiceMeeter VAIO)', 'inputs': 0,
+                 'outputs': 2, 'transport': 'virt', 'default_output': True}
+    monkeypatch.setattr(windows, 'devices', lambda: [{**HEADSET, 'default_input': False}, {**MEETER, 'default_input': True},
+                                                     {**SPEAKERS, 'default_output': False}, CABLE_IN, CABLE_OUT, meeter_in])
+    sinks, ok = selftest.listing('sinks')  # headphones: no cable, no VoiceMeeter; no "System default" (it is VoiceMeeter)
+    assert sinks == [(SPEAKERS['name'], SPEAKERS['name'])] and ok is False
+    sources, ok = selftest.listing('sources')
+    assert sources == [(HEADSET['uid'], HEADSET['name'])] and ok is False
     monkeypatch.setattr(windows, 'devices', lambda: devs)
     assert windows.not_virtual(CABLE_OUT['name'], what='headphones') == CABLE_OUT['name']  # not this check's business
     assert selftest.devices('sources') == [(HEADSET['uid'], HEADSET['name']), (BROADCAST['uid'], BROADCAST['name'])]

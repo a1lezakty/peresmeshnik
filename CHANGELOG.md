@@ -3,13 +3,30 @@
 Versions are tagged and published by hand after a check by a person (no release is published by CI). The section of a
 version is the top of its GitHub release notes (`.github/workflows/release.yml`).
 
-## 0.3.0 — 2026-11-12
+## 0.3.1 — 2026-11-16
 
 The first published version: a real-time translator for calls on macOS 14+ (Apple Silicon) and Windows 10 2004+ / 11,
 from source on Linux. You hear the other side in your language, as a voice in your headphones and as subtitles; they
 hear you in theirs, in your cloned voice (on any computer in 7 languages, in 13 on an NVIDIA GPU), else in a stock voice
 or the cloud's. Each direction runs on this computer or in the cloud (Google Gemini Live, with your own key; its sound
-goes to Google). Everything of 0.1.0 and 0.2.0 below is in it.
+goes to Google). Everything of 0.3.0, 0.2.0 and 0.1.0 below is in it, with these fixes from a check on a real Mac:
+
+- Model downloads work on every Mac: the app carries its own certificates for HTTPS (on a Mac without them every download
+  failed with "certificate verify failed"). Your own `SSL_CERT_FILE` / `SSL_CERT_DIR` still win.
+- The setup wizard shows the whole BlackHole hint: `brew install --cask blackhole-2ch`, or the installer from
+  existential.audio without Homebrew (the site e-mails the link), and that the Mac may need a restart. It says that in
+  the call app BlackHole 2ch is only the microphone; the speaker stays your headphones.
+- Microphone and headphones lists show only real devices: no BlackHole, VB-Cable, Zoom's or Teams' virtual devices.
+  "System default" is offered only while the system's default is a real device (installing BlackHole can make it the
+  default input). A virtual device saved earlier is refused with what to do, instead of silence.
+- With translation off the call hears your microphone again as soon as you choose a real one, set the system's
+  default back, or connect one; no need to turn translation on and off.
+- The self-test says what silence from the microphone means (no permission, a MacBook with its lid closed, a wrong
+  input) instead of "say something".
+
+## 0.3.0 — 2026-11-12
+
+Not published: its release was replaced by 0.3.1 before it went out.
 
 Languages: any pair of 14 — English, Russian, Ukrainian, German, French, Spanish, Italian, Portuguese, Polish, Turkish,
 Chinese, Japanese, Korean, Arabic — both ways.

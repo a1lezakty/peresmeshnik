@@ -655,20 +655,32 @@ def save_key(key: str, cfg: config.Cloud | None = None) -> None:
 
 
 def device_combo(kind: str, current: str) -> QComboBox:
-    """PipeWire / PulseAudio sinks or sources; '' = the system default."""
+    """The real outputs or inputs (selftest.listing); '' = the system default, offered only while that is a real device
+    (a saved '' then shows the first real one: saving takes it; the app refuses '' with why meanwhile)."""
     c = QComboBox()
-    c.addItem('System default', '')
+    fill_combo(c, kind, current)
+    return c
+
+
+def fill_combo(c: QComboBox, kind: str, current: str) -> None:
+    """device_combo's items, again (the devices changed: BlackHole installed may be the system's default now)."""
+    c.blockSignals(True)
+    c.clear()
     try:
-        from peresmeshnik.ui.selftest import devices
-        for name, desc in devices(kind):
+        from peresmeshnik.ui.selftest import listing
+        found, default_ok = listing(kind)
+        if default_ok:
+            c.addItem('System default', '')
+        for name, desc in found:
             if not name.startswith('peresmeshnik_'):  # our own devices are no choice here
                 c.addItem(desc, name)
     except Exception as e:  # no sound server: only the default
+        c.addItem('System default', '')
         c.setToolTip(f'cannot list devices: {e}')
     if current and c.findData(current) < 0:
         c.addItem(current, current)
     c.setCurrentIndex(max(0, c.findData(current)))
-    return c
+    c.blockSignals(False)
 
 
 class SettingsDialog(QDialog):
@@ -767,7 +779,7 @@ class SettingsDialog(QDialog):
                 self.note.setText(f'Hotkey not changed: {why}')
                 return
             s.ui.hotkey = combo
-        s.ui.headphones, s.ui.mic = self.headphones.currentData(), self.mic.currentData()
+        s.ui.headphones, s.ui.mic = self.headphones.currentData() or '', self.mic.currentData() or ''  # empty list: ''
         if new_key := bool(self.key.text().strip()):
             save_key(self.key.text(), s.cloud)
         elif self.forgotten:

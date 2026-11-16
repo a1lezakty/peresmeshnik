@@ -270,6 +270,21 @@ class Arrival(_Listener):
         self.on_arrive()
 
 
+class InputsChanged(_Listener):
+    """`on_change()` once (on a thread of its own) when the system's default input or its device list changes (the
+    default set back from BlackHole 2ch, AirPods connected). close() removes the listeners."""
+
+    def __init__(self, on_change: Callable[[], None]):
+        self.on_change = on_change
+        super().__init__([(SYSTEM, DEVICES, GLOBAL), (SYSTEM, DEFAULT_INPUT, GLOBAL)], 'the default input')
+
+    def _check(self, obj):
+        return True
+
+    def _fire(self, why) -> None:
+        self.on_change()
+
+
 class Running(_Listener):
     """`on_change(running)` (on a thread of its own) each time "some process runs IO on the device `name`" changes
     (kAudioDevicePropertyDeviceIsRunningSomewhere): a call app started or stopped playing into BlackHole 16ch."""

@@ -40,7 +40,7 @@ mac = pytest.mark.skipif(bool(_ready()), reason=_ready() if MAC else 'macOS only
 
 
 def test_blackhole_missing_says_how_to_install(monkeypatch):
-    with pytest.raises(macos.BlackHoleMissing, match='brew install blackhole-2ch'):
+    with pytest.raises(macos.BlackHoleMissing, match='brew install --cask blackhole-2ch'):
         macos.blackhole([{'uid': 'BuiltInSpeakerDevice', 'name': 'MacBook Pro Speakers', 'inputs': 0, 'outputs': 2}])
     assert macos.blackhole([{'uid': 'BlackHole2ch_UID', 'name': 'BlackHole 2ch', 'inputs': 2, 'outputs': 2}])
     with pytest.raises(ValueError, match='not your microphone'):
@@ -63,7 +63,7 @@ def test_the_call_device_and_virtual_inputs_are_no_microphone(monkeypatch):
             {**dev, 'uid': 'ZoomAudioDevice', 'name': 'ZoomAudioDevice', 'transport': 'virt'},
             {**dev, 'uid': 'BlackHole16ch_UID', 'name': 'BlackHole 16ch', 'transport': 'virt', 'outputs': 16},
             {**dev, 'uid': 'peresmeshnik-test-mic', 'name': 'Test Mic', 'transport': 'grup'},
-            {**dev, 'uid': 'KrispMicrophone', 'name': 'krisp microphone', 'transport': 'virt'}]  # the real one, processed
+            {**dev, 'uid': 'KrispMicrophone', 'name': 'Krisp Microphone', 'transport': 'virt'}]  # the real one, processed
     monkeypatch.setattr(selftest, 'HELPER', True)
     monkeypatch.setattr(selftest, 'WINDOWS', False)
     monkeypatch.setattr(sys, 'platform', 'darwin')  # mic.native() picks audio/macos.py (on the Windows runner too)
@@ -77,8 +77,8 @@ def test_the_call_device_and_virtual_inputs_are_no_microphone(monkeypatch):
     assert macos.not_blackhole('KrispMicrophone') == 'KrispMicrophone'
     assert macos.not_blackhole('') == ''  # the default input: the helper never takes a virtual one by itself
     assert selftest.devices('sources') == [('BuiltInMicrophoneDevice', 'MacBook Pro Microphone'),
-                                           ('KrispMicrophone', 'krisp microphone')]
-    assert ('BlackHole16ch_UID', 'BlackHole 16ch') in selftest.devices('sinks')  # an output: S1's (the call app's)
+                                           ('KrispMicrophone', 'Krisp Microphone')]
+    assert ('BlackHole 16ch', 'BlackHole 16ch') not in selftest.devices('sinks')  # the call app's speaker: nobody hears it
     monkeypatch.setenv('PERESMESHNIK_TEST_MIC', 'BlackHole16ch_UID')
     assert ('BlackHole16ch_UID', 'BlackHole 16ch') in selftest.devices('sources')
     monkeypatch.delenv('PYTEST_CURRENT_TEST')  # the app itself: the tests' hook lets nothing through
@@ -800,7 +800,7 @@ def test_a_virtual_default_input_is_no_microphone(monkeypatch):
         assert macos.not_virtual('BuiltInMicrophoneDevice') == 'BuiltInMicrophoneDevice'  # chosen: no matter
     monkeypatch.setattr(macos, 'devices', lambda: [{**mic, 'default_input': True}])
     assert macos.not_virtual('') == ''
-    monkeypatch.setattr(macos, 'devices', lambda: [{**mic, 'uid': 'KrispMicrophone', 'name': 'krisp microphone',
+    monkeypatch.setattr(macos, 'devices', lambda: [{**mic, 'uid': 'KrispMicrophone', 'name': 'Krisp Microphone',
                                                     'transport': 'virt', 'default_input': True}])
     assert macos.not_virtual('') == ''  # the real microphone, processed
     monkeypatch.setattr(selftest, 'HELPER', True)  # the self-test's microphone goes through the same check
@@ -826,7 +826,8 @@ def test_the_self_test_says_exact_zeros_are_no_microphone(monkeypatch):
     monkeypatch.setattr(selftest, 'WINDOWS', False)
     monkeypatch.setattr(sys, 'platform', 'darwin')
     r = selftest.check_mic('', seconds=0)
-    assert not r.ok and 'exact zeros' in r.detail and 'Privacy & Security → Microphone' in r.detail, r.detail
+    assert not r.ok and r.detail.startswith('No sound at all came from the microphone') and 'lid closed' in r.detail
+    assert 'Privacy & Security → Microphone' in r.detail and 'allow Terminal' in r.detail, r.detail
     assert 'say something' not in r.detail
     Zeros.stop = lambda self: np.full(48000, 1e-5, np.float32)  # a quiet room: still "say something"
     r = selftest.check_mic('', seconds=0)
@@ -884,5 +885,140 @@ def test_the_microphone_loop_refuses_a_virtual_default_and_follows_the_settings(
         s.ui.mic = 'BuiltInMicrophoneDevice'
         ctl.mic_changed().result(10)
         assert len(spawned) == 2
+    finally:
+        ctl._pool.shutdown()
+
+
+def _mac_devices():
+    dev = {'inputs': 0, 'outputs': 0, 'rate': 48000.0, 'default_input': False, 'default_output': False}
+    return [{**dev, 'uid': 'BuiltInMicrophoneDevice', 'name': 'MacBook Pro Microphone', 'transport': 'bltn', 'inputs': 1},
+            {**dev, 'uid': 'BuiltInSpeakerDevice', 'name': 'MacBook Pro Speakers', 'transport': 'bltn', 'outputs': 2},
+            {**dev, 'uid': 'AirPods_UID', 'name': 'AirPods Pro', 'transport': 'blue', 'inputs': 1, 'outputs': 2},
+            {**dev, 'uid': 'BlackHole2ch_UID', 'name': 'BlackHole 2ch', 'transport': 'virt', 'inputs': 2, 'outputs': 2},
+            {**dev, 'uid': 'BlackHole16ch_UID', 'name': 'BlackHole 16ch', 'transport': 'virt', 'inputs': 16, 'outputs': 16},
+            {**dev, 'uid': 'ZoomAudioDevice', 'name': 'ZoomAudioDevice', 'transport': 'virt', 'inputs': 2, 'outputs': 2},
+            {**dev, 'uid': 'MultiOutput', 'name': 'Multi-Output Device', 'transport': 'grup', 'outputs': 2},
+            {**dev, 'uid': 'KrispSpeaker', 'name': 'Krisp Speaker', 'transport': 'virt', 'outputs': 2}]
+
+
+def test_the_lists_offer_real_devices_and_system_default_only_when_it_is_real(monkeypatch):
+    """Headphones: no BlackHole 2ch / 16ch, no Zoom's speaker (nobody hears them; a user picked BlackHole and heard
+    nothing); a Multi-Output Device and Krisp's speaker play on real ones. "System default" in either list only while
+    macOS' default is a real device: installing BlackHole can make it the default."""
+    from peresmeshnik.audio import mic
+    from peresmeshnik.ui import selftest
+    from peresmeshnik.ui.tray import device_combo
+    monkeypatch.delenv('PERESMESHNIK_TEST_MIC', raising=False)
+    devs = _mac_devices()
+    devs[0]['default_input'] = devs[1]['default_output'] = True
+    monkeypatch.setattr(macos, 'devices', lambda: devs)
+    monkeypatch.setattr(mic, 'native', lambda: macos)
+    monkeypatch.setattr(selftest, 'HELPER', True)
+    monkeypatch.setattr(selftest, 'WINDOWS', False)
+    sinks, ok = selftest.listing('sinks')
+    assert ok and sinks == [('MacBook Pro Speakers', 'MacBook Pro Speakers'), ('AirPods Pro', 'AirPods Pro'),
+                            ('Multi-Output Device', 'Multi-Output Device'), ('Krisp Speaker', 'Krisp Speaker')]
+    sources, ok = selftest.listing('sources')
+    assert ok and sources == [('BuiltInMicrophoneDevice', 'MacBook Pro Microphone'), ('AirPods_UID', 'AirPods Pro')]
+    c = device_combo('sinks', '')
+    assert c.itemData(0) == '' and c.currentData() == ''
+    for d in devs:
+        d['default_input'] = d['uid'] == 'BlackHole2ch_UID'
+        d['default_output'] = d['uid'] == 'BlackHole2ch_UID'
+    for kind, first in (('sinks', 'MacBook Pro Speakers'), ('sources', 'BuiltInMicrophoneDevice')):
+        assert selftest.listing(kind)[1] is False
+        c = device_combo(kind, '')  # saved '': the first real one shown (saving takes it), no "System default"
+        assert '' not in [c.itemData(i) for i in range(c.count())] and c.currentData() == first
+
+
+def test_virtual_headphones_are_refused_with_why(monkeypatch):
+    """The saved headphones a virtual device (Zoom's speaker) or BlackHole by its UID (the 0.3.0 lists saved UIDs):
+    said, not played into nothing; an aggregate (Multi-Output Device) plays."""
+    from peresmeshnik import app
+    from peresmeshnik.audio import capture_macos, coreaudio, mic
+    devs = _mac_devices()
+    devs[1]['default_output'] = True
+    monkeypatch.setattr(macos, 'devices', lambda: devs)
+    monkeypatch.setattr(mic, 'native', lambda: macos)
+    monkeypatch.setattr(coreaudio, 'devices', lambda: [{'id': i, 'name': d['name'], 'inputs': d['inputs'], 'outputs': d['outputs'],
+                                                         'virtual': d['transport'] in ('virt', 'grup')} for i, d in enumerate(devs)])
+    monkeypatch.setattr(coreaudio, 'default', lambda output=True: 'MacBook Pro Speakers')
+    monkeypatch.setattr(capture_macos, 'path', lambda: 'tap')
+    monkeypatch.setattr(app.sys, 'platform', 'darwin')
+    monkeypatch.setattr(app.crash, 'private', lambda *a: None)
+    with pytest.raises(RuntimeError, match='the saved output is ZoomAudioDevice, a virtual device: nobody hears'):
+        app.Headphones('ZoomAudioDevice').resolve()
+    with pytest.raises(RuntimeError, match='the saved output is BlackHole 2ch, a device of the call'):
+        app.Headphones('BlackHole2ch_UID').resolve()  # by its UID: found by name, refused
+    assert app.Headphones('AirPods_UID').resolve() == 'AirPods Pro'
+    assert app.Headphones('Multi-Output Device').resolve() == 'Multi-Output Device'
+    assert app.Headphones('Krisp Speaker').resolve() == 'Krisp Speaker'
+    assert app.Headphones('').resolve() == 'MacBook Pro Speakers'
+
+
+def _loop_ctl(monkeypatch, devs):
+    """A Controller of the app (macOS) whose helper loops are recorded, not started."""
+    from peresmeshnik import app, config
+    from peresmeshnik.audio import mic
+    monkeypatch.delenv('PERESMESHNIK_TEST_MIC', raising=False)
+    monkeypatch.setattr(macos, 'devices', lambda: devs)
+    spawned = []
+
+    class Loop:
+        def __init__(self, *args, **k):
+            self.args, self.stderr, self.closed = args, [], False
+            self.stdin = types.SimpleNamespace(close=lambda: setattr(self, 'closed', True))
+            spawned.append(args)
+
+        def poll(self):
+            return 0 if self.closed else None
+
+        def wait(self, timeout=None):
+            return 0
+    monkeypatch.setattr(macos, 'spawn', Loop)
+    monkeypatch.setattr(mic, 'native', lambda: macos)
+    monkeypatch.setattr(app.sys, 'platform', 'darwin')
+    monkeypatch.setattr(app, 'LOOP_RECHECK_S', 0.05)  # no Core Audio here: the Timer instead of its notification
+    states, s = [], config.Settings()
+    return app.Controller(None, states.append, settings=s), states, s, spawned
+
+
+def test_a_refused_loop_starts_by_itself_once_the_default_input_is_real(monkeypatch):
+    """Translation off, "System default" while macOS' default input is BlackHole 2ch: refused, said at startup (after
+    the tray's "idle"), and tried again as the devices change: the default set back, the call hears the user."""
+    devs = _mac_devices()
+    devs[3]['default_input'] = True  # BlackHole 2ch
+    ctl, states, s, spawned = _loop_ctl(monkeypatch, devs)
+    vmic = types.SimpleNamespace(device={'uid': 'BlackHole2ch_UID'}, call_mic={'uid': 'BlackHole2ch_UID'})
+    monkeypatch.setattr(ctl, 'virtual_mic', lambda: setattr(ctl, '_vmic', vmic) or vmic)
+    try:
+        ctl.submit(ctl._startup_vmic).result(10)
+        assert spawned == [] and "macOS' default input is BlackHole 2ch" in ctl.startup_error, ctl.startup_error
+        time.sleep(0.3)  # tried again meanwhile: still refused, said once
+        assert spawned == [] and len(states) == 1, states
+        devs[3]['default_input'], devs[0]['default_input'] = False, True  # set back in System Settings → Sound → Input
+        end = time.monotonic() + 5
+        while not spawned and time.monotonic() < end:
+            time.sleep(0.02)
+        assert spawned and spawned[0][:3] == ('loop', '--from', ''), spawned
+        assert states[-1] == 'idle, translation off (the call hears your microphone again)'
+    finally:
+        ctl._disarm()
+        ctl._pool.shutdown()
+
+
+def test_blackhole_installed_in_the_wizard_gets_its_loop_at_finish(monkeypatch):
+    """BlackHole 2ch was missing at the start (no virtual mic, no loop); installed during the wizard, Finish
+    (tray.restart -> mic_changed) makes the virtual mic and starts the loop, without translation on once."""
+    devs = _mac_devices()
+    devs[0]['default_input'] = True
+    ctl, states, s, spawned = _loop_ctl(monkeypatch, devs)
+    assert ctl._vmic is None
+    vmic = types.SimpleNamespace(device={'uid': 'BlackHole2ch_UID'}, call_mic={'uid': 'BlackHole2ch_UID'})
+    monkeypatch.setattr(ctl, 'virtual_mic', lambda: setattr(ctl, '_vmic', vmic) or vmic)
+    try:
+        s.ui.mic = 'BuiltInMicrophoneDevice'
+        ctl.mic_changed().result(10)
+        assert [a[:5] for a in spawned] == [('loop', '--from', 'BuiltInMicrophoneDevice', '--to', 'BlackHole2ch_UID')]
     finally:
         ctl._pool.shutdown()

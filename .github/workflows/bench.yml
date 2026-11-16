@@ -1,9 +1,9 @@
 name: bench
 
-# research-1116-r4 only (round 5: ZONOS3-Mini on 8 FLEURS voices, the Russian direction from FLEURS test speakers), manual: dispatched with ref research-1116-r4.
-# zonos-ru: ZONOS3-Mini (commit 96d9e0ec, Russian since 13.11) on the CPU by the BENCH tts_clone method
-#   (bench/clone_light.py: 6 shortest FLEURS sentences, ECAPA vs the full reference, faster-whisper small CER).
-# stock-ru: speed and Whisper-small CER of the new light stock voices (Kitten TTS 2 mini, Supertonic 3, kokoro-ru).
+# research-1116-r4 only (round 6), manual: dispatched with ref research-1116-r4.
+# ZONOS3-Mini (commit 96d9e0ec) on the macOS runner's CPU (virtual M1, 3 cores, no usable GPU): the backbone with
+# --cpu and the audio decoder with --zac-cpu (the server puts it on Metal by default on Apple Silicon).
+# BENCH tts_clone method (bench/clone_light.py), BENCH voices; en->ru with the voice vector moved toward Russian speakers.
 on:
   workflow_dispatch:
 
@@ -11,8 +11,8 @@ permissions:
   contents: read
 
 jobs:
-  zonos-ru:
-    runs-on: ubuntu-24.04
+  zonos-mac:
+    runs-on: macos-15
     timeout-minutes: 120
     env:
       BENCH_DATA: ${{ github.workspace }}/bench-data
@@ -25,13 +25,13 @@ jobs:
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
         with:
           version: '0.13.7'
-          checksum: 'c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83'
+          checksum: '81b811b57e4624df7ed3aac148e0359100d9962f3d9dce00aec533dc2e086731'
           python-version: '3.11'
       - name: Machine
-        run: nproc; lscpu | head -20; free -g; df -h .; command -v ffmpeg cargo cmake
+        run: sysctl -n machdep.cpu.brand_string hw.memsize hw.ncpu; df -h .; command -v ffmpeg cargo cmake || true
       - name: Data and venvs
         run: |
-          sudo apt-get -qq update && sudo apt-get -qq install -y ffmpeg > /dev/null && ffmpeg -version | head -1
+          command -v ffmpeg > /dev/null || brew install -q ffmpeg > /dev/null
           uv run -q --no-project -p 3.11 --with numpy --with soundfile --with pyarrow python bench/data.py
           uv venv -q -p 3.11 venv-eval && uv pip install -q -p venv-eval/bin/python -r bench/requirements-tts-clone-eval.txt
           uv venv -q -p 3.11 venv-run && uv pip install -q -p venv-run/bin/python numpy soundfile scipy huggingface_hub psutil
@@ -39,46 +39,31 @@ jobs:
         run: |
           git clone -q https://github.com/Zyphra/ZONOS3-Mini z && git -C z checkout -q 96d9e0ec
           git -C z submodule update -q --init --recursive
-          git -C z submodule status --recursive | head
-          cd z/servers/ggml && cmake -B build -DCMAKE_BUILD_TYPE=Release > ../../../build.log 2>&1 && cmake --build build -j4 >> ../../../build.log 2>&1 \
+          cd z/servers/ggml && cmake -B build -DCMAKE_BUILD_TYPE=Release > ../../../build.log 2>&1 && cmake --build build -j3 >> ../../../build.log 2>&1 \
             || { tail -40 ../../../build.log; exit 1; }
-          ls build | head -30
+          grep -i "metal\|openmp\|accelerate" ../../../build.log | head -8
       - name: Weights
         run: |
           venv-run/bin/python -c "
           from huggingface_hub import hf_hub_download as h
           for f in ('backbone-ptq.gguf', 'zac-keep2.gguf', 'spk-encoder.gguf'):
               h('Zyphra/ZONOS3-Mini', 'gguf/' + f, local_dir='z/servers/ggml')"
-          ls -la z/servers/ggml/gguf
-      - name: Voices and the direction
-        run: |
-          export ZONOS_BIN=$PWD/z/servers/ggml/build ZONOS_GGUF=$PWD/z/servers/ggml/gguf VOICES=$PWD/data-voices
-          BENCH_THREADS=4 venv-eval/bin/python r4/voices_pick.py
-          uv run -q --no-project -p 3.11 --with numpy --with soundfile --with pyarrow python -c "
-          import sys; sys.path.insert(0, 'bench')
-          from data import fleurs
-          print(len(fleurs('en', 'us', split='test')), len(fleurs('ru', 'ru', split='test')))"
-          DIR_CLIPS='fleurs/{lang}/test/*.wav' DIR_MAX=40 venv-run/bin/python r4/zonos_dir.py ru_dir_test.npy
       - name: Run
         run: |
-          export ZONOS_BIN=$PWD/z/servers/ggml/build ZONOS_GGUF=$PWD/z/servers/ggml/gguf
-          cat data-voices/voices.json
-          run() {  # label args...  (the voice is the reference 'en'; en2ru = the voice speaking Russian)
-            local L=$1; shift
+          export ZONOS_BIN=$PWD/z/servers/ggml/build ZONOS_GGUF=$PWD/z/servers/ggml/gguf ZONOS_ARGS=--zac-cpu
+          BENCH_THREADS=3 venv-eval/bin/python bench/clone_light.py refs
+          venv-run/bin/python r4/zonos_dir.py ru_dir.npy
+          run() {  # label threads args...
+            local L=$1 T=$2; shift 2
             echo "== $L"
-            if BENCH_THREADS=4 OMP_NUM_THREADS=4 taskset -c 0-3 venv-run/bin/python bench/clone_light.py synth --model zonos --label "$L" --n "$N" "$@" > "$L.log" 2>&1; then
-              BENCH_THREADS=4 venv-eval/bin/python bench/clone_light.py eval --label "$L" 2>&1 | grep -E '^\{' || echo "eval failed: $L"
+            if BENCH_THREADS=$T OMP_NUM_THREADS=$T venv-run/bin/python bench/clone_light.py synth --model zonos --label "$L" --n "$N" "$@" > "$L.log" 2>&1; then
+              BENCH_THREADS=3 venv-eval/bin/python bench/clone_light.py eval --label "$L" 2>&1 | grep -E '^\{' || echo "eval failed: $L"
             else
               tail -25 "$L.log"; echo "synth failed: $L"
             fi
           }
-          for d in data-voices/v*/; do v=$(basename $d)
-            export BENCH_DATA=$PWD/$d BENCH_OUT=$PWD/out-voices/$v
-            BENCH_THREADS=4 venv-eval/bin/python bench/clone_light.py refs --secs 5 > /dev/null 2>&1
-            unset ZONOS_SHIFT
-            run $v-zonos --ref-s 5 --cases en2en,en2ru
-            for dose in 0.75 1; do
-              export ZONOS_SHIFT=$PWD/ru_dir_test.npy:$dose
-              run $v-zonos-d$dose --ref-s 5 --cases en2ru
-            done
-          done
+          run mac-zonos-3t 3 --ref-s 5 --cases ru2en
+          run mac-zonos-2t 2 --ref-s 5 --cases ru2en
+          export ZONOS_SHIFT=$PWD/ru_dir.npy:0.75
+          run mac-zonos-3t-d0.75 3 --ref-s 5 --cases en2ru
+          for f in out/tts_clone/*/server.log; do echo "--- $f"; grep -i "backend\|zac:\|threads" "$f" | head -8; done

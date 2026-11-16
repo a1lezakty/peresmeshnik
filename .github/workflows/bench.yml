@@ -1,60 +1,18 @@
 name: bench
 
-# Manual only: Actions → bench → Run workflow, or add a label to a PR: "bench" runs every suite,
-# "bench-<suite>" (e.g. bench-clone) one suite. workflow_dispatch needs this file on the default
-# branch; the label also works before the merge.
+# research-1116 R3, this branch only: STT candidates on the macOS runner (M1, 3 cores, CPU).
+# Manual only: gh workflow run bench.yml --ref research-1116-r3
 on:
   workflow_dispatch:
-    inputs:
-      suites:
-        description: 'JSON list of suites: asr, mt, tts, clone'
-        default: '["asr", "mt", "tts", "clone"]'
-      os:
-        description: 'Runner'
-        default: macos-15
-  pull_request:
-    types: [labeled]
 
 permissions:
   contents: read
 
 jobs:
-  plan:
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.label.name, 'bench')
-    runs-on: ubuntu-latest
-    outputs:
-      suites: ${{ steps.s.outputs.suites }}
-    steps:
-      - id: s
-        env:
-          INPUT: ${{ github.event.inputs.suites }}
-          LABEL: ${{ github.event.label.name }}
-        run: |
-          python3 - >> "$GITHUB_OUTPUT" <<'EOF'
-          import json, os
-          allowed = ['asr', 'mt', 'tts', 'clone']
-          inp, label = os.environ['INPUT'], os.environ['LABEL']
-          suites = json.loads(inp) if inp else allowed if label == 'bench' else [label.removeprefix('bench-')]
-          if not isinstance(suites, list) or not suites or any(s not in allowed for s in suites):
-              raise SystemExit(f'unknown suite in {suites!r}; allowed: {allowed}')
-          print('suites=' + json.dumps(suites))
-          EOF
-
-  bench:
-    needs: plan
-    strategy:
-      fail-fast: false
-      matrix:
-        suite: ${{ fromJSON(needs.plan.outputs.suites) }}
-    runs-on: ${{ github.event.inputs.os || 'macos-15' }}
-    timeout-minutes: 150
+  r3-stt:
+    runs-on: macos-15
+    timeout-minutes: 120
     env:
-      BENCH_DATA: ${{ github.workspace }}/bench-data
-      BENCH_HOST: ${{ github.event.inputs.os || 'macos-15' }}
-      HF_HOME: ${{ github.workspace }}/models/hf
-      TORCH_HOME: ${{ github.workspace }}/models/torch
-      PERESMESHNIK_MODELS: ${{ github.workspace }}/models
-      COQUI_TOS_AGREED: '1'
       HF_HUB_DISABLE_PROGRESS_BARS: '1'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
@@ -70,59 +28,24 @@ jobs:
           python-version: '3.12'
       - name: Machine
         run: |
-          uname -a; sysctl -n machdep.cpu.brand_string hw.memsize hw.ncpu 2>/dev/null || nproc; df -h .
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
-        with:
-          path: bench-data
-          key: bench-data-${{ hashFiles('bench/data.py') }}
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
-        with:
-          path: models
-          # this file in the key: the GGUF revisions and sums live below, so a new one makes a new key, restore-keys
-          # brings the old cache, the step fetches the changed file once and the new key saves it (a key without it hits
-          # the old cache every run, never saves, and the step fetches ~5.8 GB each time)
-          key: models-${{ matrix.suite }}-${{ runner.os }}-${{ hashFiles('bench/*.py', 'bench/requirements*.txt', '.github/workflows/bench.yml') }}
-          restore-keys: models-${{ matrix.suite }}-${{ runner.os }}-
-      - name: Bench venv
-        if: matrix.suite != 'clone'
+          uname -a; sysctl -n machdep.cpu.brand_string hw.memsize hw.ncpu; df -h .
+      - name: Venv, clips, models
+        working-directory: bench/r3
         run: |
-          uv venv .bench
-          if [ "$RUNNER_OS" = Linux ]; then CPU="--extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match"; fi
-          uv pip install -p .bench -r bench/requirements.txt ${CPU:-}
-          .bench/bin/python bench/data.py
-          .bench/bin/python -c "import torch, onnxruntime as o; print('mps', torch.backends.mps.is_available(), 'ort', o.get_available_providers())"
-      - name: llama.cpp + HY-MT1.5 GGUF
-        if: matrix.suite == 'mt' && runner.os == 'macOS'
+          uv venv -p 3.12 .v
+          uv pip install -p .v "onnx-asr[cpu,hub]==0.12.0" sherpa-onnx==2.0.1 soundfile soxr jiwer num2words
+          .v/bin/python mac_fetch.py
+      - name: Run
+        working-directory: bench/r3
         run: |
-          # the archive is run here and the weights make BENCH's numbers: each checked by SHA-256, at a fixed commit
-          curl -sL -o llama.tgz https://github.com/ggml-org/llama.cpp/releases/download/b12189/llama-b12189-bin-macos-arm64.tar.gz
-          echo 'f30e2f3032df30a0c37c9fbd43125253dcd4cb96d6a879aa81e464944bc20aee  llama.tgz' | shasum -a 256 -c
-          tar xzf llama.tgz
-          echo "LLAMA_SERVER=$(find $PWD -name llama-server -type f | head -1)" >> $GITHUB_ENV
-          mkdir -p models/gguf
-          for m in 1.8B:265b2e615a7dc9b06c435dc878829ad99a512ba2:4383ac0c3c8e476de98ff979c2a3f069f8c4fb385e7860cf2d28da896cc477c7 \
-                   7B:126325496bc8e3575f1d8615b8ca951d8483f206:fc87637e4dd29547811a28170770c2ac17725fb7690b7c4aafa4f463c3e77568; do
-            IFS=: read -r size rev sum <<< "$m"
-            f=models/gguf/HY-MT1.5-$size-Q4_K_M.gguf
-            url=https://huggingface.co/tencent/HY-MT1.5-$size-GGUF/resolve/$rev/HY-MT1.5-$size-Q4_K_M.gguf
-            [ -f $f ] || curl -sfL -o $f $url
-            # a cache of an older revision (restore-keys) has another file: fetched once again, else it fails for good
-            echo "$sum  $f" | shasum -a 256 -c || { rm -f $f; curl -sfL -o $f $url; echo "$sum  $f" | shasum -a 256 -c; }
+          for k in gigaam-v3-e2e-ctc parakeet-tdt-0.6b-v3 gigaam-ml-large-ctc gigaam-v3-e2e-rnnt t-one vosk-ru nemotron-unified-0.6b nemotron-stream-0.6b; do
+            .v/bin/python bench.py $k --threads 3 --lat --conds clean || echo "FAIL $k"
           done
-          echo "GGUF=$PWD/models/gguf/HY-MT1.5-1.8B-Q4_K_M.gguf $PWD/models/gguf/HY-MT1.5-7B-Q4_K_M.gguf" >> $GITHUB_ENV
-      - name: Run ${{ matrix.suite }}
-        if: matrix.suite != 'clone'
-        env:
-          SUITE: ${{ matrix.suite }}
-        run: |
-          if [ "$RUNNER_OS" = macOS ] && [ "$SUITE" = mt ]; then export LLAMA_DEVICE=metal; fi
-          PY=$PWD/.bench/bin/python bench/suite.sh "$SUITE" --threads 3
-      - name: Voice clone
-        if: matrix.suite == 'clone'
-        run: bench/clone_ci.sh
+          .v/bin/python score.py > results/summary.md || true
+          cat results/summary.md
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:
-          name: bench-${{ matrix.suite }}-${{ github.event.inputs.os || 'macos-15' }}
-          path: bench/results/
+          name: r3-stt-macos-15
+          path: bench/r3/results/
           if-no-files-found: warn

@@ -127,7 +127,7 @@ jobs:
           run() { echo "== $*"; "$@" || { echo "FAILED: $*"; failed=$((failed + 1)); }; }
           uv pip install -q -p .bench -e .
           $PY -m peresmeshnik models fetch --accept-licenses silero-vad wespeaker-resnet34 parakeet-tdt-0.6b-v3 \
-            gigaam-v3-e2e-ctc opus-mt-en-ru opus-mt-ru-en piper-ru_RU-dmitri-medium piper-en_US-john-medium pocket-tts-ru
+            gigaam-v3-e2e-ctc quickmt-en-ru opus-mt-ru-en piper-ru_RU-dmitri-medium piper-en_US-john-medium pocket-tts-ru
           $PY bench/pocket_speed.py profiles $V
           run $PY bench/pocket_speed.py standin $EN
           run $PY bench/pocket_speed.py speed pocket-tts-ru --voice $V/ref_en

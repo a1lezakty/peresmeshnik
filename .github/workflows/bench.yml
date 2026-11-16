@@ -1,6 +1,6 @@
 name: bench
 
-# research-1116-r4 only (round 4: ZONOS3-Mini en->ru with the voice vector moved toward Russian speakers), manual: dispatched with ref research-1116-r4.
+# research-1116-r4 only (round 5: ZONOS3-Mini on 8 FLEURS voices, the Russian direction from FLEURS test speakers), manual: dispatched with ref research-1116-r4.
 # zonos-ru: ZONOS3-Mini (commit 96d9e0ec, Russian since 13.11) on the CPU by the BENCH tts_clone method
 #   (bench/clone_light.py: 6 shortest FLEURS sentences, ECAPA vs the full reference, faster-whisper small CER).
 # stock-ru: speed and Whisper-small CER of the new light stock voices (Kitten TTS 2 mini, Supertonic 3, kokoro-ru).
@@ -50,27 +50,35 @@ jobs:
           for f in ('backbone-ptq.gguf', 'zac-keep2.gguf', 'spk-encoder.gguf'):
               h('Zyphra/ZONOS3-Mini', 'gguf/' + f, local_dir='z/servers/ggml')"
           ls -la z/servers/ggml/gguf
+      - name: Voices and the direction
+        run: |
+          export ZONOS_BIN=$PWD/z/servers/ggml/build ZONOS_GGUF=$PWD/z/servers/ggml/gguf VOICES=$PWD/data-voices
+          BENCH_THREADS=4 venv-eval/bin/python r4/voices_pick.py
+          uv run -q --no-project -p 3.11 --with numpy --with soundfile --with pyarrow python -c "
+          import sys; sys.path.insert(0, 'bench')
+          from data import fleurs
+          print(len(fleurs('en', 'us', split='test')), len(fleurs('ru', 'ru', split='test')))"
+          DIR_CLIPS='fleurs/{lang}/test/*.wav' DIR_MAX=40 venv-run/bin/python r4/zonos_dir.py ru_dir_test.npy
       - name: Run
         run: |
           export ZONOS_BIN=$PWD/z/servers/ggml/build ZONOS_GGUF=$PWD/z/servers/ggml/gguf
-          BENCH_THREADS=4 venv-eval/bin/python bench/clone_light.py refs
-          run() {  # label threads args...
-            local L=$1 T=$2; shift 2
+          cat data-voices/voices.json
+          run() {  # label args...  (the voice is the reference 'en'; en2ru = the voice speaking Russian)
+            local L=$1; shift
             echo "== $L"
-            if BENCH_THREADS=$T OMP_NUM_THREADS=$T taskset -c 0-$((T-1)) venv-run/bin/python bench/clone_light.py synth --model zonos --label "$L" --n "$N" "$@" > "$L.log" 2>&1; then
-              BENCH_THREADS=4 venv-eval/bin/python bench/clone_light.py eval --label "$L" 2>&1 | grep -E '^\{|^en ru' || echo "eval failed: $L"
+            if BENCH_THREADS=4 OMP_NUM_THREADS=4 taskset -c 0-3 venv-run/bin/python bench/clone_light.py synth --model zonos --label "$L" --n "$N" "$@" > "$L.log" 2>&1; then
+              BENCH_THREADS=4 venv-eval/bin/python bench/clone_light.py eval --label "$L" 2>&1 | grep -E '^\{' || echo "eval failed: $L"
             else
               tail -25 "$L.log"; echo "synth failed: $L"
             fi
           }
-          venv-run/bin/python r4/zonos_dir.py ru_dir.npy
-          run zonos-en2ru-d0 4 --ref-s 5 --cases en2ru
-          for dose in 0.5 1 2; do
-            export ZONOS_SHIFT=$PWD/ru_dir.npy:$dose
-            run zonos-en2ru-d$dose 4 --ref-s 5 --cases en2ru
+          for d in data-voices/v*/; do v=$(basename $d)
+            export BENCH_DATA=$PWD/$d BENCH_OUT=$PWD/out-voices/$v
+            BENCH_THREADS=4 venv-eval/bin/python bench/clone_light.py refs --secs 5 > /dev/null 2>&1
+            unset ZONOS_SHIFT
+            run $v-zonos --ref-s 5 --cases en2en,en2ru
+            for dose in 0.75 1; do
+              export ZONOS_SHIFT=$PWD/ru_dir_test.npy:$dose
+              run $v-zonos-d$dose --ref-s 5 --cases en2ru
+            done
           done
-          export ZONOS_SHIFT=$PWD/ru_dir.npy:1
-          run zonos-en2ru-d1-r10 4 --ref-s 10 --cases en2ru
-          unset ZONOS_SHIFT
-          for f in out/tts_clone/*/server.log; do echo "--- $f"; tail -5 "$f"; done
-

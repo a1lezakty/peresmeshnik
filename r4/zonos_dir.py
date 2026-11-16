@@ -1,5 +1,5 @@
 """R4: a 'Russian speakers' direction for ZONOS3-Mini's 192-d voice vector: mean of the unit vectors of the FLEURS ru
-clips minus that of the FLEURS en clips (bench-data/set/{ru,en}/*.wav), saved as an .npy of the encoder's own shape.
+clips minus that of the FLEURS en clips ($DIR_CLIPS under $BENCH_DATA, default the bench set), saved as an .npy of the encoder's own shape.
 
     python r4/zonos_dir.py OUT.npy        # needs $ZONOS_BIN (spk-encoder-cli) and $ZONOS_GGUF (spk-encoder.gguf)
 """
@@ -8,14 +8,16 @@ from pathlib import Path
 
 import numpy as np
 
-SET = Path(os.environ.get('BENCH_DATA', 'bench-data')) / 'set'
+ROOT = Path(os.environ.get('BENCH_DATA', 'bench-data'))
+PATTERN = os.environ.get('DIR_CLIPS', 'set/{lang}/*.wav')  # e.g. fleurs/{lang}/test/*.wav: speakers apart from dev
+MAX = int(os.environ.get('DIR_MAX', 40))
 b, g = os.environ['ZONOS_BIN'], os.environ['ZONOS_GGUF']
 
 
 def unit_mean(lang):
     vs = []
     with tempfile.TemporaryDirectory() as t:
-        for w in sorted((SET / lang).glob('*.wav')):
+        for w in sorted(ROOT.glob(PATTERN.format(lang=lang)))[:MAX]:
             o = Path(t) / (w.stem + '.npy')
             subprocess.run([f'{b}/spk-encoder-cli', f'{g}/spk-encoder.gguf', '--audio', str(w), str(o), '--cpu'],
                            check=True, capture_output=True)

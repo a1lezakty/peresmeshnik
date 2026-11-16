@@ -53,7 +53,7 @@ def engines(sides) -> str:
     return ', '.join(f'{ARROW[x.name]}: {x.engine}' for x in sides)
 RESTARTS = 3  # a side that fails this often within a minute stays off, with the reason
 QUIT_S = 5.0  # quit() waits this long for the control thread (a side still loading its models), then exits without it
-LOOP_RECHECK_S = 5.0  # Windows: the microphone loop refused (a virtual default input) is tried again this often
+LOOP_RECHECK_S = 5.0  # macOS without Core Audio's notification: the refused microphone loop is tried again this often
 MAX_CLONE_RTF = 1.0  # seconds of synthesis per second of speech, warm: above, the clone falls behind for good (me -> them
 #                      has no lag limit) and the stock voice speaks; the RTX 3060 runs it at 0.4-0.5 (BENCH), a GTX 10xx
 #                      is not measured
@@ -125,8 +125,8 @@ def headphones_name(saved: str) -> str:
 
 
 class _Arm:
-    """Controller._arm's retry: `handle` is coreaudio.InputsChanged (macOS) or a threading.Timer; `fired` once it fired
-    or was closed."""
+    """Controller._arm's retry: `handle` is coreaudio.InputsChanged (macOS), winaudio.DeviceWatch (Windows) or a
+    threading.Timer; `fired` once it fired or was closed."""
 
     def __init__(self):
         self.fired, self.handle = False, None
@@ -1236,8 +1236,8 @@ class Controller:
     def _loop_refused(self, why: str, retry: bool) -> None:
         """The loop cannot start on this microphone setting: said once (at startup by the tray after its "idle":
         startup_error) and, for "System default" (`retry`), tried again by itself when the default input or the devices
-        change (macOS: Core Audio's notification; Windows: every LOOP_RECHECK_S), so a default set back or AirPods
-        connected let the call hear the user."""
+        change (macOS: Core Audio's notification; Windows: the loopback helper's `watch`), so a default set back or
+        AirPods connected let the call hear the user. Nothing polls: idle stays idle (docs/ARCHITECTURE.md §5)."""
         (log.warning if why != self._loop_why else log.info)('microphone loop: %s', why)
         if why != self._loop_why:
             self._loop_why = why
@@ -1260,6 +1260,14 @@ class Controller:
             if not arm.fired:
                 arm.fired = True
                 self.submit(retry)
+        if sys.platform == 'win32':  # no Timer: a helper `list` every few seconds is CPU while idle
+            try:
+                from peresmeshnik.audio import winaudio
+                arm.handle = winaudio.DeviceWatch(again, flow='capture')
+            except Exception as e:  # no watch: the settings and translation on / off still try again
+                arm.fired = True
+                log.warning('device watch: %s', e)
+            return
         try:
             if sys.platform != 'darwin':
                 raise RuntimeError('no Core Audio')

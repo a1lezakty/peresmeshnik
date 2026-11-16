@@ -7,6 +7,7 @@ microphone: a test process plays into it. A device that goes and comes back is a
 Elsewhere skipped, except the checks that need no Mac.
 """
 import os
+import platform
 import subprocess
 import sys
 import threading
@@ -911,7 +912,7 @@ MIC_I, SPK_I, BH2_I = 1, 2, 3  # indexes in _mac_devices()
 
 def _qt():
     """A QApplication for the device lists (offscreen without a display)."""
-    if os.uname().sysname == 'Linux' and not os.environ.get('DISPLAY'):  # not sys.platform: a test may fake it
+    if platform.system() == 'Linux' and not os.environ.get('DISPLAY'):  # not sys.platform: a test may fake it
         os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     QApplication = pytest.importorskip('PySide6.QtWidgets').QApplication  # noqa: N806
     return QApplication.instance() or QApplication([])
@@ -1126,20 +1127,72 @@ def test_a_listener_that_fires_in_its_constructor_still_recovers(monkeypatch):
         ctl._pool.shutdown()
 
 
-def test_quit_with_a_retry_armed_and_queued_starts_no_loop(monkeypatch):
-    """Windows: the refused loop's Timer is armed and a retry is queued behind other work when the app quits: the
-    retry finds the app quitting, nothing is spawned, the Timer is cancelled."""
+class _Watch:
+    """winaudio.DeviceWatch's stand-in: `on_change()` is Windows saying the default input or a device changed."""
+    made: list = []
+
+    def __init__(self, on_change, flow='render'):
+        self.on_change, self.flow, self.closed = on_change, flow, False
+        self.made.append(self)
+
+    def close(self):
+        self.closed = True
+
+
+def _win_loop(monkeypatch, devs):
+    """_loop_ctl on Windows' path (the helper module stays macOS' fake): the device watch is _Watch, and every device
+    list (`list`, a helper process on Windows) is counted."""
+    from peresmeshnik import app
+    from peresmeshnik.audio import winaudio
+    ctl, states, s, spawned = _loop_ctl(monkeypatch, devs)
+    _with_vmic(monkeypatch, ctl)
+    monkeypatch.setattr(app.sys, 'platform', 'win32')
+    monkeypatch.setattr(winaudio, 'DeviceWatch', _Watch)
+    monkeypatch.setattr(_Watch, 'made', [])
+    listed = []
+    monkeypatch.setattr(macos, 'devices', lambda: listed.append(1) or devs)
+    return ctl, states, spawned, listed
+
+
+def test_a_refused_loop_on_windows_lists_no_devices_while_idle(monkeypatch):
+    """Windows, translation off, the default input virtual (CABLE Output): refused, then nothing runs while idle (no
+    helper `list` every few seconds: idle CPU, docs/ARCHITECTURE.md §5) until Windows says the devices changed; then
+    the loop starts. A device event while still refused (no microphone yet) lists once and waits again."""
     from peresmeshnik import app
     devs = _mac_devices()
     devs[BH2_I]['default_input'] = True
-    ctl, states, s, spawned = _loop_ctl(monkeypatch, devs)
-    _with_vmic(monkeypatch, ctl)
-    monkeypatch.setattr(app.sys, 'platform', 'win32')  # the Timer (the helper module stays macOS' fake)
-    monkeypatch.setattr(app, 'LOOP_RECHECK_S', 30.0)
+    ctl, states, spawned, listed = _win_loop(monkeypatch, devs)
+    monkeypatch.setattr(app, 'LOOP_RECHECK_S', 0.05)  # a Timer, if any, would list ~10 times below
+    try:
+        ctl.submit(ctl.startup).result(10)
+        assert spawned == [] and ctl._loop_why
+        n = len(listed)
+        time.sleep(0.5)
+        assert len(listed) == n and spawned == []  # idle: nothing listed (no helper `list` spawned), nothing started
+        assert len(_Watch.made) == 1 and _Watch.made[0].flow == 'capture'  # waits on Windows' device events instead
+        _Watch.made[-1].on_change()  # a device event, the default still virtual
+        assert _until(lambda: len(listed) > n and len(_Watch.made) == 2)
+        time.sleep(0.3)
+        assert spawned == [] and _Watch.made[0].closed and not _Watch.made[1].closed and len(listed) == n + 1
+        devs[BH2_I]['default_input'], devs[MIC_I]['default_input'] = False, True  # a real default
+        _Watch.made[-1].on_change()
+        assert _until(lambda: spawned) and spawned[0][:3] == ('loop', '--from', '')
+        assert _until(lambda: ctl._loop_arm is None) and all(w.closed for w in _Watch.made)
+    finally:
+        ctl._disarm()
+        ctl._pool.shutdown()
+
+
+def test_quit_with_a_retry_armed_and_queued_starts_no_loop(monkeypatch):
+    """Windows: the refused loop's device watch is armed and a retry is queued behind other work when the app quits:
+    the retry finds the app quitting, nothing is spawned, the watch is closed."""
+    devs = _mac_devices()
+    devs[BH2_I]['default_input'] = True
+    ctl, states, spawned, listed = _win_loop(monkeypatch, devs)
     ctl.submit(ctl.startup).result(10)
     arm = ctl._loop_arm
-    timer = arm.handle
-    assert isinstance(timer, threading.Timer) and timer.is_alive()
+    watch = arm.handle
+    assert isinstance(watch, _Watch) and not watch.closed
     gate = threading.Event()
     ctl.submit(gate.wait, 10)  # the control thread busy
     ctl.submit(ctl._loop_retry)  # queued
@@ -1149,8 +1202,29 @@ def test_quit_with_a_retry_armed_and_queued_starts_no_loop(monkeypatch):
     assert _until(lambda: ctl._quitting)
     gate.set()
     q.join(15)
-    timer.join(2)
-    assert spawned == [] and ctl._loop_arm is None and arm.fired and not timer.is_alive()
+    assert spawned == [] and ctl._loop_arm is None and arm.fired and watch.closed
+
+
+def test_no_device_watch_on_windows_leaves_the_settings_to_retry(monkeypatch):
+    """Windows: the device watch does not start (no loopback helper): no Timer instead, the refusal stays; saving the
+    settings (mic_changed) still tries again."""
+    from peresmeshnik.audio import winaudio
+    devs = _mac_devices()
+    devs[BH2_I]['default_input'] = True
+    ctl, states, spawned, listed = _win_loop(monkeypatch, devs)
+
+    def no_helper(on_change, flow='render'):
+        raise FileNotFoundError('peresmeshnik-loopback.exe')
+    monkeypatch.setattr(winaudio, 'DeviceWatch', no_helper)
+    try:
+        ctl.submit(ctl.startup).result(10)
+        assert spawned == [] and ctl._loop_why and ctl._loop_arm.fired and ctl._loop_arm.handle is None
+        devs[BH2_I]['default_input'], devs[MIC_I]['default_input'] = False, True
+        ctl.mic_changed().result(10)
+        assert spawned[0][:3] == ('loop', '--from', '') and ctl._loop_arm is None
+    finally:
+        ctl._disarm()
+        ctl._pool.shutdown()
 
 
 def test_a_saved_virtual_microphone_is_not_retried(monkeypatch):

@@ -4,7 +4,8 @@ sounddevice (PortAudio) reads the device list once, at init: a device plugged in
 it. So the default and the rates come from here (sounddevice's WASAPI host API, which matches the system), and a
 device change is heard through the native helper's `watch` (IMMNotificationClient), not by polling. The PortAudio
 refresh machinery (close every stream, re-init, reopen) is shared with macOS (`coreaudio`): identical logic, so it is
-reused rather than copied. `DeviceWatch` calls back when the default render device or a device's state changes.
+reused rather than copied. `DeviceWatch` calls back when the default render (or capture) device or a device's state
+changes.
 """
 from __future__ import annotations
 
@@ -96,12 +97,12 @@ class DeviceWatch:
     """`on_change()` (on a thread of its own) when the default render device changes or a device's state does: the
     native helper's `watch` emits one JSON line per event (no polling). A burst (a headset: its stereo and hands-free
     endpoints and a new default) is one call, SETTLE_S after its first event, so the output is refreshed once, not
-    once per line; a change of the default microphone is none of the output's business. close() ends it; after it no
-    call comes."""
+    once per line; a change of the default microphone is none of the output's business (`flow='capture'`: the default
+    microphone's instead of the output's). close() ends it; after it no call comes."""
 
-    def __init__(self, on_change: Callable[[], None]):
+    def __init__(self, on_change: Callable[[], None], flow: str = 'render'):
         from peresmeshnik.audio.capture_windows import CREATE_NO_WINDOW, helper
-        self.on_change = on_change
+        self.on_change, self.flow = on_change, flow
         self._stopped = False
         self._pending = threading.Lock()  # held from a burst's first event until its call
         self._proc = subprocess.Popen([helper(), 'watch'], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -116,7 +117,7 @@ class DeviceWatch:
                 ev = json.loads(line.decode(errors='replace'))
             except ValueError:
                 continue
-            if ev.get('event') == 'state' or (ev.get('event') == 'default' and ev.get('flow') == 'render'):
+            if ev.get('event') == 'state' or (ev.get('event') == 'default' and ev.get('flow') == self.flow):
                 if self._pending.acquire(blocking=False):  # else a call is due already: this event is in it
                     threading.Timer(SETTLE_S, self._fire).start()
 

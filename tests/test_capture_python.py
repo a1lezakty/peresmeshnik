@@ -78,12 +78,12 @@ class FakeWatch:
         pass
 
 
-def watch(monkeypatch, bursts, gap=0.0) -> list:
+def watch(monkeypatch, bursts, gap=0.0, **flow) -> list:
     calls = []
     monkeypatch.setattr(capture_windows, 'helper', lambda: 'helper.exe')
     monkeypatch.setattr(winaudio.subprocess, 'Popen', lambda *a, **k: FakeWatch(bursts, gap))
     done = threading.Event()
-    w = winaudio.DeviceWatch(lambda: calls.append(time.monotonic()))
+    w = winaudio.DeviceWatch(lambda: calls.append(time.monotonic()), **flow)
     done.wait(1.5)
     w.close()
     return calls
@@ -97,6 +97,12 @@ def test_a_burst_of_device_events_refreshes_once(monkeypatch):
 
 def test_a_microphone_default_change_is_no_output_event(monkeypatch):
     assert watch(monkeypatch, [[{'event': 'default', 'flow': 'capture', 'id': 'webcam-mic'}]]) == []
+
+
+def test_the_microphone_watch_hears_a_default_microphone_change_not_the_outputs(monkeypatch):
+    """flow='capture' (the refused microphone loop, app.Controller._arm): the default microphone, not the output."""
+    assert len(watch(monkeypatch, [[{'event': 'default', 'flow': 'capture', 'id': 'webcam-mic'}]], flow='capture')) == 1
+    assert watch(monkeypatch, [[{'event': 'default', 'flow': 'render', 'id': 'X'}]], flow='capture') == []
 
 
 def test_two_bursts_apart_refresh_twice(monkeypatch):

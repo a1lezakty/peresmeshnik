@@ -30,10 +30,13 @@ def _ca_bundle() -> None:
         hashed = False
     if p.cafile or hashed or ssl.create_default_context().cert_store_stats()['x509_ca']:  # Windows: its system store
         return
-    import certifi
+    try:
+        import certifi
+    except ImportError:  # a build without it: started all the same, HTTPS fails as before and says why
+        return
     os.environ['SSL_CERT_FILE'] = certifi.where()
 
 
 _ca_bundle()
 
-__version__ = '0.3.0'
+__version__ = '0.3.1'

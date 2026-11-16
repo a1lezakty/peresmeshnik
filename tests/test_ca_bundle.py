@@ -12,6 +12,7 @@ import pytest
 
 import peresmeshnik
 
+START = dict(os.environ)
 NONE = ssl.DefaultVerifyPaths(None, None, 'SSL_CERT_FILE', '/nowhere/cert.pem', 'SSL_CERT_DIR', '/nowhere/certs')
 EMPTY = types.SimpleNamespace(cert_store_stats=lambda: {'x509': 0, 'crl': 0, 'x509_ca': 0})
 
@@ -19,8 +20,9 @@ EMPTY = types.SimpleNamespace(cert_store_stats=lambda: {'x509': 0, 'crl': 0, 'x5
 @pytest.fixture
 def bare(monkeypatch):
     """No SSL_CERT_* from the user; OpenSSL finds no CA certificates of its own (and no Windows store)."""
-    monkeypatch.delenv('SSL_CERT_FILE', raising=False)
-    monkeypatch.delenv('SSL_CERT_DIR', raising=False)
+    for var in ('SSL_CERT_FILE', 'SSL_CERT_DIR'):  # set first: the teardown then restores them, also as absent
+        monkeypatch.setenv(var, '')
+        monkeypatch.delenv(var)
     monkeypatch.setattr(ssl, 'get_default_verify_paths', lambda: NONE)
     monkeypatch.setattr(ssl, 'create_default_context', lambda *a, **k: EMPTY)
 
@@ -28,6 +30,17 @@ def bare(monkeypatch):
 def test_no_system_certificates_take_certifis(bare):
     peresmeshnik._ca_bundle()
     assert os.environ['SSL_CERT_FILE'] == certifi.where() and os.path.isfile(certifi.where())
+
+
+def test_without_certifi_it_still_starts(bare, monkeypatch):
+    monkeypatch.setitem(sys.modules, 'certifi', None)  # a build without it: import fails
+    peresmeshnik._ca_bundle()
+    assert 'SSL_CERT_FILE' not in os.environ
+
+
+def test_nothing_leaks_into_the_session():
+    """The fixture's teardown put the environment back: no test above left SSL_CERT_FILE for the next ones."""
+    assert os.environ.get('SSL_CERT_FILE') == START.get('SSL_CERT_FILE')
 
 
 @pytest.mark.parametrize('var', ['SSL_CERT_FILE', 'SSL_CERT_DIR'])

@@ -136,14 +136,14 @@ jobs:
             run $PY bench/pocket_speed.py speed pocket-tts-en --model-dir $EN --voice $V/ref_ru --n 1  # its voice state made
             run $PY bench/me_them.py input
             ME="--null-mic --voice $V/ref_ru --engine pocket-tts-en --model-dir $EN"
-            run $PY bench/me_them.py run $ME --out-dir $O/me_a1
-            for v in b c d; do run $PY bench/latency_variants.py $v me_them.py run $ME --out-dir $O/me_$v; done
-            run $PY bench/me_them.py run $ME --out-dir $O/me_a2
+            for i in 1 2; do  # run 43932276656 had a b c d a, and d with a fixed -40 dBFS floor: it cut nothing
+              run $PY bench/me_them.py run $ME --out-dir $O/me_a$i
+              for v in b d; do run $PY bench/latency_variants.py $v me_them.py run $ME --out-dir $O/me_$v$i; done
+            done
             curl -sfL https://www.openslr.org/resources/12/dev-clean.tar.gz \
               | tar -xzf - -C bench-data LibriSpeech/dev-clean/1272 LibriSpeech/dev-clean/1462 || echo 'FAILED: dev-clean'
             THEM="--data bench-data/LibriSpeech/dev-clean --a 1272 --b 1462 --clone models/pocket-tts-ru --speaker models/wespeaker-resnet34"
-            run $PY bench/their_voice.py $THEM --out $O/them_a
-            for v in c d; do run $PY bench/latency_variants.py $v their_voice.py $THEM --out $O/them_$v; done
+            for v in d; do run $PY bench/latency_variants.py $v their_voice.py $THEM --out $O/them_$v; done
             rm -f $O/*/*.wav; [ $failed = 0 ]; exit
           fi
           run $PY bench/pocket_speed.py speed pocket-tts-ru --voice $V/ref_en

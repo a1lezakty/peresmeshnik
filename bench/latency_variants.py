@@ -24,7 +24,8 @@ from peresmeshnik import pipeline  # noqa: E402
 from peresmeshnik.local import asr, vad  # noqa: E402
 from peresmeshnik.voices import live  # noqa: E402
 
-KEEP_S, QUIET = 0.12, 0.01  # trailing silence kept; below this |sample| counts as silence (-40 dBFS)
+KEEP_S, FLOOR_DB = 0.12, 30.0  # trailing silence kept; 20 ms frames this far below the clause's loudest are silence
+TRIMMED = []  # seconds cut per clause (variant d), printed at exit
 
 
 class NoDrop(float):
@@ -36,17 +37,25 @@ class NoDrop(float):
 
 
 def trim(chunks, sr):
-    """The chunks as they come, but the silence after the last sound held back; at the end at most KEEP_S of it."""
-    held = np.zeros(0, np.float32)
+    """The chunks as they come, but the quiet after the last loud 20 ms frame held back; at the end at most KEEP_S of
+    it. ponytail: 20 ms frames re-cut from each chunk's start, fine for a tail."""
+    f, top, held = sr // 50, 0.0, np.zeros(0, np.float32)
     for c in chunks:
-        loud = np.nonzero(np.abs(c) > QUIET)[0]
+        x = np.concatenate([held, np.asarray(c, np.float32)])
+        n = len(x) // f
+        rms = np.sqrt(np.mean(np.square(x[:n * f].reshape(n, f)), axis=1)) if n else np.zeros(0)
+        top = max(top, float(rms.max(initial=0.0)))
+        loud = np.nonzero(rms > top * 10 ** (-FLOOR_DB / 20))[0] if top else []
         if len(loud):
-            yield np.concatenate([held, c[:loud[-1] + 1]])
-            held = c[loud[-1] + 1:]
+            end = (int(loud[-1]) + 1) * f
+            yield x[:end]
+            held = x[end:]
         else:
-            held = np.concatenate([held, c])
-    if len(held):
-        yield held[:int(KEEP_S * sr)]
+            held = x
+    keep = held[:int(KEEP_S * sr)]
+    TRIMMED.append(round((len(held) - len(keep)) / sr, 3))
+    if len(keep):
+        yield keep
 
 
 class SpeedTts:
@@ -73,6 +82,8 @@ def main():
     if variant == 'd':
         faster = live.faster
         live.faster = lambda chunks, speed, sr=live.OUT_SR: trim(faster(chunks, speed, sr), sr)
+        import atexit
+        atexit.register(lambda: print(f'trimmed per clause, s: {TRIMMED} (total {sum(TRIMMED):.2f})', flush=True))
     sys.argv = [script, *args]
     if script != 'me_them.py':
         runpy.run_path(str(BENCH / script), run_name='__main__')

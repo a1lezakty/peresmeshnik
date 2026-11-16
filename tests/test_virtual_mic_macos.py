@@ -984,13 +984,9 @@ def test_silent_headphones_are_refused_and_a_saved_uid_becomes_its_name(monkeypa
             app.Headphones(name).resolve()
     with pytest.raises(RuntimeError, match='the saved output is BlackHole 2ch, a device of the call'):
         app.Headphones('BlackHole2ch_UID').resolve()  # by its UID: found by name, refused
-    monkeypatch.setattr(app, 'CALL_OUTPUTS', ('BlackHole 16ch',))  # the runner's stand-in (test_macos_audio.py)
-    assert app.Headphones('BlackHole 2ch').resolve() == 'BlackHole 2ch'  # BlackHole is CALL_OUTPUTS' call alone
-    monkeypatch.undo()  # back to the app's own rules for the rest
-    devs[SPK_I]['default_output'] = True
-    _fake_coreaudio(monkeypatch, devs)
-    monkeypatch.setattr(app.sys, 'platform', 'darwin')
-    monkeypatch.setattr(app.crash, 'private', lambda *a: None)
+    with monkeypatch.context() as m:  # the runner's stand-in (test_macos_audio.py), only here
+        m.setattr(app, 'CALL_OUTPUTS', ('BlackHole 16ch',))
+        assert app.Headphones('BlackHole 2ch').resolve() == 'BlackHole 2ch'  # BlackHole is CALL_OUTPUTS' call alone
     for name in ('Multi-Output Device', 'krisp speaker', 'eqMac', 'Loopback Audio', ''):
         assert app.Headphones(name).resolve() == (name or 'MacBook Pro Speakers')
     s = config.Settings()

@@ -38,11 +38,11 @@ elif eng == 'supertonic3':
 elif eng == 'kokororu':
     import onnxruntime as ort
     from huggingface_hub import snapshot_download
-    d = Path(snapshot_download('zaakirio/kokoro-ru', allow_patterns=[
-        'config.json', 'ru_g2p.py', 'onnx/model_quantized.onnx', 'voices/sveta.bin', 'espeak-data/*', 'espeak-data/**']))
-    sys.path.insert(0, str(d))
+    d = Path(snapshot_download('zaakirio/kokoro-ru', local_dir=HERE / 'models/kokoro-ru', allow_patterns=[
+        '*.json', 'ru_g2p.py', 'onnx/model_quantized.onnx', 'voices/sveta.bin', 'espeak-data/*', 'espeak-data/**']))
+    sys.path.insert(0, str(d))  # real files in one folder: ru_g2p finds espeak-data and kokoro-config.json beside itself
     from ru_g2p import RuG2P
-    g2p = RuG2P(espeak_data=d / 'espeak-data')  # snapshot files are links into blobs/, so pass the folder
+    g2p = RuG2P()
     vocab = json.loads((d / 'config.json').read_text())['vocab']
     so = ort.SessionOptions(); so.intra_op_num_threads = threads; so.inter_op_num_threads = 1
     sess = ort.InferenceSession(str(d / 'onnx/model_quantized.onnx'), so, providers=['CPUExecutionProvider'])

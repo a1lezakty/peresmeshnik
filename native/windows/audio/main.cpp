@@ -39,6 +39,7 @@
 #include <io.h>
 
 #include <algorithm>
+#include <cctype>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
@@ -187,8 +188,10 @@ static std::optional<Device> find(const std::vector<Device>& all, const std::wst
 
 // The user's voice: not a software device, unless it is the real microphone processed (peresmeshnik/audio PROCESSED).
 static bool real(const Device& d) {
-    return d.transport != "virt" || d.name.find("NVIDIA Broadcast") != std::string::npos ||
-           d.name.find("Krisp") != std::string::npos;
+    std::string name = d.name;  // UTF-8: ASCII letters lowered, the rest as it is
+    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    return d.transport != "virt" || name.find("nvidia broadcast") != std::string::npos ||
+           name.find("krisp") != std::string::npos;
 }
 
 static bool active(const std::wstring& id) {

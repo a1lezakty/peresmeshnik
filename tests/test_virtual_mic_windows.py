@@ -236,12 +236,20 @@ def test_cable_and_virtual_inputs_are_no_microphone(monkeypatch):
         windows.not_virtual('')  # no real microphone at all
     meeter_in = {**DEV, 'uid': '{0.0.0.00000000}.{vmi}', 'name': 'VoiceMeeter Input (VB-Audio VoiceMeeter VAIO)', 'inputs': 0,
                  'outputs': 2, 'transport': 'virt', 'default_output': True}
-    monkeypatch.setattr(windows, 'devices', lambda: [{**HEADSET, 'default_input': False}, {**MEETER, 'default_input': True},
-                                                     {**SPEAKERS, 'default_output': False}, CABLE_IN, CABLE_OUT, meeter_in])
-    sinks, ok = selftest.listing('sinks')  # headphones: no cable, no VoiceMeeter; no "System default" (it is VoiceMeeter)
-    assert sinks == [(SPEAKERS['name'], SPEAKERS['name'])] and ok is False
+    teams = {**DEV, 'uid': '{0.0.0.00000000}.{tms}', 'name': 'Microsoft Teams Audio Device', 'inputs': 0, 'outputs': 2,
+             'transport': 'virt'}
+    devices = [{**HEADSET, 'default_input': False}, {**MEETER, 'default_input': True}, {**SPEAKERS, 'default_output': False},
+               CABLE_IN, CABLE_OUT, meeter_in, teams]
+    monkeypatch.setattr(windows, 'devices', lambda: devices)
+    sinks, ok = selftest.listing('sinks')  # headphones: VoiceMeeter Input plays on (stays), no cable, no Teams'
+    assert sinks == [(meeter_in['name'], meeter_in['name']), (SPEAKERS['name'], SPEAKERS['name'])] and ok is True
     sources, ok = selftest.listing('sources')
     assert sources == [(HEADSET['uid'], HEADSET['name'])] and ok is False
+    devices[5] = {**meeter_in, 'default_output': False}
+    devices[3] = {**CABLE_IN, 'default_output': True}  # CABLE Input as Windows' default output: no "System default"
+    assert selftest.listing('sinks')[1] is False
+    devices[3], devices[6] = CABLE_IN, {**teams, 'default_output': True}
+    assert selftest.listing('sinks')[1] is False
     monkeypatch.setattr(windows, 'devices', lambda: devs)
     assert windows.not_virtual(CABLE_OUT['name'], what='headphones') == CABLE_OUT['name']  # not this check's business
     assert selftest.devices('sources') == [(HEADSET['uid'], HEADSET['name']), (BROADCAST['uid'], BROADCAST['name'])]

@@ -655,8 +655,9 @@ def save_key(key: str, cfg: config.Cloud | None = None) -> None:
 
 
 def device_combo(kind: str, current: str) -> QComboBox:
-    """The real outputs or inputs (selftest.listing); '' = the system default, offered only while that is a real device
-    (a saved '' then shows the first real one: saving takes it; the app refuses '' with why meanwhile)."""
+    """The real outputs or inputs (selftest.listing); '' = the system default, offered only while that is a real device.
+    A saved '' then shows the built-in (else the first real) one, and saving takes it. Meanwhile the app refuses a ''
+    microphone with why (macOS, Windows) and '' headphones on macOS; Windows plays to the first real output instead."""
     c = QComboBox()
     fill_combo(c, kind, current)
     return c
@@ -664,6 +665,9 @@ def device_combo(kind: str, current: str) -> QComboBox:
 
 def fill_combo(c: QComboBox, kind: str, current: str) -> None:
     """device_combo's items, again (the devices changed: BlackHole installed may be the system's default now)."""
+    if kind == 'sinks' and current and sys.platform == 'darwin':  # 0.3.0 saved the headphones by UID: by name now
+        from peresmeshnik.app import headphones_name
+        current = headphones_name(current)
     c.blockSignals(True)
     c.clear()
     try:

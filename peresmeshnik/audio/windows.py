@@ -15,7 +15,7 @@ import sys
 import threading
 from pathlib import Path
 
-from peresmeshnik.audio import processed
+from peresmeshnik.audio import processed, silent_output
 
 HELPER = 'peresmeshnik-audio.exe'
 CABLE = 'VB-Audio Virtual Cable'  # in both endpoints' names, also when the user renames them: "CABLE Input (VB-Audio ...)"
@@ -100,8 +100,10 @@ def not_virtual(key: str, what: str = 'microphone') -> str:
 
 
 def virtual(d: dict, output: bool = False) -> bool:
-    """A software device: not the user's voice (unless the real microphone processed: NVIDIA Broadcast, Krisp); as an
-    output (`output`) nobody hears it (VB-Cable, VoiceMeeter), unless it plays on to the real one (the same names)."""
+    """A software device: not the user's voice (unless the real microphone processed: NVIDIA Broadcast, Krisp). As an
+    output (`output`) only one nobody hears (audio.silent_output: CABLE Input, Teams'); VoiceMeeter Input plays on."""
+    if output:
+        return silent_output(d['name'])
     return (d['transport'] == 'virt' or 'VB-Audio' in d['name']) and not processed(d['name'])
 
 

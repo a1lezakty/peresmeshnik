@@ -13,7 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from peresmeshnik.audio import processed
+from peresmeshnik.audio import processed, silent_output
 
 HELPER = 'peresmeshnik-audio'
 BLACKHOLE = 'BlackHole 2ch'
@@ -102,10 +102,11 @@ def not_blackhole(key: str, what: str = 'microphone') -> str:
 
 def virtual(d: dict, output: bool = False) -> bool:
     """A virtual device or an aggregate: not the user's voice, unless the real microphone processed (Krisp). As an
-    output (`output`) only a virtual one: nobody hears what plays into it (BlackHole, Zoom's and Teams' speakers); an
-    aggregate plays on its real devices (a Multi-Output Device) and Krisp's speaker on the real one."""
-    kinds = ('virt',) if output else ('virt', 'grup')
-    return d['transport'] in kinds and not (d['transport'] == 'virt' and processed(d['name']))
+    output (`output`) only one nobody hears (audio.silent_output: BlackHole, Zoom's and Teams' speakers); an aggregate,
+    Krisp's speaker, eqMac or Loopback play on to a real device."""
+    if output:
+        return silent_output(d['name'])
+    return d['transport'] in ('virt', 'grup') and not (d['transport'] == 'virt' and processed(d['name']))
 
 
 not_virtual = not_blackhole  # the name shared with audio/windows.py

@@ -113,8 +113,8 @@ macOS 14 Sonoma or later on Apple Silicon (M1 and newer).
    `xattr -dr com.apple.quarantine /Applications/Peresmeshnik.app`.
 3. Install [BlackHole 2ch](https://existential.audio/blackhole/) (`brew install --cask blackhole-2ch`, or its
    .pkg: the site e-mails the download link; the Mac may need a restart before it shows up): the virtual microphone
-   that the other side hears. In your call app choose **BlackHole 2ch** as the microphone only; its speaker stays
-   your headphones. If installing it made BlackHole 2ch macOS' default input, choose your real microphone in
+   that the other side hears. In your call app choose **BlackHole 2ch** as the microphone only (on 14.4+ its
+   speaker stays your headphones). If installing it made BlackHole 2ch macOS' default input, choose your real microphone in
    Peresmeshnik's settings (or set it back in System Settings → Sound → Input). On macOS older than 14.4 also
    BlackHole 16ch (`brew install --cask blackhole-16ch`) as the call app's speaker: the app takes the call's sound
    from there.

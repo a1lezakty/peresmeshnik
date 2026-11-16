@@ -66,7 +66,8 @@ def listing(kind: str) -> tuple[list[tuple[str, str]], bool]:
                 or not out_ and d['uid'] == helper.stand_in_mic()]
         key = 'name' if out_ else 'uid'
         ok = not any(d[default] for d in devs) or any(d[default] for d in real)
-        return [(d[key], d['name']) for d in sorted(real, key=lambda d: not d[default])], ok
+        first = lambda d: (not d[default], d.get('transport') != 'bltn')  # noqa: E731  no real default: the built-in one
+        return [(d[key], d['name']) for d in sorted(real, key=first)], ok
     items = json.loads(pactl('-f', 'json', 'list', kind) or '[]')
     default = pactl('get-default-sink' if kind == 'sinks' else 'get-default-source').strip()
     out = [(d['name'], d.get('description') or d['name']) for d in items if not d['name'].endswith('.monitor')]

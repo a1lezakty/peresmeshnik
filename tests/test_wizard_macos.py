@@ -156,12 +156,22 @@ def test_devices_page_shows_the_whole_install_hint(monkeypatch):
         assert [page.mic.itemData(i) for i in range(page.mic.count())] == ['BuiltInMicrophoneDevice']
         assert page.mic_note.isHidden()
         devs[0] = {**MIC, 'inputs': 0}  # a Mac mini: no microphone at all, only BlackHole (the page opened again)
+        monkeypatch.setenv('PERESMESHNIK_CALL_PATH', 'blackhole')  # and macOS < 14.4
         page.initializePage()
         assert page.mic.count() == 0
         assert not page.mic_note.isHidden(), page.mic_note.text()
         assert "⚠ macOS' default input is BlackHole 2ch and there is no microphone: connect a microphone" in page.mic_note.text()
-        assert 'In the call app the speaker stays your headphones' in ''.join(
-            x.text() for x in page.findChildren(type(page.vmic)))
+        for _ in range(5):
+            QCoreApplication.processEvents()  # the rows removed by initializePage go
+        texts = ''.join(x.text() for x in page.findChildren(type(page.vmic)))
+        assert 'is chosen only as the microphone; its speaker is set on the next page' in texts  # below 14.4
+        assert 'its speaker stays your headphones' not in texts
+        monkeypatch.setenv('PERESMESHNIK_CALL_PATH', 'tap')
+        page.initializePage()
+        for _ in range(5):
+            QCoreApplication.processEvents()
+        texts = ''.join(x.text() for x in page.findChildren(type(page.vmic)))
+        assert 'is chosen only as the microphone; its speaker stays your headphones' in texts
     finally:
         w.close()
 

@@ -69,6 +69,16 @@ BLACKHOLE_THEN = ('The Mac may need a restart before the device shows up (Homebr
                   '<b>Check again</b>.')
 
 
+def _call_path() -> str:
+    """macOS: how the app hears the call ('tap' on 14.4+, 'blackhole' below: the call app's speaker is BlackHole 16ch)."""
+    try:
+        from peresmeshnik.audio import capture_macos
+        return capture_macos.path()
+    except Exception as e:
+        log.info('call path: %s', e)
+        return 'tap'
+
+
 def form(page: QWizardPage) -> QFormLayout:
     """A form whose wrapped texts are as tall as their lines: macOS' default policy keeps a field at its size hint, and
     QFormLayout then gives a wrapped QLabel the height of its text at the full width, cutting off the last lines (the
@@ -300,8 +310,9 @@ class DevicesPage(QWizardPage):
             self.recheck.clicked.connect(self._recheck)
             self.f.addRow('Virtual microphone', self.vmic)
             self.f.addRow('', self.recheck)
-            speaker = QLabel('In the call app the speaker stays your headphones; '
-                             f'<b>{"CABLE Output" if WINDOWS else "BlackHole 2ch"}</b> is chosen there only as the microphone.')
+            speaker = QLabel(f'In the call app <b>{"CABLE Output" if WINDOWS else "BlackHole 2ch"}</b> is chosen only as the '
+                             'microphone; ' + ('its speaker stays your headphones.' if WINDOWS or _call_path() == 'tap' else
+                                               'its speaker is set on the next page.'))  # below 14.4: BlackHole 16ch
             speaker.setWordWrap(True)
             self.f.addRow('', speaker)
             self.check_vmic(probe=not self._probed)  # the microphone tried once, not on every visit to the page

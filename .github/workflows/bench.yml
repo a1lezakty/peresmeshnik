@@ -7,13 +7,11 @@ on:
   workflow_dispatch:
     inputs:
       suites:
-        description: 'JSON list of suites: asr, mt, tts, clone'
+        description: 'JSON list of suites: asr, mt, tts, clone, pocket'
         default: '["asr", "mt", "tts", "clone"]'
       os:
         description: 'Runner'
         default: macos-15
-  pull_request:
-    types: [labeled]
 
 permissions:
   contents: read
@@ -32,7 +30,7 @@ jobs:
         run: |
           python3 - >> "$GITHUB_OUTPUT" <<'EOF'
           import json, os
-          allowed = ['asr', 'mt', 'tts', 'clone']
+          allowed = ['asr', 'mt', 'tts', 'clone', 'pocket']
           inp, label = os.environ['INPUT'], os.environ['LABEL']
           suites = json.loads(inp) if inp else allowed if label == 'bench' else [label.removeprefix('bench-')]
           if not isinstance(suites, list) or not suites or any(s not in allowed for s in suites):
@@ -111,7 +109,7 @@ jobs:
           done
           echo "GGUF=$PWD/models/gguf/HY-MT1.5-1.8B-Q4_K_M.gguf $PWD/models/gguf/HY-MT1.5-7B-Q4_K_M.gguf" >> $GITHUB_ENV
       - name: Run ${{ matrix.suite }}
-        if: matrix.suite != 'clone'
+        if: matrix.suite != 'clone' && matrix.suite != 'pocket'
         env:
           SUITE: ${{ matrix.suite }}
         run: |
@@ -120,6 +118,31 @@ jobs:
       - name: Voice clone
         if: matrix.suite == 'clone'
         run: bench/clone_ci.sh
+      - name: Pocket TTS, the app's engine and pipeline (int8, 2 threads per engine)
+        if: matrix.suite == 'pocket'
+        run: |
+          # research-1116 R1: ungated weights only (pocket-tts-ru from the registry; English: pocket_speed.py's stand-in)
+          PY=$PWD/.bench/bin/python O=bench/results/pocket V=$RUNNER_TEMP/voices EN=$RUNNER_TEMP/pocket-en-standin  # not in the models cache
+          mkdir -p $O; failed=0
+          run() { echo "== $*"; "$@" || { echo "FAILED: $*"; failed=$((failed + 1)); }; }
+          uv pip install -q -p .bench -e .
+          $PY -m peresmeshnik models fetch --accept-licenses silero-vad wespeaker-resnet34 parakeet-tdt-0.6b-v3 \
+            gigaam-v3-e2e-ctc opus-mt-en-ru opus-mt-ru-en piper-ru_RU-dmitri-medium piper-en_US-john-medium pocket-tts-ru
+          $PY bench/pocket_speed.py profiles $V
+          run $PY bench/pocket_speed.py standin $EN
+          run $PY bench/pocket_speed.py speed pocket-tts-ru --voice $V/ref_en
+          run $PY bench/pocket_speed.py speed pocket-tts-ru --voice $V/ref_ru
+          run $PY bench/pocket_speed.py speed pocket-tts-en --model-dir $EN --voice $V/ref_ru
+          [ -d bench-data/LibriSpeech/dev-clean/1462 ] || curl -sfL https://www.openslr.org/resources/12/dev-clean.tar.gz \
+            | tar -xzf - -C bench-data LibriSpeech/dev-clean/1272 LibriSpeech/dev-clean/1462 || echo 'FAILED: dev-clean'
+          run $PY bench/their_voice.py --data bench-data/LibriSpeech/dev-clean --a 1272 --b 1462 \
+            --clone models/pocket-tts-ru --speaker models/wespeaker-resnet34 --out $O/them_1272_1462
+          run $PY bench/me_them.py input
+          run $PY bench/me_them.py run --null-mic --voice $V/ref_ru --engine pocket-tts-en --model-dir $EN \
+            --with-them tests/data/call-en.ogg --them-engine pocket-tts-ru --them-voice $V/ref_en --out-dir $O/both
+          run $PY bench/me_them.py run --null-mic --voice $V/ref_ru --engine pocket-tts-en --model-dir $EN --out-dir $O/me_alone
+          rm -f $O/*/*.wav  # the artifact: numbers, not audio
+          [ $failed = 0 ]
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:

@@ -911,7 +911,7 @@ MIC_I, SPK_I, BH2_I = 1, 2, 3  # indexes in _mac_devices()
 
 def _qt():
     """A QApplication for the device lists (offscreen without a display)."""
-    if sys.platform.startswith('linux') and not os.environ.get('DISPLAY'):
+    if os.uname().sysname == 'Linux' and not os.environ.get('DISPLAY'):  # not sys.platform: a test may fake it
         os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     QApplication = pytest.importorskip('PySide6.QtWidgets').QApplication  # noqa: N806
     return QApplication.instance() or QApplication([])
@@ -983,6 +983,13 @@ def test_silent_headphones_are_refused_and_a_saved_uid_becomes_its_name(monkeypa
             app.Headphones(name).resolve()
     with pytest.raises(RuntimeError, match='the saved output is BlackHole 2ch, a device of the call'):
         app.Headphones('BlackHole2ch_UID').resolve()  # by its UID: found by name, refused
+    monkeypatch.setattr(app, 'CALL_OUTPUTS', ('BlackHole 16ch',))  # the runner's stand-in (test_macos_audio.py)
+    assert app.Headphones('BlackHole 2ch').resolve() == 'BlackHole 2ch'  # BlackHole is CALL_OUTPUTS' call alone
+    monkeypatch.undo()  # back to the app's own rules for the rest
+    devs[SPK_I]['default_output'] = True
+    _fake_coreaudio(monkeypatch, devs)
+    monkeypatch.setattr(app.sys, 'platform', 'darwin')
+    monkeypatch.setattr(app.crash, 'private', lambda *a: None)
     for name in ('Multi-Output Device', 'krisp speaker', 'eqMac', 'Loopback Audio', ''):
         assert app.Headphones(name).resolve() == (name or 'MacBook Pro Speakers')
     s = config.Settings()
@@ -1027,7 +1034,12 @@ def _loop_ctl(monkeypatch, devs):
     monkeypatch.setattr(macos, 'spawn', Loop)
     monkeypatch.setattr(mic, 'native', lambda: macos)
     monkeypatch.setattr(app.sys, 'platform', 'darwin')
-    monkeypatch.setattr(app, 'LOOP_RECHECK_S', 0.05)  # no Core Audio here: the Timer instead of its notification
+    monkeypatch.setattr(app, 'LOOP_RECHECK_S', 0.05)  # the Timer instead of Core Audio's notification: the devices
+    from peresmeshnik.audio import coreaudio  # change in this fake list only, Core Audio (on a Mac) would not say so
+
+    def no_listener(on_change):
+        raise RuntimeError('no Core Audio notification for a fake device list')
+    monkeypatch.setattr(coreaudio, 'InputsChanged', no_listener)
     monkeypatch.setenv('PERESMESHNIK_CALL_PATH', 'tap')  # macOS 14.4+: no pass-through
     overlay = types.SimpleNamespace(side=lambda name: types.SimpleNamespace(hide=lambda: None))
     states, s = [], config.Settings()
@@ -1099,8 +1111,8 @@ def test_a_listener_that_fires_in_its_constructor_still_recovers(monkeypatch):
 
         def close(self):
             self.closed = True
-    monkeypatch.setattr(coreaudio, 'InputsChanged', Listener)
     ctl, states, s, spawned = _loop_ctl(monkeypatch, devs)
+    monkeypatch.setattr(coreaudio, 'InputsChanged', Listener)  # after _loop_ctl's Timer-only stand-in
     _with_vmic(monkeypatch, ctl)
     try:
         ctl.submit(ctl.startup).result(10)

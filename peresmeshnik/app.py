@@ -198,7 +198,9 @@ class Headphones:
             if name == capture_macos.CALL_DEVICE and capture_macos.path() == 'blackhole':  # the call would hear itself
                 raise RuntimeError(f'the headphones are {name}, the call app\'s speaker: choose your real headphones in the '
                                    'settings or the system')
-            if silent_output(name):  # Zoom's or Teams' speaker: nobody hears it (eqMac, Loopback play on: allowed)
+            if silent_output(name) and not name.startswith('BlackHole'):  # Zoom's or Teams' speaker: nobody hears it
+                # (eqMac, Loopback play on: allowed). BlackHole: CALL_OUTPUTS above, which the runner's tests narrow to
+                # 16ch (tests/test_macos_audio.py: its only output, 2ch, stands in for the headphones)
                 raise RuntimeError(f'the {"saved" if name == self.sink else "default"} output is {name}, a virtual device: '
                                    'nobody hears what plays there; choose your real headphones in the settings or the system')
             crash.private(name)

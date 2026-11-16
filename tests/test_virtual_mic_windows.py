@@ -211,6 +211,7 @@ BROADCAST = {**DEV, 'uid': '{0.0.1.00000000}.{nv}', 'name': 'Microphone (NVIDIA 
 
 def test_cable_and_virtual_inputs_are_no_microphone(monkeypatch):
     from peresmeshnik.ui import selftest
+    monkeypatch.delenv('PERESMESHNIK_TEST_MIC', raising=False)  # tests/conftest.py's stand-in on macOS: none here
     devs = [HEADSET, SPEAKERS, CABLE_IN, CABLE_OUT, MEETER, BROADCAST]
     monkeypatch.setattr(windows, 'devices', lambda: devs)
     monkeypatch.setattr(selftest, 'HELPER', True)

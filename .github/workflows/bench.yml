@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       suites:
-        description: 'JSON list of suites: asr, mt, tts, clone, pocket'
+        description: 'JSON list of suites: asr, mt, tts, clone, pocket, fixes'
         default: '["asr", "mt", "tts", "clone"]'
       os:
         description: 'Runner'
@@ -30,7 +30,7 @@ jobs:
         run: |
           python3 - >> "$GITHUB_OUTPUT" <<'EOF'
           import json, os
-          allowed = ['asr', 'mt', 'tts', 'clone', 'pocket']
+          allowed = ['asr', 'mt', 'tts', 'clone', 'pocket', 'fixes']
           inp, label = os.environ['INPUT'], os.environ['LABEL']
           suites = json.loads(inp) if inp else allowed if label == 'bench' else [label.removeprefix('bench-')]
           if not isinstance(suites, list) or not suites or any(s not in allowed for s in suites):
@@ -109,7 +109,7 @@ jobs:
           done
           echo "GGUF=$PWD/models/gguf/HY-MT1.5-1.8B-Q4_K_M.gguf $PWD/models/gguf/HY-MT1.5-7B-Q4_K_M.gguf" >> $GITHUB_ENV
       - name: Run ${{ matrix.suite }}
-        if: matrix.suite != 'clone' && matrix.suite != 'pocket'
+        if: matrix.suite != 'clone' && matrix.suite != 'pocket' && matrix.suite != 'fixes'
         env:
           SUITE: ${{ matrix.suite }}
         run: |
@@ -119,7 +119,9 @@ jobs:
         if: matrix.suite == 'clone'
         run: bench/clone_ci.sh
       - name: Pocket TTS, the app's engine and pipeline (int8, 2 threads per engine)
-        if: matrix.suite == 'pocket'
+        if: matrix.suite == 'pocket' || matrix.suite == 'fixes'
+        env:
+          SUITE: ${{ matrix.suite }}
         run: |
           # research-1116 R1: ungated weights only (pocket-tts-ru from the registry; English: pocket_speed.py's stand-in)
           PY=$PWD/.bench/bin/python O=bench/results/pocket V=$RUNNER_TEMP/voices EN=$RUNNER_TEMP/pocket-en-standin  # not in the models cache
@@ -130,6 +132,20 @@ jobs:
             gigaam-v3-e2e-ctc quickmt-en-ru opus-mt-ru-en piper-ru_RU-dmitri-medium piper-en_US-john-medium pocket-tts-ru
           $PY bench/pocket_speed.py profiles $V
           run $PY bench/pocket_speed.py standin $EN
+          if [ "$SUITE" = fixes ]; then  # the proposed 0.3.2 latency fixes (bench/latency_variants.py), a twice
+            run $PY bench/pocket_speed.py speed pocket-tts-en --model-dir $EN --voice $V/ref_ru --n 1  # its voice state made
+            run $PY bench/me_them.py input
+            ME="--null-mic --voice $V/ref_ru --engine pocket-tts-en --model-dir $EN"
+            run $PY bench/me_them.py run $ME --out-dir $O/me_a1
+            for v in b c d; do run $PY bench/latency_variants.py $v me_them.py run $ME --out-dir $O/me_$v; done
+            run $PY bench/me_them.py run $ME --out-dir $O/me_a2
+            curl -sfL https://www.openslr.org/resources/12/dev-clean.tar.gz \
+              | tar -xzf - -C bench-data LibriSpeech/dev-clean/1272 LibriSpeech/dev-clean/1462 || echo 'FAILED: dev-clean'
+            THEM="--data bench-data/LibriSpeech/dev-clean --a 1272 --b 1462 --clone models/pocket-tts-ru --speaker models/wespeaker-resnet34"
+            run $PY bench/their_voice.py $THEM --out $O/them_a
+            for v in c d; do run $PY bench/latency_variants.py $v their_voice.py $THEM --out $O/them_$v; done
+            rm -f $O/*/*.wav; [ $failed = 0 ]; exit
+          fi
           run $PY bench/pocket_speed.py speed pocket-tts-ru --voice $V/ref_en
           run $PY bench/pocket_speed.py speed pocket-tts-ru --voice $V/ref_ru
           run $PY bench/pocket_speed.py speed pocket-tts-en --model-dir $EN --voice $V/ref_ru

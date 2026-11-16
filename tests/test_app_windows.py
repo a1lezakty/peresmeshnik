@@ -93,6 +93,7 @@ def test_installed_files_shortcut_and_uninstall_entry(installed):
               'licenses/PySide6_Essentials/LGPL-3.0.txt', 'licenses/PySide6_Essentials/GPL-3.0.txt',  # Qt: its wheel has
               'licenses/shiboken6/LGPL-3.0.txt',  # only the commercial option's text
               'licenses/ctranslate2/libiomp5md-LICENSE.txt', 'licenses/sounddevice/PortAudio-LICENSE.txt',
+              '_internal/certifi/cacert.pem',  # CA certificates for HTTPS if Windows' own store has none (peresmeshnik/__init__.py)
               *(f'_internal/voice-runner/{f}'  # voicepack.runner_dir
                 for f in ('voice_runner.py', 'pack-windows.json', 'xtts.py', 'qwen3.py'))):
         assert (installed / f).exists(), f

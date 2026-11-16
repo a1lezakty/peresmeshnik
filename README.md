@@ -111,10 +111,13 @@ macOS 14 Sonoma or later on Apple Silicon (M1 and newer).
    verify…"). Click Done, then System Settings → Privacy & Security → "Open Anyway" next to Peresmeshnik, and
    confirm (on macOS 14 right-click the app → Open also works). The same from the Terminal:
    `xattr -dr com.apple.quarantine /Applications/Peresmeshnik.app`.
-3. Install [BlackHole 2ch](https://existential.audio/blackhole/) (`brew install --cask blackhole-2ch`, or
-   its pkg): the virtual microphone that the other side hears. In your call app choose
-   **BlackHole 2ch** as the microphone. On macOS older than 14.4 also BlackHole 16ch (`blackhole-16ch`) as
-   the call app's speaker: the app takes the call's sound from there.
+3. Install [BlackHole 2ch](https://existential.audio/blackhole/) (`brew install --cask blackhole-2ch`, or its
+   .pkg: the site e-mails the download link; the Mac may need a restart before it shows up): the virtual microphone
+   that the other side hears. In your call app choose **BlackHole 2ch** as the microphone only (on 14.4+ its
+   speaker stays your headphones). If installing it made BlackHole 2ch macOS' default input, choose your real microphone in
+   Peresmeshnik's settings (or set it back in System Settings → Sound → Input). On macOS older than 14.4 also
+   BlackHole 16ch (`brew install --cask blackhole-16ch`) as the call app's speaker: the app takes the call's sound
+   from there.
 4. Start Peresmeshnik: its icon is in the menu bar (no Dock icon). The installer puts only the app on the computer;
    the wizard's **Components** page lists what to download (0.6–2.8 GB for a pair, typically 1.2–1.9 GB), ticked
    where it suits this computer and the pair, with each one's size and license; nothing downloads before Download.

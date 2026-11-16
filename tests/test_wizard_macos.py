@@ -46,7 +46,7 @@ def test_devices_page_without_blackhole_says_how_to_install(monkeypatch):
     page = wizard.DevicesPage(type('W', (), {'s': config.Settings()})())
     page.initializePage()
     text = page.vmic.text()
-    assert 'not installed' in text and 'brew install blackhole-2ch' in text and 'existential.audio/blackhole' in text
+    assert 'not installed' in text and 'brew install --cask blackhole-2ch' in text and 'existential.audio/blackhole' in text
     assert not page.recheck.isHidden()
     assert [page.mic.itemData(i) for i in range(page.mic.count())] == ['', 'BuiltInMicrophoneDevice']
     devs.append(BLACKHOLE)  # installed meanwhile
@@ -107,6 +107,73 @@ def test_call_sound_page_blackhole(monkeypatch):
     devs.append({**BLACKHOLE, 'uid': 'BlackHole16ch_UID', 'name': 'BlackHole 16ch', 'inputs': 16, 'outputs': 16, 'id': 4})
     page.button.click()
     assert page.state.text() == '✔ BlackHole 16ch is installed.' and page.button.isHidden()
+
+
+
+def test_devices_page_shows_the_whole_install_hint(monkeypatch):
+    """The BlackHole 2ch hint whole, with macOS' form policy (fields at their size hint): a wrapped QLabel there got the
+    height of its text at the full width, and the hint ended at "brew install" (a user's Mac, 0.3.0). The no-Homebrew
+    way and the restart are in it; BlackHole 2ch as macOS' default input is said too."""
+    from PySide6.QtWidgets import QFormLayout, QProxyStyle, QStyle, QWizard
+
+    from peresmeshnik.ui import selftest, wizard
+
+    class MacForm(QProxyStyle):
+        def styleHint(self, hint, *a):  # noqa: N802 (Qt name)
+            return int(QFormLayout.FieldsStayAtSizeHint.value) if hint == QStyle.SH_FormLayoutFieldGrowthPolicy else \
+                super().styleHint(hint, *a)
+    devs = [MIC, SPEAKERS]
+    monkeypatch.setattr(wizard, 'MACOS', True)
+    monkeypatch.setattr(wizard, 'WINDOWS', False)
+    monkeypatch.setattr(selftest, 'HELPER', True)
+    monkeypatch.setattr(selftest, 'WINDOWS', False)
+    monkeypatch.setattr(sys, 'platform', 'darwin')
+    monkeypatch.setattr(macos, 'devices', lambda: list(devs))
+    monkeypatch.setattr(macos, 'permission', lambda: 'authorized')
+    monkeypatch.delenv('PERESMESHNIK_TEST_MIC', raising=False)
+    style = MacForm('Fusion')
+    w = QWizard()
+    w.setStyle(style)
+    w.s = config.Settings()
+    page = wizard.DevicesPage(w)
+    page.setStyle(style)
+    w.addPage(page)
+    w.resize(706, 560)
+    w.show()
+    try:
+        for _ in range(5):
+            QCoreApplication.processEvents()
+        text, v = page.vmic.text(), page.vmic
+        assert '<code>brew install --cask blackhole-2ch</code>' in text and 'without Homebrew' in text and '.pkg' in text
+        assert 'href="https://existential.audio/blackhole/"' in text and 'e-mail' in text and 'restart' in text
+        assert v.height() >= v.heightForWidth(v.width()), (v.width(), v.height(), v.heightForWidth(v.width()))
+        assert [page.mic.itemData(i) for i in range(page.mic.count())] == ['', 'BuiltInMicrophoneDevice']
+        assert page.mic_note.isHidden()
+        devs.append({**BLACKHOLE, 'default_input': True})  # installed, and macOS took it as its default input
+        devs[0] = {**MIC, 'default_input': False}
+        page.recheck.click()  # the lists again: "System default" is no microphone now, not offered
+        assert page.vmic.text().startswith('✔ BlackHole 2ch is installed')
+        assert [page.mic.itemData(i) for i in range(page.mic.count())] == ['BuiltInMicrophoneDevice']
+        assert page.mic_note.isHidden()
+        devs[0] = {**MIC, 'inputs': 0}  # a Mac mini: no microphone at all, only BlackHole (the page opened again)
+        monkeypatch.setenv('PERESMESHNIK_CALL_PATH', 'blackhole')  # and macOS < 14.4
+        page.initializePage()
+        assert page.mic.count() == 0
+        assert not page.mic_note.isHidden(), page.mic_note.text()
+        assert "⚠ macOS' default input is BlackHole 2ch and there is no microphone: connect a microphone" in page.mic_note.text()
+        for _ in range(5):
+            QCoreApplication.processEvents()  # the rows removed by initializePage go
+        texts = ''.join(x.text() for x in page.findChildren(type(page.vmic)))
+        assert 'is chosen only as the microphone; its speaker is set on the next page' in texts  # below 14.4
+        assert 'its speaker stays your headphones' not in texts
+        monkeypatch.setenv('PERESMESHNIK_CALL_PATH', 'tap')
+        page.initializePage()
+        for _ in range(5):
+            QCoreApplication.processEvents()
+        texts = ''.join(x.text() for x in page.findChildren(type(page.vmic)))
+        assert 'is chosen only as the microphone; its speaker stays your headphones' in texts
+    finally:
+        w.close()
 
 
 MAC = sys.platform == 'darwin'

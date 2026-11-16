@@ -27,6 +27,7 @@ def _cc(s: str) -> int:
 SYSTEM = 1  # kAudioObjectSystemObject
 DEVICES, DEFAULT_OUTPUT, DEFAULT_INPUT, RUN_LOOP = _cc('dev#'), _cc('dOut'), _cc('dIn '), _cc('rnlp')
 NAME, ALIVE, STREAMS, TRANSPORT, RATE = _cc('lnam'), _cc('livn'), _cc('stm#'), _cc('tran'), _cc('nsrt')
+UID = _cc('uid ')  # kAudioDevicePropertyDeviceUID
 RUNNING_SOMEWHERE = _cc('gone')  # kAudioDevicePropertyDeviceIsRunningSomewhere
 GLOBAL, INPUT, OUTPUT = _cc('glob'), _cc('inpt'), _cc('outp')
 VIRTUAL, AGGREGATE = _cc('virt'), _cc('grup')  # kAudioDeviceTransportType…
@@ -91,8 +92,8 @@ def _ids(obj: int, selector: int, scope: int = GLOBAL) -> list[int]:
     return list(buf[:size.value // 4])
 
 
-def _name(dev: int) -> str:
-    ref = _get(dev, NAME, ctypes.c_void_p)
+def _name(dev: int, prop: int = NAME) -> str:
+    ref = _get(dev, prop, ctypes.c_void_p)
     if not ref:
         return ''
     buf = ctypes.create_string_buffer(1024)
@@ -102,10 +103,11 @@ def _name(dev: int) -> str:
 
 
 def devices() -> list[dict]:
-    """[{'id', 'name', 'inputs', 'outputs' (stream counts), 'virtual' (BlackHole and the like, aggregates)}]"""
+    """[{'id', 'name', 'uid', 'inputs', 'outputs' (stream counts), 'virtual' (BlackHole and the like, aggregates)}]"""
     out = []
     for d in _ids(SYSTEM, DEVICES):
-        out.append({'id': d, 'name': _name(d), 'inputs': len(_ids(d, STREAMS, INPUT)), 'outputs': len(_ids(d, STREAMS, OUTPUT)),
+        out.append({'id': d, 'name': _name(d), 'uid': _name(d, UID),
+                    'inputs': len(_ids(d, STREAMS, INPUT)), 'outputs': len(_ids(d, STREAMS, OUTPUT)),
                     'virtual': _get(d, TRANSPORT, ctypes.c_uint32) in (VIRTUAL, AGGREGATE)})
     return out
 
@@ -117,7 +119,13 @@ def default(output: bool = True) -> str:
 
 
 def device_id(name: str, output: bool = True) -> int | None:
-    return next((d['id'] for d in devices() if d['name'] == name and d['outputs' if output else 'inputs']), None)
+    """The device named `name` (or with this UID: 0.3.0 saved the headphones by UID)."""
+    return next((d['id'] for d in devices() if name in (d['name'], d.get('uid')) and d['outputs' if output else 'inputs']), None)
+
+
+def name_of(key: str, output: bool = True) -> str:
+    """The name of the device named or with the UID `key` (0.3.0's saved headphones), else `key` as it is."""
+    return next((d['name'] for d in devices() if key in (d['name'], d.get('uid')) and d['outputs' if output else 'inputs']), key)
 
 
 # Every PortAudio stream of the app on macOS opens with stream_args(): the device's own rate and one buffer size.
@@ -268,6 +276,21 @@ class Arrival(_Listener):
 
     def _fire(self, why) -> None:
         self.on_arrive()
+
+
+class InputsChanged(_Listener):
+    """`on_change()` once (on a thread of its own) when the system's default input or its device list changes (the
+    default set back from BlackHole 2ch, AirPods connected). close() removes the listeners."""
+
+    def __init__(self, on_change: Callable[[], None]):
+        self.on_change = on_change
+        super().__init__([(SYSTEM, DEVICES, GLOBAL), (SYSTEM, DEFAULT_INPUT, GLOBAL)], 'the default input')
+
+    def _check(self, obj):
+        return True
+
+    def _fire(self, why) -> None:
+        self.on_change()
 
 
 class Running(_Listener):

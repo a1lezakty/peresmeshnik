@@ -34,7 +34,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from peresmeshnik import __version__, config, crash
-from peresmeshnik.audio import c_locale
+from peresmeshnik.audio import c_locale, silent_output
 from peresmeshnik.audio.echo import EchoGate, Reference, Referenced, Threaded
 from peresmeshnik.audio.resample import Resampler
 from peresmeshnik.engines import SAMPLE_RATE, Caption, Latency, Speech
@@ -53,6 +53,7 @@ def engines(sides) -> str:
     return ', '.join(f'{ARROW[x.name]}: {x.engine}' for x in sides)
 RESTARTS = 3  # a side that fails this often within a minute stays off, with the reason
 QUIT_S = 5.0  # quit() waits this long for the control thread (a side still loading its models), then exits without it
+LOOP_RECHECK_S = 5.0  # macOS without Core Audio's notification: the refused microphone loop is tried again this often
 MAX_CLONE_RTF = 1.0  # seconds of synthesis per second of speech, warm: above, the clone falls behind for good (me -> them
 #                      has no lag limit) and the stock voice speaks; the RTX 3060 runs it at 0.4-0.5 (BENCH), a GTX 10xx
 #                      is not measured
@@ -101,6 +102,42 @@ class FileIn:
             self._thread.join()
 
 
+def headphones_name(saved: str) -> str:
+    """macOS: the saved headphones by name: 0.3.0's lists saved Core Audio UIDs, the app finds outputs by name. A UID
+    of a device that is there becomes its name, in the settings too (once); anything else stays as it is."""
+    if not saved or sys.platform != 'darwin':
+        return saved
+    try:
+        from peresmeshnik.audio import coreaudio
+        name = coreaudio.name_of(saved)
+    except Exception as e:
+        log.info('headphones %s: %s', saved, e)
+        return saved
+    if name != saved:
+        try:
+            s = config.load()
+            if s.ui.headphones == saved:
+                s.ui.headphones = name
+                config.save(s)
+        except Exception as e:  # used by name all the same; the settings keep the UID
+            log.warning('headphones: %s', e)
+    return name
+
+
+class _Arm:
+    """Controller._arm's retry: `handle` is coreaudio.InputsChanged (macOS), winaudio.DeviceWatch (Windows) or a
+    threading.Timer; `fired` once it fired or was closed."""
+
+    def __init__(self):
+        self.fired, self.handle = False, None
+
+    def close(self) -> None:
+        self.fired = True
+        h, self.handle = self.handle, None
+        if h is not None:
+            (h.cancel if isinstance(h, threading.Timer) else h.close)()
+
+
 class Headphones:
     """`AudioOut` to a PipeWire/PulseAudio sink (Linux) or a Core Audio device (macOS) at the first chunk's rate
     (Piper 22.05 kHz, Gemini 24 kHz); chunks at another rate (the live pass-through, 16 kHz) are resampled. `sink`
@@ -130,17 +167,21 @@ class Headphones:
                 name = self.sink
             else:
                 name = winaudio.default_output()
-                if not name or name == exclude or is_cable(name):
-                    name = next((n for n in names if n != exclude and not is_cable(n)), '')
+                if not name or name == exclude or is_cable(name) or silent_output(name):
+                    name = next((n for n in names if n != exclude and not is_cable(n) and not silent_output(n)), '')
                 if not name:
                     raise RuntimeError('no output device')
             if is_cable(name):
                 raise RuntimeError(f'the output is {name}, a virtual cable (the call app\'s microphone): choose your '
                                    'headphones in the settings or the system')
+            if name == self.sink and silent_output(name):  # Teams' speaker: nobody hears it (VoiceMeeter plays on)
+                raise RuntimeError(f'the saved headphones are {name}, a virtual device: nobody hears what plays there; '
+                                   'choose your real headphones in the settings')
             return name
         if sys.platform == 'darwin':
             from peresmeshnik.audio import capture_macos, coreaudio
             outs = [d for d in coreaudio.devices() if d['outputs']]
+            self.sink = headphones_name(self.sink)  # saved by its UID (0.3.0's lists): its name
             if self.sink and self.sink != exclude and any(d['name'] == self.sink for d in outs):
                 name = self.sink
             else:
@@ -157,6 +198,11 @@ class Headphones:
             if name == capture_macos.CALL_DEVICE and capture_macos.path() == 'blackhole':  # the call would hear itself
                 raise RuntimeError(f'the headphones are {name}, the call app\'s speaker: choose your real headphones in the '
                                    'settings or the system')
+            if silent_output(name) and not name.startswith('BlackHole'):  # Zoom's or Teams' speaker: nobody hears it
+                # (eqMac, Loopback play on: allowed). BlackHole: CALL_OUTPUTS above, which the runner's tests narrow to
+                # 16ch (tests/test_macos_audio.py: its only output, 2ch, stands in for the headphones)
+                raise RuntimeError(f'the {"saved" if name == self.sink else "default"} output is {name}, a virtual device: '
+                                   'nobody hears what plays there; choose your real headphones in the settings or the system')
             crash.private(name)
             return name
         names = [line.split('\t')[1] for line in pactl('list', 'short', 'sinks').splitlines() if '\t' in line]
@@ -861,6 +907,10 @@ class Controller:
         self.stuck = False  # quit() did not wait for a side still loading: the process exits without its thread
         self._pool = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix='control')  # no thread until first use
         self._vmic = self._call = self._router = self._loop = self._call_watch = None
+        self._loop_mic = ''  # macOS, Windows: the microphone setting the running loop was started with
+        self._loop_why = ''  # macOS, Windows: why the loop was refused (a virtual default input), until it runs
+        self._loop_arm: _Arm | None = None  # the refused loop (or the missing virtual mic) tried again
+        self._starting = False  # startup(): its errors go to startup_error
         self._events = None  # Linux: PulseEvents
         self._loop_on = False  # Linux: the microphone loop is wanted (translation off); loaded while the call app records
         self._raw_mic = False  # the call hears my microphone as it is (a loop), not through our output
@@ -932,6 +982,15 @@ class Controller:
     def startup(self) -> None:
         """The devices are there from the start, so the call app can pick the microphone and S1 can move the
         call's sound once; until translation is on, the real microphone is looped into the virtual one."""
+        self._starting = True  # what goes wrong is said by the tray after its "idle" (startup_error), not before it
+        try:
+            self._startup()
+        finally:
+            self._starting = False
+
+    def _startup(self) -> None:
+        if self.devices and sys.platform == 'darwin' and self.settings is None:
+            headphones_name(config.load().ui.headphones)  # 0.3.0 saved a UID: its name in the settings from now on
         if self.devices and sys.platform == 'darwin':
             self._startup_call_macos()
             self._startup_vmic()
@@ -1047,8 +1106,12 @@ class Controller:
         except Exception as e:
             log.warning('virtual mic: %s', e)
             self.startup_error = '; '.join(x for x in (self.startup_error, str(e)) if x)  # next to S1's, not over it
+            if sys.platform == 'darwin':  # BlackHole installed while the app runs: the loop starts when it comes
+                self._arm(self._reloop)
             return
         self._loopback(True)
+        if self._loop_why:  # refused (a virtual default input): the tray says it after its "idle", not under it
+            self.startup_error = '; '.join(x for x in (self.startup_error, self._loop_why.removeprefix('error: ')) if x)
 
     def _startup_call_windows(self) -> None:
         """Windows, the call's sound (S1): a previous run that crashed while muting the call app left its session
@@ -1135,13 +1198,21 @@ class Controller:
             return
         why = 'error: the call will not hear your microphone while translation is off: '
         try:
-            mic = helper.not_virtual((self.settings or config.load()).ui.mic)
+            self._loop_mic = saved = (self.settings or config.load()).ui.mic
+            mic = helper.not_virtual(saved)
             watch = ['--watch', self._vmic.call_mic['uid']] if sys.platform == 'win32' else []  # macOS: the same device
             self._loop = p = helper.spawn('loop', '--from', mic, '--to', self._vmic.device['uid'], *watch, stdout=subprocess.DEVNULL)
+        except ValueError as e:  # no microphone behind "System default" (BlackHole 2ch): tried again as devices change
+            self._loop_refused(why + str(e), retry=not saved)  # a saved virtual microphone: only the settings fix it
+            return
         except Exception as e:
             log.warning('microphone loop: %s', e)
             self.on_state(why + str(e))
             return
+        self._disarm()
+        if self._loop_why:  # refused before: the microphone is there now
+            self._loop_why = ''
+            self.on_state('idle, translation off (the call hears your microphone again)')
 
         ready = threading.Event()
 
@@ -1161,6 +1232,85 @@ class Controller:
                     self.on_state(why + (helper.NO_PERMISSION if p.returncode == 6 else f'the loop ended ({p.returncode})'))
         threading.Thread(target=watch, name='mic-loop', daemon=True).start()
         ready.wait(3)  # its first word ("idle": set up, waiting for a call): its start belongs to ours, not to the idle
+
+    def _loop_refused(self, why: str, retry: bool) -> None:
+        """The loop cannot start on this microphone setting: said once (at startup by the tray after its "idle":
+        startup_error) and, for "System default" (`retry`), tried again by itself when the default input or the devices
+        change (macOS: Core Audio's notification; Windows: the loopback helper's `watch`), so a default set back or
+        AirPods connected let the call hear the user. Nothing polls: idle stays idle (docs/ARCHITECTURE.md §5)."""
+        (log.warning if why != self._loop_why else log.info)('microphone loop: %s', why)
+        if why != self._loop_why:
+            self._loop_why = why
+            if not self._starting:
+                self.on_state(why)
+        if retry:
+            self._arm(self._loop_retry)
+
+    def _arm(self, retry) -> None:
+        """`retry` on the control thread once the default input or the device list changes; one arm at a time. A spent
+        arm (fired, even from inside its own constructor) counts as none and is replaced."""
+        old = self._loop_arm
+        if self._quitting or old is not None and not old.fired:
+            return
+        arm = self._loop_arm = _Arm()
+        if old is not None:
+            old.close()
+
+        def again():
+            if not arm.fired:
+                arm.fired = True
+                self.submit(retry)
+        if sys.platform == 'win32':  # no Timer: a helper `list` every few seconds is CPU while idle
+            try:
+                from peresmeshnik.audio import winaudio
+                arm.handle = winaudio.DeviceWatch(again, flow='capture')
+            except Exception as e:  # no watch: the settings and translation on / off still try again
+                arm.fired = True
+                log.warning('device watch: %s', e)
+            return
+        try:
+            if sys.platform != 'darwin':
+                raise RuntimeError('no Core Audio')
+            from peresmeshnik.audio import coreaudio
+            arm.handle = coreaudio.InputsChanged(again)
+        except Exception as e:
+            if sys.platform == 'darwin':
+                log.warning('default input: %s', e)
+            arm.handle = threading.Timer(LOOP_RECHECK_S, again)
+            arm.handle.daemon = True
+            arm.handle.start()
+
+    def _disarm(self) -> None:
+        arm, self._loop_arm = self._loop_arm, None
+        if arm is not None:
+            arm.close()
+
+    def _loop_retry(self) -> None:
+        if self.on or self._quitting or self._loop is not None or self._vmic is None:
+            return
+        self._arm(self._loop_retry)  # armed before the check: a change while the devices are listed is not lost
+        self._loopback(True)  # started: disarmed; refused again: this arm waits for the next change
+
+    def mic_changed(self) -> concurrent.futures.Future | None:
+        """Settings saved: with translation off, the microphone loop (macOS, Windows) takes the microphone they name now,
+        or starts if it could not (a virtual default input); a running translation is restarted by the tray itself."""
+        return self.submit(self._reloop)
+
+    def _reloop(self) -> None:
+        if self.on or not self.devices or sys.platform not in ('darwin', 'win32'):
+            return
+        if self._vmic is None:  # BlackHole 2ch / VB-Cable installed since the start (the wizard's "Check again")
+            try:
+                self.virtual_mic()
+            except Exception as e:
+                log.warning('virtual mic: %s', e)
+                if sys.platform == 'darwin':  # still missing: again when a device comes
+                    self._arm(self._reloop)
+                return
+        if self._loop is not None and self._loop_mic != (self.settings or config.load()).ui.mic:
+            self._loop_helper(False)
+        self._loopback(True)  # the call hears the raw microphone (_raw_mic); a loop still on its microphone stays
+        self._through_start()  # macOS < 14.4: BlackHole 16ch installed meanwhile (it returns at once otherwise)
 
     def _watch_call(self, on: bool) -> None:
         """Windows: CallWatch while me -> them translates into CABLE Input (only the app's own devices, not tests)."""
@@ -1528,7 +1678,7 @@ class Controller:
             self._through_start()
         if self.on or sides:
             self.on = False
-            self.on_state('idle, translation off')
+            self.on_state(self._loop_why or 'idle, translation off')  # the loop still refused: that, not "idle"
         sides = side = None  # the last references to the stopped sides: their engines go now
         free_memory()
 
@@ -1545,7 +1695,7 @@ class Controller:
         log.info('devices refreshed: %s', r)
         for why in r['failed']:
             self.on_state(f'error: after the device refresh: {why}')
-        saved = (self.settings or config.load()).ui.headphones
+        saved = headphones_name((self.settings or config.load()).ui.headphones)
         if sys.platform == 'darwin' and self._through and saved:
             from peresmeshnik.audio.out import portaudio_names
             if saved not in portaudio_names():  # still not there for PortAudio: the next change of it, not a loop
@@ -1566,7 +1716,7 @@ class Controller:
                 x.name == 'them' for x in self.sides):  # them -> me reads BlackHole 16ch itself
             return
         try:
-            saved = (self.settings or config.load()).ui.headphones
+            saved = headphones_name((self.settings or config.load()).ui.headphones)
             pick = Headphones(saved).resolve
             from peresmeshnik.audio.out import portaudio_names
             if saved and (pick() != saved or saved not in portaudio_names()):  # gone: back to them when they are back
@@ -1627,6 +1777,7 @@ class Controller:
             self.stuck = True
             self._unroute()  # the call app's sound goes back now; the rest goes with the process (cli: os._exit)
         self._through_stop()  # its Core Audio listeners go before the control thread does
+        self._disarm()
         self._pool.shutdown(wait=not self.stuck)
         self._loopback(False)
         if self._vmic:

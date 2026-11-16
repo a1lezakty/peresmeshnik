@@ -136,7 +136,7 @@ func fourcc(_ v: UInt32) -> String {
 struct Device {
     let id: AudioObjectID, uid: String, name: String, inputs: Int, outputs: Int, rate: Double, transport: String
     var real: Bool {  // not BlackHole & co, not an aggregate; Krisp's is the microphone processed (audio PROCESSED)
-        transport == "virt" ? name.contains("Krisp") : transport != "grup"
+        transport == "virt" ? name.localizedCaseInsensitiveContains("krisp") : transport != "grup"  // "krisp microphone"
     }
     var label: String { "\(uid)\t\(name)" }
 }

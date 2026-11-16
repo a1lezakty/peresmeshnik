@@ -15,7 +15,7 @@ import sys
 import threading
 from pathlib import Path
 
-from peresmeshnik.audio import processed
+from peresmeshnik.audio import processed, silent_output
 
 HELPER = 'peresmeshnik-audio.exe'
 CABLE = 'VB-Audio Virtual Cable'  # in both endpoints' names, also when the user renames them: "CABLE Input (VB-Audio ...)"
@@ -79,15 +79,32 @@ def stand_in_mic() -> str:
 def not_virtual(key: str, what: str = 'microphone') -> str:
     """CABLE Output carries our own translation: as the microphone the app would hear itself. Any other virtual input
     (another cable, Voicemeeter) is not the user's voice either; NVIDIA Broadcast and Krisp are (audio.processed)."""
+    if not key and what == 'microphone' and not stand_in_mic():  # the default input: what Windows has chosen as it
+        ins = [d for d in devices() if d['inputs']]
+        d = next((d for d in ins if d['default_input']), None)
+        if d and (is_ours(d) or virtual(d)):  # the helper would skip it and take the first real input, maybe a silent one
+            if all(is_ours(x) or virtual(x) for x in ins):
+                raise ValueError(f'Windows\' default microphone is {d["name"]} and there is no microphone: connect a '
+                                 'microphone')
+            raise ValueError(f'Windows\' default microphone is {d["name"]}, not your microphone: choose your real microphone '
+                             'in the settings, or set it back in Settings → System → Sound → Input')
     if not key or what != 'microphone' or key == stand_in_mic():
         return key
     d = next((d for d in devices() if d['inputs'] and key in (d['uid'], d['name'])), None)
     if d and is_ours(d):
         raise ValueError(f'{CABLE_OUT} is the virtual microphone for the call app, not your microphone: choose your real '
                          'microphone in the settings')
-    if d and (d['transport'] == 'virt' or 'VB-Audio' in d['name']) and not processed(d['name']):
+    if d and virtual(d):
         raise ValueError(f'{d["name"]} is a virtual device, not your microphone: choose your real microphone in the settings')
     return key
+
+
+def virtual(d: dict, output: bool = False) -> bool:
+    """A software device: not the user's voice (unless the real microphone processed: NVIDIA Broadcast, Krisp). As an
+    output (`output`) only one nobody hears (audio.silent_output: CABLE Input, Teams'); VoiceMeeter Input plays on."""
+    if output:
+        return silent_output(d['name'])
+    return (d['transport'] == 'virt' or 'VB-Audio' in d['name']) and not processed(d['name'])
 
 
 def permission() -> str:

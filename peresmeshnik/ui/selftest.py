@@ -24,11 +24,16 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from peresmeshnik.audio import processed
-
 MACOS = sys.platform == 'darwin'
 WINDOWS = sys.platform == 'win32'
 HELPER = MACOS or WINDOWS  # our native helper does the sound (audio/macos.py, audio/windows.py)
+# exact digital zeros from the microphone (a real one always hisses a little): what the user can do about it
+NO_SOUND_MACOS = ('No sound at all came from the microphone. Choose your real microphone in Settings, or allow Peresmeshnik '
+                  'in System Settings → Privacy & Security → Microphone (if you started it from the Terminal, allow '
+                  'Terminal there). A MacBook with its lid closed has its microphone off.')
+NO_SOUND_WINDOWS = ('No sound at all came from the microphone. Choose your real microphone in Settings, or allow '
+                    'microphone access in Windows Settings → Privacy & security → Microphone ("Microphone access" and '
+                    '"Let desktop apps access your microphone").')
 SR = 48_000
 MIN_SCORE = 0.5  # normalised correlation of the found chirp; noise and silence stay < 0.1
 MIN_MIC_DB = -50.0
@@ -39,23 +44,34 @@ def pactl(*args: str) -> str:
 
 
 def devices(kind: str) -> list[tuple[str, str]]:
-    """[(name, description)] of 'sinks' or 'sources' (monitors of sinks left out); default first.
-    macOS: [(Core Audio UID, name)] of outputs or inputs, BlackHole 2ch left out (it is ours: the virtual mic); as inputs
-    no virtual device (BlackHole, Zoom's, Teams') and no aggregate either: none of them is the user's voice. Windows: the
-    same from WASAPI without VB-Cable; outputs by name (the headphones open through PortAudio, which knows names)."""
+    """[(name, description)] of 'sinks' or 'sources' (monitors of sinks left out); default first (listing())."""
+    return listing(kind)[0]
+
+
+def listing(kind: str) -> tuple[list[tuple[str, str]], bool]:
+    """(devices(kind), whether "System default" is a choice). macOS, Windows (the helper's list): outputs and inputs
+    without our virtual microphone (BlackHole 2ch, VB-Cable) and without any other virtual device (BlackHole 16ch, Zoom's,
+    Teams', VoiceMeeter): nobody hears an output of them, and none is the user's voice; as inputs no aggregate either
+    (the same rule as not_virtual); NVIDIA Broadcast and Krisp are the real devices, processed. The microphone by its
+    UID (endpoint id), the headphones by name (they open through PortAudio, which knows names, as app.Headphones
+    resolves them). "System default" only while the system's default is a real device: installing BlackHole can make
+    it the default, and the app would then play to nobody / record no one."""
     if HELPER:
         from peresmeshnik.audio.mic import native
         helper = native()
-        side, default = ('outputs', 'default_output') if kind == 'sinks' else ('inputs', 'default_input')
-        out = [d for d in helper.devices() if d[side] and not helper.is_ours(d)
-               and (kind == 'sinks' or d['transport'] not in ('virt', 'grup') or d['uid'] == helper.stand_in_mic()
-                    or d['transport'] == 'virt' and processed(d['name']))]  # NVIDIA Broadcast, Krisp: the user's voice
-        key = 'name' if WINDOWS and kind == 'sinks' else 'uid'
-        return [(d[key], d['name']) for d in sorted(out, key=lambda d: not d[default])]
+        out_ = kind == 'sinks'
+        side, default = ('outputs', 'default_output') if out_ else ('inputs', 'default_input')
+        devs = [d for d in helper.devices() if d[side]]
+        real = [d for d in devs if not helper.is_ours(d) and not helper.virtual(d, out_)
+                or not out_ and d['uid'] == helper.stand_in_mic()]
+        key = 'name' if out_ else 'uid'
+        ok = not any(d[default] for d in devs) or any(d[default] for d in real)
+        first = lambda d: (not d[default], d.get('transport') != 'bltn')  # noqa: E731  no real default: the built-in one
+        return [(d[key], d['name']) for d in sorted(real, key=first)], ok
     items = json.loads(pactl('-f', 'json', 'list', kind) or '[]')
     default = pactl('get-default-sink' if kind == 'sinks' else 'get-default-source').strip()
     out = [(d['name'], d.get('description') or d['name']) for d in items if not d['name'].endswith('.monitor')]
-    return sorted(out, key=lambda d: d[0] != default)
+    return sorted(out, key=lambda d: d[0] != default), True
 
 
 def chirp(sr: int = SR, seconds: float = 0.4) -> np.ndarray:
@@ -232,13 +248,16 @@ def check_mic(source: str, seconds: float = 3.0) -> Result:
         return Result('microphone', False, native().NO_PERMISSION)
     db = 20 * np.log10(np.max(np.sqrt(np.convolve(x ** 2, np.ones(1600) / 1600, 'valid'))) + 1e-9) if len(x) > 1600 else -120.0
     ok = bool(db >= MIN_MIC_DB)
+    if HELPER and len(x) > 1600 and not x.any():  # a real microphone always hisses a little: exact zeros are no sound at all
+        from peresmeshnik.audio.mic import native
+        return Result(f'microphone ({source or "the default input"})', False, NO_SOUND_WINDOWS if WINDOWS else NO_SOUND_MACOS)
     return Result(f'microphone ({source or "the default input"})', ok,
                   f'loudest 0.1 s at {db:.0f} dBFS' + ('' if ok else ': say something, or check the input'))
 
 
 def _helper_mic(mic: str | None) -> str:
     from peresmeshnik.audio.mic import native
-    return native().not_virtual(mic or '')  # '' = the default input (never a virtual one: the helper skips them)
+    return native().not_virtual(mic or '')  # '' = the default input: refused with why when it is a virtual one
 
 
 def run_all(headphones: str | None = None, mic: str | None = None, vmic=None, report=lambda r: None) -> list[Result]:

@@ -1,6 +1,6 @@
 [project]
 name = "peresmeshnik"
-version = "0.3.0"
+version = "0.3.1"
 description = "Real-time call translator: subtitles and translated speech both ways, in your own cloned voice"
 readme = "README.md"
 license = "PolyForm-Noncommercial-1.0.0"
@@ -22,6 +22,7 @@ dependencies = [
     "jeepney>=0.8; sys_platform == 'linux'",
     "websockets>=15",  # the remote server (peresmeshnik/remote): its WebSocket, client and server
     "cryptography>=43",  # the remote server's self-signed certificate
+    "certifi",  # CA certificates when the Python it runs on has none (peresmeshnik/__init__.py: the .app on a Mac)
 ]
 
 [project.scripts]

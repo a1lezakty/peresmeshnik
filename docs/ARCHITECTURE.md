@@ -293,7 +293,7 @@ part before that. The text tools for Chinese and Japanese are in the voice pack 
 
 | | Capture "them" (call sound) | Mute original while translating | Virtual microphone "me → them" |
 |---|---|---|---|
-| **macOS ≥ 14.4** | Core Audio **process tap** of the call app (`CATapDescription`), no driver | tap with `muteBehavior = mutedWhenTapped` | **BlackHole 2ch** (user installs: `brew install blackhole-2ch` or the pkg); call app mic = BlackHole |
+| **macOS ≥ 14.4** | Core Audio **process tap** of the call app (`CATapDescription`), no driver | tap with `muteBehavior = mutedWhenTapped` | **BlackHole 2ch** (user installs: `brew install --cask blackhole-2ch` or the pkg); call app mic = BlackHole |
 | macOS < 14.4 | call app speaker = BlackHole 16ch, the app captures it and plays to headphones | implicit (the app is the only path to the headphones) | BlackHole 2ch |
 | **Windows 10 2004+ / 11** | WASAPI **process loopback** of the call app (`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`); fallback: endpoint loopback | lower the call app's audio session volume to 0 (`ISimpleAudioVolume`, variant A): the stage-4 spike confirmed the process loopback is taken before the session volume (BENCH), so the translation is heard and the original is not; the original level is saved and restored on off and after a crash | **VB-Audio Virtual Cable** (user installs); call app mic = "CABLE Output" |
 | **Linux (PipeWire / PulseAudio)** | the app creates a null sink `Peresmeshnik Call`, moves the call app's stream there (`pactl move-sink-input`) and records its monitor | implicit (only the app plays to the headphones) | the app creates a virtual source `Peresmeshnik Mic` (`module-null-sink` + `module-remap-source`); call app mic = Peresmeshnik Mic; removed on exit |
@@ -469,7 +469,7 @@ tray (`stalonetray`), not a StatusNotifierItem tray over D-Bus (KDE, GNOME's App
 wayland plugin; the portal against a fake one.
 
 **macOS, me → them (stage 3).** The virtual microphone is BlackHole 2ch, installed by the user (the wizard's
-devices page checks for it and, missing, shows `brew install blackhole-2ch`, the installer's link and "Check
+devices page checks for it and, missing, shows `brew install --cask blackhole-2ch`, the installer's link and "Check
 again"); the call app takes it as its microphone. Core Audio work runs in `peresmeshnik-audio`
 (`native/macos/audio`, Swift, built by one `swiftc` and placed next to the app's executable), one small process
 per stream, as parec / pacat / module-loopback on Linux; Python starts, reads and stops them (`audio/macos.py`).

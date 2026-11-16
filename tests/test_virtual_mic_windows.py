@@ -10,6 +10,7 @@ where CABLE Output is the call app's side, my voice comes from a file (the app's
 Elsewhere only the checks that need no Windows run.
 """
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -210,6 +211,7 @@ BROADCAST = {**DEV, 'uid': '{0.0.1.00000000}.{nv}', 'name': 'Microphone (NVIDIA 
 
 def test_cable_and_virtual_inputs_are_no_microphone(monkeypatch):
     from peresmeshnik.ui import selftest
+    monkeypatch.delenv('PERESMESHNIK_TEST_MIC', raising=False)  # tests/conftest.py's stand-in on macOS: none here
     devs = [HEADSET, SPEAKERS, CABLE_IN, CABLE_OUT, MEETER, BROADCAST]
     monkeypatch.setattr(windows, 'devices', lambda: devs)
     monkeypatch.setattr(selftest, 'HELPER', True)
@@ -224,6 +226,32 @@ def test_cable_and_virtual_inputs_are_no_microphone(monkeypatch):
     assert windows.not_virtual(HEADSET['uid']) == HEADSET['uid']
     assert windows.not_virtual(BROADCAST['uid']) == BROADCAST['uid']
     assert windows.not_virtual('') == ''  # the default input: the helper never takes a virtual one by itself
+    for default in (CABLE_OUT, MEETER):  # Windows' default microphone a virtual one: said, not recorded as silence
+        monkeypatch.setattr(windows, 'devices', lambda d=default: [{**HEADSET, 'default_input': False}, {**d, 'default_input': True}])
+        with pytest.raises(ValueError, match=f"Windows' default microphone is {re.escape(default['name'])}, not your microphone"):
+            windows.not_virtual('')
+    monkeypatch.setattr(windows, 'devices', lambda: [HEADSET, {**BROADCAST, 'default_input': True}])
+    assert windows.not_virtual('') == ''  # the real microphone, processed
+    monkeypatch.setattr(windows, 'devices', lambda: [SPEAKERS, CABLE_IN, {**CABLE_OUT, 'default_input': True}, MEETER])
+    with pytest.raises(ValueError, match="CABLE Output .* and there is no microphone: connect a microphone"):
+        windows.not_virtual('')  # no real microphone at all
+    meeter_in = {**DEV, 'uid': '{0.0.0.00000000}.{vmi}', 'name': 'VoiceMeeter Input (VB-Audio VoiceMeeter VAIO)', 'inputs': 0,
+                 'outputs': 2, 'transport': 'virt', 'default_output': True}
+    teams = {**DEV, 'uid': '{0.0.0.00000000}.{tms}', 'name': 'Microsoft Teams Audio Device', 'inputs': 0, 'outputs': 2,
+             'transport': 'virt'}
+    devices = [{**HEADSET, 'default_input': False}, {**MEETER, 'default_input': True}, {**SPEAKERS, 'default_output': False},
+               CABLE_IN, CABLE_OUT, meeter_in, teams]
+    monkeypatch.setattr(windows, 'devices', lambda: devices)
+    sinks, ok = selftest.listing('sinks')  # headphones: VoiceMeeter Input plays on (stays), no cable, no Teams'
+    assert sinks == [(meeter_in['name'], meeter_in['name']), (SPEAKERS['name'], SPEAKERS['name'])] and ok is True
+    sources, ok = selftest.listing('sources')
+    assert sources == [(HEADSET['uid'], HEADSET['name'])] and ok is False
+    devices[5] = {**meeter_in, 'default_output': False}
+    devices[3] = {**CABLE_IN, 'default_output': True}  # CABLE Input as Windows' default output: no "System default"
+    assert selftest.listing('sinks')[1] is False
+    devices[3], devices[6] = CABLE_IN, {**teams, 'default_output': True}
+    assert selftest.listing('sinks')[1] is False
+    monkeypatch.setattr(windows, 'devices', lambda: devs)
     assert windows.not_virtual(CABLE_OUT['name'], what='headphones') == CABLE_OUT['name']  # not this check's business
     assert selftest.devices('sources') == [(HEADSET['uid'], HEADSET['name']), (BROADCAST['uid'], BROADCAST['name'])]
     assert selftest.devices('sinks') == [(SPEAKERS['name'], SPEAKERS['name'])]  # by name: the headphones go through PortAudio

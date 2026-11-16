@@ -65,6 +65,9 @@ def test_bundle_contents(app):
     assert os.access(audio, os.X_OK), 'no peresmeshnik-audio in Contents/MacOS'
     subprocess.run(['codesign', '--verify', '--strict', audio], check=True)
     assert isinstance(json.loads(subprocess.run([audio, 'list'], capture_output=True, text=True, timeout=20, check=True).stdout), list)
+    # HTTPS: the Python it is built with (python.org's) looks for CA certificates in its own folder, absent on a user's Mac
+    assert any((app / 'Contents' / d / 'certifi' / 'cacert.pem').is_file() for d in ('Frameworks', 'Resources')), \
+        'no CA bundle (peresmeshnik/__init__.py)'
     lic = app / 'Contents' / 'Resources' / 'licenses'
     assert (lic / 'piper-runner-LICENSE.txt').exists() and (lic / 'Peresmeshnik-LICENSE.txt').exists()
     assert 'espeak-ng' in (lic / 'piper-runner-SOURCE.txt').read_text()  # where the GPL program's sources are

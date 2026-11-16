@@ -793,6 +793,7 @@ name = "peresmeshnik"
 version = "0.3.0"
 source = { editable = "." }
 dependencies = [
+    { name = "certifi" },
     { name = "cryptography" },
     { name = "ctranslate2" },
     { name = "google-genai" },
@@ -822,6 +823,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "certifi" },
     { name = "cryptography", specifier = ">=43" },
     { name = "ctranslate2", specifier = ">=4.5" },
     { name = "google-genai", specifier = ">=3" },

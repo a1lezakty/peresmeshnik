@@ -1,0 +1,7 @@
+# Chatterbox Multilingual (resemble-ai). Python 3.11. Linux CPU: torch/torchaudio from https://download.pytorch.org/whl/cpu
+# chatterbox-tts pins torch/torchaudio 2.6.0, transformers 5.2.0, numpy<2 itself. Weights: ResembleAI/chatterbox on HF (MIT).
+torch==2.6.0
+torchaudio==2.6.0
+chatterbox-tts==0.1.7
+soundfile==0.14.0
+setuptools<70  # runtime: resemble-perth imports pkg_resources; without it the watermarker is None and load fails

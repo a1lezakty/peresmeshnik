@@ -42,7 +42,7 @@ elif eng == 'kokororu':
         'config.json', 'ru_g2p.py', 'onnx/model_quantized.onnx', 'voices/sveta.bin', 'espeak-data/*', 'espeak-data/**']))
     sys.path.insert(0, str(d))
     from ru_g2p import RuG2P
-    g2p = RuG2P()
+    g2p = RuG2P(espeak_data=d / 'espeak-data')  # snapshot files are links into blobs/, so pass the folder
     vocab = json.loads((d / 'config.json').read_text())['vocab']
     so = ort.SessionOptions(); so.intra_op_num_threads = threads; so.inter_op_num_threads = 1
     sess = ort.InferenceSession(str(d / 'onnx/model_quantized.onnx'), so, providers=['CPUExecutionProvider'])

@@ -1,7 +1,9 @@
 name: bench
 
-# research-1116-r4 only: CPU time to first audio and RTF of light TTS without published numbers.
-# Manual: dispatched with ref research-1116-r4. Results are printed as JSON lines in the "Run" step.
+# research-1116-r4 only (round 2), manual: dispatched with ref research-1116-r4.
+# zonos-ru: ZONOS3-Mini (commit 96d9e0ec, Russian since 13.11) on the CPU by the BENCH tts_clone method
+#   (bench/clone_light.py: 6 shortest FLEURS sentences, ECAPA vs the full reference, faster-whisper small CER).
+# stock-ru: speed and Whisper-small CER of the new light stock voices (Kitten TTS 2 mini, Supertonic 3, kokoro-ru).
 on:
   workflow_dispatch:
 
@@ -9,17 +11,65 @@ permissions:
   contents: read
 
 jobs:
-  tts:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-15
-            threads: '2 3'
-          - os: ubuntu-24.04
-            threads: '2 4'
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+  zonos-ru:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      BENCH_DATA: ${{ github.workspace }}/bench-data
+      BENCH_OUT: ${{ github.workspace }}/out
+      HF_HOME: ${{ github.workspace }}/hf
+      HF_HUB_DISABLE_PROGRESS_BARS: '1'
+      N: '6'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
+        with:
+          version: '0.13.7'
+          checksum: 'c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83'
+          python-version: '3.11'
+      - name: Machine
+        run: nproc; lscpu | head -20; free -g; df -h .; command -v ffmpeg cargo cmake
+      - name: Data and venvs
+        run: |
+          uv run -q --no-project -p 3.11 --with numpy --with soundfile --with pyarrow python bench/data.py
+          uv venv -q -p 3.11 venv-eval && uv pip install -q -p venv-eval/bin/python -r bench/requirements-tts-clone-eval.txt
+          uv venv -q -p 3.11 venv-run && uv pip install -q -p venv-run/bin/python numpy soundfile scipy huggingface_hub psutil
+      - name: Build ZONOS3-Mini ggml server
+        run: |
+          git clone -q https://github.com/Zyphra/ZONOS3-Mini z && git -C z checkout -q 96d9e0ec
+          git -C z submodule update -q --init --recursive
+          git -C z submodule status --recursive | head
+          cd z/servers/ggml && cmake -B build -DCMAKE_BUILD_TYPE=Release > ../../../build.log 2>&1 && cmake --build build -j4 >> ../../../build.log 2>&1 \
+            || { tail -40 ../../../build.log; exit 1; }
+          ls build | head -30
+      - name: Weights
+        run: |
+          venv-run/bin/python -c "
+          from huggingface_hub import hf_hub_download as h
+          for f in ('backbone-ptq.gguf', 'zac-keep2.gguf', 'spk-encoder.gguf'):
+              h('Zyphra/ZONOS3-Mini', 'gguf/' + f, local_dir='z/servers/ggml')"
+          ls -la z/servers/ggml/gguf
+      - name: Run
+        run: |
+          export ZONOS_BIN=$PWD/z/servers/ggml/build ZONOS_GGUF=$PWD/z/servers/ggml/gguf
+          BENCH_THREADS=4 venv-eval/bin/python bench/clone_light.py refs
+          run() {  # label threads args...
+            local L=$1 T=$2; shift 2
+            echo "== $L"
+            if BENCH_THREADS=$T OMP_NUM_THREADS=$T taskset -c 0-$((T-1)) venv-run/bin/python bench/clone_light.py synth --model zonos --label "$L" --n "$N" "$@" > "$L.log" 2>&1; then
+              BENCH_THREADS=4 venv-eval/bin/python bench/clone_light.py eval --label "$L" 2>&1 | grep '^{' || echo "eval failed: $L"
+            else
+              tail -25 "$L.log"; echo "synth failed: $L"
+            fi
+          }
+          run zonos-ru-4t-r5 4 --ref-s 5
+          run zonos-ru-2t-r5 2 --ref-s 5 --cases en2ru,ru2en
+          run zonos-ru-4t-r10 4 --ref-s 10 --cases en2ru,ru2ru
+          for f in out/tts_clone/*/server.log; do echo "--- $f"; tail -5 "$f"; done
+
+  stock-ru:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     env:
       HF_HOME: ${{ github.workspace }}/hf
       HF_HUB_DISABLE_PROGRESS_BARS: '1'
@@ -28,29 +78,20 @@ jobs:
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6.8.0
         with:
           version: '0.13.7'
-          checksum: ${{ runner.os == 'Linux' && 'c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83'
-            || '81b811b57e4624df7ed3aac148e0359100d9962f3d9dce00aec533dc2e086731' }}
+          checksum: 'c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83'
           python-version: '3.12'
-      - name: Machine
-        run: |
-          uname -a; sysctl -n machdep.cpu.brand_string hw.memsize hw.ncpu 2>/dev/null || { nproc; lscpu | head -20; free -g; }; df -h .
       - name: Install
         run: |
           uv venv .venv && . .venv/bin/activate
-          uv pip install pip kittenml supertonic ruaccent soundfile huggingface_hub piper-tts==1.8.0
-          uv pip list | grep -i -E '^(kittenml|supertonic|ruaccent|onnxruntime|torch|piper-tts|misaki) '
+          uv pip install pip kittenml supertonic ruaccent soundfile huggingface_hub piper-tts==1.8.0 faster-whisper
       - name: Run
-        env:
-          THREADS: ${{ matrix.threads }}
         run: |
           . .venv/bin/activate
           cd r4
-          python r4_tts_cpu.py piper en 0 2>>err.log | tail -1 | tee -a results.jsonl || true
           python r4_tts_cpu.py piper ru 0 2>>err.log | tail -1 | tee -a results.jsonl || true
-          for cfg in "kitten2mini ru" "kitten2mini en" "supertonic3 en" "supertonic3 ru" "kokororu ru"; do
-            for th in $THREADS; do
-              OMP_NUM_THREADS=$th python r4_tts_cpu.py $cfg $th 2>>err.log | tail -1 | tee -a results.jsonl || true
-            done
+          for cfg in "kitten2mini ru" "kitten2mini en" "supertonic3 ru" "supertonic3 en" "kokororu ru"; do
+            OMP_NUM_THREADS=4 taskset -c 0-3 python r4_tts_cpu.py $cfg 4 2>>err.log | tail -1 | tee -a results.jsonl || true
           done
+          python cer.py wav/* 2>>err.log | tee -a results.jsonl || true
           echo '--- results'; cat results.jsonl
           echo '--- errors (tail)'; grep -v -i 'warn\|fetching\|unauthenticated' err.log | tail -40

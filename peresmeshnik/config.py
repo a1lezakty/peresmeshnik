@@ -175,7 +175,8 @@ MAC_LOCAL_GB = 15  # me -> them local by default on a Mac from "16 GB" (16 GiB);
 
 def me_to_them_default(s: Settings) -> str:
     """Me -> them where the user chose nothing: local on a Mac from 16 GB where the pair runs here in your cloned voice
-    (Pocket TTS: with the Hugging Face token of its gated weights), else the cloud. Gemini is a simultaneous interpreter
+    (Pocket TTS: with the Hugging Face token of its gated weights) and its models are downloaded (translation starts, a
+    voice not enrolled yet is said: the stock voice speaks meanwhile), else the cloud. Gemini is a simultaneous interpreter
     3-4 s behind, not in your voice; the clone here starts 1.5 s after a clause (LATENCY 0.3.2). Elsewhere the cloud, as
     before (the wizard recommends local where an NVIDIA GPU runs the clone). A 'cloud' that is only this default is not
     saved (`save`), so the token given later brings local; 'local' is always saved: the voice never goes to Google unasked."""
@@ -183,11 +184,12 @@ def me_to_them_default(s: Settings) -> str:
         return 'cloud'
     import psutil
 
-    from peresmeshnik import languages
+    from peresmeshnik import languages, models
     if psutil.virtual_memory().total < MAC_LOCAL_GB * 2 ** 30:
         return 'cloud'
     d = languages.direction(s, 'me_to_them')
-    return 'local' if d.local and d.voice == 'clone' else 'cloud'
+    ready = d.local and d.voice == 'clone' and all(models.is_fetched(models.get(i)) for i in d.models)
+    return 'local' if ready else 'cloud'
 
 
 problem = ''  # what the last load() could not use, for the user ('' = nothing)

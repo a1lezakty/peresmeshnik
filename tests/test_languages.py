@@ -522,19 +522,22 @@ def test_the_old_russian_asr_serves_until_the_new_one_is_downloaded(monkeypatch)
 
 def test_me_to_them_is_local_by_default_on_a_mac_from_16_gb_with_the_clone(monkeypatch):
     """LATENCY 0.3.2: Gemini lags 3-4 s and is not my voice; on a Mac from 16 GB where the clone speaks their language
-    (Pocket TTS English: with the Hugging Face token) me -> them is local by default. 8 GB, no clone, not a Mac: the
-    cloud, as before."""
+    (Pocket TTS English: with the Hugging Face token) and its models are here, me -> them is local by default. 8 GB, no
+    clone, not a Mac: the cloud, as before."""
     import sys
     from types import SimpleNamespace
 
     import psutil
-    ram, d = [16], {'local': True, 'voice': 'clone'}
+    ram, d, fetched = [16], {'local': True, 'voice': 'clone', 'models': ('parakeet-tdt-0.6b-v3',)}, [True]
     monkeypatch.setattr(psutil, 'virtual_memory', lambda: SimpleNamespace(total=ram[0] * 2 ** 30))
     monkeypatch.setattr(languages, 'direction', lambda s, side: SimpleNamespace(**d))
+    monkeypatch.setattr(models, 'is_fetched', lambda m, base=None: fetched[0])
     s = config.Settings()
     monkeypatch.setattr(sys, 'platform', 'darwin')
     assert config.me_to_them_default(s) == 'local'
-    d['voice'] = 'stock'  # no token: the stock voice would speak
+    fetched[0] = False  # its models not downloaded yet: translation would not start
+    assert config.me_to_them_default(s) == 'cloud'
+    fetched[0], d['voice'] = True, 'stock'  # no token: the stock voice would speak
     assert config.me_to_them_default(s) == 'cloud'
     d['voice'], ram[0] = 'clone', 8
     assert config.me_to_them_default(s) == 'cloud'
@@ -572,8 +575,8 @@ def test_the_old_default_cloud_goes_a_chosen_cloud_stays(tmp_path, monkeypatch):
 
 def test_the_mac_default_is_worked_out_once_in_a_load(tmp_path, monkeypatch):
     """models.root() loads the settings again (for models_dir) while me_to_them_default asks whether the clone's
-    weights are here: that inner load does not work out the default again (no recursion). English with the token:
-    Pocket TTS, local."""
+    weights are here: that inner load does not work out the default again (no recursion). English with the token and
+    the pair's models downloaded: Pocket TTS, local."""
     import sys
     from types import SimpleNamespace
 
@@ -586,6 +589,12 @@ def test_the_mac_default_is_worked_out_once_in_a_load(tmp_path, monkeypatch):
     monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
     monkeypatch.delenv('HF_TOKEN', raising=False)
     monkeypatch.setattr(models, 'hf_token_file', lambda: tmp_path / 'hf-token')
+    def fetch(i):
+        (tmp_path / 'models' / i).mkdir(parents=True)
+        (tmp_path / 'models' / i / models.MARKER).write_text(models.get(i).fingerprint)
+    fetch('gigaam-v3-e2e-ctc'), fetch('opus-mt-ru-en')  # ru -> en here
     assert config.load().me_to_them == 'cloud'  # no token: a stock voice would speak, the cloud stays
     monkeypatch.setenv('HF_TOKEN', 'hf_x')
+    assert config.load().me_to_them == 'cloud'  # the clone's weights not downloaded yet
+    fetch('pocket-tts-en')
     assert config.load().me_to_them == 'local'

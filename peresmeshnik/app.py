@@ -599,7 +599,7 @@ class Side:
 
     def _local(self, s: config.Settings):
         from peresmeshnik import languages
-        from peresmeshnik.pipeline import make_local
+        from peresmeshnik.pipeline import VOICE_END, make_local
         pair = languages.direction(s, 'them_to_me' if self.name == 'them' else 'me_to_them')
         if not pair.local:  # the wizard and the tray say so before; settings edited by hand land here
             raise RuntimeError(f'{"; ".join(pair.why)}: switch "{ARROW[self.name].capitalize()}" to cloud')
@@ -610,7 +610,8 @@ class Side:
             d = make_local(self.src, self.tgt, tts=pair.tts, max_lag_s=MAX_LAG_S, **kw)  # the queue policy: subtitles keep the rest
             return live.attach(self._stock(d, s), s, self.echo, lambda why: self.on_error(  # in their own voice once
                 f'note: {ARROW[self.name]}: a stock voice speaks instead of their voice ({why})'), self.raw_mic)  # made
-        elif pair.voice == 'stock':  # a stock voice: chosen where the clone falls behind (an 8 GB Mac, BENCH), or the
+        kw['end'] = VOICE_END  # my voice: its clause ends later than a subtitle's; sped up when behind, never dropped
+        if pair.voice == 'stock':  # a stock voice: chosen where the clone falls behind (an 8 GB Mac, BENCH), or the
             d = make_local(self.src, self.tgt, tts=pair.tts, **kw)  # clone cannot speak the language
         else:
             from peresmeshnik import models, voice
@@ -664,11 +665,11 @@ class Side:
         key: local was chosen, so the user's voice does not leave the machine unasked."""
         from peresmeshnik import languages
         from peresmeshnik.cloud import api_key
-        from peresmeshnik.pipeline import make_local
+        from peresmeshnik.pipeline import VOICE_END, make_local
         if not languages.pick(s.local.tts, self.tgt):  # zh, ar: no stock voice (M-24: not "unknown model ''")
             raise RuntimeError(f'your cloned voice cannot speak ({why}) and there is no stock voice for '
                                f'{languages.name(self.tgt)}: switch "Me → them" to cloud')
-        d = self._stock(make_local(self.src, self.tgt, settings=s), s)
+        d = self._stock(make_local(self.src, self.tgt, settings=s, end=VOICE_END), s)
         try:
             cloud = bool(api_key(s.cloud))
         except SystemExit:  # no key

@@ -358,7 +358,7 @@ def run(a):
         tts = XttsClone(a.model_dir, a.device, a.threads) if a.device else make_clone(a.model_dir, a.threads)
         v = voice.load(a.voice.name, a.voice.parent)
     marked = Marked(tts)
-    d = pipeline.make_local('ru', 'en', threads=a.threads, tts=marked, voice=v)
+    d = pipeline.make_local('ru', 'en', threads=a.threads, tts=marked, voice=v, end=pipeline.VOICE_END)  # as the app's
     d.realtime = True
     load_s = time.perf_counter() - t
     events, src = d.events, []

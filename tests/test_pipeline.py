@@ -410,8 +410,21 @@ def test_queue_policy_caps_the_voice_lag():
     assert max(tts.speeds) > 1.0 and all(1.0 <= s <= 1.4 for s in tts.speeds)  # behind: faster, within the cap
 
 
-def test_barge_in_drops_what_is_not_heard_yet():
+def test_me_to_them_is_sped_up_at_the_same_pitch_and_never_dropped():
+    """LATENCY 0.3.2: me -> them has no max_lag_s (the other side has no subtitles of a dropped clause), yet its voice
+    behind is sped up as at MAX_LAG_S; a TTS without `speed` (a clone) through voices/live.faster: its speech shorter by
+    the speed."""
+    rows = voice_rows(LongTts(), None, seconds=6.0)
+    sped = [r for r in rows if r.get('speed', 1.0) > 1.05]
+    assert sped and not any('dropped' in r for r in rows) and all(r['speed'] <= 1.4 for r in sped)
+    for r in sped:  # LongTts: 1 s of speech per word at 1x
+        assert len(r['text'].split()) / r['speed'] - 0.1 < r['speech_s'] < len(r['text'].split()) / r['speed'] + 0.1, r
+
+
+def test_barge_in_drops_what_is_not_heard_yet(monkeypatch):
     """The user talks over the voice: the clause being spoken stops, a clause that ends later is spoken."""
+    from peresmeshnik import pipeline
+    monkeypatch.setattr(pipeline, 'FAST_AFTER_S', 10.0)  # SlowTts's voice starts 0.52 s late: not sped up (re-chunked)
     d = LocalDirection(EnergyVad(), WordAsr(), UpperMt(), SlowTts(), 'en', 'ru')
     got = []
 

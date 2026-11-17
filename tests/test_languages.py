@@ -93,6 +93,7 @@ def test_the_gpu_is_asked_once_unless_its_driver_did_not_answer(monkeypatch):
     from types import SimpleNamespace
 
     from peresmeshnik.ui import wizard
+    monkeypatch.setattr(wizard, 'MACOS', False)  # the macOS runner's 7 GB: no local recommended there
     answers, now = [languages.Gpu(why='timed out'), languages.Gpu(8.0, (572, 83), 8.6)], [100.0]
     calls = []
     monkeypatch.setattr(languages, '_PROBED', {})
@@ -517,3 +518,74 @@ def test_the_old_russian_asr_serves_until_the_new_one_is_downloaded(monkeypatch)
     here = set()
     with pytest.raises(models.ModelMissing, match=rnnt):
         asr.OnnxAsr(rnnt)
+
+
+def test_me_to_them_is_local_by_default_on_a_mac_from_16_gb_with_the_clone(monkeypatch):
+    """LATENCY 0.3.2: Gemini lags 3-4 s and is not my voice; on a Mac from 16 GB where the clone speaks their language
+    (Pocket TTS English: with the Hugging Face token) me -> them is local by default. 8 GB, no clone, not a Mac: the
+    cloud, as before."""
+    import sys
+    from types import SimpleNamespace
+
+    import psutil
+    ram, d = [16], {'local': True, 'voice': 'clone'}
+    monkeypatch.setattr(psutil, 'virtual_memory', lambda: SimpleNamespace(total=ram[0] * 2 ** 30))
+    monkeypatch.setattr(languages, 'direction', lambda s, side: SimpleNamespace(**d))
+    s = config.Settings()
+    monkeypatch.setattr(sys, 'platform', 'darwin')
+    assert config.me_to_them_default(s) == 'local'
+    d['voice'] = 'stock'  # no token: the stock voice would speak
+    assert config.me_to_them_default(s) == 'cloud'
+    d['voice'], ram[0] = 'clone', 8
+    assert config.me_to_them_default(s) == 'cloud'
+    monkeypatch.setattr(sys, 'platform', 'linux')
+    ram[0] = 64
+    assert config.me_to_them_default(s) == 'cloud'
+
+
+def test_the_old_default_cloud_goes_a_chosen_cloud_stays(tmp_path, monkeypatch):
+    """0.3.1 saved me_to_them = "cloud" (its default) with the rest: this computer's default comes instead. 'cloud'
+    chosen since stays; a 'cloud' that is only the default is not saved, so the token given later brings local; 'local'
+    is always saved (a token forgotten later does not send the voice to Google)."""
+    default = ['local']
+    monkeypatch.setattr(config, 'me_to_them_default', lambda s: default[0])
+    p = tmp_path / 'settings.toml'
+    p.write_text('my_lang = "ru"\nthem_to_me = "local"\nme_to_them = "cloud"\n', 'utf-8')  # 0.3.1's: no saved_by
+    s = config.load(p)
+    assert s.me_to_them == 'local'
+    config.save(s, p)
+    assert 'saved_by' in p.read_text('utf-8') and config.load(p).me_to_them == 'local'
+    s.me_to_them = 'cloud'  # the user's own choice now
+    config.save(s, p)
+    assert config.load(p).me_to_them == 'cloud'
+    p.write_text('me_to_them = "cloud"\n', 'utf-8')
+    default[0] = 'cloud'  # no token yet
+    config.save(config.load(p), p)
+    assert 'me_to_them' not in p.read_text('utf-8')
+    default[0] = 'local'  # the token given
+    s = config.load(p)
+    assert s.me_to_them == 'local'
+    config.save(s, p)
+    default[0] = 'cloud'  # forgotten again
+    assert config.load(p).me_to_them == 'local'
+
+
+def test_the_mac_default_is_worked_out_once_in_a_load(tmp_path, monkeypatch):
+    """models.root() loads the settings again (for models_dir) while me_to_them_default asks whether the clone's
+    weights are here: that inner load does not work out the default again (no recursion). English with the token:
+    Pocket TTS, local."""
+    import sys
+    from types import SimpleNamespace
+
+    import psutil
+    monkeypatch.setattr(psutil, 'virtual_memory', lambda: SimpleNamespace(total=16 * 2 ** 30))
+    monkeypatch.setattr(config, 'sys', SimpleNamespace(platform='darwin', stderr=sys.stderr))
+    monkeypatch.delenv('PERESMESHNIK_MODELS', raising=False)
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    monkeypatch.setattr(config, 'cache_dir', lambda: tmp_path)
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
+    monkeypatch.delenv('HF_TOKEN', raising=False)
+    monkeypatch.setattr(models, 'hf_token_file', lambda: tmp_path / 'hf-token')
+    assert config.load().me_to_them == 'cloud'  # no token: a stock voice would speak, the cloud stays
+    monkeypatch.setenv('HF_TOKEN', 'hf_x')
+    assert config.load().me_to_them == 'local'

@@ -101,7 +101,11 @@ class Muted:
         tts = self._get()
         rs = Resampler(tts.sample_rate, self.sample_rate)
         kw = {'speed': speed} if speed != 1.0 and 'speed' in inspect.signature(tts.synth).parameters else {}
-        for chunk in tts.synth(text, lang, voice, **kw):
+        chunks = tts.synth(text, lang, voice, **kw)
+        if speed != 1.0 and not kw:  # a clone has no speed of its own: at the same pitch, as on the local path
+            from peresmeshnik.voices.live import faster
+            chunks = faster(chunks, speed, tts.sample_rate)
+        for chunk in chunks:
             yield rs(chunk)
 
     def close(self) -> None:

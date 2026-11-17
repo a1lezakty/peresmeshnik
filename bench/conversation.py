@@ -195,7 +195,7 @@ def segment(a):
     for name, pcm, meta in items(src):
         d = LocalDirection(SileroVad(threshold=a.vad, min_silence_ms=a.silence), base.asr, base.mt, base.tts, src, tgt,
                            max_clause_s=a.max_clause)
-        d.asr.context_s = a.context
+        d.asr.context_s, d.asr.tail_s = a.context, a.tail
         d.realtime = False
         with Rows() as r:
             t = drain(d)
@@ -218,7 +218,7 @@ def segment(a):
     reasons = {k: round(sum(x['reason'] == k for x in rows) / len(rows), 3) for k in ('pause', 'punct', 'max', 'eof')}
     record('pipeline', f'{base.asr.name}+opus-mt', lang=src, mode='segment', data='+'.join(n for n, _, _ in items(src)),
            audio_s=round(sum(len(p) for _, p, _ in items(src)) / SR), vad_threshold=a.vad, min_silence_ms=a.silence,
-           max_clause_s=a.max_clause, context_s=a.context, threads=a.threads, clauses=len(rows),
+           tail_s=a.tail, max_clause_s=a.max_clause, context_s=a.context, threads=a.threads, clauses=len(rows),
            wer=round(jiwer.wer(refs, hyps), 4), wer_offline=round(jiwer.wer(refs, offl), 4),
            chrf=round(sacrebleu.corpus_chrf(trs, [prefs]).score, 1), chrf_offline=round(sacrebleu.corpus_chrf(otrs, [prefs]).score, 1),
            clause_s_p50=pct(dur, 50), clause_s_p95=pct(dur, 95), short_share=round(sum(n <= 2 for n in nw) / len(nw), 3),
@@ -235,8 +235,9 @@ def lag(a):
     data = [('fleurs-continuous', continuous(src), None)] if a.continuous else list(items(src))
     rows, audio = [], 0.0
     for name, pcm, _ in data:
-        d = LocalDirection(type(d.vad)(), d.asr, d.mt, d.tts, src, tgt, max_clause_s=a.max_clause,
+        d = LocalDirection(type(d.vad)(min_silence_ms=a.silence), d.asr, d.mt, d.tts, src, tgt, max_clause_s=a.max_clause,
                            max_lag_s=a.max_lag or None)
+        d.asr.tail_s = a.tail
         with Rows() as r:
             t = drain(d)
             run(d, np.concatenate([pcm, np.zeros(SR * 3 // 2, np.float32)]), realtime=True)
@@ -252,6 +253,7 @@ def lag(a):
            for x in spoken if 'voice_lag_s' in x for i in range(nw(x))]
     record('pipeline', f'{d.asr.name}+opus-mt+piper', lang=src, mode='lag', data='fleurs-continuous' if a.continuous else 'conversation',
            audio_s=round(audio), max_lag_s=a.max_lag or None, max_clause_s=a.max_clause, threads=a.threads,
+           min_silence_ms=a.silence, tail_s=a.tail,
            clauses=len(rows), dropped_clauses=round(1 - len(spoken) / len(rows), 3),
            dropped_words=round(1 - sum(map(nw, spoken)) / sum(map(nw, rows)), 3),
            voice_lag_s_p50=pct(lags, 50), voice_lag_s_p95=pct(lags, 95), voice_lag_s_max=round(max(lags), 2),
@@ -272,7 +274,8 @@ def main():
     ap.add_argument('--asr', help='ASR model id (default: settings)')
     ap.add_argument('--threads', type=int, default=2)
     ap.add_argument('--vad', type=float, default=0.5, help='Silero speech threshold')
-    ap.add_argument('--silence', type=int, default=300, help='VAD pause that ends a clause, ms')
+    ap.add_argument('--silence', type=int, default=300, help='VAD pause that ends a clause, ms (pipeline.QUICK_END / VOICE_END)')
+    ap.add_argument('--tail', type=float, default=0.8, help='no cut at a word start this near the ASR window end, s')
     ap.add_argument('--max-clause', type=float, default=5.0)
     ap.add_argument('--context', type=float, default=1.0)
     ap.add_argument('--max-lag', type=float, default=4.0, help='lag: queue policy cap, s (0 = no policy)')

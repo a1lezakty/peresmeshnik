@@ -49,7 +49,7 @@ from peresmeshnik.local import voicepack
 from peresmeshnik.remote import pairing
 from peresmeshnik.ui.components import PACK_CONSENT, ComponentsBox, HfTokenBox
 from peresmeshnik.ui.overlay import font_note
-from peresmeshnik.ui.tray import LANGS, MIC_LABEL, SIDES, device_combo, fill_combo, save_key
+from peresmeshnik.ui.tray import GEMINI, LANGS, MIC_LABEL, SIDES, device_combo, fill_combo, save_key
 
 LINUX = sys.platform.startswith('linux')
 log = logging.getLogger('peresmeshnik.ui')
@@ -123,9 +123,10 @@ def gpu_refusal(g: Gpu) -> str:
 
 def tier(lang: str = 'en') -> tuple[str, str]:
     """(what this machine is, the recommended me -> them engine): local where a clone engine speaks `lang` here
-    (languages.clone_engine)."""
+    (languages.clone_engine), on a Mac from 16 GB (config.me_to_them_default)."""
     gb, g = psutil.virtual_memory().total / 2 ** 30, languages.nvidia_once()  # the probe direction() asks too: once
-    rec = 'local' if languages.clone_engine(lang, platform=languages.Platform(gpu=g))[0] else 'cloud'
+    rec = 'local' if languages.clone_engine(lang, platform=languages.Platform(gpu=g))[0] and \
+        (not MACOS or gb >= config.MAC_LOCAL_GB) else 'cloud'
     return f'{gb:.0f} GB RAM, {gpu_text(g.vram)}: recommended them → me local, me → them {rec}', rec
 
 
@@ -233,6 +234,8 @@ class LanguagesPage(QWizardPage):
             if d.src == 'ar' and c.currentText() == 'cloud' and languages.cloud_subtitles(s, key):
                 text += ' Arabic subtitles from the cloud are Egyptian Arabic (Gemini has no other): other dialects come out ' \
                         'worse.'
+            if c.currentText() == 'cloud':
+                text = f'{GEMINI[key][0].upper()}{GEMINI[key][1:]}. {text}'
             self.why[key].setText(text)
         ms, base = [models.get(i) for i in needed_models(s)], models.root()
         todo = [m for m in ms if not models.is_fetched(m, base)]
@@ -278,7 +281,9 @@ class DevicesPage(QWizardPage):
         self.w = w
         self.setTitle('Sound devices')
         self.setSubTitle('Translated speech goes to your headphones; your translated voice goes to the virtual microphone '
-                         f'"{VMIC}", which you choose in the call app.')
+                         f'"{VMIC}", which you choose in the call app. Wired headphones are best; do not choose the '
+                         'microphone of AirPods (or another Bluetooth headset): it switches them to the phone-call mode '
+                         '(HFP), slower and with poor sound both ways.')
         self.f = form(self)
         self.warn = QLabel()
         self.warn.setWordWrap(True)

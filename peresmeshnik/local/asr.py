@@ -28,7 +28,7 @@ SENTENCE_END = tuple('.?!;。？！；؟')
 COMMAS = tuple(',，、،')
 NO_SPACES = {'zh', 'ja'}  # no spaces between words: every token boundary is a word boundary, words are characters
 LEAD_S = 0.5
-TAIL_S = 0.8  # timestamps of the last ~0.8 s of a window run ahead of the audio (0.5: BENCH stage 5, not taken)
+TAIL_S = 0.8  # timestamps of the last ~0.8 s of a window run ahead of the audio; the app's own: pipeline.QUICK_END / VOICE_END
 MIN_PART_S = 1.0  # an early cut at a comma leaves at least this much speech before it
 # the next clause may repeat up to this many of a cut's last words ("to cope with" | "cope with the"): dropped when
 # its own window did not hear them in the context before the cut (there "Thank you. | Thank you very much" is said twice)
@@ -91,7 +91,7 @@ def _starts_sentence(tok: str) -> bool:
 
 class OnnxAsr:
     def __init__(self, model_id: str = 'parakeet-tdt-0.6b-v3', threads: int = 2, partial_every_s: float = 0.3,
-                 context_s: float = 1.0, live: bool = True):
+                 context_s: float = 1.0, live: bool = True, tail_s: float | None = None):
         import onnx_asr
 
         from peresmeshnik import models
@@ -104,7 +104,7 @@ class OnnxAsr:
         name, quant = ONNX_ASR[model_id]
         self.name = model_id
         self.partial_every = int(partial_every_s * SAMPLE_RATE)
-        self.context_s = context_s
+        self.context_s, self.tail_s = context_s, tail_s  # tail_s None: TAIL_S
         self._lead = np.zeros(int(LEAD_S * SAMPLE_RATE), np.float32)
         providers = device.onnx_providers()
         self.device = 'cuda' if providers[0] == 'CUDAExecutionProvider' else 'cpu'
@@ -137,7 +137,7 @@ class OnnxAsr:
             cap_whisper(self.model)
 
     def stream(self, lang: str) -> OnnxAsrStream:
-        return OnnxAsrStream(self, lang, self.context_s)
+        return OnnxAsrStream(self, lang, self.context_s, self.tail_s)
 
     def recognize(self, pcm: np.ndarray, lead: bool = True, lang: str | None = None):
         """Parakeet (int8 and fp32 alike) now and then returns '' for a short window. On windows that start
@@ -156,8 +156,9 @@ class OnnxAsrStream:
     a window that starts mid-speech loses words, so the model hears the end of the previous clause
     and its tokens (timestamps before the clause start) are dropped."""
 
-    def __init__(self, asr: OnnxAsr, lang: str, context_s: float = 1.0):
+    def __init__(self, asr: OnnxAsr, lang: str, context_s: float = 1.0, tail_s: float | None = None):
         self.asr, self.lang = asr, lang  # Parakeet and GigaAM detect the language themselves
+        self.tail_s = TAIL_S if tail_s is None else tail_s  # no cut at a word starting this near the window's end
         self.spaced = lang not in NO_SPACES
         self.repeat = REPEAT_WORDS if self.spaced else REPEAT_CHARS
         self.context = int(context_s * SAMPLE_RATE)
@@ -219,7 +220,7 @@ class OnnxAsrStream:
             return self._cut_quiet() if force else None
         toks, ts = self._last
         # word starts far enough from the window end: there the model squeezes the last words together
-        starts = [k for k in range(1, len(toks)) if self._word(toks[k]) and ts[k] <= len(self.pcm) / SAMPLE_RATE - TAIL_S]
+        starts = [k for k in range(1, len(toks)) if self._word(toks[k]) and ts[k] <= len(self.pcm) / SAMPLE_RATE - self.tail_s]
         # a sentence end is punctuation before a capitalised word ("U.N. also" is not one; scripts without case: a letter)
         k = next((k for k in reversed(starts) if toks[k - 1].endswith(SENTENCE_END) and _starts_sentence(toks[k])), None)
         self.cut_at = 'sentence'
@@ -242,9 +243,9 @@ class OnnxAsrStream:
 
     def _cut_quiet(self) -> str:
         """A forced cut without timestamps: at the quietest 0.1 s of the clause's second half (short of the last
-        TAIL_S), the words before it from one more run; the rest starts the next clause, with no context."""
+        tail_s), the words before it from one more run; the rest starts the next clause, with no context."""
         f = SAMPLE_RATE // 10
-        lo, hi = len(self.pcm) // 2 // f, (len(self.pcm) - int(TAIL_S * SAMPLE_RATE)) // f
+        lo, hi = len(self.pcm) // 2 // f, (len(self.pcm) - int(self.tail_s * SAMPLE_RATE)) // f
         if hi <= lo:
             return self.finish()
         rms = [float(np.mean(self.pcm[i * f:(i + 1) * f] ** 2)) for i in range(lo, hi)]

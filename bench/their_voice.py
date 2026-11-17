@@ -151,7 +151,8 @@ def main() -> None:
         true = next((k for t0_, t1_, k in turns if t0_ <= mid <= t1_ + GAP_S), '?')
         e = judge.embed(x, live.OUT_SR) if len(x) > live.OUT_SR // 2 else None
         clauses.append({'start_s': r['start_s'], 'end_s': r['end_s'], 'true': true, 'who': who[0], 'made_s': who[1],
-                        'voice_lag_s': r.get('voice_lag_s'), 'tts_first_ms': r.get('tts_first_ms'),
+                        'voice_lag_s': r.get('voice_lag_s'), 'caption_lag_s': r.get('caption_lag_s'),
+                        'tts_first_ms': r.get('tts_first_ms'),
                         'speech_s': r.get('speech_s'), 'speed': r.get('speed', 1.0),
                         'sim_true': None if e is None else round(float(e @ ref[true]), 3) if true != '?' else None,
                         'sim_other': None if e is None or true == '?' else round(float(e @ ref['AB'[true == 'A']]), 3),
@@ -188,6 +189,7 @@ def main() -> None:
         'sim_true_stock': med([c['sim_true'] for c in clauses if c['who'] == 'stock' and c['sim_true'] is not None]),
         'voice_lag_clone': med([c['voice_lag_s'] for c in clone if c['voice_lag_s'] is not None]),
         'voice_lag_clone_max': max((c['voice_lag_s'] for c in clone if c['voice_lag_s'] is not None), default=None),
+        'caption_lag': med([r['caption_lag_s'] for r in rows if 'caption_lag_s' in r]),  # every clause's subtitle
         'tts_first_ms_clone': med([c['tts_first_ms'] for c in clone if c['tts_first_ms'] is not None]),
         'tts_first_ms_stock': med([c['tts_first_ms'] for c in clauses if c['who'] == 'stock' and c['tts_first_ms']]),
         # the voice's pace: seconds of speech per character of the translation, at speed 1

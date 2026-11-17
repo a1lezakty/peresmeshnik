@@ -585,7 +585,8 @@ def test_arabic_from_the_cloud_is_said_to_be_egyptian(tmp_path, monkeypatch):
 
 def test_a_star_model_reaches_the_side(tmp_path, monkeypatch):
     """'*' in `[local]` asr and mt (one model for every language or pair): the app's local side, the cloud's local
-    fallback and make_local's own defaults are built on it (languages.direction's ids), no KeyError."""
+    fallback and make_local's own defaults are built on it (languages.direction's ids), no KeyError. A clause ends sooner
+    for them -> me and the subtitles than for my voice (pipeline.QUICK_END / VOICE_END)."""
     from types import SimpleNamespace
 
     from peresmeshnik import app, pipeline
@@ -596,11 +597,11 @@ def test_a_star_model_reaches_the_side(tmp_path, monkeypatch):
                              ('tts-ja', 'tts', ('ja',))):
         reg[mid] = models.Model(mid, role, langs, 'MIT', 'u', 'u', {})
     monkeypatch.setattr(models, 'registry', lambda: reg)
-    made = []
-    monkeypatch.setattr(asr, 'OnnxAsr', lambda mid, threads=None: made.append(mid))
+    made, ends = [], []
+    monkeypatch.setattr(asr, 'OnnxAsr', lambda mid, threads=None, tail_s=None: made.append(mid) or ends.append(tail_s))
     monkeypatch.setattr(mt, 'OpusMt', lambda src, tgt, mid, threads=None: made.append(mid))
     monkeypatch.setattr(tts, 'PiperTts', lambda mid, threads=None: made.append(mid))
-    monkeypatch.setattr(vad, 'SileroVad', lambda: None)
+    monkeypatch.setattr(vad, 'SileroVad', lambda min_silence_ms: ends.append(min_silence_ms))
     monkeypatch.setattr(pipeline, 'LocalDirection', lambda *a, **k: SimpleNamespace(
         tts=None, mt=None, warm_up=lambda: None, close=lambda: None))
     monkeypatch.setattr(gemini, 'GeminiDirection', lambda src, tgt, *a, **k: Direction(src, tgt))
@@ -609,16 +610,17 @@ def test_a_star_model_reaches_the_side(tmp_path, monkeypatch):
     pipeline.make_local('ja', 'de', settings=s)
     assert sorted(made) == ['asr-many', 'mt-many', 'tts-de']
     for name, src, tgt, voice in (('them', 'ja', 'de', 'tts-de'), ('me', 'de', 'ja', 'tts-ja')):
-        made.clear()
+        made.clear(), ends.clear()
         side = app.Side.__new__(app.Side)
         side.name, side.src, side.tgt = name, src, tgt
         side._local(s)
         assert sorted(made) == ['asr-many', 'mt-many', voice]
+        assert tuple(ends) == (pipeline.QUICK_END if name == 'them' else pipeline.VOICE_END) == ((200, 0.5), (300, 0.8))[name == 'me']
     s.them_to_me = 'cloud'
-    made.clear()
+    made.clear(), ends.clear()
     fb = fallback.make('them', s, 'a-key')  # local subtitles beside the cloud voice: the '*' models
     try:
-        assert sorted(made) == ['asr-many', 'mt-many']
+        assert sorted(made) == ['asr-many', 'mt-many'] and tuple(ends) == pipeline.QUICK_END
     finally:
         fb.close()
 
@@ -753,6 +755,8 @@ def test_languages_page_says_what_a_cloud_side_falls_back_on(tmp_path, monkeypat
     config.save(s)
     page = wizard.LanguagesPage(type('W', (), {'s': s})())
     assert 'If the cloud fails' not in page.why['them_to_me'].text()  # it goes on here: nothing to warn about
+    assert page.why['me_to_them'].text().startswith('Cloud (Gemini): simultaneous interpreter, lags ~3–4 s, the voice is '
+                                                    'not yours. ')  # said for what it is (LATENCY 0.3.2)
     stand_ins(monkeypatch, consent=('tts-ja',))  # me -> them falls back on a noncommercial voice: optional, said
     page.refresh()
     assert 'fallback voice is noncommercial' in page.why['me_to_them'].text()

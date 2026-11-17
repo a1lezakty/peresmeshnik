@@ -42,7 +42,10 @@ mic ─▶ capture ─▶ queue ─▶ VAD ─▶ ASR ─clause end─▶ MT ─
   the clause's second half or between words; the next window keeps 1 s of the previous clause in
   front, since Parakeet loses words on a window that starts mid-speech). MT translates each
   clause on its own (OPUS-MT has no context input; a context-aware LLM MT is a stage-5 option);
-  TTS starts on the first clause while the speaker is still talking.
+  TTS starts on the first clause while the speaker is still talking. A clause cut by length goes to
+  the TTS without a full stop (its sentence goes on), and where clauses meet (`audio/joins.py`) the
+  synthesized silence is cut to ~0.1 s and a clause that goes on with the sentence starts as loud as
+  the one before ended, back to its own loudness within 1 s; no crossfade (0.3.2, research 2026-11-16).
 - **Subtitles** show ASR partials of the current clause immediately and replace them with the
   final text + translation at clause end. The overlay repaints only when the text changes.
 - **Queue and barge-in** (`pipeline.py`; numbers: BENCH, stage 2). Translated speech plays back to

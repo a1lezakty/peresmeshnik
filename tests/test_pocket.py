@@ -202,7 +202,7 @@ def test_synth_streams_and_stops(model, tmp_path):
 def test_prompt_and_split(model):
     assert pocket.prompt('hello there') == ('Hello there.', 5)
     said = '“Hi?”, she said, and went on with the story'
-    assert pocket.prompt(said + ',') == (said + '.', 3)
+    assert pocket.prompt(said + ',') == (said, 3)  # it goes on: no full stop (a clause cut by length)
     assert pocket.prompt('It’s fine!')[0] == "It's fine!"
     assert pocket.prompt('« Oui ; non » (bien)', 'fr')[0] == 'Oui , non bien.'
     assert pocket.prompt('Это «так» — да', 'ru')[0] == 'Это «так» — да.'  # Shtorm: no rewrites

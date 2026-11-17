@@ -446,6 +446,7 @@ class TheirVoice:
     fails. Never into the call: app.Side refuses an output that goes there (`them`)."""
     them = True
     sample_rate = OUT_SR
+    speaking = ''  # 'clone' or 'stock': who says the clause being synthesized (the tray's voice line, app.voice_kind)
 
     def __init__(self, stock, live: LiveVoice):
         self.stock, self.live = stock, live
@@ -453,7 +454,7 @@ class TheirVoice:
     def synth(self, text: str, lang: str, voice=None, speed: float = 1.0):
         """`voice`: the clause's Clause (LiveVoice.offer, through the pipeline); None: a clause of whoever spoke last."""
         if (v := self.live.voice(voice if isinstance(voice, Clause) else None)) is not None:
-            said, eng = False, self.live.engine
+            said, eng, self.speaking = False, self.live.engine, 'clone'
             for last in (False, True):
                 try:
                     for chunk in self._at(faster(self._timed(eng.synth(text, lang, v), eng.sample_rate), speed,
@@ -470,6 +471,7 @@ class TheirVoice:
                     if said:  # the rest of this clause is lost, the next ones are said in the stock voice
                         return
                     break
+        self.speaking = 'stock'
         yield from self._at(self.stock.synth(text, lang, **({'speed': speed} if speed != 1.0 else {})),
                             self.stock.sample_rate)
 

@@ -555,6 +555,23 @@ def clone_rtf(tts, lang: str, voice) -> float:
     return (time.perf_counter() - t0) / max(n / tts.sample_rate, 1e-3)
 
 
+def voice_kind(tts) -> str:
+    """'clone', 'stock' or '' (not known yet) for the TTS a direction speaks with, through its wrappers: crash.Respawn,
+    cloud/fallback.Muted (its voice made at first use), voices/live.TheirVoice (`speaking`, per clause)."""
+    from peresmeshnik.cloud.fallback import Muted
+    from peresmeshnik.local.tts import PiperTts
+    for _ in range(4):
+        if (k := getattr(tts, 'speaking', None)) is not None:
+            return k
+        if isinstance(tts, crash.Respawn):
+            tts = tts.tts
+        elif isinstance(tts, Muted):
+            tts = tts._tts
+        else:
+            break
+    return '' if tts is None else 'stock' if isinstance(tts, PiperTts) else 'clone'
+
+
 def spoke(e: BaseException | None) -> bool:
     """The error came from the pipeline's speak worker (the TTS: the clone), not from ASR or MT."""
     return e is not None and any(f.name == '_speak' for f in traceback.extract_tb(e.__traceback__))
@@ -570,6 +587,7 @@ class Side:
     # sides (a switch is rare) and a class default, so a side made without __init__ (tests) has it
     echo = None  # the side made without __init__ (tests) attaches the other person's voice without the echo check
     raw_mic = None  # them: () -> my microphone goes into the call as it is (the loopback while me -> them loads)
+    voice_line = True  # the tray's line says whose voice it plays (voice_now); remote/server.py's side does not
 
     def __init__(self, name: str, s: config.Settings, inp, out, overlay, on_error=lambda text: None, echo=None):
         """`echo`: an audio.echo.EchoGate on the input (our own speech coming back from the other side is not translated)."""
@@ -581,6 +599,7 @@ class Side:
         self._lock = threading.Lock()  # stop() vs a fallback voice being made mid-call
         self.on_talk = lambda: None  # 'me': I am talking (a partial caption of BARGE_IN_WORDS): barge-in on the other side
         self.directions = []  # (direction, takes its captions, takes its speech)
+        self._voice = ''  # the voice the tray says speaks this side's translation (voice_now)
         self._threads: list[threading.Thread] = []
         self._live_q: queue.Queue = queue.Queue()  # the live pass-through, played on its own thread
         if self.engine == 'local':
@@ -772,6 +791,9 @@ class Side:
                         self.on_talk()
                 elif isinstance(e, Speech) and speech and (not (self.live or self.auto) or self._supports_live):
                     self.out.play(e.pcm, e.sample_rate)
+                    if self.voice_line and (v := self.voice_now()) and v != self._voice:  # the tray: what is heard now
+                        self._voice = v
+                        self.on_error(f'voice: {ARROW[self.name]}: {v}')
                 elif isinstance(e, Latency) and captions and hasattr(self.overlay, 'latency'):
                     self.overlay.latency(e)
             if self._stopping:
@@ -793,6 +815,28 @@ class Side:
                 self.on_failure(f'the translation failed ({type(e).__name__}: {e})', e)
             else:
                 self.on_error(f'error: {ARROW[self.name]}: {e}')
+
+    def voice_now(self) -> str:
+        """Whose voice says this side's translation now, in the user's words ('' not known yet): Gemini's, my server's,
+        my cloned voice (from which recording), their cloned voice, a stock voice. TheirVoice decides per clause: the
+        clause being synthesized, a clause or so ahead of what plays."""
+        d = self.directions[0][0] if self.directions else None
+        d = getattr(d, 'inner', d)  # LiveSwitch's
+        whose = 'your' if self.name == 'me' else 'their'
+        if getattr(d, 'mode', None) == 'cloud':  # cloud/fallback.Fallback: its primary path speaks
+            if self.engine != 'remote':
+                return "Gemini's voice, not yours" if self.name == 'me' else "Gemini's voice"
+            clone = (getattr(d.cloud, 'server', None) or {}).get('voice') == 'clone'
+            return f'{whose} cloned voice, on your server' if clone else 'a stock voice, on your server'
+        d = getattr(d, 'local', d)  # the fallback's local path speaks
+        kind = voice_kind(getattr(d, 'tts', None))
+        if kind != 'clone':
+            return {'stock': 'a stock voice'}.get(kind, '')
+        lang = (getattr(getattr(d, 'voice', None), 'meta', None) or {}).get('lang')
+        if self.name == 'me' and lang:
+            from peresmeshnik import languages
+            return f'your cloned voice, from your {languages.name(lang)} recording'
+        return f'{whose} cloned voice'
 
     def interrupt(self) -> None:
         """Barge-in: the user talks over this side's voice. What is not heard yet goes; the subtitles stay."""

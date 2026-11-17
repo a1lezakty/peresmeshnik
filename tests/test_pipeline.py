@@ -91,7 +91,7 @@ class ToneTts:
 
     def synth(self, text, lang, voice=None):
         for _ in text.split():
-            yield np.zeros(800, np.float32)
+            yield np.full(800, 0.1, np.float32)  # sound: audio/joins.py holds back silence
 
 
 def tone(s):
@@ -213,7 +213,7 @@ class SlowTts(ToneTts):
     def synth(self, text, lang, voice=None):
         for _ in text.split():
             time.sleep(0.2)
-            yield np.zeros(800, np.float32)
+            yield np.full(800, 0.1, np.float32)
 
 
 def two_clauses():
@@ -368,12 +368,12 @@ class LongTts(ToneTts):
 
     def synth(self, text, lang, voice=None):
         for _ in text.split():
-            yield np.zeros(self.sample_rate, np.float32)
+            yield np.full(self.sample_rate, 0.1, np.float32)
 
     def _synth_speed(self, text, lang, voice=None, speed=1.0):
         self.speeds.append(speed)
         for _ in text.split():
-            yield np.zeros(int(self.sample_rate / speed), np.float32)
+            yield np.full(int(self.sample_rate / speed), 0.1, np.float32)
 
 
 def voice_rows(tts, max_lag_s, seconds=4.0, events=None):

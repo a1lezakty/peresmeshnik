@@ -848,3 +848,66 @@ def test_settings_window_chooses_the_devices_on_every_os(tmp_path, monkeypatch):
     d = tray_mod.SettingsDialog(t)
     monkeypatch.undo()
     assert d.mic.count() == 3 and d.headphones.findData('uid-1') == 1
+
+
+def test_the_tray_says_which_voice_speaks(tmp_path, monkeypatch):
+    """TTS §3.2 (0.3.2): one menu line with the voice each side's translation is heard in; gone with translation off."""
+    from peresmeshnik.ui import tray as tray_mod
+    monkeypatch.setenv('PERESMESHNIK_CONFIG', str(tmp_path / 'settings.toml'))
+    monkeypatch.setattr(config, 'config_dir', lambda: tmp_path)
+    t = tray_mod.Tray(type('Ctl', (), {'live': False, 'on': False})())
+    said = []
+    monkeypatch.setattr(t, 'message', said.append)
+    t.set_state('translating (them → me: local, me → them: local)')
+    t.set_state('voice: me → them: your cloned voice, from your Russian recording')
+    t.set_state('voice: them → me: a stock voice')
+    t.set_state('voice: them → me: their cloned voice')
+    assert t.voice_now.isVisible() and t.voice_now.text() == ('Voice: me → them: your cloned voice, from your Russian '
+                                                            'recording; them → me: their cloned voice')
+    assert said == [] and t.status.text().startswith('translating')  # no message, the state line as it was
+    t.set_state('idle, translation off')
+    assert not t.voice_now.isVisible() and not t.voices
+
+
+def test_a_side_tells_whose_voice_it_plays_once_per_change(tmp_path):
+    from peresmeshnik import crash
+    from peresmeshnik.app import voice_kind
+    from peresmeshnik.cloud.fallback import Muted
+    from peresmeshnik.engines import Voice
+    from peresmeshnik.local.tts import PiperTts
+    from peresmeshnik.voices.live import TheirVoice
+    piper = PiperTts.__new__(PiperTts)
+    piper.sample_rate = 22050
+    respawn = crash.Respawn(lambda: piper)
+    assert voice_kind(respawn) == 'stock' and voice_kind(object()) == 'clone' and voice_kind(None) == ''
+    muted = Muted(lambda: piper)
+    assert voice_kind(muted) == ''  # its voice is made at its first use
+    muted._tts = respawn
+    assert voice_kind(muted) == 'stock'
+    theirs = TheirVoice.__new__(TheirVoice)
+    assert voice_kind(theirs) == ''
+    theirs.speaking = 'clone'
+    assert voice_kind(theirs) == 'clone'
+
+    class D:  # a local direction: its TTS, its voice, its speech
+        def __init__(self, tts, voice=None):
+            self.tts, self.voice = tts, voice
+
+        def events(self):
+            yield Speech(np.zeros(10, np.float32), 24000)
+            yield Speech(np.zeros(10, np.float32), 24000)
+    said, played = [], []
+    side = Side.__new__(Side)
+    side.name, side.engine, side.live, side.auto, side._stopping, side._voice = 'me', 'local', False, False, True, ''
+    side.out, side.on_error = type('O', (), {'play': lambda self, pcm, sr: played.append(sr)})(), said.append
+    side.directions = [(D(object(), Voice('me', 'pocket', tmp_path, {'lang': 'ru'})), False, True)]
+    side._consume(side.directions[0][0], False, True)
+    assert played == [24000, 24000] and said == ['voice: me → them: your cloned voice, from your Russian recording']
+    fallback = type('Fallback', (), {'mode': 'cloud', 'local': D(respawn)})()
+    side.directions = [(type('LiveSwitch', (), {'inner': fallback})(), False, True)]
+    assert side.voice_now() == "Gemini's voice, not yours"
+    fallback.mode = 'local'  # the cloud failed: the local path speaks, here a stock voice
+    assert side.voice_now() == 'a stock voice'
+    side.name = 'them'
+    side.directions = [(D(theirs), False, True)]
+    assert side.voice_now() == 'their cloned voice'

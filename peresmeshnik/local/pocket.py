@@ -200,8 +200,12 @@ def end_on_pause(x: np.ndarray, sr: int = SR, pause_s: float = 0.08, fade_s: flo
     return np.concatenate([x, np.zeros(int(pause_s * sr), np.float32)])
 
 
-def prompt(text: str, lang: str = 'en') -> tuple[str, int]:
-    """The text as the model was trained on it (pocket_tts' prepare_text_prompt) and the frames to say after EOS."""
+def prompt(text: str, lang: str = 'en', goes: bool = False) -> tuple[str, int]:
+    """The text as the model was trained on it (pocket_tts' prepare_text_prompt) and the frames to say after EOS. A text
+    that ends with a comma goes on (a clause cut by length, audio/joins.goes_on; a long sentence's piece, split()): said
+    without its comma and no full stop, so it does not fall as a sentence's end (research 2026-11-16 VOICE §3.4: the
+    model stops without it; RU pause at the join 0.51 -> 0.23 s). A text that ends in a word gets its full stop, unless
+    it `goes` on (the last piece of such a text)."""
     text = ' '.join(text.split())
     if lang in REPLACE:
         text = re.sub(r'([.!?…])\s*[,;:]', r'\1', ' '.join(text.translate(str.maketrans(REPLACE[lang])).split()))
@@ -212,8 +216,10 @@ def prompt(text: str, lang: str = 'en') -> tuple[str, int]:
     after = (3 if len(text.split()) <= 4 else 1) + 2
     text = text[0].upper() + text[1:]
     core = text.rstrip('"\'”’)]» ')
-    if core and core[-1] not in '.!?…':
-        text = core.rstrip(',;:-–— ') + '.' + text[len(core):].strip() if core[-1] in ',;:-–—' else text + '.'
+    if core and core[-1] in ',;:-–—':
+        text = core.rstrip(',;:-–— ') + text[len(core):].strip()
+    elif core and core[-1] not in '.!?…' and not goes:
+        text += '.'
     return text, after
 
 
@@ -363,13 +369,15 @@ class PocketTts:
         if not re.search(r'\w', text):
             return
         state = self.graphs._ov(self.state(voice))
-        for part in self.split(text, lang):
-            yield from self._say(part, state, lang)
+        goes = text.rstrip('"\'”’)]» ')[-1:] in tuple(',;:-–—')  # prompt(): it goes on, its last piece has no full stop
+        parts = self.split(text, lang)
+        for i, part in enumerate(parts):
+            yield from self._say(part, state, lang, goes and i == len(parts) - 1)
 
-    def _say(self, text: str, state, lang: str = 'en') -> Iterator[np.ndarray]:
+    def _say(self, text: str, state, lang: str = 'en', goes: bool = False) -> Iterator[np.ndarray]:
         """One piece: the text after the voice, then a latent per 80 ms frame until EOS (+ a few frames), each decoded
         as soon as it is made."""
-        text, after = prompt(text, lang)
+        text, after = prompt(text, lang, goes)
         tokens = self._sp.encode(text)
         g, std = self.graphs, math.sqrt(self.temp)
         _, _, cache = g.flow(self._embed[tokens][None], state, np.zeros((1, len(self._bos)), np.float32))

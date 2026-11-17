@@ -197,6 +197,7 @@ class ServerSide(Side):
         return d if isinstance(d, _Unswitched) else _Unswitched(d)
 
     stock = False  # the clone could not speak: a stock voice does
+    voice_line = False  # whose voice speaks: the client's tray says it (app.Side.voice_now), not a note from here
 
     def _fallback(self, s, why):  # the clone cannot speak (also mid-call, Side._clone_died): the stock voice
         try:

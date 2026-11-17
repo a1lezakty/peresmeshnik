@@ -88,6 +88,10 @@ class Tray(QObject):
         m = self.menu = QMenu()
         self.status = m.addAction('idle, translation off')
         self.status.setEnabled(False)
+        self.voices: dict[str, str] = {}  # side -> the voice that speaks its translation now ("voice: " states)
+        self.voice_now = m.addAction('')  # one line: what is heard is what is shown (TTS §3.2)
+        self.voice_now.setEnabled(False)
+        self.voice_now.setVisible(False)
         m.addSeparator()
         self.translation = m.addAction('Translation')
         self.translation.setCheckable(True)
@@ -209,6 +213,15 @@ class Tray(QObject):
         if state.startswith('notice: '):  # about something else than translating (the call app's volume): said, no more
             self.message(state.removeprefix('notice: '))
             return
+        if state.startswith('voice: '):  # 'voice: <side>: <whose voice>' (app.Side.voice_now): the menu's voice line
+            side, _, whose = state.removeprefix('voice: ').partition(': ')
+            self.voices[side] = whose
+            self.voice_now.setText(('Voice: ' + '; '.join(f'{k}: {v}' for k, v in self.voices.items()))[:160])
+            self.voice_now.setVisible(True)
+            return
+        if state.startswith('idle') or state == 'warming up':  # translation off, or on again: no voice speaks yet
+            self.voices.clear()
+            self.voice_now.setVisible(False)
         self.status.setText(state[:120])
         self.icon.setToolTip(f'Peresmeshnik: {state}')
         if self.fallback:

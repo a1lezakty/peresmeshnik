@@ -35,9 +35,10 @@ runs from source. Not yet tried in a real call (see below).
 other person's voice for "them → me", yours for "me → them". It needs your own Gemini API key (aistudio.google.com →
 Get API key). On the free tier Google may use that audio to improve its models; a paid key is billed by Google, about
 $2.2 an hour per direction ([ARCHITECTURE §9](docs/ARCHITECTURE.md#9-hardware-tiers)). Gemini is a simultaneous
-interpreter: its translation lags ~3–4 s behind the speech, and its voice is not yours. On a Mac with 16 GB or more where
-your cloned voice speaks their language (Pocket TTS: with the Hugging Face token below) "me → them" is on this computer by
-default: your voice starts ~1.5 s after each phrase ([BENCH](docs/BENCH.md)). Elsewhere without an NVIDIA GPU the wizard
+interpreter: its translation lags ~3–4 s behind the speech, and its voice is not yours. On a Mac with 16 GB or more,
+once your cloned voice can speak their language there (Pocket TTS: your recorded voice, its models downloaded, for most
+languages the Hugging Face token above), "me → them" is on this computer unless you chose otherwise: your voice starts
+~1.5 s after each phrase ([BENCH](docs/BENCH.md#032-the-delay)). Elsewhere without an NVIDIA GPU the wizard
 suggests the cloud for what you say; a direction whose languages have local models (the table below) can stay on
 this computer instead (a stock voice then speaks for you). With both directions here no key is needed and nothing is
 sent.

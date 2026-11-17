@@ -157,7 +157,7 @@ jobs:
             S=$RUNNER_TEMP/conv-src; mkdir -p $S
             AMI=https://groups.inf.ed.ac.uk/ami
             YO=https://huggingface.co/datasets/espnet/yodas2/resolve/main/data/ru000
-            get() { [ -s "$S/$1" ] || curl -sfL --retry 3 --max-time 1200 -o "$S/$1" "$2"; }
+            get() { [ -s "$S/$1" ] || run curl -sfL --retry 3 --max-time 1200 -o "$S/$1" "$2"; }
             get ami_public_manual_1.6.2.zip $AMI/AMICorpusAnnotations/ami_public_manual_1.6.2.zip
             for m in ES2002a IS1009a; do get $m.Mix-Headset.wav $AMI/AMICorpusMirror/amicorpus/$m/audio/$m.Mix-Headset.wav; done
             get yodas2-ru000-text-00000000.json $YO/text/00000000.json
@@ -169,6 +169,7 @@ jobs:
               BENCH_HOST=$BENCH_HOST-end200 run $PY bench/conversation.py segment $lang --silence 200 --tail 0.5
             done
           fi
+          cp $B/bench/results/*.jsonl $O/ 2>/dev/null || true  # 0.3.1's scripts write their rows next to themselves
           find $O -name '*.wav' -exec rm -f {} +  # the artifact: numbers, not audio
           [ $failed = 0 ]
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2

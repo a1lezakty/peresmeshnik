@@ -756,7 +756,7 @@ def test_languages_page_says_what_a_cloud_side_falls_back_on(tmp_path, monkeypat
     page = wizard.LanguagesPage(type('W', (), {'s': s})())
     assert 'If the cloud fails' not in page.why['them_to_me'].text()  # it goes on here: nothing to warn about
     assert page.why['me_to_them'].text().startswith('Cloud (Gemini): simultaneous interpreter, lags ~3–4 s, the voice is '
-                                                    'not yours. ')  # said for what it is (LATENCY 0.3.2)
+                                                    'not yours. ')  # said for what it is (BENCH "0.3.2")
     stand_ins(monkeypatch, consent=('tts-ja',))  # me -> them falls back on a noncommercial voice: optional, said
     page.refresh()
     assert 'fallback voice is noncommercial' in page.why['me_to_them'].text()

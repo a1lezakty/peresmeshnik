@@ -156,7 +156,7 @@ class Settings:
     remote: Remote = field(default_factory=Remote)
     server: Server = field(default_factory=Server)
     ui: Ui = field(default_factory=Ui)
-    # the version that wrote the file ('' = 0.3.1 or older: its me_to_them 'cloud' was the default then, not a choice)
+    # the version that wrote the file ('' = before saved_by, 0.3.1 or older: its me_to_them 'cloud' was the default)
     saved_by: str = field(default='', compare=False)
 
 
@@ -175,21 +175,47 @@ MAC_LOCAL_GB = 15  # me -> them local by default on a Mac from "16 GB" (16 GiB);
 
 def me_to_them_default(s: Settings) -> str:
     """Me -> them where the user chose nothing: local on a Mac from 16 GB where the pair runs here in your cloned voice
-    (Pocket TTS: with the Hugging Face token of its gated weights) and its models are downloaded (translation starts, a
-    voice not enrolled yet is said: the stock voice speaks meanwhile), else the cloud. Gemini is a simultaneous interpreter
-    3-4 s behind, not in your voice; the clone here starts 1.5 s after a clause (LATENCY 0.3.2). Elsewhere the cloud, as
-    before (the wizard recommends local where an NVIDIA GPU runs the clone). A 'cloud' that is only this default is not
-    saved (`save`), so the token given later brings local; 'local' is always saved: the voice never goes to Google unasked."""
+    (Pocket TTS: with the Hugging Face token of its gated weights), with your confirmed voice and the pair's models
+    downloaded, the stock voice too (`fallback._clone_not_ready`: translation starts in your voice), else the cloud.
+    Gemini is a simultaneous interpreter 3-4 s behind, not in your voice; the clone here starts ~1.5 s after a clause
+    (BENCH "0.3.2").
+    Elsewhere the cloud, as before (the wizard recommends local where an NVIDIA GPU runs the clone). A 'cloud' that is
+    only this default is not saved (`save`), so the token given later brings local; a 'local' worked out is saved at once
+    (`load`): the voice never goes to Google unasked."""
     if sys.platform != 'darwin':
         return 'cloud'
     import psutil
 
     from peresmeshnik import languages, models
+    from peresmeshnik.cloud.fallback import _clone_not_ready
     if psutil.virtual_memory().total < MAC_LOCAL_GB * 2 ** 30:
         return 'cloud'
     d = languages.direction(s, 'me_to_them')
-    ready = d.local and d.voice == 'clone' and all(models.is_fetched(models.get(i)) for i in d.models)
-    return 'local' if ready else 'cloud'
+    if not (d.local and d.voice == 'clone') or _clone_not_ready(s, d.tgt, d.tts):  # my confirmed voice, its token, model
+        return 'cloud'
+    ids = [d.asr, d.mt, languages.pick(s.local.tts, d.tgt)]  # the stock voice: the clone's fallback (app.Side._fallback)
+    return 'local' if all(models.is_fetched(models.get(i)) for i in ids if i) else 'cloud'
+
+
+def _default_me_to_them(s: Settings, path: Path) -> None:
+    """Nothing chosen for me -> them: this computer's default. A 'local' worked out is saved at once where the file
+    exists (the wizard's first run is told by its absence), so a model missing later fails that side loudly and never
+    sends the voice to the cloud unasked."""
+    _defaulting.on = True
+    try:
+        s.me_to_them = s._me_default = me_to_them_default(s)
+    except Exception as e:  # load() never raises (H-01): the old default
+        print(f'settings: no default for me_to_them ({e!r}), cloud', file=sys.stderr)
+        s.me_to_them = s._me_default = 'cloud'
+    finally:
+        _defaulting.on = False
+    if s.me_to_them == 'local':
+        s.forced_cloud = [k for k in s.forced_cloud if k != 'me_to_them']  # the pair runs here now
+        if path.exists():
+            try:
+                save(s, path)
+            except OSError as e:
+                print(f'settings: me_to_them = "local" not saved ({e})', file=sys.stderr)
 
 
 problem = ''  # what the last load() could not use, for the user ('' = nothing)
@@ -256,13 +282,9 @@ def load(path: Path | None = None) -> Settings:
     if not 0.2 <= (r := s.local.mic_echo_rho_on) <= 0.8:  # near 0 it zeroes my speech, near 1 lets every echo through
         s.local.mic_echo_rho_on = min(max(r, 0.2), 0.8)
         print(f'settings: local.mic_echo_rho_on {r} is outside 0.2..0.8, {s.local.mic_echo_rho_on} used', file=sys.stderr)
-    if ('me_to_them' not in data or not data.get('saved_by') and data['me_to_them'] == OLD_DEFAULTS['me_to_them']) \
-            and not getattr(_defaulting, 'on', False):  # nothing chosen: this computer's default
-        _defaulting.on = True
-        try:
-            s.me_to_them = s._me_default = me_to_them_default(s)
-        finally:
-            _defaulting.on = False
+    if not bad and not getattr(_defaulting, 'on', False) and \
+            ('me_to_them' not in data or not data.get('saved_by') and data['me_to_them'] == OLD_DEFAULTS['me_to_them']):
+        _default_me_to_them(s, path)  # nothing chosen
     if bad:  # read in part: nothing goes to the cloud by a mistake in the file (the key is kept apart, H-01)
         s.them_to_me = s.me_to_them = 'local'
         bad.insert(0, f'{path.name} could not be read whole, both directions are local now')

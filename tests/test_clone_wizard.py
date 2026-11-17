@@ -241,7 +241,7 @@ def test_stock_voice_instead_of_the_clone(page, monkeypatch):
     # no clone, no voice profile: the stock voice and the ids languages.direction picked
     assert made == [((s.my_lang, s.their_lang), {'tts': s.local.tts[s.their_lang], 'asr': s.local.asr[s.my_lang],
                                                   'mt': s.local.mt[f'{s.my_lang}-{s.their_lang}'], 'settings': s,
-                                                  'end': pipeline.VOICE_END})]  # my voice's clause end (LATENCY 0.3.2)
+                                                  'end': pipeline.VOICE_END})]  # my voice's clause end (BENCH "0.3.2")
     page.stock.setChecked(False)
     assert s.local.clone == 'xtts-v2' and not page.isComplete()
 
@@ -300,25 +300,10 @@ def test_a_clone_that_dies_with_no_stock_voice_restarts_the_side(monkeypatch, tm
 ])
 def test_tier_by_vram(tmp_path, monkeypatch, smi, vram, rec):
     from peresmeshnik.ui import wizard
-    monkeypatch.setattr(wizard, 'MACOS', False)  # a Mac's RAM: test_tier_on_a_mac_by_ram
     fake_smi(monkeypatch, smi)
     assert wizard.gpu().vram == vram
     what, r = wizard.tier()
     assert r == rec and (f'an NVIDIA GPU with {vram:.0f} GB' if vram else 'no NVIDIA GPU') in what
-
-
-def test_tier_on_a_mac_by_ram(monkeypatch):
-    """A Mac: me -> them local is recommended where the clone speaks (Pocket TTS) and from 16 GB (LATENCY 0.3.2)."""
-    from types import SimpleNamespace
-
-    from peresmeshnik import languages
-    from peresmeshnik.ui import wizard
-    monkeypatch.setattr(wizard, 'MACOS', True)
-    monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu())
-    monkeypatch.setattr(languages, 'clone_engine', lambda lang, platform=None: ('pocket-tts-en', ''))
-    for gb, rec in ((8, 'cloud'), (16, 'local')):
-        monkeypatch.setattr(wizard.psutil, 'virtual_memory', lambda gb=gb: SimpleNamespace(total=gb * 2 ** 30))
-        assert wizard.tier('en') == (f'{gb} GB RAM, no NVIDIA GPU: recommended them → me local, me → them {rec}', rec)
 
 
 def fake_smi(monkeypatch, out, old=None):

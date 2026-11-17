@@ -61,9 +61,11 @@ MAX_BEHIND_S = 0.15
 MAX_LAG_S = 4.0  # them -> me: voice starting later than this after its clause ended is dropped (BENCH stage 2: queue policy)
 FAST_AFTER_S = 0.5  # voice this far behind its clause end is sped up ...
 MAX_SPEED = 1.4  # ... linearly up to this at MAX_LAG_S (4 s, 0.5 s, 1.4x: 1-3 % of the words dropped in conversation, BENCH)
+WSOLA_FROM = 1.03  # a TTS without `speed` (the clone) is sped up from this: below, WSOLA would only cost its artefacts
 # a clause's end: (VAD pause, ms; no cut at a word starting this near the ASR window's end, s: local/asr.TAIL_S).
-# Subtitles and them -> me end it sooner (LATENCY 0.3.2: subtitle 0.70 -> 0.43 s, them -> me voice -0.09 s); me -> them's
-# voice keeps 300 ms / 0.8 s: more, shorter clauses, each ends in Pocket's own tail (its start +0.6 s, M1 runner)
+# Them -> me and a cloud side's local subtitles end it sooner (BENCH "0.3.2": subtitle 0.70 -> 0.43 s, them -> me voice
+# -0.09 s); local me -> them keeps 300 ms / 0.8 s for its voice and so its subtitles: more, shorter clauses, each ends in
+# Pocket's own tail (its start +0.6 s, M1 runner)
 QUICK_END = (200, 0.5)
 VOICE_END = (300, 0.8)
 
@@ -282,7 +284,10 @@ MAX_LAG_S."""
                 if lag > FAST_AFTER_S:
                     cap = self.max_lag_s or MAX_LAG_S
                     speed = round(1 + (MAX_SPEED - 1) * min(1.0, (lag - FAST_AFTER_S) / max(cap - FAST_AFTER_S, 1e-3)), 3)
-                    c['speed'] = speed
+                    if not self._speeds and speed < WSOLA_FROM:
+                        speed = 1.0
+                    else:
+                        c['speed'] = speed
             cut = self._cut
             for chunk in self._synth(translation, voice, speed, sr):
                 if self._stop.is_set() or self._cut != cut:

@@ -36,8 +36,8 @@ mic ─▶ capture ─▶ queue ─▶ VAD ─▶ ASR ─clause end─▶ MT ─
   output device).
 - **VAD first.** Silero VAD (32 ms frames, 0.1–0.3 ms per frame measured in stage 1: 0.3–1 % of a core)
   gates everything: on silence ASR, MT and TTS do not run at all.
-- **Clauses, not sentences.** A segment ends at a VAD pause ≥ 200 ms (300 ms for *me → them*'s voice: more, shorter
-  clauses there each end in the clone's own tail, LATENCY 0.3.2), at punctuation from the
+- **Clauses, not sentences.** A segment ends at a VAD pause ≥ 200 ms (300 ms for local *me → them*, its voice and so
+  its subtitles: more, shorter clauses there each end in the clone's own tail, BENCH "0.3.2"), at punctuation from the
   ASR (GigaAM e2e and Parakeet emit it), or after 5 s of continuous speech (then at a comma in
   the clause's second half or between words; the next window keeps 1 s of the previous clause in
   front, since Parakeet loses words on a window that starts mid-speech). MT translates each
@@ -77,9 +77,9 @@ mic ─▶ capture ─▶ queue ─▶ VAD ─▶ ASR ─clause end─▶ MT ─
 `GeminiDirection` streams the same PCM to a Gemini Live session and maps its transcripts and audio
 to the same events. Settings choose per direction. Typical mixes: on an 8 GB Mac *them → me*
 local (cheap) and *me → them* in the cloud, because no local clone runs in real time there (§6);
-on a Mac from 16 GB (Pocket TTS, with the Hugging Face token) and with an NVIDIA GPU both local, since only the local
-path speaks in a true clone of my voice, and Gemini is a simultaneous interpreter ~3–4 s behind
-(`config.me_to_them_default`).
+on a Mac from 16 GB (Pocket TTS with my confirmed voice and its models: `config.me_to_them_default`) and with an
+NVIDIA GPU both local, since only the local path speaks in a true clone of my voice, and Gemini is a simultaneous
+interpreter ~3–4 s behind.
 
 **Cloud fallback** (`cloud/fallback.py`, stage 5). A cloud side is one `Fallback` direction: Gemini speaks, and the
 local path (VAD + ASR + MT: the side's subtitles, unless `cloud.subtitles`) runs beside it with its voice muted (a TTS
@@ -147,8 +147,8 @@ text), `caption` (translated subtitle), `tts_first` (first synthesized audio), `
 starts playing, behind the speech before it). The overlay shows `caption` and `voice`; the per
 clause JSON log has all of them. Medians and p90 per platform against this budget: BENCH, stage 5. The worst link
 is a clause cut without a pause (the 5 s limit, a punctuated sentence end): the cut takes only words that start
-`tail_s` before the window end, so the clause is known that much after its last word: 0.5 s for the subtitles and
-*them → me*, 0.8 s for *me → them*'s voice (`pipeline.QUICK_END` / `VOICE_END`, BENCH "0.3.2"). The next clause may
+`tail_s` before the window end, so the clause is known that much after its last word: 0.5 s for *them → me* and a
+cloud side's local subtitles, 0.8 s for local *me → them* (`pipeline.QUICK_END` / `VOICE_END`, BENCH "0.3.2"). The next clause may
 repeat up to 3 of the cut's last words; they are dropped.
 
 **Me → them, local clone** — the same chain with the clone TTS instead of Piper:

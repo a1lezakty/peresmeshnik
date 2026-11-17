@@ -396,7 +396,7 @@ def voice_rows(tts, max_lag_s, seconds=4.0, events=None):
 
 
 def test_queue_policy_caps_the_voice_lag():
-    free = voice_rows(LongTts(), None)
+    free = voice_rows(LongTts(), None, seconds=6.0)  # sped up (to 1.4x), not dropped: twice as long still falls behind
     assert max(r['voice_lag_s'] for r in free) > 2.5 and not any('dropped' in r for r in free)  # falls ever further behind
     events = []
     capped = voice_rows(LongTts(), 1.5, events=events)
@@ -411,7 +411,7 @@ def test_queue_policy_caps_the_voice_lag():
 
 
 def test_me_to_them_is_sped_up_at_the_same_pitch_and_never_dropped():
-    """LATENCY 0.3.2: me -> them has no max_lag_s (the other side has no subtitles of a dropped clause), yet its voice
+    """BENCH "0.3.2": me -> them has no max_lag_s (the other side has no subtitles of a dropped clause), yet its voice
     behind is sped up as at MAX_LAG_S; a TTS without `speed` (a clone) through voices/live.faster: its speech shorter by
     the speed."""
     rows = voice_rows(LongTts(), None, seconds=6.0)
@@ -419,6 +419,30 @@ def test_me_to_them_is_sped_up_at_the_same_pitch_and_never_dropped():
     assert sped and not any('dropped' in r for r in rows) and all(r['speed'] <= 1.4 for r in sped)
     for r in sped:  # LongTts: 1 s of speech per word at 1x
         assert len(r['text'].split()) / r['speed'] - 0.1 < r['speech_s'] < len(r['text'].split()) / r['speed'] + 0.1, r
+
+
+def test_barge_in_closes_a_sped_up_clones_request():
+    """The clone's chunks through voices/live.faster: the speak worker's break (barge-in, close) still closes the clone's
+    own request at once (a runner reads away the rest of it), as without the speed-up."""
+    closed = []
+
+    class Clone(ToneTts):
+        sample_rate = 24_000
+
+        def synth(self, text, lang, voice=None):
+            try:
+                for _ in range(20):
+                    yield np.zeros(1920, np.float32)
+            finally:
+                closed.append(text)
+    d = LocalDirection(EnergyVad(), WordAsr(), UpperMt(), Clone(), 'en', 'ru')
+    try:
+        for i, _ in enumerate(d._synth('x', None, 1.3, 24_000)):  # as _speak's loop
+            if i == 5:
+                break
+        assert closed == ['x']
+    finally:
+        d.close()
 
 
 def test_barge_in_drops_what_is_not_heard_yet(monkeypatch):

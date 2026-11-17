@@ -468,7 +468,7 @@ def test_tray_menu_and_settings_window(tmp_path, monkeypatch):
     assert {'Translation', 'Live voice', 'Settings…', 'Setup wizard…', 'Quit'} <= set(texts)
     t.message = lambda text: calls.append(('said', text))
     cloud = next(a for a in t.engines['them_to_me'].actions() if a.data()[1] == 'cloud')
-    assert cloud.text() == 'cloud (Gemini): simultaneous interpreter, lags ~3–4 s, the voice is not theirs'  # LATENCY 0.3.2
+    assert cloud.text() == 'cloud (Gemini): simultaneous interpreter, lags ~3–4 s, the voice is not theirs'  # BENCH "0.3.2"
     cloud.trigger()  # no Gemini key: not changed, said
     assert config.load().them_to_me == 'local' and 'no Gemini key' in calls.pop()[1]
     (tmp_path / 'gemini-key').write_text('a-key')

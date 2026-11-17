@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # isort: off
-from peresmeshnik.pipeline import make_local, read_audio  # noqa: E402  first: it pins BLAS threads
+from peresmeshnik.pipeline import VOICE_END, make_local, read_audio  # noqa: E402  first: it pins BLAS threads
 import numpy as np  # noqa: E402
 # isort: on
 
@@ -119,7 +119,7 @@ def main():
     if a.rho_on is None:
         from peresmeshnik import config
         a.rho_on = config.Local().mic_echo_rho_on
-    base = make_local('ru', 'en', threads=a.threads, tts=NoTts())  # the me -> them side, its subtitles
+    base = make_local('ru', 'en', threads=a.threads, tts=NoTts(), end=VOICE_END)  # the me -> them side, its subtitles
     pool, played = fleurs('ru'), synth_played(40, a.seed)
     tot: dict = {'none': {}, 'echo-gate': {}}
     for seed in range(a.seed, a.seed + a.n):

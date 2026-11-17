@@ -93,7 +93,6 @@ def test_the_gpu_is_asked_once_unless_its_driver_did_not_answer(monkeypatch):
     from types import SimpleNamespace
 
     from peresmeshnik.ui import wizard
-    monkeypatch.setattr(wizard, 'MACOS', False)  # the macOS runner's 7 GB: no local recommended there
     answers, now = [languages.Gpu(why='timed out'), languages.Gpu(8.0, (572, 83), 8.6)], [100.0]
     calls = []
     monkeypatch.setattr(languages, '_PROBED', {})
@@ -521,22 +520,29 @@ def test_the_old_russian_asr_serves_until_the_new_one_is_downloaded(monkeypatch)
 
 
 def test_me_to_them_is_local_by_default_on_a_mac_from_16_gb_with_the_clone(monkeypatch):
-    """LATENCY 0.3.2: Gemini lags 3-4 s and is not my voice; on a Mac from 16 GB where the clone speaks their language
+    """BENCH "0.3.2": Gemini lags 3-4 s and is not my voice; on a Mac from 16 GB where the clone speaks their language
     (Pocket TTS English: with the Hugging Face token) and its models are here, me -> them is local by default. 8 GB, no
     clone, not a Mac: the cloud, as before."""
     import sys
     from types import SimpleNamespace
 
     import psutil
-    ram, d, fetched = [16], {'local': True, 'voice': 'clone', 'models': ('parakeet-tdt-0.6b-v3',)}, [True]
+    ram, fetched = [16], [True]
+    d = {'local': True, 'voice': 'clone', 'asr': 'gigaam-v3-e2e-ctc', 'mt': 'opus-mt-ru-en', 'tts': 'pocket-tts-en', 'tgt': 'en'}
     monkeypatch.setattr(psutil, 'virtual_memory', lambda: SimpleNamespace(total=ram[0] * 2 ** 30))
     monkeypatch.setattr(languages, 'direction', lambda s, side: SimpleNamespace(**d))
     monkeypatch.setattr(models, 'is_fetched', lambda m, base=None: fetched[0])
+    from peresmeshnik.cloud import fallback
+    why = ['']  # my confirmed voice, its token and model: there
+    monkeypatch.setattr(fallback, '_clone_not_ready', lambda s, lang, engine='': why[0])
     s = config.Settings()
     monkeypatch.setattr(sys, 'platform', 'darwin')
     assert config.me_to_them_default(s) == 'local'
     fetched[0] = False  # its models not downloaded yet: translation would not start
     assert config.me_to_them_default(s) == 'cloud'
+    fetched[0], why[0] = True, 'no voice enrolled (setup wizard, "Your voice")'  # a stock voice, not mine, would speak
+    assert config.me_to_them_default(s) == 'cloud'
+    why[0] = ''
     fetched[0], d['voice'] = True, 'stock'  # no token: the stock voice would speak
     assert config.me_to_them_default(s) == 'cloud'
     d['voice'], ram[0] = 'clone', 8
@@ -547,17 +553,31 @@ def test_me_to_them_is_local_by_default_on_a_mac_from_16_gb_with_the_clone(monke
 
 
 def test_the_old_default_cloud_goes_a_chosen_cloud_stays(tmp_path, monkeypatch):
-    """0.3.1 saved me_to_them = "cloud" (its default) with the rest: this computer's default comes instead. 'cloud'
-    chosen since stays; a 'cloud' that is only the default is not saved, so the token given later brings local; 'local'
-    is always saved (a token forgotten later does not send the voice to Google)."""
+    """0.3.1 saved me_to_them = "cloud" (its default) with the rest: this computer's default comes instead, and a
+    'local' worked out is saved at once (a model missing later must not send the voice to Google). 'cloud' chosen
+    since stays; a 'cloud' that is only the default is not saved, so the token given later brings local; 0.3.1's
+    'local' and 'remote' stay."""
     default = ['local']
     monkeypatch.setattr(config, 'me_to_them_default', lambda s: default[0])
     p = tmp_path / 'settings.toml'
-    p.write_text('my_lang = "ru"\nthem_to_me = "local"\nme_to_them = "cloud"\n', 'utf-8')  # 0.3.1's: no saved_by
+    for kept in ('local', 'remote'):
+        p.write_text(f'me_to_them = "{kept}"\n', 'utf-8')
+        default[0] = 'cloud'
+        assert config.load(p).me_to_them == kept
+    default[0] = 'local'
+    p.write_text('my_lang = "ru"\nthem_to_me = "local"\nme_to_them = "cloud"\nforced_cloud = ["me_to_them"]\n',
+                 'utf-8')  # 0.3.1's: no saved_by
     s = config.load(p)
-    assert s.me_to_them == 'local'
+    assert s.me_to_them == 'local' and s.forced_cloud == []  # it runs here now: not a side the app moved
+    assert 'saved_by' in p.read_text('utf-8') and 'me_to_them = "local"' in p.read_text('utf-8')
+    default[0] = 'cloud'  # the pocket model's pins changed in an update: not downloaded now
+    assert config.load(p).me_to_them == 'local'  # the side fails loudly, the voice does not go to Google
+    p.write_text('me_to_them = "cloud"\n', 'utf-8')
+    s = config.load(p)
+    s._me_default = None  # the user chose 'cloud' in the wizard or the tray, where it is the default too
     config.save(s, p)
-    assert 'saved_by' in p.read_text('utf-8') and config.load(p).me_to_them == 'local'
+    default[0] = 'local'
+    assert config.load(p).me_to_them == 'cloud'
     s.me_to_them = 'cloud'  # the user's own choice now
     config.save(s, p)
     assert config.load(p).me_to_them == 'cloud'
@@ -589,10 +609,14 @@ def test_the_mac_default_is_worked_out_once_in_a_load(tmp_path, monkeypatch):
     monkeypatch.setattr(languages, 'gpu', lambda engine='': False)
     monkeypatch.delenv('HF_TOKEN', raising=False)
     monkeypatch.setattr(models, 'hf_token_file', lambda: tmp_path / 'hf-token')
+    from peresmeshnik.cloud import fallback  # my voice enrolled and confirmed: taken as there; its token and model asked
+    monkeypatch.setattr(fallback, '_clone_not_ready', lambda s, lang, engine='': languages.not_here(engine) or (
+        '' if models.is_fetched(models.get(engine)) else 'not downloaded'))
+
     def fetch(i):
         (tmp_path / 'models' / i).mkdir(parents=True)
         (tmp_path / 'models' / i / models.MARKER).write_text(models.get(i).fingerprint)
-    fetch('gigaam-v3-e2e-ctc'), fetch('opus-mt-ru-en')  # ru -> en here
+    fetch('gigaam-v3-e2e-ctc'), fetch('opus-mt-ru-en'), fetch('piper-en_US-john-medium')  # ru -> en here
     assert config.load().me_to_them == 'cloud'  # no token: a stock voice would speak, the cloud stays
     monkeypatch.setenv('HF_TOKEN', 'hf_x')
     assert config.load().me_to_them == 'cloud'  # the clone's weights not downloaded yet

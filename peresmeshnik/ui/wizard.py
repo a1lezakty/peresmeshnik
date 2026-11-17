@@ -123,10 +123,9 @@ def gpu_refusal(g: Gpu) -> str:
 
 def tier(lang: str = 'en') -> tuple[str, str]:
     """(what this machine is, the recommended me -> them engine): local where a clone engine speaks `lang` here
-    (languages.clone_engine), on a Mac from 16 GB (config.me_to_them_default)."""
+    (languages.clone_engine)."""
     gb, g = psutil.virtual_memory().total / 2 ** 30, languages.nvidia_once()  # the probe direction() asks too: once
-    rec = 'local' if languages.clone_engine(lang, platform=languages.Platform(gpu=g))[0] and \
-        (not MACOS or gb >= config.MAC_LOCAL_GB) else 'cloud'
+    rec = 'local' if languages.clone_engine(lang, platform=languages.Platform(gpu=g))[0] else 'cloud'
     return f'{gb:.0f} GB RAM, {gpu_text(g.vram)}: recommended them → me local, me → them {rec}', rec
 
 
@@ -184,8 +183,9 @@ class LanguagesPage(QWizardPage):
         self.err = QLabel()
         f.addRow(self.err)
         self.forced = set(s.forced_cloud)  # sides moved to the cloud for a pair they cannot run: a pair they can brings them back
+        self.touched = set()  # sides the user chose here: saved as chosen (config.me_to_them_default does not apply)
         for key, c in self.engine.items():  # a programmatic change blocks the signal: this is the user's own choice
-            c.currentIndexChanged.connect(lambda _, key=key: self.forced.discard(key))
+            c.currentIndexChanged.connect(lambda _, key=key: (self.forced.discard(key), self.touched.add(key)))
         for c in (self.my_lang, self.their_lang, *self.engine.values()):
             c.currentIndexChanged.connect(self.refresh)
         self.subtitles.toggled.connect(self.refresh)
@@ -1208,6 +1208,9 @@ class SetupWizard(QWizard):
 
     def finish(self) -> None:
         self.voice_page.commit()  # before saving: the settings name the profile, not the draft
-        config.save(changed(self.base, self.s, config.load()))  # a change in the tray meanwhile stays
+        now = changed(self.base, self.s, config.load())  # a change in the tray meanwhile stays
+        if 'me_to_them' in self.pages[0].touched:  # the user's own, even where it is the default: saved as such
+            now.me_to_them, now._me_default = self.s.me_to_them, None
+        config.save(now)
         self.tray.sync()
         self.tray.restart()

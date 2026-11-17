@@ -193,8 +193,12 @@ def me_to_them_default(s: Settings) -> str:
     d = languages.direction(s, 'me_to_them')
     if not (d.local and d.voice == 'clone') or _clone_not_ready(s, d.tgt, d.tts):  # my confirmed voice, its token, model
         return 'cloud'
+    from peresmeshnik.local.asr import UNTIL_FETCHED  # a new ASR default not downloaded yet: the old one serves
+
+    def here(i):
+        return models.is_fetched(models.get(i)) or i in UNTIL_FETCHED and models.is_fetched(models.get(UNTIL_FETCHED[i]))
     ids = [d.asr, d.mt, languages.pick(s.local.tts, d.tgt)]  # the stock voice: the clone's fallback (app.Side._fallback)
-    return 'local' if all(models.is_fetched(models.get(i)) for i in ids if i) else 'cloud'
+    return 'local' if all(here(i) for i in ids if i) else 'cloud'
 
 
 def _default_me_to_them(s: Settings, path: Path) -> None:

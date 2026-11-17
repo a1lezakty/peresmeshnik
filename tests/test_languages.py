@@ -616,7 +616,8 @@ def test_the_mac_default_is_worked_out_once_in_a_load(tmp_path, monkeypatch):
     def fetch(i):
         (tmp_path / 'models' / i).mkdir(parents=True)
         (tmp_path / 'models' / i / models.MARKER).write_text(models.get(i).fingerprint)
-    fetch('gigaam-v3-e2e-ctc'), fetch('opus-mt-ru-en'), fetch('piper-en_US-john-medium')  # ru -> en here
+    # ru -> en here; 0.3.1's GigaAM CTC on disk serves until the new default RNN-T is downloaded (local/asr.UNTIL_FETCHED)
+    fetch('gigaam-v3-e2e-ctc'), fetch('opus-mt-ru-en'), fetch('piper-en_US-john-medium')
     assert config.load().me_to_them == 'cloud'  # no token: a stock voice would speak, the cloud stays
     monkeypatch.setenv('HF_TOKEN', 'hf_x')
     assert config.load().me_to_them == 'cloud'  # the clone's weights not downloaded yet

@@ -132,7 +132,8 @@ jobs:
           run() { echo "== $*"; "$@" || { echo "FAILED: $*"; failed=$((failed + 1)); }; }
           uv pip install -q -p .bench -e .
           $PY -m peresmeshnik models fetch --accept-licenses silero-vad wespeaker-resnet34 parakeet-tdt-0.6b-v3 \
-            gigaam-v3-e2e-ctc quickmt-en-ru opus-mt-ru-en piper-ru_RU-dmitri-medium piper-en_US-john-medium pocket-tts-ru
+            gigaam-v3-e2e-ctc gigaam-v3-e2e-rnnt quickmt-en-ru opus-mt-ru-en piper-ru_RU-dmitri-medium piper-en_US-john-medium \
+            pocket-tts-ru  # ru ASR: 0.3.1's CTC, RNN-T since 0.3.2
           git fetch -q --depth 1 origin 35aff6d9d59006e40325f6e51c2e9ec6a10d2197
           git worktree add -q --detach $B 35aff6d9d59006e40325f6e51c2e9ec6a10d2197
           cp bench/their_voice.py $B/bench/  # its subtitle lag too; the rest of the script is 0.3.1's

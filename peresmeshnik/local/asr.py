@@ -21,6 +21,9 @@ ONNX_ASR = {'parakeet-tdt-0.6b-v3': ('nemo-parakeet-tdt-0.6b-v3', 'int8'),  # re
             'fastconformer-ar-pcd': ('nemo-conformer-ctc', 'int8'),
             'fastconformer-fr-pc': ('nemo-conformer-ctc', 'int8'),
             'whisper-large-v3-turbo': ('whisper', 'fp16')}  # no timestamps: see OnnxAsrStream._cut_quiet
+# a new default -> the one it replaced: an update moves the settings (config.OLD_DEFAULTS) before the new model is
+# downloaded, so the old one, still on disk, serves until then (Components… downloads the new one)
+UNTIL_FETCHED = {'gigaam-v3-e2e-rnnt': 'gigaam-v3-e2e-ctc'}
 SENTENCE_END = tuple('.?!;。？！；؟')
 COMMAS = tuple(',，、،')
 NO_SPACES = {'zh', 'ja'}  # no spaces between words: every token boundary is a word boundary, words are characters
@@ -93,6 +96,11 @@ class OnnxAsr:
 
         from peresmeshnik import models
         from peresmeshnik.local import device
+        if (old := UNTIL_FETCHED.get(model_id)) and not models.is_fetched(models.get(model_id)) \
+                and models.is_fetched(models.get(old)):
+            import logging
+            logging.getLogger('peresmeshnik.models').warning('%s is not downloaded yet: %s recognises meanwhile', model_id, old)
+            model_id = old
         name, quant = ONNX_ASR[model_id]
         self.name = model_id
         self.partial_every = int(partial_every_s * SAMPLE_RATE)

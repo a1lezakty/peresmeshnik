@@ -63,7 +63,7 @@ def _mt() -> dict[str, str]:
 class Local:
     threads: int = 2  # per runtime: onnxruntime intra_op, CTranslate2 intra_threads, torch set_num_threads
     # ru: GigaAM, not Parakeet: Parakeet has no language setting and drifts into Ukrainian on short windows (BENCH stage 1).
-    # Its e2e RNN-T, not CTC (0.3.2): WER on far-field speech 7.8 -> 5.0 %, the final ~0.1 s later (BENCH 0.3.2).
+    # Its e2e RNN-T, not CTC (0.3.2): WER on far-field speech 7.8 -> 5.0 %, the final ~0.1 s later (BENCH "0.3.2: Russian ASR").
     # tr / zh / ko: Whisper large-v3-turbo, live only on an NVIDIA GPU (its registry row: needs = "gpu"; BENCH stage 6)
     asr: dict[str, str] = field(default_factory=lambda: {
         'en': 'parakeet-tdt-0.6b-v3', 'ru': 'gigaam-v3-e2e-rnnt',

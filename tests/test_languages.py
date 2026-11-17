@@ -487,3 +487,33 @@ def test_both_directions_cloned_share_the_card(monkeypatch):
     card[0] = 6.0
     assert languages.clone_engine('en') == ('xtts-v2', '')  # Qwen3 needs 8 GB
     assert languages.clone_engine('pl', 'them_to_me', beside='xtts-v2') == ('xtts-v2', '')  # 2 + 2 GB + runners of 6
+
+
+def test_the_old_russian_asr_serves_until_the_new_one_is_downloaded(monkeypatch):
+    """0.3.2: an update moves the settings to GigaAM RNN-T (config.OLD_DEFAULTS) before its 226 MB is downloaded: the
+    CTC model still on disk recognises meanwhile; once RNN-T is there, RNN-T; with neither, "not downloaded" as before."""
+    import onnx_asr
+
+    from peresmeshnik.local import asr, device
+
+    class Model:
+        def with_timestamps(self):
+            return self
+
+    def path(i, base=None):
+        if i not in here:
+            raise models.ModelMissing(f'model {i} is not downloaded')
+        return f'/models/{i}'
+    loaded = []
+    monkeypatch.setattr(models, 'is_fetched', lambda m, base=None: m.id in here)
+    monkeypatch.setattr(models, 'path', path)
+    monkeypatch.setattr(device, 'onnx_providers', lambda: ['CPUExecutionProvider'])
+    monkeypatch.setattr(onnx_asr, 'load_model', lambda name, p, **k: loaded.append((name, p)) or Model())
+    rnnt, ctc = 'gigaam-v3-e2e-rnnt', 'gigaam-v3-e2e-ctc'
+    here = {ctc}
+    assert asr.OnnxAsr(rnnt).name == ctc and loaded[-1] == (ctc, f'/models/{ctc}')
+    here = {ctc, rnnt}
+    assert asr.OnnxAsr(rnnt).name == rnnt and loaded[-1] == (rnnt, f'/models/{rnnt}')
+    here = set()
+    with pytest.raises(models.ModelMissing, match=rnnt):
+        asr.OnnxAsr(rnnt)

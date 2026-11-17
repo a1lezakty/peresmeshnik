@@ -2906,3 +2906,36 @@ and pace are overstated (above).
   state, so a kept voice speaks from the first clause of the next call (`kept_roundtrip` in every run since it was added).
 - The echo check (no clause into the sample while our voice played into the call) did not trigger here: there is no
   me → them side in this bench (tests/test_live.py covers it).
+
+## 0.3.2: Russian ASR — GigaAM v3 e2e RNN-T against CTC
+
+**Accuracy** (WER %, 100 clips per set, int8 on the CPU of a Ryzen 5600X server, 4 threads; the same weights as the
+registry rows, Hugging Face `istupakov/gigaam-v3-onnx` at `322c3b2`). Golos crowd is left out: its references write
+brands in Cyrillic and numbers as words, so models with punctuation get errors for nothing. Normalised: lowercase,
+ё → е, no punctuation, digits spelled out.
+
+| Model | Golos far-field | Common Voice 17 ru | Golos far-field, Opus 16 kbit/s | EN + RU in one phrase |
+|---|---|---|---|---|
+| GigaAM v3 e2e CTC (0.3.1) | 7.8 | 2.1 | 8.4 | 48.6 |
+| **GigaAM v3 e2e RNN-T (0.3.2)** | **5.0** | **1.8** | **6.5** | 49.1 |
+
+**Speed** (the window re-run every 0.3 s as the app runs it; "final" from the end of speech, its 0.3 s VAD pause
+included; medians of 10–25 phrases of 3–5.5 s; M1 = the GitHub `macos-15` runner, 3 cores):
+
+| Model | Final, s: M1 · x86 · RTX 3060 | One window, ms: M1 · x86 · RTX 3060 | Peak RSS (x86) |
+|---|---|---|---|
+| CTC | 0.45 · 0.49 · 0.48 | 73 · 114 · 95 | 444 MB |
+| RNN-T | 0.62 · 0.57 · 0.59 | 148 · 152 · 140 | 410 MB |
+
+The int8 graphs barely use the GPU (onnxruntime keeps the quantised operators on the CPU). Mixed EN + RU speech stays
+bad with either: GigaAM writes the English part as Latin mush.
+
+**With the clone on the macOS runner** (`bench/me_them.py`, 30 s of dense Russian reading → my clone, Pocket TTS
+English, int8; alone and with them → me cloned on the same 3 cores; twice each, CTC and RNN-T interleaved): nothing
+dropped in 108 clauses, the start of my voice after the clause 1.95 → 1.66 s (me → them alone), 2.22 → 2.08 s (both
+sides), 1.88 → 1.61 s (both, the queue sped up as in 0.3.2), p90 2.84–3.13 s either way; the last clauses start no
+later than the first; CPU +1–3 %. The voice queue does not grow, so RNN-T is the default everywhere, not only where
+the clone has an NVIDIA GPU. 30 s per run: a long call was not measured.
+
+The model is 226 MB (216 MiB) more to download once. Until it is, the CTC model already on disk recognises
+(`local/asr.py` `UNTIL_FETCHED`).

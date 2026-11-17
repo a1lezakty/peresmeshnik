@@ -192,12 +192,20 @@ jobs:
   sources:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write  # the attestation of the .tar (a tag only, as on macOS)
+      attestations: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
       - name: The sources the builds owe (GPL piper-runner, LGPL mpg123), each download checked by its SHA-256
         run: |
           packaging/sources.sh "$(sed -n "s/^__version__ = '\(.*\)'/\1/p" peresmeshnik/__init__.py)" dist
           cd dist && sha256sum *.tar | tee "$(ls *.tar).sha256"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        if: startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run  # as on macOS: the notes' gh attestation verify
+        with:                                                          # holds for every file of the release
+          subject-path: dist/*.tar
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: Peresmeshnik-sources

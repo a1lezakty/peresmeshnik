@@ -644,7 +644,7 @@ class Side:
             engine = pair.tts
             try:  # pair.tts: languages.clone_engine's for this computer and the language
                 # M-20: only my own voice, confirmed at the microphone (a contact's never); my sample in their language
-                v, note = voice.speaker(s.local.voice, self.tgt)  # when it is clean enough (voice.sample_why)
+                v, note = voice.speaker(s.local.voice, self.tgt, engine=pair.tts)  # clean, and closer to me
                 try:
                     tts = make_engine(pair.tts, model_dir, threads=s.local.threads)
                 except RuntimeError as e:  # the addon's Qwen3 did not start: the next engine (XTTS-v2), not the stock voice

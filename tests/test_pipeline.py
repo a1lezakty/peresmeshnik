@@ -119,7 +119,8 @@ def test_clauses_events_and_log(caplog):
     assert len(finals) == 2 and asr.streams == 2
     # one chunk per word; speech starts after the first caption, captions do not wait for speech
     kinds = ''.join('C' if isinstance(e, Caption) and e.final else 'S' for e in events if isinstance(e, Speech) or e.final)
-    assert kinds.count('S') == sum(len(c.original.split()) for c in finals) and kinds.index('S') > kinds.index('C')
+    # and each clause's last 5 ms, held back to fade them out (audio/joins.py)
+    assert kinds.count('S') == sum(len(c.original.split()) + 1 for c in finals) and kinds.index('S') > kinds.index('C')
     rows = [json.loads(r.getMessage()) for r in caplog.records]
     assert [r['reason'] for r in rows] == ['pause', 'pause']
     assert {'asr_final_ms', 'mt_ms', 'tts_first_ms', 'tts_ms'} <= rows[0].keys()
@@ -462,7 +463,7 @@ def test_barge_in_drops_what_is_not_heard_yet(monkeypatch):
     run(d, np.concatenate([tone(1.5), silence(1.5), tone(1.5), silence(0.6)]), realtime=True)
     d.finish()
     time.sleep(0.1)
-    assert len(got) == 1 + 3  # clause 0: one chunk of its 3 words, then cut; clause 1: all 3 words
+    assert len(got) == 1 + 3 + 1  # clause 0: one chunk of its 3 words, then cut; clause 1: all 3 words and its faded end
     assert d.stats['dropped'] == 0  # nothing was queued at the cut; clause 0's tail broke off mid-synthesis
 
 

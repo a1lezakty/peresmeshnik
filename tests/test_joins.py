@@ -45,10 +45,13 @@ def test_digital_silence_and_a_soft_end():
     assert abs(len(y) - (2 * joins.EDGE_S + 0.7) * SR) <= 2 * SR * joins.FRAME_S  # -45 dBFS after -20 is still sound
 
 
-def test_chunks_of_sound_go_out_as_they_came():
+def test_sound_goes_out_as_it_came_its_end_faded():
     x = tone(0.8)
     out = list(Joins()(chunks(x), SR))
-    assert [len(c) for c in out] == [len(c) for c in chunks(x)]  # no empty or extra chunk at its end
+    end = round(joins.FADE_S * SR)
+    assert len(out) == len(chunks(x)) + 1 and all(len(c) for c in out)  # its last 5 ms held back, to fade them out
+    y = np.concatenate(out)
+    assert np.array_equal(y[:-end], x[:-end]) and y[-1] == 0  # an engine that stops mid-sound does not click
 
 
 def test_no_sound_at_all_goes_out_as_it_came():

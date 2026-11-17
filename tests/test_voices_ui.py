@@ -502,6 +502,7 @@ def test_wizard_sample_in_their_language(tmp_path, monkeypatch):
     from test_clone_wizard import speech_like
     page, s = wizard_page(tmp_path, monkeypatch)
     root = tmp_path / 'voices'
+    monkeypatch.setattr(voice, 'room_echo', lambda pcm, sr: 0.1)  # a dry room (test_voice_profiles: the estimator)
     assert page.sample_lang() == 'en' and not page.sample_box.isHidden() and page.sample_confirm is None
     assert 'Your voice in English' in page.sample_text.text() and 'your Russian recording speaks' in page.sample_text.text()
     assert page.sample_prompt.text() == voice.PROMPTS['en']
@@ -525,7 +526,12 @@ def test_wizard_sample_in_their_language(tmp_path, monkeypatch):
     assert voice.mine('me-en.new') and [p.name for p in voice.profiles(root)] == []  # drafts: not listed yet
     page.commit()
     assert not (root / 'me-en.new').exists() and voice.mine('me-en').meta['consent']['how'] == 'mic-live'
-    assert s.local.voice == 'me' and voice.speaker(s.local.voice, s.their_lang)[0].name == 'me-en'
+    v, note = voice.speaker(s.local.voice, s.their_lang)  # no clone here to hear: not compared with my main recording,
+    assert s.local.voice == 'me' and v.name == 'me' and 'not compared' in note  # so it does not speak (never worse)
+    k = {'model': 'x', 'similarity': 0.5, 'main': 0.3, 'main_sha256': voice._sha(root / 'me' / 'reference.wav')}
+    v = voice.load('me-en')
+    voice._write(v.path, v.meta | {'consent': v.meta['consent'] | {'clones': {'pocket-tts-en': k}}})
+    assert voice.speaker(s.local.voice, s.their_lang)[0].name == 'me-en'  # heard closer at its confirmation: it speaks
 
 
 def test_wizard_sample_not_kept_or_cancelled(tmp_path, monkeypatch):

@@ -31,7 +31,8 @@ RESET_DB = 1.5  # it starts this much louder than the clause before ended (a sen
 RAMP_S = 1.0  # ... and is back at its own loudness after this long
 MAX_DB = 6.0  # it is turned down at most this much, never up: a clause that ended in a whisper (-35 dBFS) does not make
 # the next one start as quiet (bench/joins.py: at 12 dB such starts fell under the speech of their own clause)
-FADE_S = 0.005  # where silence is cut the sound fades in / out: Pocket's silence is room noise, cut short it clicked
+FADE_S = 0.005  # where silence is cut the sound fades in, and each clause's end fades out: Pocket's silence is room
+# noise, and a clause that goes on may stop mid-sound: cut short, they clicked (bench/joins.py, RU)
 
 
 def goes_on(text: str) -> str:
@@ -89,8 +90,10 @@ class Joins:
     def _trim(self, chunks, sr: int, tail_s: float):
         """The chunks with the silence before the first sound cut to EDGE_S and after the last to `tail_s`; silence in
         between stays (held back until sound follows). A clause with no sound at all goes out as it came."""
-        f, lead, tail = round(sr * FRAME_S), round(sr * EDGE_S), round(sr * tail_s)
-        x = np.zeros(0, np.float32)  # held back: judged silence since the last sound, then less than a frame not judged
+        f, lead, tail, end = round(sr * FRAME_S), round(sr * EDGE_S), round(sr * tail_s), round(sr * FADE_S)
+        # held back: the last FADE_S of sound (the clause's end fades: an engine may stop mid-sound), judged silence since,
+        # then less than a frame not judged
+        x = np.zeros(0, np.float32)
         judged, floor, top, spoke, came, cut = 0, np.inf, -np.inf, False, [], False
         try:
             for c in chunks:
@@ -108,11 +111,11 @@ class Joins:
                     top = max(top, float(db.max()))
                     a = judged + int(np.argmax(loud)) * f  # the first frame of sound
                     b = judged + (int(np.flatnonzero(loud)[-1]) + 1) * f  # the end of the last
-                    y = x[0 if spoke else max(a - lead, 0):b]
+                    y = x[0 if spoke else max(a - lead, 0):b - end]
                     if not spoke and (cut or a > lead):
                         y = fade(y, sr, True)
                     yield y
-                    x, judged, spoke, came = x[b:], judged + k * f - b, True, []
+                    x, judged, spoke, came = x[b - end:], judged + k * f - b + end, True, []
                 else:
                     judged += k * f
                     if not spoke and judged > lead:  # before the first sound only the last EDGE_S is kept
@@ -121,8 +124,7 @@ class Joins:
             getattr(chunks, 'close', lambda: None)()  # broken off: the engine reads away the rest (local/tts.py)
         if spoke:
             self.top = top
-            if tail and len(x):
-                yield fade(x[:tail], sr, False) if len(x) > tail else x
+            yield fade(x[:end + tail], sr, False)
         else:
             yield from came
 

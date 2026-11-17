@@ -748,8 +748,8 @@ class SettingsDialog(QDialog):
         self.voice = QComboBox()
         self.voice.addItem('none', '')
         from peresmeshnik import voice
-        for v in voice.profiles():  # mine only: a contact's voice never speaks as me (the me side refuses it anyway)
-            if v.meta['kind'] == 'me':
+        for v in voice.profiles():  # mine only: a contact's voice never speaks as me (the me side refuses it anyway); not
+            if v.meta['kind'] == 'me' and not voice.is_sample(v):  # a sample in their language: voice.speaker picks that
                 self.voice.addItem(v.meta['name'], v.name)
         self.voice.setCurrentIndex(max(0, self.voice.findData(s.local.voice)))
         f.addRow('My voice (local clone)', self.voice)

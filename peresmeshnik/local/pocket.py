@@ -36,6 +36,10 @@ STATE_V = 2  # how the state is made (2: polyphase resampling): an older cache f
 REF_S = 10.0  # longer samples do not sound more alike, and at ~40 s the model breaks down (RESEARCH-clone 3.3)
 TEMP, EOS_LOGIT, MIN_FRAMES, MAX_TOKENS = 0.3, -4.0, 6, 50  # pocket_tts defaults; EOS is not trusted before MIN_FRAMES
 FADE_IN = SR // 200  # a fresh decoder state steps at its first samples (a click): 5 ms fade, as pocket_tts
+# a text that goes on (no full stop, prompt()) often still sounds when EOS and its frames are said: 3 frames more (17.11,
+# 8 clauses x 2: ends still sounding RU 5 of 16 -> 2, EN 2 -> 0; with the full stop RU 1 of 9); audio/joins.py cuts the
+# silence there and fades the end
+GOES_AFTER = 3
 # Characters absent from a language's training text, as its pocket_tts config rewrites them (the Kyutai rows have no
 # config of their own); ';' reads as ',' in SEMICOLONS. A config.yaml next to the weights (community models) can set
 # TEMP and EOS_LOGIT: settings()
@@ -201,11 +205,10 @@ def end_on_pause(x: np.ndarray, sr: int = SR, pause_s: float = 0.08, fade_s: flo
 
 
 def prompt(text: str, lang: str = 'en', goes: bool = False) -> tuple[str, int]:
-    """The text as the model was trained on it (pocket_tts' prepare_text_prompt) and the frames to say after EOS. A text
-    that ends with a comma goes on (a clause cut by length, audio/joins.goes_on; a long sentence's piece, split()): said
-    without its comma and no full stop, so it does not fall as a sentence's end (research 2026-11-16 VOICE §3.4: the
-    model stops without it; RU pause at the join 0.51 -> 0.23 s). A text that ends in a word gets its full stop, unless
-    it `goes` on (the last piece of such a text)."""
+    """The text as the model was trained on it (pocket_tts' prepare_text_prompt) and the frames to say after EOS. One that
+    `goes` on (a clause cut by length: audio/joins.goes_on ends it with a comma) is said without its comma and with no full
+    stop, so it does not fall as a sentence's end (research 2026-11-16 VOICE §3.4: the model stops without it), and
+    GOES_AFTER frames longer."""
     text = ' '.join(text.split())
     if lang in REPLACE:
         text = re.sub(r'([.!?…])\s*[,;:]', r'\1', ' '.join(text.translate(str.maketrans(REPLACE[lang])).split()))
@@ -216,10 +219,10 @@ def prompt(text: str, lang: str = 'en', goes: bool = False) -> tuple[str, int]:
     after = (3 if len(text.split()) <= 4 else 1) + 2
     text = text[0].upper() + text[1:]
     core = text.rstrip('"\'”’)]» ')
-    if core and core[-1] in ',;:-–—':
-        text = core.rstrip(',;:-–— ') + text[len(core):].strip()
-    elif core and core[-1] not in '.!?…' and not goes:
-        text += '.'
+    if goes:
+        return core.rstrip(',;:-–— ') + text[len(core):].strip(), after + GOES_AFTER
+    if core and core[-1] not in '.!?…':
+        text = core.rstrip(',;:-–— ') + '.' + text[len(core):].strip() if core[-1] in ',;:-–—' else text + '.'
     return text, after
 
 
@@ -334,8 +337,9 @@ class PocketTts:
         return Voice(name=v.name, engine='pocket', path=v.path, meta=v.meta)
 
     # ---- speech
-    def split(self, text: str, lang: str = 'en') -> list[str]:
-        """Pieces of at most MAX_TOKENS tokens at sentence ends, a long sentence at commas (pocket_tts' split)."""
+    def split(self, text: str, lang: str = 'en', goes: bool = False) -> list[str]:
+        """Pieces of at most MAX_TOKENS tokens at sentence ends, a long sentence at commas (pocket_tts' split); `goes`: the
+        text goes on (prompt())."""
         piece = self._sp.id_to_piece
 
         def decimal(tokens: list[int], i: int) -> bool:  # 3.5: not a sentence end
@@ -351,7 +355,7 @@ class PocketTts:
                 prev = t in marks
             return [p for p in parts if p]
         pieces = []
-        for s in cut(self._sp.encode(prompt(text, lang)[0]), self._ends):
+        for s in cut(self._sp.encode(prompt(text, lang, goes)[0]), self._ends):
             subs = cut(self._sp.encode(self._sp.decode(s).strip()), self._commas) if len(s) > MAX_TOKENS else [s]
             pieces += [(len(p), self._sp.decode(p)) for p in (subs if len(subs) > 1 else [s])]
         chunks: list[list] = []
@@ -369,8 +373,8 @@ class PocketTts:
         if not re.search(r'\w', text):
             return
         state = self.graphs._ov(self.state(voice))
-        goes = text.rstrip('"\'”’)]» ')[-1:] in tuple(',;:-–—')  # prompt(): it goes on, its last piece has no full stop
-        parts = self.split(text, lang)
+        goes = text.rstrip('"\'”’)]» ')[-1:] in tuple(',;:-–—')  # it goes on (a clause cut by length): no full stop
+        parts = self.split(text, lang, goes)
         for i, part in enumerate(parts):
             yield from self._say(part, state, lang, goes and i == len(parts) - 1)
 

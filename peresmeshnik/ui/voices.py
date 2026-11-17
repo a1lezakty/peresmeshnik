@@ -110,8 +110,9 @@ def hear_clone(s: config.Settings, consent: dict, v, engine: str, spk, say=lambd
     the first time it speaks (voice.vet_clone)."""
     from peresmeshnik import models
     from peresmeshnik.local.clone import make_engine
-    say('Your live voice matches. Now the voice made from your recording says two test phrases… '
-        '(the first time it starts: up to a minute)')
+    say('Your live voice matches. Now the voice made from your recording says two test phrases'
+        + (', and the one made from your main recording, to hear which sounds more like you' if voice.is_sample(v) else '')
+        + '… (the first time it starts: up to a minute)')
     out, quit = [], threading.Event()
 
     def run() -> None:

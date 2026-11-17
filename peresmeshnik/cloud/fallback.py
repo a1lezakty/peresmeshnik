@@ -507,7 +507,7 @@ def _clone_not_ready(s, lang: str, engine: str = '') -> str:
     from peresmeshnik import voice
     with contextlib.suppress(OSError, ValueError):  # missing or broken: said where it is loaded, as before
         try:  # M-20: a contact's voice never speaks as me; nor one whose clone was heard unlike my live voice
-            voice.speaker(s.local.voice, lang)  # my sample in `lang`, or my main recording
+            voice.speaker(s.local.voice, lang, engine=engine)  # my sample in `lang`, or my main recording
         except voice.NotMine as e:
             return e.why
     if why := languages.not_here(engine):  # an NVIDIA engine's voice pack, a gated model's token
@@ -594,7 +594,7 @@ def make(name: str, s, key: str, on_state=lambda text: None, on_respawn=lambda e
     if tts_id and not piper:
         from peresmeshnik import voice as profiles
         try:
-            voice, sample = profiles.speaker(s.local.voice, tgt)  # my sample in their language, or my main recording
+            voice, sample = profiles.speaker(s.local.voice, tgt, engine=tts_id)  # my sample in their language, or main
         except Exception as e:
             log.warning('me: voice %s: %s', s.local.voice, e)
 

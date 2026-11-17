@@ -7,13 +7,11 @@ on:
   workflow_dispatch:
     inputs:
       suites:
-        description: 'JSON list of suites: asr, mt, tts, clone'
+        description: 'JSON list of suites: asr, mt, tts, clone, pocket, fixes, rnnt'
         default: '["asr", "mt", "tts", "clone"]'
       os:
         description: 'Runner'
         default: macos-15
-  pull_request:
-    types: [labeled]
 
 permissions:
   contents: read
@@ -32,7 +30,7 @@ jobs:
         run: |
           python3 - >> "$GITHUB_OUTPUT" <<'EOF'
           import json, os
-          allowed = ['asr', 'mt', 'tts', 'clone']
+          allowed = ['asr', 'mt', 'tts', 'clone', 'pocket', 'fixes', 'rnnt']
           inp, label = os.environ['INPUT'], os.environ['LABEL']
           suites = json.loads(inp) if inp else allowed if label == 'bench' else [label.removeprefix('bench-')]
           if not isinstance(suites, list) or not suites or any(s not in allowed for s in suites):
@@ -111,7 +109,7 @@ jobs:
           done
           echo "GGUF=$PWD/models/gguf/HY-MT1.5-1.8B-Q4_K_M.gguf $PWD/models/gguf/HY-MT1.5-7B-Q4_K_M.gguf" >> $GITHUB_ENV
       - name: Run ${{ matrix.suite }}
-        if: matrix.suite != 'clone'
+        if: matrix.suite != 'clone' && matrix.suite != 'pocket' && matrix.suite != 'fixes' && matrix.suite != 'rnnt'
         env:
           SUITE: ${{ matrix.suite }}
         run: |
@@ -120,6 +118,64 @@ jobs:
       - name: Voice clone
         if: matrix.suite == 'clone'
         run: bench/clone_ci.sh
+      - name: Pocket TTS, the app's engine and pipeline (int8, 2 threads per engine)
+        if: matrix.suite == 'pocket' || matrix.suite == 'fixes' || matrix.suite == 'rnnt'
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: |
+          # research-1116 R1: ungated weights only (pocket-tts-ru from the registry; English: pocket_speed.py's stand-in)
+          PY=$PWD/.bench/bin/python O=bench/results/pocket V=$RUNNER_TEMP/voices EN=$RUNNER_TEMP/pocket-en-standin  # not in the models cache
+          mkdir -p $O; failed=0
+          run() { echo "== $*"; "$@" || { echo "FAILED: $*"; failed=$((failed + 1)); }; }
+          uv pip install -q -p .bench -e .
+          $PY -m peresmeshnik models fetch --accept-licenses silero-vad wespeaker-resnet34 parakeet-tdt-0.6b-v3 \
+            gigaam-v3-e2e-ctc gigaam-v3-e2e-rnnt quickmt-en-ru opus-mt-ru-en piper-ru_RU-dmitri-medium piper-en_US-john-medium pocket-tts-ru
+          $PY bench/pocket_speed.py profiles $V
+          run $PY bench/pocket_speed.py standin $EN
+          if [ "$SUITE" = rnnt ]; then  # 0.3.2 C: RU ASR GigaAM RNN-T against CTC with my clone, alone and with them -> me
+            run $PY bench/pocket_speed.py speed pocket-tts-en --model-dir $EN --voice $V/ref_ru --n 1  # its voice state made
+            run $PY bench/me_them.py input
+            printf '[local]\nasr = { "ru" = "gigaam-v3-e2e-ctc" }\n' > $RUNNER_TEMP/ctc.toml
+            ME="--null-mic --voice $V/ref_ru --engine pocket-tts-en --model-dir $EN"
+            BOTH="--with-them tests/data/call-en.ogg --them-engine pocket-tts-ru --them-voice $V/ref_en"
+            for i in 1 2; do  # interleaved: the runner's noise falls on both
+              for asr in ctc rnnt; do
+                if [ $asr = ctc ]; then export PERESMESHNIK_CONFIG=$RUNNER_TEMP/ctc.toml; else unset PERESMESHNIK_CONFIG; fi
+                run $PY bench/me_them.py run $ME --out-dir $O/me_${asr}_a$i
+                run $PY bench/me_them.py run $ME $BOTH --out-dir $O/both_${asr}_a$i
+                run $PY bench/latency_variants.py b me_them.py run $ME $BOTH --out-dir $O/both_${asr}_b$i
+              done
+            done
+            unset PERESMESHNIK_CONFIG
+            rm -f $O/*/*.wav; [ $failed = 0 ]; exit
+          fi
+          if [ "$SUITE" = fixes ]; then  # the proposed 0.3.2 latency fixes (bench/latency_variants.py), a twice
+            run $PY bench/pocket_speed.py speed pocket-tts-en --model-dir $EN --voice $V/ref_ru --n 1  # its voice state made
+            run $PY bench/me_them.py input
+            ME="--null-mic --voice $V/ref_ru --engine pocket-tts-en --model-dir $EN"
+            for i in 1 2; do  # run 43932276656 had a b c d a, and d with a fixed -40 dBFS floor: it cut nothing
+              run $PY bench/me_them.py run $ME --out-dir $O/me_a$i
+              for v in b d; do run $PY bench/latency_variants.py $v me_them.py run $ME --out-dir $O/me_$v$i; done
+            done
+            curl -sfL https://www.openslr.org/resources/12/dev-clean.tar.gz \
+              | tar -xzf - -C bench-data LibriSpeech/dev-clean/1272 LibriSpeech/dev-clean/1462 || echo 'FAILED: dev-clean'
+            THEM="--data bench-data/LibriSpeech/dev-clean --a 1272 --b 1462 --clone models/pocket-tts-ru --speaker models/wespeaker-resnet34"
+            for v in d; do run $PY bench/latency_variants.py $v their_voice.py $THEM --out $O/them_$v; done
+            rm -f $O/*/*.wav; [ $failed = 0 ]; exit
+          fi
+          run $PY bench/pocket_speed.py speed pocket-tts-ru --voice $V/ref_en
+          run $PY bench/pocket_speed.py speed pocket-tts-ru --voice $V/ref_ru
+          run $PY bench/pocket_speed.py speed pocket-tts-en --model-dir $EN --voice $V/ref_ru
+          [ -d bench-data/LibriSpeech/dev-clean/1462 ] || curl -sfL https://www.openslr.org/resources/12/dev-clean.tar.gz \
+            | tar -xzf - -C bench-data LibriSpeech/dev-clean/1272 LibriSpeech/dev-clean/1462 || echo 'FAILED: dev-clean'
+          run $PY bench/their_voice.py --data bench-data/LibriSpeech/dev-clean --a 1272 --b 1462 \
+            --clone models/pocket-tts-ru --speaker models/wespeaker-resnet34 --out $O/them_1272_1462
+          run $PY bench/me_them.py input
+          run $PY bench/me_them.py run --null-mic --voice $V/ref_ru --engine pocket-tts-en --model-dir $EN \
+            --with-them tests/data/call-en.ogg --them-engine pocket-tts-ru --them-voice $V/ref_en --out-dir $O/both
+          run $PY bench/me_them.py run --null-mic --voice $V/ref_ru --engine pocket-tts-en --model-dir $EN --out-dir $O/me_alone
+          rm -f $O/*/*.wav  # the artifact: numbers, not audio
+          [ $failed = 0 ]
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:

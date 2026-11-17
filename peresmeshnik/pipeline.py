@@ -50,6 +50,7 @@ from collections import defaultdict
 
 import numpy as np  # BLAS threads: pinned in peresmeshnik/__init__.py, which runs first
 
+from peresmeshnik.audio.joins import Joins, goes_on
 from peresmeshnik.engines import SAMPLE_RATE, Caption, Latency, Speech, Voice
 from peresmeshnik.local.asr import NO_SPACES, _key, join, units
 
@@ -100,6 +101,7 @@ MAX_LAG_S."""
         self.on_clause = None
         self._seg, self._seg0 = [], 0
         self._play_end = 0.0  # when the speech put out so far has played, if played back to back
+        self._joins = Joins()  # the clauses' silence and loudness where they meet (audio/joins.py)
         self._play_lock = threading.Lock()  # _play_end: the speech thread adds to it, interrupt() resets it
         self._stop = threading.Event()  # close(): drop what is queued instead of saying it
         self._error: BaseException | None = None  # the first worker that died
@@ -122,6 +124,7 @@ MAX_LAG_S."""
         flushes its output too. Clauses that end from now on are spoken as usual."""
         with self._play_lock:  # not lost under the speech thread's update of _play_end
             self._cut = self._play_end = time.perf_counter()
+        self._joins.end_db = None  # the next clause is not levelled to speech cut off
 
     def warm_up(self) -> None:
         """Run every engine once before audio comes (first calls allocate); the app shows "warming up"."""
@@ -280,6 +283,7 @@ MAX_LAG_S."""
                     st['dropped'] += 1
                     log.info(json.dumps(c | {'translation': translation}, ensure_ascii=False))
                     self._events.put(Latency(c['clause'], 'dropped', round(lag, 3)))  # no voice comes for it (a remote client)
+                    self._joins.end_db = None  # the next clause is not levelled to the one before the dropped one
                     continue
                 if lag > FAST_AFTER_S:
                     cap = self.max_lag_s or MAX_LAG_S
@@ -288,8 +292,8 @@ MAX_LAG_S."""
                         speed = 1.0
                     else:
                         c['speed'] = speed
-            cut = self._cut
-            for chunk in self._synth(translation, voice, speed, sr):
+            cut, more = self._cut, c.get('reason') in ('max', 'early')  # cut by length: its sentence goes on, no full stop
+            for chunk in self._joins(self._synth(goes_on(translation) if more else translation, voice, speed, sr), sr, more):
                 if self._stop.is_set() or self._cut != cut:
                     break  # closes synth(), which reads away the rest of the request
                 now = time.perf_counter()

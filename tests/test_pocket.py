@@ -203,6 +203,8 @@ def test_prompt_and_split(model):
     assert pocket.prompt('hello there') == ('Hello there.', 5)
     said = '“Hi?”, she said, and went on with the story'
     assert pocket.prompt(said + ',') == (said + '.', 3)
+    assert pocket.prompt(said + ',', goes=True) == (said, 3 + pocket.GOES_AFTER)  # cut by length: no full stop
+    assert pocket.prompt('and then we', goes=True)[0] == 'And then we'
     assert pocket.prompt('It’s fine!')[0] == "It's fine!"
     assert pocket.prompt('« Oui ; non » (bien)', 'fr')[0] == 'Oui , non bien.'
     assert pocket.prompt('Это «так» — да', 'ru')[0] == 'Это «так» — да.'  # Shtorm: no rewrites

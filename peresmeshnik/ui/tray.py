@@ -88,6 +88,10 @@ class Tray(QObject):
         m = self.menu = QMenu()
         self.status = m.addAction('idle, translation off')
         self.status.setEnabled(False)
+        self.voices: dict[str, str] = {}  # side -> the voice that speaks its translation now ("voice: " states)
+        self.voice_now = m.addAction('')  # one line: what is heard is what is shown (TTS §3.2)
+        self.voice_now.setEnabled(False)
+        self.voice_now.setVisible(False)
         m.addSeparator()
         self.translation = m.addAction('Translation')
         self.translation.setCheckable(True)
@@ -209,6 +213,15 @@ class Tray(QObject):
         if state.startswith('notice: '):  # about something else than translating (the call app's volume): said, no more
             self.message(state.removeprefix('notice: '))
             return
+        if state.startswith('voice: '):  # 'voice: <side>: <whose voice>' (app.Side.voice_now): the menu's voice line
+            side, _, whose = state.removeprefix('voice: ').partition(': ')
+            self.voices[side] = whose
+            self.voice_now.setText(('Voice: ' + '; '.join(f'{k}: {v}' for k, v in self.voices.items()))[:160])
+            self.voice_now.setVisible(True)
+            return
+        if state.startswith('idle') or state == 'warming up':  # translation off, or on again: no voice speaks yet
+            self.voices.clear()
+            self.voice_now.setVisible(False)
         self.status.setText(state[:120])
         self.icon.setToolTip(f'Peresmeshnik: {state}')
         if self.fallback:
@@ -735,8 +748,8 @@ class SettingsDialog(QDialog):
         self.voice = QComboBox()
         self.voice.addItem('none', '')
         from peresmeshnik import voice
-        for v in voice.profiles():  # mine only: a contact's voice never speaks as me (the me side refuses it anyway)
-            if v.meta['kind'] == 'me':
+        for v in voice.profiles():  # mine only: a contact's voice never speaks as me (the me side refuses it anyway); not
+            if v.meta['kind'] == 'me' and not voice.is_sample(v):  # a sample in their language: voice.speaker picks that
                 self.voice.addItem(v.meta['name'], v.name)
         self.voice.setCurrentIndex(max(0, self.voice.findData(s.local.voice)))
         f.addRow('My voice (local clone)', self.voice)

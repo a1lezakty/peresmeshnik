@@ -624,7 +624,7 @@ class FastTts:
 def test_qwen3_that_does_not_start_gives_way_to_xtts(monkeypatch, tmp_path):
     """FIXES addon 6: the addon's Qwen3-TTS chosen, its runner does not start (CloneUnavailable): the next engine,
     XTTS-v2, speaks my cloned voice, said why; not the stock voice."""
-    from peresmeshnik import languages, models
+    from peresmeshnik import languages, models, voice
     side, s, made, _ = me_side(monkeypatch, tmp_path, key=False)
     monkeypatch.setattr(languages, 'addon_here', lambda: True)
     monkeypatch.setattr(languages, 'nvidia_once', lambda: languages.Gpu(8.0, (572, 83), 8.6))
@@ -639,8 +639,11 @@ def test_qwen3_that_does_not_start_gives_way_to_xtts(monkeypatch, tmp_path):
             raise CloneUnavailable('the voice pack: ModuleNotFoundError: faster_qwen3_tts')
         return FastTts(model_id)
     monkeypatch.setattr(clone, 'make_engine', make)
+    speaker, asked = voice.speaker, []
+    monkeypatch.setattr(voice, 'speaker', lambda *a, engine='', **k: asked.append(engine) or speaker(*a, engine=engine, **k))
     d = side._local(s)
     assert tried == ['qwen3-tts', 'xtts-v2'] and made[0].name == 'xtts-v2' and d.warm == 1
+    assert asked[1:] == ['qwen3-tts', 'xtts-v2', 'xtts-v2']  # _clone_not_ready, then the speaker for the one that speaks
     assert side.errors == ['note: me → them: xtts-v2 speaks your cloned voice: qwen3-tts did not start (the voice pack: '
                            'ModuleNotFoundError: faster_qwen3_tts)']
 

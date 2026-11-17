@@ -488,3 +488,137 @@ def test_a_voice_whose_clone_was_refused_can_be_confirmed_again(root):
     d.refresh()
     d.list.setCurrentRow(0)
     assert 'confirm it again' in d.list.item(0).text() and d.confirm_button.isEnabled()
+
+
+def read_ok(monkeypatch, box):
+    """The live reading of `box` passes: its ASR heard the phrases shown, the voice is the recording's."""
+    said = box.said
+    monkeypatch.setattr(voices, 'check_models', lambda s, lang, say: (Asr(' '.join(said)), Speaker(0.9)))
+
+
+def test_wizard_sample_in_their_language(tmp_path, monkeypatch):
+    """The voice page's "Your voice in English": Record reads PROMPTS['en'], the verdict, the box confirms the take with
+    English phrases; the take is "me-en.new" until Finish, then "me-en", and voice.speaker uses it."""
+    from test_clone_wizard import speech_like
+    page, s = wizard_page(tmp_path, monkeypatch)
+    root = tmp_path / 'voices'
+    monkeypatch.setattr(voice, 'room_echo', lambda pcm, sr: 0.1)  # a dry room (test_voice_profiles: the estimator)
+    assert page.sample_lang() == 'en' and not page.sample_box.isHidden() and page.sample_confirm is None
+    assert 'Your voice in English' in page.sample_text.text() and 'your Russian recording speaks' in page.sample_text.text()
+    assert page.sample_prompt.text() == voice.PROMPTS['en']
+    heard = []
+    monkeypatch.setattr('peresmeshnik.audio.mic.record', lambda sec, dev, sr, progress: heard.append(sec) or speech_like(sec, sr))
+    page.record()
+    pump(lambda: not page.running)
+    read_ok(monkeypatch, page.confirm)
+    page.confirm.start()
+    pump(lambda: not page.confirm.running)
+    page.record_sample()
+    pump(lambda: not page.running)
+    assert heard == [45.0, 8.0, 45.0] and page.sample.name == 'me-en.new' and page.sample.meta['lang'] == 'en'
+    assert 'Kept: confirm it below' in page.sample_out.text() and page.sample_confirm is not None
+    box = page.sample_confirm
+    assert box.lang == 'en' and set(box.said) <= set(voice.LIVE_PHRASES['en'])
+    read_ok(monkeypatch, box)
+    box.start()
+    assert not page.isComplete() and not page.record_button.isEnabled() and not page.sample_button.isEnabled()
+    pump(lambda: not box.running)
+    assert voice.mine('me-en.new') and [p.name for p in voice.profiles(root)] == []  # drafts: not listed yet
+    page.commit()
+    assert not (root / 'me-en.new').exists() and voice.mine('me-en').meta['consent']['how'] == 'mic-live'
+    v, note = voice.speaker(s.local.voice, s.their_lang)  # no clone here to hear: not compared with my main recording,
+    assert s.local.voice == 'me' and v.name == 'me' and 'not compared' in note  # so it does not speak (never worse)
+    k = {'model': 'x', 'similarity': 0.5, 'main': 0.3, 'main_sha256': voice._sha(root / 'me' / 'reference.wav')}
+    v = voice.load('me-en')
+    voice._write(v.path, v.meta | {'consent': v.meta['consent'] | {'clones': {'pocket-tts-en': k}}})
+    assert voice.speaker(s.local.voice, s.their_lang)[0].name == 'me-en'  # heard closer at its confirmation: it speaks
+
+
+def test_wizard_sample_not_kept_or_cancelled(tmp_path, monkeypatch):
+    """A take that fails the stricter check is not kept (said why: my recording speaks); Cancel drops a kept take and
+    leaves the saved sample as it was; Back to another language drops it too; no section where nothing would use it."""
+    from test_clone_wizard import speech_like
+    page, s = wizard_page(tmp_path, monkeypatch)
+    root = tmp_path / 'voices'
+    monkeypatch.setattr('peresmeshnik.audio.mic.record', lambda sec, dev, sr, progress: speech_like(sec, sr))
+    monkeypatch.setattr(voice, 'room_echo', lambda pcm, sr: voice.SAMPLE_ECHO + 1)
+    page.record_sample()
+    pump(lambda: not page.running)
+    assert ('Not kept: a lot of room echo: record it again in a smaller, furnished room; your Russian recording speaks '
+            'English.') in page.sample_out.text()
+    assert page.sample is None and page.sample_confirm is None and not (root / 'me-en.new').exists()
+    monkeypatch.setattr(voice, 'room_echo', lambda pcm, sr: 0.0)
+    voice.save(speech_like(45, seed=3), 24_000, 'me-en', 'en', root=root, source='mic')  # an earlier wizard's
+    old = (root / 'me-en' / 'reference.wav').read_bytes()
+    page.sample = None
+    page.initializePage()
+    assert page.sample.name == 'me-en' and page.sample_out.text().startswith('Saved, recorded')
+    page.record_sample()
+    pump(lambda: not page.running)
+    assert page.sample.name == 'me-en.new'
+    page.rollback()  # Cancel
+    assert not (root / 'me-en.new').exists() and (root / 'me-en' / 'reference.wav').read_bytes() == old
+    page.record_sample()
+    pump(lambda: not page.running)
+    s.their_lang = 'de'  # Back: they speak German now
+    page.initializePage()
+    assert not (root / 'me-en.new').exists() and page.sample is None and page.sample_lang() == 'de'
+    from peresmeshnik import models
+    monkeypatch.setattr(models, 'is_fetched', lambda m, base=None: True)
+    s.their_lang = 'en'
+    page.stock.setChecked(True)  # nothing would speak a sample: the stock voice, the cloud
+    assert page.sample_lang() == '' and page.sample_box.isHidden()
+    page.stock.setChecked(False)
+    assert not page.sample_box.isHidden()
+    s.me_to_them = 'cloud'
+    page.initializePage()
+    assert page.sample_lang() == '' and page.sample_box.isHidden()
+
+
+def test_voices_window_my_sample(root, monkeypatch):
+    """Voices…: my sample is listed as mine, with whether it is used; confirmed with its language's phrases; deleting
+    it keeps my voice; deleting my voice takes its samples (and their takes) too."""
+    s, changed = config.Settings(), []
+    s.local.voice = 'me'
+    voice.save(*speech(), 'me-en', 'en', '', root, 'mic')
+    voice.save(*speech(), 'me-de.new', 'de', '', root, 'mic')  # a wizard's take
+    d = voices.VoicesDialog(s, changed.append)
+    names = [v.name for v in d.voices]
+    rows = [d.list.item(i).text() for i in range(d.list.count())]
+    assert rows[names.index('me-en')].startswith('Your voice (English sample): en, 40 s, it is not confirmed'), rows
+    d.list.setCurrentRow(names.index('me-en'))
+    assert d.confirm_button.isEnabled()
+    d.start_confirm()
+    box = d.boxes['me-en']
+    assert box.lang == 'en' and set(box.said) <= set(voice.LIVE_PHRASES['en'])
+    monkeypatch.setattr('peresmeshnik.audio.mic.record', lambda sec, dev, sr, progress: speech(sec, sr)[0])
+    read_ok(monkeypatch, box)
+    box.start()
+    pump(lambda: not box.running)
+    assert voice.mine('me-en') and changed == [True]
+    rows = [d.list.item(i).text() for i in range(d.list.count())]
+    assert 'confirmed at the microphone' in rows[names.index('me-en')] and ', not used: ' in rows[names.index('me-en')]
+    d.list.setCurrentRow(names.index('me-en'))
+    assert not d.confirm_button.isEnabled()  # no clone here to compare with: confirming again changes nothing
+    monkeypatch.setattr(voices, 'clone_here', lambda s: 'pocket-tts-en')  # one here now (the token given later)
+    q = voice.load('me-en').meta['quality'] | {'level_db': -20.0, 'snr_db': 40.0, 'band_db': -10.0, 'echo': 0.1}
+    voice._write(root / 'me-en', voice.load('me-en').meta | {'quality': q})
+    d.refresh()
+    d.list.setCurrentRow(names.index('me-en'))
+    assert 'not used: it was not compared with your main recording' in d.list.item(names.index('me-en')).text()
+    assert d.confirm_button.isEnabled()  # stuck otherwise: confirmed, never compared, never used
+    v = voice.load('me-en')
+    from peresmeshnik import models
+    k = {'model': models.get('pocket-tts-en').fingerprint, 'similarity': 0.3, 'main': 0.4,
+         'main_sha256': voice._sha(root / 'me' / 'reference.wav')}
+    voice._write(v.path, v.meta | {'consent': v.meta['consent'] | {'clones': {'pocket-tts-en': k}}})
+    d.refresh()
+    d.list.setCurrentRow(names.index('me-en'))
+    assert voice.LESS_LIKE in d.list.item(names.index('me-en')).text() and not d.confirm_button.isEnabled()
+    d.delete()
+    assert not (root / 'me-en').exists() and (root / 'me').exists() and s.local.voice == 'me' and changed[-1] is True
+    voice.save(*speech(), 'me-en', 'en', '', root, 'mic')
+    d.refresh()
+    d.list.setCurrentRow([v.name for v in d.voices].index('me'))
+    d.delete()
+    assert s.local.voice == '' and not any(p.name.startswith('me') for p in root.iterdir())

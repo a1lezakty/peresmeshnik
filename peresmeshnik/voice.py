@@ -218,6 +218,99 @@ def check(pcm: np.ndarray, sr: int) -> Report:
     return r
 
 
+# a sample of my voice in the other side's language (`<name>-<lang>`; research 2026-11-16 VOICE 2.1, 3.2): it speaks
+# instead of my main recording only when cleaner than check() asks. Calibrated 17.11 (Pocket-en as the app runs it, ECAPA:
+# 5 LibriTTS-R readers x 2 samples x 17 conditions, 5 FLEURS readers; a clean sample 0.56, through a room or noise less):
+# - SAMPLE_SNR_DB, check()'s snr_db: a true SNR of 30 dB reads 22.5-28.8 and costs nothing, 20 dB reads 18.7-20.4 and
+#   costs 0.07, 15 dB 0.13 (room echo fills the pauses too: this line catches part of it);
+# - SAMPLE_ECHO, room_echo(): RT60 0.4 s reads 0.31-0.41 and costs 0.04, 0.7 s reads 0.53-0.72 and costs 0.08 (0.19 with
+#   noise); dry samples 0.07-0.13, FLEURS home rooms 0.09-0.26; None (cannot tell) fails;
+# - BAND_DB (check()'s warning) fails it: nothing above 3.4 kHz costs 0.14, a 16 kHz microphone nothing.
+# None of the 85 harmless conditions failed. Level and a little clipping cost the clone nothing once save() levels it:
+# only check()'s own limits. What a recording check cannot see: some voices clone worse whatever the room (0.39-0.44 for
+# two clean readers), there the sample may sound no closer than the main recording
+SAMPLE_SNR_DB, SAMPLE_ECHO = 22.0, 0.45
+ECHO_BANDS = ((400, 800), (800, 1600), (1600, 3200), (3200, 6400))  # Hz
+ECHO_HOP_S, ECHO_WIN_S = 0.008, 0.032
+# a decay starts at a peak ECHO_PEAK_DB over the band's noise floor and is fitted from ECHO_TOP_DB under the peak down to
+# ECHO_FLOOR_DB over the floor (at least ECHO_MIN_FALL_DB in ECHO_MIN_FRAMES); a rise of ECHO_RISE_DB ends it (the next sound)
+ECHO_PEAK_DB, ECHO_TOP_DB, ECHO_FLOOR_DB, ECHO_MIN_FALL_DB, ECHO_MIN_FRAMES, ECHO_RISE_DB = 20.0, 5.0, 8.0, 10.0, 5, 2.0
+ECHO_PCT, ECHO_MIN_DECAYS = 20, 12  # the room: the fast end of the decays (speech may stop slowly, never faster than the room)
+
+
+def _decays(e: np.ndarray, hop: float) -> list[float]:
+    """The RT60s (s) of the falls after each local peak of the band envelope `e` (dB per hop; NaN: no sound to judge)."""
+    floor = float(np.nanpercentile(e, 10))
+    out, i, n = [], 1, len(e)
+    while i < n - 1:
+        if not (e[i] >= e[i - 1] and e[i] > e[i + 1] and e[i] >= floor + ECHO_PEAK_DB):
+            i += 1
+            continue
+        j, low = i, e[i]
+        while j + 1 < n and e[j + 1] < low + ECHO_RISE_DB and e[j + 1] > floor + ECHO_FLOOR_DB:
+            j += 1
+            low = min(low, e[j])
+        seg = e[i:j + 1]
+        k = np.arange(len(seg))
+        use = (seg <= e[i] - ECHO_TOP_DB) & (seg >= floor + ECHO_FLOOR_DB) & (k <= int(np.argmin(seg)))
+        if use.sum() >= ECHO_MIN_FRAMES and seg[use].max() - seg[use].min() >= ECHO_MIN_FALL_DB:
+            slope = np.polyfit(k[use] * hop, seg[use], 1)[0]  # dB a second
+            if slope < 0:
+                out.append(-60.0 / slope)
+        i = max(j, i + 1)
+    return out
+
+
+def room_echo(pcm: np.ndarray, sr: int) -> float | None:
+    """How long the room makes a sound die away, an RT60 in seconds, from the falls after speech sounds in four bands
+    (32 ms frames every 8 ms); None when there are too few to tell (under ~5 s of speech, or too noisy). A dry room and
+    a close microphone read 0.07-0.15 (how fast speech sounds stop by themselves); stationary noise moves it by +0.07 at
+    most (the fit stops above the noise). save() keeps it in `quality['echo']`."""
+    raw = np.asarray(pcm, np.float64)
+    raw = raw.mean(axis=1) if raw.ndim > 1 else raw
+    x = raw - (raw.mean() if len(raw) else 0.0)
+    hop, win = max(1, round(ECHO_HOP_S * sr)), max(2, round(ECHO_WIN_S * sr))
+    if len(x) < win * 4:
+        return None
+    idx = np.arange(win)[None, :] + hop * np.arange((len(x) - win) // hop + 1)[:, None]
+    fr = x[idx]
+    dead = (raw[idx] == 0).sum(axis=1) > win // 8  # touches digital silence: its fall is a cut, not a room
+    p = np.abs(np.fft.rfft(fr * np.hanning(win), axis=1)) ** 2
+    f = np.fft.rfftfreq(win, 1 / sr)
+    times: list[float] = []
+    for lo, hi in ECHO_BANDS:
+        if hi > sr / 2:
+            continue
+        band = p[:, (f >= lo) & (f < hi)].sum(axis=1)
+        live = (band > 1e-20) & ~dead
+        if live.sum() < 50:
+            continue
+        e = np.convolve(10 * np.log10(np.maximum(band, 1e-20)), np.ones(3) / 3, mode='same')  # no ripple-made peaks
+        e[~live] = np.nan  # a decay stops there
+        times += _decays(e, hop / sr)
+    return float(np.percentile(times, ECHO_PCT)) if len(times) >= ECHO_MIN_DECAYS else None
+
+
+def sample_why(q: dict) -> str:
+    """'' when a sample of my voice in the other side's language may speak (its voice.json `quality`: check()'s numbers
+    and `echo`), else one short reason, for the user."""
+    if 'echo' not in q:  # saved before the check had it
+        return 'it was not checked for room echo: record it again'
+    if q.get('clipped', 0.0) > MAX_CLIPPED:
+        return 'it is clipped: record it again with a lower mic gain'
+    if q.get('level_db', -120.0) < QUIET_DB:
+        return 'it is too quiet: record it again closer to the microphone'
+    if q.get('snr_db', 0.0) < SAMPLE_SNR_DB:
+        return 'background noise: record it again somewhere quieter'
+    if q['echo'] is None:
+        return 'too little clear speech to hear the room: record it again somewhere quieter, pausing less'
+    if q['echo'] > SAMPLE_ECHO:
+        return 'a lot of room echo: record it again in a smaller, furnished room'
+    if q.get('band_db', 0.0) < BAND_DB:
+        return 'no sound above 4 kHz: record it again with a wired or built-in microphone'
+    return ''
+
+
 def verdict(r: Report) -> str:
     """One line for the user: good, good with a caveat, or record again and why."""
     if r.errors:
@@ -358,7 +451,9 @@ def voices_dir() -> Path:
 # --- voice.json v2: my voice and the voices of the people I talk to (RESEARCH-clone §5-6, FINDINGS M-20) ---
 #   {version: 2, id, name, kind, lang, created, consent, seconds, engines,
 #    and for kind 'me' as in v1: transcript, sample_rate, gain_db, quality}   (v1 readers still find their keys)
-# id       the folder: 'me' ('me.new' while the wizard holds a new take); a contact 'them-<8 hex>': no name in a path
+# id       the folder: 'me' ('me.new' while the wizard holds a new take); a contact 'them-<8 hex>': no name in a path;
+#          'me-<lang>' (kind 'me', source 'mic'): a sample of my voice in the other side's language, confirmed as 'me' is;
+#          it speaks that language for me while sample_why(quality) is '' (speaker()), else 'me' does
 # name     shown on the voices screen; never in logs or crash reports
 # kind     'me': may speak into the call (virtual mic) and go to my server; 'them': only ever into my headphones
 # consent  None (not confirmed: it speaks nowhere as me) or {how, at, wer, similarity, windows, ref_sha256}; how:
@@ -383,7 +478,12 @@ CONSENT = {'mic-live': 'me', 'import+mic-match': 'me', 'call-saved': 'them'}  # 
 
 
 class NotMine(RuntimeError):
-    """A profile that may not speak as me (into the call, to my server): a contact's, or mine not confirmed yet."""
+    """A profile that may not speak as me (into the call, to my server): a contact's, or mine not confirmed yet. `why`:
+    why_not_mine's text."""
+
+    def __init__(self, why: str):
+        super().__init__(f'this voice cannot speak for you: {why}')
+        self.why = why
 
 
 def _sha(path: Path) -> str:
@@ -416,8 +516,71 @@ def mine(name: str, root: Path | None = None) -> Voice:
     """The profile `name` if it may speak as me, else NotMine (the text names no voice: it may reach a log)."""
     v = load(name, root)
     if why := why_not_mine(v):
-        raise NotMine(f'this voice cannot speak for you: {why}')
+        raise NotMine(why)
     return v
+
+
+def is_sample(v: Voice) -> bool:
+    """A sample of my voice in another language (speaker()'s `<name>-<lang>`), not my main profile."""
+    return v.meta.get('kind', 'me') == 'me' and v.name.removesuffix('.new').endswith(f'-{v.meta.get("lang")}')
+
+
+def main_of(v: Voice) -> Path | None:
+    """The folder of my main recording beside the sample `v` (is_sample); for the wizard's draft sample, its draft main
+    recording first (both are kept at Finish)."""
+    base = v.name.removesuffix('.new').removesuffix(f'-{v.meta.get("lang")}')
+    names = (f'{base}.new', base) if v.name.endswith('.new') else (base,)
+    return next((f for n in names if ((f := v.path.parent / n) / 'reference.wav').is_file()), None)
+
+
+LESS_LIKE = 'the voice made from it sounded less like you than the one from your main recording'
+
+
+def closer_why(v: Voice, engine: str) -> str:
+    """'' when the clone `engine` ('': any) made from my sample `v` sounded more like my live reading than the one made
+    from my main recording (main_of; confirm_clone heard both, at the sample's confirmation), else why not, for the user:
+    the sample never makes my voice less like me than the main recording does. Any reason but LESS_LIKE: confirming the
+    sample again (with that engine here) compares them."""
+    from peresmeshnik import models
+    main = main_of(v)
+    k = next((k for e, k in ((v.meta.get('consent') or {}).get('clones') or {}).items()
+              if (not engine or e == engine) and 'main' in k), None)
+    if k is None:
+        return 'it was not compared with your main recording yet: confirm it again (Voices…)'
+    try:
+        fp = models.get(engine).fingerprint if engine else k.get('model')
+    except models.ModelMissing:  # not a registry engine (a runner of one's own): its weights cannot be told apart
+        fp = k.get('model')
+    if k.get('model') != fp:
+        return 'the voice engine changed after it was compared: confirm it again (Voices…)'
+    if main is not None and k.get('main_sha256') != _sha(main / 'reference.wav'):
+        return 'your main recording changed after it was compared: confirm the sample again (Voices…)'
+    if k['main'] is not None and k['similarity'] <= k['main']:
+        return f'{LESS_LIKE} ({k["similarity"]:.2f} against {k["main"]:.2f})'
+    return ''
+
+
+def speaker(name: str, lang: str, root: Path | None = None, engine: str = '') -> tuple[Voice, str]:
+    """The profile that speaks `lang` as me with the clone `engine`: my sample in that language (`<name>-<lang>`) when it
+    is mine (why_not_mine), clean enough (sample_why) and its clone was heard closer to me than my main recording's
+    (closer_why), else `mine(name)` (NotMine as there); and a note for the user, only when such a sample is there but not
+    used ('' else)."""
+    from peresmeshnik import languages
+    why = ''
+    if ((root or voices_dir()) / f'{name}-{lang}').is_dir():
+        try:
+            v = load(f'{name}-{lang}', root)
+            why = (why_not_mine(v) or sample_why(v.meta.get('quality') or {})
+                   or closer_why(v, engine))
+        except (OSError, ValueError, AttributeError):
+            why = 'it cannot be read: record it again'
+        if not why:
+            return v, ''
+    v = mine(name, root)
+    if not why:
+        return v, ''
+    return v, (f'your {languages.name(lang)} sample is not used ({why}): your {languages.name(v.meta.get("lang", ""))} '
+               f'recording speaks {languages.name(lang)}')
 
 
 def upgrade(meta: dict, folder: str) -> dict:
@@ -487,7 +650,7 @@ def save_them(name: str, lang: str, seconds: float, states: dict[str, tuple[np.n
     return Voice(name=vid, engine='reference', path=base / vid, meta=meta)
 
 
-APP_IDS = r'me|them-[0-9a-f]{8}'  # the app's own folder ids: they name nobody (crash reports keep them)
+APP_IDS = r'me(-[a-z]{2})?|them-[0-9a-f]{8}'  # the app's own folder ids ('me-<lang>': speaker()): they name nobody (crash reports)
 ASIDE = ('.new', '.old', '.tmp')  # the wizard's take in progress, its last one, a contact's voice being saved
 
 
@@ -891,9 +1054,24 @@ def confirm_clone(consent: dict, tts, engine: str, v: Voice, lang: str, speaker:
     sim = clone_match(tts, v, lang, consent['live'], speaker)
     if sim is None:
         return None, 'Not confirmed: ' + SAID_NOTHING + '.'
-    if sim >= CLONE_MATCH:
-        return consent | {'clones': {**consent.get('clones', {}), engine: _heard(engine, sim)}}, ''
-    return None, 'Not confirmed: ' + CLONE_WHY.format(sim=sim) + '.'
+    if sim < CLONE_MATCH:
+        return None, 'Not confirmed: ' + CLONE_WHY.format(sim=sim) + '.'
+    heard, note = _heard(engine, sim), ''
+    if is_sample(v) and (main := main_of(v)) is not None:  # my sample in their language: and my main recording's clone,
+        from peresmeshnik import languages  # against the same live reading (closer_why: the closer one speaks)
+        m = load(main.name, main.parent)
+        ms = clone_match(tts, m, lang, consent['live'], speaker)
+        heard |= {'main': None if ms is None else round(ms, 3), 'main_sha256': _sha(main / 'reference.wav')}
+        mine_lang, its = languages.name(m.meta.get('lang', '')), languages.name(lang)
+        if ms is None:
+            note = f'The voice made from your {mine_lang} recording said nothing: this one speaks {its} for you.'
+        elif sim > ms:
+            note = (f'The voice made from it sounds more like you than the one from your {mine_lang} recording '
+                    f'({sim:.2f} against {ms:.2f}): it speaks {its} for you.')
+        else:
+            note = (f'The voice made from it does not sound more like you than the one from your {mine_lang} recording '
+                    f'({sim:.2f} against {ms:.2f}): your {mine_lang} recording goes on speaking {its}.')
+    return consent | {'clones': {**consent.get('clones', {}), engine: heard}}, note
 
 
 def vet_clone(tts, engine: str, v: Voice, lang: str) -> str:
@@ -976,7 +1154,8 @@ def save(pcm: np.ndarray, sr: int, name: str, lang: str, transcript: str | None 
     meta = {'version': VERSION, 'id': name, 'name': name, 'kind': 'me', 'lang': lang, 'created': _now(),
             'consent': None, 'source': source, 'seconds': round(len(y) / sr, 2), 'engines': {},
             'transcript': transcript or '', 'sample_rate': sr, 'gain_db': round(20 * np.log10(gain), 1),
-            'quality': {k: v for k, v in asdict(report).items() if k not in ('errors', 'warnings')}}
+            'quality': {k: v for k, v in asdict(report).items() if k not in ('errors', 'warnings')}
+            | {'echo': None if (e := room_echo(x, sr)) is None else round(e, 3)}}
     _write(path, meta)
     return Voice(name=name, engine='reference', path=path, meta=meta)
 

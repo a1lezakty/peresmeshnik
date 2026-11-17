@@ -3,6 +3,45 @@
 Versions are tagged and published by hand after a check by a person (no release is published by CI). The section of a
 version is the top of its GitHub release notes (`.github/workflows/release.yml`).
 
+## 0.3.2 — 2026-11-17
+
+Your voice reaches the call sooner and sounds smoother, and can speak their language from a sample of yours in it;
+their subtitles come sooner; Russian is recognized with fewer mistakes. Measured on test machines (GitHub's virtual M1
+of 3 cores, CPU only, and x86 CPUs), not yet on a real Mac: `docs/BENCH.md`, the "0.3.2" sections.
+
+- **Me → them runs on your Mac by default** with 16 GB or more, once your cloned voice can speak their language here:
+  Hugging Face token given, your voice recorded and confirmed, the pair's models downloaded. Until then the cloud as
+  before; the start after it is ready runs locally. A choice you make in the wizard or the tray from 0.3.2 on stays;
+  0.3.1 saved the cloud the same way whether you chose it or not, so to keep the cloud choose it again in the tray.
+  Windows and Linux as before.
+- **Your voice keeps up** (and still drops nothing): from 0.5 s behind it speaks faster at the same pitch, up to 1.4× at
+  4 s behind. Its start after your phrase, median: 1.97 → 1.45 s on the virtual M1, 2.19 → 1.86 s on x86. The same for
+  the local voice that takes over when the cloud fails. A voice that speeds up no longer cuts the last ~50 ms of a
+  clause (both directions).
+- **Their subtitles sooner:** a phrase of theirs ends after 200 ms of silence instead of 300 (the subtitles of a side
+  in the cloud or on your server too): median 0.78 → 0.64 s, p90 1.97 → 1.62 s on the virtual M1. The price: shorter
+  clauses, so English recognition gets ~2 % more words wrong (23 → 25 % on hard conversational speech; Russian +0.3 %),
+  the translation about the same. Your own voice to the call keeps 0.3.1's clause end, so that its clauses stay whole.
+- **The cloud says what it is:** "cloud (Gemini): simultaneous interpreter, lags ~3–4 s, the voice is not yours" (not
+  theirs, for them → me) in the tray and the wizard.
+- **Clause joins in your cloned voice:** a short pause between clauses of one sentence (median, English 0.74 → 0.20 s,
+  Russian 0.19 → 0.10 s), the next clause starts near the loudness of the one before (a jump of +8.0 → +5.1 dB in
+  English, +5.0 → +2.4 dB in Russian), no clicks; a clause cut for its length no longer ends on a falling full stop. The
+  next clause is held up to 0.4 s for it, mostly while the one before still plays.
+- **Your voice in their language** (the wizard's "Your voice in English", or another language they speak; Voices…):
+  45 s read in that language, checked for noise, room echo and missing high frequencies (one line says why when it
+  fails). When you confirm it, the clones of both recordings say test phrases against one live reading of yours, and
+  the sample speaks only if its clone sounds more like you; otherwise your main recording speaks, as before. Your own
+  server still clones the main recording.
+- **Whose voice speaks:** a tray line "Voice: me → them: your cloned voice, from your English recording; them → me:
+  their cloned voice" (or a stock voice, Gemini's voice, … on your server).
+- **Russian recognition on GigaAM v3 e2e RNN-T** (was CTC): far-field speech 5.0 % of words wrong instead of 7.8 %
+  (Golos), Common Voice 1.8 instead of 2.1 %; its final text comes 0.1–0.2 s later, your voice in the call not later.
+  After the update download it in Components… (226 MB); until then the old model recognizes as in 0.3.1, and
+  Components… lists it as in use. Once the new one is there, the old one (225 MB) can be removed there.
+- **Headphones:** README (macOS) and the wizard's Sound devices page advise wired ones, not the AirPods microphone
+  (macOS switches AirPods to their phone-call mode, slower and with poor sound both ways).
+
 ## 0.3.1 — 2026-11-16
 
 The first published version: a real-time translator for calls on macOS 14+ (Apple Silicon) and Windows 10 2004+ / 11,

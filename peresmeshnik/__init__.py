@@ -39,4 +39,4 @@ def _ca_bundle() -> None:
 
 _ca_bundle()
 
-__version__ = '0.3.1'
+__version__ = '0.3.2'

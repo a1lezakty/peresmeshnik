@@ -203,17 +203,17 @@ def test_wizard_asks_for_the_right_models(monkeypatch):
     s = config.Settings()  # them -> me local, me -> them cloud with local subtitles and its fallback voice (H-09)
     assert needed_models(s) == ['silero-vad', 'parakeet-tdt-0.6b-v3', s.local.mt['en-ru'], 'piper-ru_RU-dmitri-medium',
                                 'pocket-tts-ru', 'wespeaker-resnet34',  # them -> me in their voice (S2)
-                                'gigaam-v3-e2e-ctc', 'opus-mt-ru-en', 'piper-en_US-john-medium']
+                                'gigaam-v3-e2e-rnnt', 'opus-mt-ru-en', 'piper-en_US-john-medium']
     s.cloud.subtitles, s.them_to_me = True, 'cloud'
     assert needed_models(s) == ['silero-vad']
     s.me_to_them = 'local'  # no NVIDIA GPU: Pocket TTS on the CPU (stage 8), the stock voice its fallback
     from peresmeshnik import models
     monkeypatch.setattr(models, 'hf_token', lambda: 'hf_test')  # Kyutai's gated weights: with the user's token
     monkeypatch.setattr(languages, 'pack_here', lambda: True)  # with an NVIDIA GPU below: its voice pack is here too
-    assert needed_models(s) == ['silero-vad', 'gigaam-v3-e2e-ctc', 'opus-mt-ru-en', 'pocket-tts-en',
+    assert needed_models(s) == ['silero-vad', 'gigaam-v3-e2e-rnnt', 'opus-mt-ru-en', 'pocket-tts-en',
                                 s.local.tts[s.their_lang], 'wespeaker-resnet34']  # my voice confirmed and its clone heard
     monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
-    assert needed_models(s) == ['silero-vad', 'gigaam-v3-e2e-ctc', 'opus-mt-ru-en', 'xtts-v2',
+    assert needed_models(s) == ['silero-vad', 'gigaam-v3-e2e-rnnt', 'opus-mt-ru-en', 'xtts-v2',
                                 s.local.tts[s.their_lang], 'wespeaker-resnet34']  # the stock voice: the clone's fallback
     s = config.Settings()  # me -> them in the cloud, my clone its fallback: heard against my live reading first (FIXES-s3-40 8)
     s.them_to_me = 'cloud'

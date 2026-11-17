@@ -1,4 +1,4 @@
-"""ASR through onnx-asr: Parakeet TDT 0.6B v3 int8 (en, ru) or GigaAM v3 e2e CTC (ru, punctuation).
+"""ASR through onnx-asr: Parakeet TDT 0.6B v3 int8 (en and other European languages) or GigaAM v3 e2e (ru, punctuation).
 
 Neither model streams natively, so the stream re-runs the model on the current clause every
 `partial_every_s` of new audio (ARCHITECTURE §4: partials on a window that grows to the clause end).
@@ -15,11 +15,15 @@ from peresmeshnik.engines import SAMPLE_RATE
 from peresmeshnik.local.vad import ort_options
 
 ONNX_ASR = {'parakeet-tdt-0.6b-v3': ('nemo-parakeet-tdt-0.6b-v3', 'int8'),  # registry id -> onnx-asr model, quantization
+            'gigaam-v3-e2e-rnnt': ('gigaam-v3-e2e-rnnt', 'int8'),
             'gigaam-v3-e2e-ctc': ('gigaam-v3-e2e-ctc', 'int8'),
             'parakeet-tdt_ctc-0.6b-ja': ('nemo-conformer-tdt', 'int8'),
             'fastconformer-ar-pcd': ('nemo-conformer-ctc', 'int8'),
             'fastconformer-fr-pc': ('nemo-conformer-ctc', 'int8'),
             'whisper-large-v3-turbo': ('whisper', 'fp16')}  # no timestamps: see OnnxAsrStream._cut_quiet
+# a new default -> the one it replaced: an update moves the settings (config.OLD_DEFAULTS) before the new model is
+# downloaded, so the old one, still on disk, serves until then (Components… downloads the new one)
+UNTIL_FETCHED = {'gigaam-v3-e2e-rnnt': 'gigaam-v3-e2e-ctc'}
 SENTENCE_END = tuple('.?!;。？！；؟')
 COMMAS = tuple(',，、،')
 NO_SPACES = {'zh', 'ja'}  # no spaces between words: every token boundary is a word boundary, words are characters
@@ -92,6 +96,11 @@ class OnnxAsr:
 
         from peresmeshnik import models
         from peresmeshnik.local import device
+        if (old := UNTIL_FETCHED.get(model_id)) and not models.is_fetched(models.get(model_id)) \
+                and models.is_fetched(models.get(old)):
+            import logging
+            logging.getLogger('peresmeshnik.models').warning('%s is not downloaded yet: %s recognises meanwhile', model_id, old)
+            model_id = old
         name, quant = ONNX_ASR[model_id]
         self.name = model_id
         self.partial_every = int(partial_every_s * SAMPLE_RATE)

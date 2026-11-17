@@ -7,6 +7,7 @@ Martelly's fifth CEP in four years.", CC-BY-4.0), the setup wizard's test phrase
 - MT into Russian on the FLEURS text: de direct (OPUS-MT tc-big), ja / ar / tr through English; a one-word reply stays one,
   du / Sie stays ты / вы (through English both get lost or made up: BENCH stage 6, MT).
 - The stock voice says the FLEURS text (zh / ar have none).
+- Russian (0.3.2, GigaAM v3 e2e RNN-T): the clause cuts of a long run of speech by its token timestamps.
 
 Needs the models of `MODELS` below (CI: the work-gate job on Linux, cached); else skipped.
 """
@@ -38,8 +39,8 @@ FLEURS_1515 = {
 CPU_ASR = ('uk', 'de', 'fr', 'es', 'it', 'pt', 'pl', 'ja', 'ar')
 MT_PAIRS = ('de-ru', 'ja-ru', 'ar-ru', 'tr-ru')  # de: its own model; the others through English (OPUS-MT tr-en, quickmt)
 # what CI fetches for this file (ci.yml, work-gate, Linux)
-MODELS = ('parakeet-tdt-0.6b-v3', 'parakeet-tdt_ctc-0.6b-ja', 'fastconformer-ar-pcd', 'fastconformer-fr-pc', 'opus-mt-de-ru',
-          'quickmt-ja-en', 'quickmt-ar-en', 'opus-mt-tr-en', 'quickmt-en-ru', 'piper-uk_UA-ukrainian_tts-medium',
+MODELS = ('gigaam-v3-e2e-rnnt', 'parakeet-tdt-0.6b-v3', 'parakeet-tdt_ctc-0.6b-ja', 'fastconformer-ar-pcd', 'fastconformer-fr-pc',
+          'opus-mt-de-ru', 'quickmt-ja-en', 'quickmt-ar-en', 'opus-mt-tr-en', 'quickmt-en-ru', 'piper-uk_UA-ukrainian_tts-medium',
           'piper-de_DE-thorsten-medium', 'piper-fr_FR-siwis-medium', 'piper-es_MX-ald-medium', 'piper-it_IT-paola-medium',
           'piper-pt_BR-faber-medium', 'piper-pl_PL-gosia-medium', 'piper-tr_TR-dfki-medium', 'piper-ko_KR-kss-medium',
           'piper-ja_JP-hi_fi_captain-medium')
@@ -84,6 +85,36 @@ def test_their_speech_is_recognised_in_the_stream(lang):
     got = cer(norm(FLEURS_1515[lang], lang), norm(text, lang))
     print(f'{lang} {model}: {got:.3f} {text!r} ({len(partials)} partials)')
     assert partials and got <= 0.35, (text, partials)  # a name and an acronym in 5 s of speech: ~0.05-0.25 measured
+
+
+def test_russian_is_cut_by_the_rnnt_timestamps():
+    """tests/data/call-ru.ogg with its pauses taken out (19 s of speech, three sentences): the stream cuts it as the app
+    does (at a sentence end, or at 5 s at a comma or between words) by the token timestamps of GigaAM RNN-T."""
+    import soundfile as sf
+
+    from peresmeshnik import config
+    from peresmeshnik.local.asr import OnnxAsr
+    data = Path(__file__).parent / 'data'
+    x, sr = sf.read(data / 'call-ru.ogg', dtype='float32')
+    f = sr // 50
+    x = np.concatenate([x[i:i + f] for i in range(0, len(x) - f, f) if np.mean(x[i:i + f] ** 2) > 1e-5])
+    model = config.Local().asr['ru']
+    asr = OnnxAsr(model, threads=2)
+    r = asr.recognize(x[:6 * sr])
+    assert model == asr.name == 'gigaam-v3-e2e-rnnt' and r.tokens and len(r.tokens) == len(r.timestamps)
+    assert all(a <= b for a, b in zip(r.timestamps, r.timestamps[1:])) and 0 <= r.timestamps[0] < r.timestamps[-1] <= 6
+    s, cuts = asr.stream('ru'), []
+    for i in range(0, len(x), 1600):
+        partial = s.feed(x[i:i + 1600])
+        if (force := s.duration >= 5.0) or partial is not None:
+            if (text := s.cut(force)) is not None:
+                cuts.append((s.cut_at, text))
+    cuts.append(('finish', s.finish()))
+    print(*cuts, sep='\n')
+    ref = ' '.join((data / 'call-ru.txt').read_text(encoding='utf-8').split())
+    got = cer(norm(ref, 'ru'), norm(' '.join(t for _, t in cuts), 'ru'))
+    kinds = {k for k, _ in cuts}
+    assert all(t for _, t in cuts) and 'sentence' in kinds and kinds & {'comma', 'word'} and got <= 0.1, (got, cuts)
 
 
 @pytest.mark.parametrize('pair', MT_PAIRS)

@@ -647,7 +647,7 @@ def test_a_new_pair_through_the_wizard_and_the_app(tmp_path, devices, monkeypatc
         ids = [c.id for c in page.box.rows if c.recommended]
         print('models:', ids, 'to download:', [c.id for c in page.box.missing()])
         parts = {p.id for i in languages.needed_models(w.s) for p in models.parts(models.get(i))}
-        assert set(ids) == parts and not {'gigaam-v3-e2e-ctc', 'xtts-v2', 't-one'} & set(ids)
+        assert set(ids) == parts and not {'gigaam-v3-e2e-rnnt', 'xtts-v2', 't-one'} & set(ids)
         for _ in range(3):  # a cut download resumes on the next click, as a user would
             if page.isComplete():
                 break

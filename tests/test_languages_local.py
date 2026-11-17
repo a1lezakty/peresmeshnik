@@ -101,7 +101,7 @@ def test_russian_is_cut_by_the_rnnt_timestamps():
     model = config.Local().asr['ru']
     asr = OnnxAsr(model, threads=2)
     r = asr.recognize(x[:6 * sr])
-    assert model == 'gigaam-v3-e2e-rnnt' and r.tokens and len(r.tokens) == len(r.timestamps)
+    assert model == asr.name == 'gigaam-v3-e2e-rnnt' and r.tokens and len(r.tokens) == len(r.timestamps)
     assert all(a <= b for a, b in zip(r.timestamps, r.timestamps[1:])) and 0 <= r.timestamps[0] < r.timestamps[-1] <= 6
     s, cuts = asr.stream('ru'), []
     for i in range(0, len(x), 1600):

@@ -172,8 +172,8 @@ def gate(sc: Scenario, frame: int = 512, **kw) -> tuple[np.ndarray, dict]:
 
 
 def clauses(base: LocalDirection, pcm: np.ndarray, realtime: bool = False, summaries: list | None = None) -> list[dict]:
-    d = LocalDirection(type(base.vad)(), base.asr, base.mt, base.tts, base.src, base.tgt, max_lag_s=base.max_lag_s,
-                       max_clause_s=base.max_clause_s, early_s=base.early_s, partial_mt=base.partial_mt)
+    d = LocalDirection(type(base.vad)(min_silence_ms=base.vad.min_silence_ms), base.asr, base.mt, base.tts, base.src, base.tgt,
+                       max_lag_s=base.max_lag_s, max_clause_s=base.max_clause_s, early_s=base.early_s, partial_mt=base.partial_mt)
     d.realtime = realtime
     with Rows() as r:
         t = threading.Thread(target=lambda: list(d.events()), daemon=True)
@@ -356,7 +356,7 @@ def long(a):
            wer=round(jiwer.wer(refs, hyps), 4), repeated_words=rep,
            cer=round(jiwer.cer([r.replace(' ', '') for r in refs], [h.replace(' ', '') for h in hyps]), 4),
            other_lang=round(len(other) / max(len(long_enough), 1), 3), other_samples=other[:3],
-           tail_s=asr.TAIL_S, repeat_words=asr.REPEAT_WORDS, asap=a.asap,
+           tail_s=base.asr.tail_s, repeat_words=asr.REPEAT_WORDS, asap=a.asap,
            chrf=round(sacrebleu.corpus_chrf(trs, [prefs]).score, 1),
            reasons={k: sum(x['reason'] == k for x in rows) for k in ('pause', 'punct', 'max', 'eof', 'early')})
     base.close()
@@ -417,11 +417,12 @@ def main():
     ap.add_argument('--repeat', type=int, help='local/asr.py REPEAT_WORDS: words of a cut the next clause may repeat (1: before stage 5)')
     ap.add_argument('--lang', default='en', choices=sorted(CODES), help='long, links: the language they speak (FLEURS dev)')
     ap.add_argument('--to', choices=sorted(CODES), help='long, links: the language they are translated into (default: ru; en for ru)')
-    ap.add_argument('--tail', type=float, help='local/asr.py TAIL_S: no cut at a word start this near the window end, s')
+    ap.add_argument('--tail', type=float, help='no cut at a word start this near the window end, s (them -> me: pipeline.QUICK_END)')
     a = ap.parse_args()
+    from peresmeshnik import pipeline
     from peresmeshnik.local import asr
     if a.tail is not None:
-        asr.TAIL_S = a.tail
+        pipeline.QUICK_END = (pipeline.QUICK_END[0], a.tail)
     if a.repeat is not None:
         asr.REPEAT_WORDS = a.repeat
     globals()[a.kind](a)

@@ -240,7 +240,8 @@ def test_stock_voice_instead_of_the_clone(page, monkeypatch):
     side._local(s)
     # no clone, no voice profile: the stock voice and the ids languages.direction picked
     assert made == [((s.my_lang, s.their_lang), {'tts': s.local.tts[s.their_lang], 'asr': s.local.asr[s.my_lang],
-                                                  'mt': s.local.mt[f'{s.my_lang}-{s.their_lang}'], 'settings': s})]
+                                                  'mt': s.local.mt[f'{s.my_lang}-{s.their_lang}'], 'settings': s,
+                                                  'end': pipeline.VOICE_END})]  # my voice's clause end (BENCH "0.3.2")
     page.stock.setChecked(False)
     assert s.local.clone == 'xtts-v2' and not page.isComplete()
 

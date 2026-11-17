@@ -219,7 +219,9 @@ class SlowTts(TextTts):
 def test_back_to_the_cloud_while_a_local_clause_is_said(fake, monkeypatch, subtitles):
     """The side goes back to the cloud at a phrase start while the clause before it is still being said locally: the
     rest of that clause still reaches the output."""
+    from peresmeshnik import pipeline
     monkeypatch.setattr(fallback, 'RETRY_S', 0.0)
+    monkeypatch.setattr(pipeline, 'FAST_AFTER_S', 10.0)  # its samples counted: SlowTts not sped up (WSOLA)
     r = Run(fake, make_tts=SlowTts, subtitles=subtitles)
     try:
         r.say(np.concatenate([tone(0.6), silence(1.0)]))
@@ -240,6 +242,29 @@ def test_back_to_the_cloud_while_a_local_clause_is_said(fake, monkeypatch, subti
         assert n >= 0.9 * 3 * 0.1 * fallback.Muted.sample_rate, f'{n} samples of the local clause reached the output'
     finally:
         r.close()
+
+
+def test_the_muted_voice_speeds_up_a_clone_at_its_own_rate():
+    """A local voice without `speed` of its own (the clone) behind the cloud is sped up as on the local path: WSOLA at
+    its rate, then resampled; one with `speed` (Piper) is asked for it."""
+    class Clone:
+        sample_rate = 24_000
+
+        def synth(self, text, lang, voice=None):
+            for _ in range(25):
+                yield np.full(1920, 0.2, np.float32)  # 2 s
+
+    class Piper(Clone):
+        def synth(self, text, lang, voice=None, speed=1.0):
+            self.speed = speed
+            yield np.zeros(100, np.float32)
+    m = fallback.Muted(Clone)
+    n = sum(map(len, m.say('a', 'en', None, 1.25)))
+    assert abs(n / fallback.Muted.sample_rate - 2 / 1.25) < 0.1
+    p = Piper()
+    m = fallback.Muted(lambda: p)
+    list(m.say('a', 'en', None, 1.25))
+    assert p.speed == 1.25
 
 
 def test_no_local_voice_says_why(fake):

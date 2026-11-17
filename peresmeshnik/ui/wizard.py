@@ -49,7 +49,7 @@ from peresmeshnik.local import voicepack
 from peresmeshnik.remote import pairing
 from peresmeshnik.ui.components import PACK_CONSENT, ComponentsBox, HfTokenBox
 from peresmeshnik.ui.overlay import font_note
-from peresmeshnik.ui.tray import LANGS, MIC_LABEL, SIDES, device_combo, fill_combo, save_key
+from peresmeshnik.ui.tray import GEMINI, LANGS, MIC_LABEL, SIDES, device_combo, fill_combo, save_key
 
 LINUX = sys.platform.startswith('linux')
 log = logging.getLogger('peresmeshnik.ui')
@@ -183,8 +183,9 @@ class LanguagesPage(QWizardPage):
         self.err = QLabel()
         f.addRow(self.err)
         self.forced = set(s.forced_cloud)  # sides moved to the cloud for a pair they cannot run: a pair they can brings them back
+        self.touched = set()  # sides the user chose here: saved as chosen (config.me_to_them_default does not apply)
         for key, c in self.engine.items():  # a programmatic change blocks the signal: this is the user's own choice
-            c.currentIndexChanged.connect(lambda _, key=key: self.forced.discard(key))
+            c.currentIndexChanged.connect(lambda _, key=key: (self.forced.discard(key), self.touched.add(key)))
         for c in (self.my_lang, self.their_lang, *self.engine.values()):
             c.currentIndexChanged.connect(self.refresh)
         self.subtitles.toggled.connect(self.refresh)
@@ -233,6 +234,8 @@ class LanguagesPage(QWizardPage):
             if d.src == 'ar' and c.currentText() == 'cloud' and languages.cloud_subtitles(s, key):
                 text += ' Arabic subtitles from the cloud are Egyptian Arabic (Gemini has no other): other dialects come out ' \
                         'worse.'
+            if c.currentText() == 'cloud':
+                text = f'{GEMINI[key][0].upper()}{GEMINI[key][1:]}. {text}'
             self.why[key].setText(text)
         ms, base = [models.get(i) for i in needed_models(s)], models.root()
         todo = [m for m in ms if not models.is_fetched(m, base)]
@@ -278,7 +281,9 @@ class DevicesPage(QWizardPage):
         self.w = w
         self.setTitle('Sound devices')
         self.setSubTitle('Translated speech goes to your headphones; your translated voice goes to the virtual microphone '
-                         f'"{VMIC}", which you choose in the call app.')
+                         f'"{VMIC}", which you choose in the call app. Wired headphones are best; do not choose the '
+                         'microphone of AirPods (or another Bluetooth headset): it switches them to the phone-call mode '
+                         '(HFP), slower and with poor sound both ways.')
         self.f = form(self)
         self.warn = QLabel()
         self.warn.setWordWrap(True)
@@ -1203,6 +1208,9 @@ class SetupWizard(QWizard):
 
     def finish(self) -> None:
         self.voice_page.commit()  # before saving: the settings name the profile, not the draft
-        config.save(changed(self.base, self.s, config.load()))  # a change in the tray meanwhile stays
+        now = changed(self.base, self.s, config.load())  # a change in the tray meanwhile stays
+        if 'me_to_them' in self.pages[0].touched:  # the user's own, even where it is the default: saved as such
+            now.me_to_them, now._me_default = self.s.me_to_them, None
+        config.save(now)
         self.tray.sync()
         self.tray.restart()

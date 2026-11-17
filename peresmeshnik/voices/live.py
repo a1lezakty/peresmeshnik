@@ -412,9 +412,10 @@ def ten(clips: list) -> np.ndarray:
 
 def faster(chunks, speed: float, sr: int = OUT_SR):
     """The speech of `chunks` `speed` times faster at the same pitch (WSOLA): 40 ms Hann frames at half overlap, each
-    taken from the input where it best continues the one before (within 5 ms of where the pace puts it). The clone
-    has no speed of its own and speaks at its sample's pace (BENCH stage 8: about Piper's); the pipeline asks
-    for this when the voice is behind (pipeline.MAX_SPEED)."""
+    taken from the input where it best continues the one before (within 5 ms of where the pace puts it). The input
+    after the last frame's middle ends it at 1x: the clause's last sound is the end of a word, not silence (Pocket),
+    and is not cut. The clone has no speed of its own and speaks at its sample's pace (BENCH stage 8: about Piper's);
+    the pipeline asks for this when the voice is behind (pipeline.MAX_SPEED)."""
     if speed <= 1.0:
         yield from chunks
         return
@@ -431,12 +432,13 @@ def faster(chunks, speed: float, sr: int = OUT_SR):
                 seg = x[lo - x0:pos + tol + n - x0]
                 at = lo + int(np.argmax(np.correlate(seg, nat, 'valid')))
             frame = x[at - x0:at + n - x0] * win
-            nat = x[at + hs - x0:at + hs + n - x0]
+            nat, rest = x[at + hs - x0:at + hs + n - x0], at + hs + n
             yield tail + frame[:hs]
             tail, k = frame[hs:], k + 1
             cut = max(round(k * hs * speed) - tol, 0) - x0  # nothing before the next search is needed again
             x, x0 = x[cut:], x0 + cut
-    yield tail
+    # the rest at 1x from the last frame's middle: its fading half `tail` plus `nat` faded in is `nat` (halves sum to 1)
+    yield x if nat is None else np.concatenate([nat, x[rest - x0:]])
 
 
 class TheirVoice:

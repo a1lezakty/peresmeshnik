@@ -40,7 +40,7 @@ from peresmeshnik.cloud.gemini import OUT_RATE, CloudDown
 from peresmeshnik.engines import Caption, Latency, Speech
 
 log = logging.getLogger(__name__)
-SETTLE_S = 0.45  # a clause is translated this long after its speech ended (VAD pause 0.3 s, final ASR, MT: BENCH)
+SETTLE_S = 0.45  # a clause is translated this long after its speech ended (VAD pause 0.2 s, final ASR, MT: BENCH)
 MARGIN_S = 0.5  # what ended this close after the estimated end of the cloud's voice counts as said
 LAG_S = 3.5  # the cloud's voice behind the speech until this session measured it (done after end, 3.1-3.7 s, BENCH)
 KEEP_S = 15.0  # input kept: for a new local path, and for the first syllables of a phrase going back to the cloud
@@ -101,7 +101,11 @@ class Muted:
         tts = self._get()
         rs = Resampler(tts.sample_rate, self.sample_rate)
         kw = {'speed': speed} if speed != 1.0 and 'speed' in inspect.signature(tts.synth).parameters else {}
-        for chunk in tts.synth(text, lang, voice, **kw):
+        chunks = tts.synth(text, lang, voice, **kw)
+        if speed != 1.0 and not kw:  # a clone has no speed of its own: at the same pitch, as on the local path
+            from peresmeshnik.voices.live import faster
+            chunks = faster(chunks, speed, tts.sample_rate)
+        for chunk in chunks:
             yield rs(chunk)
 
     def close(self) -> None:
@@ -621,6 +625,7 @@ def make(name: str, s, key: str, on_state=lambda text: None, on_respawn=lambda e
         return t
 
     def local(t):  # no local path for this pair (models.toml langs): the reason, not a KeyError
+        # its clause ends are the subtitles' (pipeline.QUICK_END), also for my voice when the cloud fails: it makes them
         if not d.subtitles:
             raise RuntimeError('; '.join(d.why))
         return make_local(src, tgt, asr=d.asr, mt=d.mt, tts=t, settings=s, voice=voice,  # languages.direction's ids

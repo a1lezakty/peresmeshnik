@@ -16,6 +16,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
@@ -145,7 +146,7 @@ class Settings:
     my_lang: str = 'ru'
     their_lang: str = 'en'
     them_to_me: str = 'local'  # 'local' | 'cloud' | 'remote'
-    me_to_them: str = 'cloud'  # default for an 8 GB Mac (ARCHITECTURE §6): no live local clone there
+    me_to_them: str = 'cloud'  # where nothing is chosen: me_to_them_default (local on a Mac from 16 GB with the clone)
     # the sides ('them_to_me', 'me_to_them') the app itself moved to the cloud, for a pair they cannot run locally: they
     # go back to 'local' with a pair that can (a side the user set to 'cloud' is not here)
     forced_cloud: list[str] = field(default_factory=list)
@@ -155,6 +156,8 @@ class Settings:
     remote: Remote = field(default_factory=Remote)
     server: Server = field(default_factory=Server)
     ui: Ui = field(default_factory=Ui)
+    # the version that wrote the file ('' = before saved_by, 0.3.1 or older: its me_to_them 'cloud' was the default)
+    saved_by: str = field(default='', compare=False)
 
 
 def settings_path() -> Path:
@@ -163,11 +166,64 @@ def settings_path() -> Path:
 
 # defaults that changed since a release that saved its [local] tables whole (0.2.0, bac8639): such a value goes on
 # load, so the new default comes in. A whole table is told by a key equal to today's default (save() no longer writes
-# those), so a value chosen again since is kept
-OLD_DEFAULTS = {'local.mt': {'en-ru': 'opus-mt-en-ru'}, 'local.asr': {'ru': 'gigaam-v3-e2e-ctc'}}
+# those), so a value chosen again since is kept. A top-level one (always saved before 0.3.2) goes from a file without
+# `saved_by`: then the computer's default comes (load)
+OLD_DEFAULTS = {'local.mt': {'en-ru': 'opus-mt-en-ru'}, 'local.asr': {'ru': 'gigaam-v3-e2e-ctc'},
+                'me_to_them': 'cloud'}
+MAC_LOCAL_GB = 15  # me -> them local by default on a Mac from "16 GB" (16 GiB); 8 GB: the cloud (ARCHITECTURE §6)
+
+
+def me_to_them_default(s: Settings) -> str:
+    """Me -> them where the user chose nothing: local on a Mac from 16 GB where the pair runs here in your cloned voice
+    (Pocket TTS: with the Hugging Face token of its gated weights), with your confirmed voice and the pair's models
+    downloaded, the stock voice too (`fallback._clone_not_ready`: translation starts in your voice), else the cloud.
+    Gemini is a simultaneous interpreter 3-4 s behind, not in your voice; the clone here starts ~1.5 s after a clause
+    (BENCH "0.3.2").
+    Elsewhere the cloud, as before (the wizard recommends local where an NVIDIA GPU runs the clone). A 'cloud' that is
+    only this default is not saved (`save`), so the token given later brings local; a 'local' worked out is saved at once
+    (`load`): the voice never goes to Google unasked."""
+    if sys.platform != 'darwin':
+        return 'cloud'
+    import psutil
+
+    from peresmeshnik import languages, models
+    from peresmeshnik.cloud.fallback import _clone_not_ready
+    if psutil.virtual_memory().total < MAC_LOCAL_GB * 2 ** 30:
+        return 'cloud'
+    d = languages.direction(s, 'me_to_them')
+    if not (d.local and d.voice == 'clone') or _clone_not_ready(s, d.tgt, d.tts):  # my confirmed voice, its token, model
+        return 'cloud'
+    from peresmeshnik.local.asr import UNTIL_FETCHED  # a new ASR default not downloaded yet: the old one serves
+
+    def here(i):
+        return models.is_fetched(models.get(i)) or i in UNTIL_FETCHED and models.is_fetched(models.get(UNTIL_FETCHED[i]))
+    ids = [d.asr, d.mt, languages.pick(s.local.tts, d.tgt)]  # the stock voice: the clone's fallback (app.Side._fallback)
+    return 'local' if all(here(i) for i in ids if i) else 'cloud'
+
+
+def _default_me_to_them(s: Settings, path: Path) -> None:
+    """Nothing chosen for me -> them: this computer's default. A 'local' worked out is saved at once where the file
+    exists (the wizard's first run is told by its absence), so a model missing later fails that side loudly and never
+    sends the voice to the cloud unasked."""
+    _defaulting.on = True
+    try:
+        s.me_to_them = s._me_default = me_to_them_default(s)
+    except Exception as e:  # load() never raises (H-01): the old default
+        print(f'settings: no default for me_to_them ({e!r}), cloud', file=sys.stderr)
+        s.me_to_them = s._me_default = 'cloud'
+    finally:
+        _defaulting.on = False
+    if s.me_to_them == 'local':
+        s.forced_cloud = [k for k in s.forced_cloud if k != 'me_to_them']  # the pair runs here now
+        if path.exists():
+            try:
+                save(s, path)
+            except OSError as e:
+                print(f'settings: me_to_them = "local" not saved ({e})', file=sys.stderr)
 
 
 problem = ''  # what the last load() could not use, for the user ('' = nothing)
+_defaulting = threading.local()  # me_to_them_default runs: models.root() loads the settings again, for models_dir only
 on_unsaved: list = []  # callbacks(why): a save() refused (its settings came from a file that could not be read)
 
 
@@ -198,9 +254,10 @@ def load(path: Path | None = None) -> Settings:
     """Never raises on what the file holds: a broken file must not stop the app (H-01); `problem` names what was not used."""
     import tomllib
     global problem
-    s, path, bad = Settings(), path or settings_path(), []
+    s, path, bad, data = Settings(), path or settings_path(), [], {}
     try:
-        _fill(s, tomllib.loads(path.read_text('utf-8-sig')), bad)  # -sig: Notepad's BOM
+        data = tomllib.loads(path.read_text('utf-8-sig'))  # -sig: Notepad's BOM
+        _fill(s, data, bad)
     except FileNotFoundError:  # none yet (the wizard writes it); or kept aside as .bad: local till a new one is saved
         if (keep := path.with_name(path.name + '.bad')).exists():
             bad.append(f'it did not parse and is kept as {keep.name}')
@@ -229,6 +286,9 @@ def load(path: Path | None = None) -> Settings:
     if not 0.2 <= (r := s.local.mic_echo_rho_on) <= 0.8:  # near 0 it zeroes my speech, near 1 lets every echo through
         s.local.mic_echo_rho_on = min(max(r, 0.2), 0.8)
         print(f'settings: local.mic_echo_rho_on {r} is outside 0.2..0.8, {s.local.mic_echo_rho_on} used', file=sys.stderr)
+    if not bad and not getattr(_defaulting, 'on', False) and \
+            ('me_to_them' not in data or not data.get('saved_by') and data['me_to_them'] == OLD_DEFAULTS['me_to_them']):
+        _default_me_to_them(s, path)  # nothing chosen
     if bad:  # read in part: nothing goes to the cloud by a mistake in the file (the key is kept apart, H-01)
         s.them_to_me = s.me_to_them = 'local'
         bad.insert(0, f'{path.name} could not be read whole, both directions are local now')
@@ -265,9 +325,12 @@ def save(s: Settings, path: Path | None = None) -> Path:
         for cb in on_unsaved:
             cb(why)
         return path
+    from peresmeshnik import __version__
     top, tables = [], []
     for f in fields(s):
-        v = getattr(s, f.name)
+        v = __version__ if f.name == 'saved_by' else getattr(s, f.name)
+        if f.name == 'me_to_them' and v == 'cloud' == getattr(s, '_me_default', None):
+            continue  # only the default when loaded: not the user's choice (me_to_them_default)
         if is_dataclass(v):  # a table's dict: only its keys that differ from the default, so a new default reaches
             base = type(v)()  # saved settings too (load merges the saved keys over the defaults)
             tables.append(f'\n[{f.name}]\n' + ''.join(f'{g.name} = {_toml(_changed(getattr(v, g.name), getattr(base, g.name)))}\n'

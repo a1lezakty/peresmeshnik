@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       suites:
-        description: 'JSON list of suites: asr, mt, tts, clone'
+        description: 'JSON list of suites: asr, mt, tts, clone, latency'
         default: '["asr", "mt", "tts", "clone"]'
       os:
         description: 'Runner'
@@ -32,9 +32,9 @@ jobs:
         run: |
           python3 - >> "$GITHUB_OUTPUT" <<'EOF'
           import json, os
-          allowed = ['asr', 'mt', 'tts', 'clone']
+          allowed = ['asr', 'mt', 'tts', 'clone', 'latency']
           inp, label = os.environ['INPUT'], os.environ['LABEL']
-          suites = json.loads(inp) if inp else allowed if label == 'bench' else [label.removeprefix('bench-')]
+          suites = json.loads(inp) if inp else allowed[:4] if label == 'bench' else [label.removeprefix('bench-')]
           if not isinstance(suites, list) or not suites or any(s not in allowed for s in suites):
               raise SystemExit(f'unknown suite in {suites!r}; allowed: {allowed}')
           print('suites=' + json.dumps(suites))
@@ -111,7 +111,7 @@ jobs:
           done
           echo "GGUF=$PWD/models/gguf/HY-MT1.5-1.8B-Q4_K_M.gguf $PWD/models/gguf/HY-MT1.5-7B-Q4_K_M.gguf" >> $GITHUB_ENV
       - name: Run ${{ matrix.suite }}
-        if: matrix.suite != 'clone'
+        if: matrix.suite != 'clone' && matrix.suite != 'latency'
         env:
           SUITE: ${{ matrix.suite }}
         run: |
@@ -120,6 +120,59 @@ jobs:
       - name: Voice clone
         if: matrix.suite == 'clone'
         run: bench/clone_ci.sh
+      - name: Latency, this checkout against 0.3.1 (35aff6d)
+        if: matrix.suite == 'latency'
+        run: |
+          # LATENCY 0.3.2: me -> them (Pocket clone; English: bench/pocket_speed.py's stand-in, ungated weights only) and
+          # them -> me (Pocket-ru, their voice), each run by its own checkout's scripts; on Linux also the quality of
+          # the clause ends on conversation (bench/conversation.py segment, AMI + YODAS2: fed as fast as it goes)
+          PY=$PWD/.bench/bin/python O=bench/results/latency V=$RUNNER_TEMP/voices EN=$RUNNER_TEMP/pocket-en-standin
+          B=$RUNNER_TEMP/before
+          mkdir -p $O; failed=0
+          run() { echo "== $*"; "$@" || { echo "FAILED: $*"; failed=$((failed + 1)); }; }
+          uv pip install -q -p .bench -e .
+          $PY -m peresmeshnik models fetch --accept-licenses silero-vad wespeaker-resnet34 parakeet-tdt-0.6b-v3 \
+            gigaam-v3-e2e-ctc gigaam-v3-e2e-rnnt quickmt-en-ru opus-mt-ru-en piper-ru_RU-dmitri-medium piper-en_US-john-medium \
+            pocket-tts-ru  # ru ASR: 0.3.1's CTC, RNN-T since 0.3.2
+          git fetch -q --depth 1 origin 35aff6d9d59006e40325f6e51c2e9ec6a10d2197
+          git worktree add -q --detach $B 35aff6d9d59006e40325f6e51c2e9ec6a10d2197
+          cp bench/their_voice.py $B/bench/  # its subtitle lag too; the rest of the script is 0.3.1's
+          PYTHONPATH=$B $PY -c 'import peresmeshnik; print("before:", peresmeshnik.__file__, peresmeshnik.__version__)'
+          $PY bench/pocket_speed.py profiles $V
+          run $PY bench/pocket_speed.py standin $EN
+          run $PY bench/me_them.py input
+          ME="--null-mic --voice $V/ref_ru --engine pocket-tts-en --model-dir $EN"
+          for i in 1 2 3; do
+            BENCH_HOST=$BENCH_HOST-before PYTHONPATH=$B run $PY $B/bench/me_them.py run $ME --out-dir $O/me_before$i
+            BENCH_HOST=$BENCH_HOST-after run $PY bench/me_them.py run $ME --out-dir $O/me_after$i
+          done
+          [ -d bench-data/LibriSpeech/dev-clean/1462 ] || curl -sfL --retry 3 --max-time 900 \
+            https://www.openslr.org/resources/12/dev-clean.tar.gz \
+            | tar -xzf - -C bench-data LibriSpeech/dev-clean/1272 LibriSpeech/dev-clean/1462 || echo 'FAILED: dev-clean'
+          THEM="--data bench-data/LibriSpeech/dev-clean --a 1272 --b 1462 --clone models/pocket-tts-ru --speaker models/wespeaker-resnet34"
+          for i in 1 2; do
+            BENCH_HOST=$BENCH_HOST-before PYTHONPATH=$B run $PY $B/bench/their_voice.py $THEM --out $O/them_before$i
+            BENCH_HOST=$BENCH_HOST-after run $PY bench/their_voice.py $THEM --out $O/them_after$i
+          done
+          if [ "$RUNNER_OS" = Linux ]; then
+            S=$RUNNER_TEMP/conv-src; mkdir -p $S
+            AMI=https://groups.inf.ed.ac.uk/ami
+            YO=https://huggingface.co/datasets/espnet/yodas2/resolve/main/data/ru000
+            get() { [ -s "$S/$1" ] || run curl -sfL --retry 3 --max-time 1200 -o "$S/$1" "$2"; }
+            get ami_public_manual_1.6.2.zip $AMI/AMICorpusAnnotations/ami_public_manual_1.6.2.zip
+            for m in ES2002a IS1009a; do get $m.Mix-Headset.wav $AMI/AMICorpusMirror/amicorpus/$m/audio/$m.Mix-Headset.wav; done
+            get yodas2-ru000-text-00000000.json $YO/text/00000000.json
+            get yodas2-ru000-duration-00000000.txt $YO/duration/00000000.txt
+            get yodas2-ru000-audio-00000000.tar.gz $YO/audio/00000000.tar.gz
+            run $PY bench/conversation.py prep --src $S
+            for lang in en ru; do  # 0.3.1's clause end, then subtitles' and them -> me's now (pipeline.QUICK_END)
+              BENCH_HOST=$BENCH_HOST-end300 run $PY bench/conversation.py segment $lang --silence 300 --tail 0.8
+              BENCH_HOST=$BENCH_HOST-end200 run $PY bench/conversation.py segment $lang --silence 200 --tail 0.5
+            done
+          fi
+          cp $B/bench/results/*.jsonl $O/ 2>/dev/null || true  # 0.3.1's scripts write their rows next to themselves
+          find $O -name '*.wav' -exec rm -f {} +  # the artifact: numbers, not audio
+          [ $failed = 0 ]
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:

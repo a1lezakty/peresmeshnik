@@ -534,6 +534,10 @@ def test_faster_keeps_the_pitch_and_shortens_by_the_speed():
     assert abs(f - 220) < 3  # the same pitch, not a faster tape
     mid = y[sr // 10:-sr // 10]
     assert np.abs(mid).max() < 0.33 and np.sqrt(np.mean(mid ** 2)) > 0.19  # frames add up without dips or clicks
+    x[-sr // 20:] = 0.5  # the clause's last 50 ms: the end of a word, kept whole at 1x (not dropped, not faded)
+    y = np.concatenate(list(live.faster(iter(chunks), 1.4)))
+    assert np.array_equal(y[-sr // 20:], x[-sr // 20:])
+    assert np.array_equal(np.concatenate(list(live.faster(iter([x[:500]]), 1.4))), x[:500])  # shorter than a frame: as is
 
 
 def test_the_them_side_speaks_at_its_voices_rate_not_the_stock_one(monkeypatch, tmp_path):

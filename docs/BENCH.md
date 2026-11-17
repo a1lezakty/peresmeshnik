@@ -2939,3 +2939,66 @@ the clone has an NVIDIA GPU. 30 s per run: a long call was not measured.
 
 The model is 226 MB (216 MiB) more to download once. Until it is, the CTC model already on disk recognises
 (`local/asr.py` `UNTIL_FETCHED`).
+
+## 0.3.2: the delay
+
+**What changed** (`pipeline.py`, `config.py`): the me → them voice behind its clause is sped up from 0.5 s linearly to
+1.4× (at 4 s) and nothing is dropped; the clone, which has no speed of its own, goes through `voices/live.faster`
+(WSOLA, from 1.03×). Them → me and a cloud side's local subtitles end a clause at a 200 ms VAD pause and cut no word
+starting within 0.5 s of the ASR window's end (`QUICK_END`); local me → them keeps 300 ms / 0.8 s for its voice and so
+for its own subtitles (`VOICE_END`): there the shorter end made the voice 0.6 s later (more clauses, each with Pocket's
+own tail; research run on the M1 runner, 2026-11-16).
+
+**How measured.** The `latency` suite of `bench.yml` on GitHub runners, 2026-11-17: `macos-15` (a virtual Apple M1, 3
+cores, CPU only — not the user's M1 Pro) and `ubuntu-latest` (x86, 4 vCPU; the second x86 runner was ~1.5× slower:
+2.7 CPU s per audio s against 1.85). In each job, before = 0.3.1 (35aff6d) by its own scripts, after = this change, run
+in turn on the same runner. RU ASR GigaAM CTC on both sides (RNN-T, above, came later). Me → them: `me_them.py run
+--null-mic`, the dense 33 s Russian reading of `me_them.py input` → my clone (Pocket TTS, English: `pocket_speed.py`'s
+stand-in from ungated weights, the same model), 3 runs each, 27 clauses pooled. Them → me: `their_voice.py`, the
+two-person LibriSpeech call (178 s), their voice cloned (Pocket-ru), 2 runs each. Lags in seconds from the end of a
+clause's speech; the voice's start as the app plays it (back to back); no devices, no Discord. "Earlier build" = the
+same change before its review (WSOLA from 1.0×, the clause's last ~50 ms cut).
+
+| | runner, run | before (0.3.1): median / p90 / max | after: median / p90 / max |
+|---|---|---|---|
+| me → them: my voice starts | M1, 44031692275 | 1.97 / 2.97 / 3.09 [per run 2.65, 1.97, 1.96] | **1.45 / 2.75 / 2.92** [1.30, 1.45, 1.67] |
+| | x86 (slow), 44031688441 | 2.19 / 4.22 / 5.01 [3.13, 1.82, 2.12] | **1.86 / 2.87 / 3.21** [1.86, 1.87, 1.86] |
+| | M1, earlier build, 44027336916 | 2.52 / 3.85 / 4.12 | 1.61 / 2.87 / 3.17 |
+| | x86, earlier build, 44027340194 | 1.82 / 3.37 / 4.05 | 1.54 / 2.59 / 2.72 |
+| them → me: subtitle | M1 | 0.78 / 1.97 | **0.64 / 1.62** |
+| | x86 (slow) | 1.04 / 1.94 | **0.96 / 1.84** |
+| | M1, earlier build | 0.88 / 1.95 | 0.81 / 1.67 |
+| | x86, earlier build | 0.53 / 1.34 | 0.48 / 1.00 |
+| them → me: their voice starts | M1 | 1.66 / 3.02 / 3.89 | **1.43 / 3.16 / 4.14** |
+| | x86 (slow) | 1.69 / 3.00 / 3.96 | **1.62 / 3.33 / 3.99** |
+| | M1, earlier build | 1.66 / 3.11 / 3.87 | 1.49 / 2.92 / 3.91 |
+| | x86, earlier build | 1.25 / 2.92 / 4.00 | 1.00 / 3.14 / 3.98 |
+
+- **Me → them:** nothing dropped (9 clauses in every run, as before); mean speed 1.11–1.15× (max 1.25–1.31×). The voice
+  ends 1.6–2.2 s after the reading on the M1 runner (1.6–1.8 s before), 1.7–1.8 s on x86 (1.8–2.0 s before). The pooled
+  median start is 0.3–0.9 s sooner on every runner, p90 0.2–1.4 s, max 0.2–1.8 s; the slow x86 runner's three runs
+  all 1.86 s (before 1.82–3.13 s). How 1.1–1.3× WSOLA sounds on the clone was not judged by ear.
+- **Them → me:** the subtitle's median is 0.05–0.14 s sooner (most clauses of a call end at a pause: 100 ms sooner),
+  its p90 0.1–0.35 s (a clause cut without a pause is known 0.3 s earlier). Their voice's median 0.07–0.25 s sooner;
+  its p90 moves −0.2…+0.3 s, within the runs' spread (more, shorter clauses queue behind each other on a slow CPU).
+  Dropped by the 4 s rule: 11 of 108 → 9 of 112 (M1), 12/107 → 11/118 (x86 slow), 12/108 → 11/113 and 10/106 → 8/112
+  (earlier build). Voice similarity and CPU per audio second the same within the runs' spread.
+- The subtitles of my own speech (local me → them) keep 0.3.1's clause end by design: their median 0.5–0.77 s before
+  and after, moving only with the runs' spread.
+
+**The price: the words of conversational English** (`conversation.py segment`, fed as fast as it goes; two x86 runners,
+runs 44027340194 / 44031688441; AMI meetings ES2002a + IS1009a, 10 min, Parakeet; YODAS2 ru000 YAYMb4M8-tQ +
+YtyM7ojCUz8, 10 min, GigaAM CTC). A known trade-off, kept: the translation is the same.
+
+| lang | clause end | clauses | ends: pause / punct / max (run 1) | WER, run 1; run 2 (offline) | chrF, run 1; run 2 (offline) | word waits p50 / p95, s (run 1) |
+|---|---|---|---|---|---|---|
+| en | 300 ms / 0.8 s (0.3.1) | 206; 208 | 0.74 / 0.15 / 0.11 | 23.2 %; 23.8 % (21.4; 22.1) | 63.7; 64.9 (73.3; 72.9) | 1.09 / 3.26 |
+| en | **200 ms / 0.5 s** | 224; 227 | 0.84 / 0.10 / 0.06 | **25.4 %; 25.1 %** | **63.3; 64.3** | 1.00 / 3.21 |
+| ru | 300 ms / 0.8 s (0.3.1) | 209; 210 | 0.17 / 0.40 / 0.43 | 7.06 %; 6.98 % (15.7; 15.9) | 74.9; 75.3 (81.2; 80.1) | 1.56 / 3.58 |
+| ru | **200 ms / 0.5 s** | 212; 212 | 0.40 / 0.29 / 0.31 | **7.37 %; 7.29 %** | **76.1; 76.3** | 1.53 / 3.71 |
+
+- English meetings: +1.3…+2.2 WER points (more, shorter clauses; the words at a cut get lost or doubled), as stage 2's
+  200 ms pause alone (+1.5) and stage 5's `TAIL_S` 0.5 in real time (±2.8) suggested. The translation (chrF against the
+  translation of the reference segments) moves −0.4…−0.6 in English and +1.0…+1.2 in Russian: within the noise of
+  ~1200 reference words. Russian WER +0.3 points. The two runners differ a little even fed as fast as it goes
+  (onnxruntime on another CPU: the offline rows differ too).

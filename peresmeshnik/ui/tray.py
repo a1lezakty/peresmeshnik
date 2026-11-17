@@ -41,6 +41,9 @@ LANGS = {c: languages.label(c) for c in languages.LANGS}
 MIC_LABEL = 'Microphone'  # me -> them and the loopback while translation is off
 SIDES = {'them_to_me': 'Them → me', 'me_to_them': 'Me → them'}
 SENT = {'them_to_me': "the call's sound (the other person's voice)", 'me_to_them': 'your voice'}  # what a cloud side sends
+# the cloud said for what it is where it is chosen: Gemini interprets on the fly, ~3-4 s behind by design (BENCH "0.3.2")
+GEMINI = {'them_to_me': 'cloud (Gemini): simultaneous interpreter, lags ~3–4 s, the voice is not theirs',
+          'me_to_them': 'cloud (Gemini): simultaneous interpreter, lags ~3–4 s, the voice is not yours'}
 MAC, WIN = sys.platform == 'darwin', sys.platform == 'win32'
 BROWSER_NOTE = (f'A browser {"is taken" if MAC or WIN else "moves"} with all of its sound: YouTube in another tab is translated too. '
                 'For calls a separate browser is better.')
@@ -98,7 +101,7 @@ class Tray(QObject):
             sub = m.addMenu(title)
             group = self.engines[key] = QActionGroup(sub)
             for engine in config.ENGINES:
-                a = sub.addAction(engine)
+                a = sub.addAction(GEMINI[key] if engine == 'cloud' else engine)
                 a.setCheckable(True)
                 a.setData((key, engine))
                 group.addAction(a)
@@ -369,6 +372,7 @@ class Tray(QObject):
         if (my, their) == (s.my_lang, s.their_lang) and not engines and not subs:  # back to what runs: another's download is let go
             if kept:  # nothing else changes: nothing to ask
                 s.forced_cloud = [k for k in s.forced_cloud if k not in kept]
+                s._me_default = None  # the user's own: saved even where it is the default (config.me_to_them_default)
                 config.save(s)
             self._pair = None
             self.status.setText(self.icon.toolTip().removeprefix('Peresmeshnik: ')[:120])  # the last state, as before it
@@ -496,6 +500,8 @@ class Tray(QObject):
         if 'subtitles' in engines:
             saved.cloud.subtitles = s.cloud.subtitles
         saved.forced_cloud = [k for k in languages.SIDES if k in moved or (k in saved.forced_cloud and k not in back + list(engines))]
+        if 'me_to_them' in engines:  # the user's own: saved even where it is the default (config.me_to_them_default)
+            saved._me_default = None
         config.save(saved)
         self.sync()
         self.ctl.set_languages()  # its control thread knows whether translation is on (a start may be under way)

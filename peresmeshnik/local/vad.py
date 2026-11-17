@@ -38,7 +38,7 @@ class SileroVad:
                  preroll_ms: int = 192, threads: int = 1):
         import onnxruntime as rt
         self._sess = rt.InferenceSession(str(path or silero_path()), ort_options(threads), providers=['CPUExecutionProvider'])
-        self.threshold = threshold
+        self.threshold, self.min_silence_ms = threshold, min_silence_ms
         self.min_silence_frames = max(1, round(min_silence_ms * SAMPLE_RATE / 1000 / FRAME))
         self._preroll: deque[np.ndarray] = deque(maxlen=max(1, round(preroll_ms * SAMPLE_RATE / 1000 / FRAME)))
         self.reset()

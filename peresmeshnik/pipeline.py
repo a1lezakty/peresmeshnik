@@ -6,9 +6,10 @@ runs TTS, so captions never wait for speech (a clone TTS on CPU is slower than r
 clause is spoken while the next one is recognised. Generic over `Tts` and `Voice`: the stock Piper
 voice (them -> me) and the clone (me -> them) plug in the same way. On silence only the VAD runs.
 
-A clause ends at a VAD pause (>= 300 ms), at sentence punctuation from the ASR with a word after
-it, or at `max_clause_s` (then at a comma or between words); `early_s` would cut it at a comma from that
-length on too, off: on a monologue the voice gained 0.2 s and the translation lost 5 chrF (BENCH stage 5).
+A clause ends at a VAD pause (200 ms; 300 ms for me -> them's voice, `QUICK_END` / `VOICE_END`), at sentence
+punctuation from the ASR with a word after it, or at `max_clause_s` (then at a comma or between words); `early_s` would
+cut it at a comma from that length on too, off: on a monologue the voice gained 0.2 s and the translation lost 5 chrF
+(BENCH stage 5).
 Before it ends, the words of the clause two ASR partials agree on are translated for the subtitle
 (`partial_mt`; a caption with only the translation, not final; skipped when the translator is behind):
 a long clause is readable while it is said. The voice says only whole clauses, so it never takes a word back.
@@ -16,8 +17,9 @@ a long clause is readable while it is said. The voice says only whole clauses, s
 The voice must not fall ever further behind on continuous speech (a translation is often longer than
 its clause, and the speech plays back to back). When audio arrives in real time, the speak worker
 knows when the clause's voice would start: from `FAST_AFTER_S` behind its clause end it speaks faster
-(linearly up to `MAX_SPEED` at `max_lag_s`, where the TTS supports `speed`), and a clause whose voice
-would start more than `max_lag_s` after its end is not said at all (its caption stays). `interrupt()`
+(linearly up to `MAX_SPEED` at `max_lag_s`, MAX_LAG_S without one: by the TTS's own `speed`, else at the same pitch
+through voices/live.faster), and a clause whose voice would start more than `max_lag_s` after its end is not said at
+all (its caption stays; me -> them has no `max_lag_s`: nothing is dropped). `interrupt()`
 is barge-in: the user talks over the voice, so what is not heard yet is dropped.
 
 When audio arrives in real time each clause also puts out `Latency` events, seconds from the end of its
@@ -59,13 +61,21 @@ MAX_BEHIND_S = 0.15
 MAX_LAG_S = 4.0  # them -> me: voice starting later than this after its clause ended is dropped (BENCH stage 2: queue policy)
 FAST_AFTER_S = 0.5  # voice this far behind its clause end is sped up ...
 MAX_SPEED = 1.4  # ... linearly up to this at MAX_LAG_S (4 s, 0.5 s, 1.4x: 1-3 % of the words dropped in conversation, BENCH)
+WSOLA_FROM = 1.03  # a TTS without `speed` (the clone) is sped up from this: below, WSOLA would only cost its artefacts
+# a clause's end: (VAD pause, ms; no cut at a word starting this near the ASR window's end, s: local/asr.TAIL_S).
+# Them -> me and a cloud side's local subtitles end it sooner (BENCH "0.3.2": subtitle 0.70 -> 0.43 s, them -> me voice
+# -0.09 s); local me -> them keeps 300 ms / 0.8 s for its voice and so its subtitles: more, shorter clauses, each ends in
+# Pocket's own tail (its start +0.6 s, M1 runner)
+QUICK_END = (200, 0.5)
+VOICE_END = (300, 0.8)
 
 
 class LocalDirection:
     """`asr.stream()` objects also take `feed(pcm, partial=False)` and expose `duration` (s),
     `cut(force, comma) -> str | None` and `cut_at` (local/asr.py). A `tts.synth` with a `speed` keyword is sped up when
-    behind. `max_lag_s` None: no queue policy, every clause is said however late — me -> them, where the other
-side has no subtitles of what was dropped; them -> me takes MAX_LAG_S."""
+    behind, another TTS through voices/live.faster. `max_lag_s` None: nothing dropped, every clause is said however late
+(sped up as at MAX_LAG_S) — me -> them, where the other side has no subtitles of what was dropped; them -> me takes
+MAX_LAG_S."""
 
     def __init__(self, vad, asr, mt, tts, src: str, tgt: str, voice: Voice | None = None, max_clause_s: float = 5.0,
                  max_lag_s: float | None = None, early_s: float | None = None, partial_mt: bool = True):
@@ -271,11 +281,15 @@ side has no subtitles of what was dropped; them -> me takes MAX_LAG_S."""
                     log.info(json.dumps(c | {'translation': translation}, ensure_ascii=False))
                     self._events.put(Latency(c['clause'], 'dropped', round(lag, 3)))  # no voice comes for it (a remote client)
                     continue
-                if self.max_lag_s is not None and self._speeds and lag > FAST_AFTER_S:
-                    speed = round(1 + (MAX_SPEED - 1) * min(1.0, (lag - FAST_AFTER_S) / max(self.max_lag_s - FAST_AFTER_S, 1e-3)), 3)
-                    c['speed'] = speed
+                if lag > FAST_AFTER_S:
+                    cap = self.max_lag_s or MAX_LAG_S
+                    speed = round(1 + (MAX_SPEED - 1) * min(1.0, (lag - FAST_AFTER_S) / max(cap - FAST_AFTER_S, 1e-3)), 3)
+                    if not self._speeds and speed < WSOLA_FROM:
+                        speed = 1.0
+                    else:
+                        c['speed'] = speed
             cut = self._cut
-            for chunk in self.tts.synth(translation, self.tgt, voice, **({'speed': speed} if speed != 1.0 else {})):
+            for chunk in self._synth(translation, voice, speed, sr):
                 if self._stop.is_set() or self._cut != cut:
                     break  # closes synth(), which reads away the rest of the request
                 now = time.perf_counter()
@@ -300,6 +314,14 @@ side has no subtitles of what was dropped; them -> me takes MAX_LAG_S."""
             log.info(json.dumps(c | {'tts_ms': round(1000 * dt), 'speech_s': round(samples / sr, 2),
                                      'translation': translation}, ensure_ascii=False))
 
+    def _synth(self, text, voice, speed: float, sr: int):
+        """The TTS's chunks `speed` times faster: by its own `speed`, else at the same pitch (WSOLA: a clone has none).
+        The loop over them holds the only reference, so its break closes the TTS's request at once."""
+        if speed == 1.0 or self._speeds:
+            return self.tts.synth(text, self.tgt, voice, **({'speed': speed} if speed != 1.0 else {}))
+        from peresmeshnik.voices.live import faster
+        return faster(self.tts.synth(text, self.tgt, voice), speed, sr)
+
     def summary(self) -> dict:
         """Busy time of each link per second of input audio (link RTF)."""
         s, a = self.stats, max(self.stats['audio_s'], 1e-9)
@@ -309,11 +331,12 @@ side has no subtitles of what was dropped; them -> me takes MAX_LAG_S."""
 
 
 def make_local(src: str, tgt: str, asr: str | None = None, threads: int | None = None, tts=None, voice: Voice | None = None,
-               settings=None, max_lag_s: float | None = None, mt: str | None = None) -> LocalDirection:
+               settings=None, max_lag_s: float | None = None, mt: str | None = None,
+               end: tuple[int, float] | None = None) -> LocalDirection:
     """Engines and threads from the settings (`[local]`, ARCHITECTURE §6), models from the registry
     (raises models.ModelMissing until fetched); S2 passes its clone `tts` and `voice`. `asr`, `mt` and a `tts` string are
     registry ids (the app passes `languages.direction`'s), by default the `[local]` tables' (`languages.pick`: the
-    language's or the pair's own, else '*')."""
+    language's or the pair's own, else '*'). `end`: when a clause ends, QUICK_END by default; me -> them's voice VOICE_END."""
     from peresmeshnik import config
     from peresmeshnik.languages import pick
     from peresmeshnik.local.asr import OnnxAsr
@@ -324,7 +347,8 @@ def make_local(src: str, tgt: str, asr: str | None = None, threads: int | None =
     threads = threads or loc.threads
     if tts is None or isinstance(tts, str):
         tts = PiperTts(tts or pick(loc.tts, tgt), threads=threads)
-    return LocalDirection(SileroVad(), OnnxAsr(asr or pick(loc.asr, src), threads=threads),
+    silence_ms, tail_s = end or QUICK_END
+    return LocalDirection(SileroVad(min_silence_ms=silence_ms), OnnxAsr(asr or pick(loc.asr, src), threads=threads, tail_s=tail_s),
                           OpusMt(src, tgt, mt or pick(loc.mt, f'{src}-{tgt}'), threads=threads),
                           tts, src, tgt, voice, max_lag_s=max_lag_s, partial_mt=loc.partial_mt)
 

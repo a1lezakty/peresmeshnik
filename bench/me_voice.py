@@ -148,7 +148,7 @@ def run(a):
         torch.cuda.set_per_process_memory_fraction(a.cuda_frac)
     tts = Traced(XttsClone(a.model_dir, a.device, a.threads))
     v = voice.load(a.voice.name, a.voice.parent)
-    d = pipeline.make_local('ru', 'en', threads=a.threads, tts=tts, voice=v)  # as the app's me -> them (no queue cap)
+    d = pipeline.make_local('ru', 'en', threads=a.threads, tts=tts, voice=v, end=pipeline.VOICE_END)  # as the app's me -> them
     d.warm_up()
     tts.said.clear()
     d.realtime = True

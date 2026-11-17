@@ -228,6 +228,12 @@ def listing(s, gpu: Gpu | None = None) -> list[Component]:
         if m.role == 'clone' and m.id not in out and languages.covers(m.id, s.their_lang):
             out[m.id] = _model(m, base, False, f'speaks {languages.name(s.their_lang)} in your own voice',
                                unavailable=languages.clone_why(m.id, s.their_lang, gpu))
+    from peresmeshnik.local.asr import UNTIL_FETCHED  # a new ASR default not downloaded yet: the old one serves it
+    for new, old in UNTIL_FETCHED.items():
+        if new in out and not out[new].installed and old in reg and old not in out and models.is_fetched(reg[old], base):
+            n = out[new]
+            out[old] = _model(reg[old], base, True, f'{n.why}, until {new} is downloaded',
+                              f'the pair has no speech recognition here until {new} is downloaded', required=n.required)
     pack = _pack(s, gpu, needed)
     with_addon = set(json.loads(voicepack.lock_file().read_text()).get('addon', {}).get('models', ())) \
         if any(c.id == ADDON for c in pack) else set()

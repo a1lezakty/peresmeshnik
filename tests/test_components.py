@@ -61,6 +61,21 @@ def test_the_pairs_models_ticked_other_pairs_to_remove(base):
     assert not (base / 'opus-mt-de-ru').exists() and 'opus-mt-de-ru' not in {c.id for c in components.listing(s)}
 
 
+def test_the_old_russian_asr_is_in_use_until_the_new_default_is_downloaded(base):
+    """0.3.2: after the update Russian runs on GigaAM CTC until RNN-T is downloaded (local/asr.UNTIL_FETCHED): CTC is no
+    leftover of another pair to remove meanwhile; once RNN-T is on disk it is."""
+    s = config.Settings(my_lang='en', their_lang='ru', them_to_me='local', me_to_them='cloud')
+    fetched(base, 'gigaam-v3-e2e-ctc')
+    rows = {c.id: c for c in components.listing(s)}
+    new, old = rows['gigaam-v3-e2e-rnnt'], rows['gigaam-v3-e2e-ctc']
+    assert not new.installed and new.recommended and old.installed and old.recommended and old.required
+    assert 'not used' not in old.why and 'hears Russian' in old.why and 'until gigaam-v3-e2e-rnnt' in old.why
+    assert 'no speech recognition here until gigaam-v3-e2e-rnnt' in old.instead
+    fetched(base, 'gigaam-v3-e2e-rnnt')
+    old = {c.id: c for c in components.listing(s)}['gigaam-v3-e2e-ctc']
+    assert not old.recommended and old.why == 'not used by the chosen pair'
+
+
 def test_the_clone_brings_the_voice_check_and_its_stock_voice(monkeypatch):
     monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
     monkeypatch.setattr(languages, 'nvidia_once', lambda: CARD)

@@ -79,7 +79,7 @@ Linux with an NVIDIA GPU they can run here ([below](#trying-it-from-source-linux
 | Language | Speech recognition | Stock voice | Your cloned voice | Cloud (Gemini Live) |
 |---|---|---|---|---|
 | English | parakeet-tdt-0.6b-v3 | piper-en_US-john-medium | qwen3-tts (NVIDIA GPU, voice pack addon) or xtts-v2 (NVIDIA GPU) or pocket-tts-en | ✔ |
-| Русский (Russian) | gigaam-v3-e2e-ctc | piper-ru_RU-dmitri-medium | qwen3-tts (NVIDIA GPU, voice pack addon) or xtts-v2 (NVIDIA GPU) or pocket-tts-ru | ✔ |
+| Русский (Russian) | gigaam-v3-e2e-rnnt | piper-ru_RU-dmitri-medium | qwen3-tts (NVIDIA GPU, voice pack addon) or xtts-v2 (NVIDIA GPU) or pocket-tts-ru | ✔ |
 | Українська (Ukrainian) | parakeet-tdt-0.6b-v3 | piper-uk_UA-ukrainian_tts-medium | — (cloud or a stock voice) | ✔ |
 | Deutsch (German) | parakeet-tdt-0.6b-v3 | piper-de_DE-thorsten-medium | qwen3-tts (NVIDIA GPU, voice pack addon) or xtts-v2 (NVIDIA GPU) or pocket-tts-de | ✔ |
 | Français (French) | fastconformer-fr-pc | piper-fr_FR-siwis-medium | qwen3-tts (NVIDIA GPU, voice pack addon) or xtts-v2 (NVIDIA GPU) or pocket-tts-fr | ✔ |

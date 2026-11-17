@@ -517,7 +517,7 @@ def test_fetch_a_pair_then_serve(tmp_path, monkeypatch):
         want |= set(languages.needed_models(s))
     [argv] = asked
     assert argv[0] == 'fetch' and argv[-1] == '--accept-licenses' and set(argv[1:-1]) == want and len(argv) == len(want) + 2
-    assert {'gigaam-v3-e2e-ctc', 'parakeet-tdt-0.6b-v3', 'piper-ru_RU-dmitri-medium', 'piper-en_US-john-medium'} <= want
+    assert {'gigaam-v3-e2e-rnnt', 'parakeet-tdt-0.6b-v3', 'piper-ru_RU-dmitri-medium', 'piper-en_US-john-medium'} <= want
     rc = 1
     assert main(['serve', '--host', '127.0.0.1', '--fetch', 'de-fr', '--fetch', 'en-ru']) == 1 and len(started) == 1
     assert '--accept-licenses' not in asked[-1]  # asked on the terminal, as `models fetch` does

@@ -1,4 +1,4 @@
-"""ASR through onnx-asr: Parakeet TDT 0.6B v3 int8 (en, ru) or GigaAM v3 e2e CTC (ru, punctuation).
+"""ASR through onnx-asr: Parakeet TDT 0.6B v3 int8 (en and other European languages) or GigaAM v3 e2e (ru, punctuation).
 
 Neither model streams natively, so the stream re-runs the model on the current clause every
 `partial_every_s` of new audio (ARCHITECTURE §4: partials on a window that grows to the clause end).
@@ -15,6 +15,7 @@ from peresmeshnik.engines import SAMPLE_RATE
 from peresmeshnik.local.vad import ort_options
 
 ONNX_ASR = {'parakeet-tdt-0.6b-v3': ('nemo-parakeet-tdt-0.6b-v3', 'int8'),  # registry id -> onnx-asr model, quantization
+            'gigaam-v3-e2e-rnnt': ('gigaam-v3-e2e-rnnt', 'int8'),
             'gigaam-v3-e2e-ctc': ('gigaam-v3-e2e-ctc', 'int8'),
             'parakeet-tdt_ctc-0.6b-ja': ('nemo-conformer-tdt', 'int8'),
             'fastconformer-ar-pcd': ('nemo-conformer-ctc', 'int8'),

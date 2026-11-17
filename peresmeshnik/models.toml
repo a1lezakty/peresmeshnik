@@ -51,6 +51,21 @@ url = "https://huggingface.co/istupakov/gigaam-v3-onnx/resolve/322c3b29492673eb7
 "v3_e2e_ctc_vocab.txt" = { sha256 = "142de7570b3de5b3035ce111a89c228e80e6085273731d944093ddf24fa539cd", size = 2007 }
 "LICENSE.txt" = { sha256 = "f00de6715714c7a63d08639cdbfaa40224eefc407302614bd19f1a8b98c875aa", size = 1070 }
 
+[gigaam-v3-e2e-rnnt]  # int8 ONNX for onnx-asr ("gigaam-v3-e2e-rnnt", quantization="int8"), punctuation included
+role = "asr"
+langs = ["ru"]
+license = "MIT"
+license_url = "https://github.com/salute-developers/GigaAM"
+url = "https://huggingface.co/istupakov/gigaam-v3-onnx/resolve/322c3b29492673eb7d0b434bfa9dfb8653e34d02/"
+[gigaam-v3-e2e-rnnt.files]
+"config.json" = { sha256 = "0641fcf73f4af791c73f05083e38a658ff5dcbee3534a0c61396c10f4b97f0fe", size = 135 }
+"v3_e2e_rnnt_encoder.int8.onnx" = { sha256 = "4e0e076a6076cd110277e529b8ac8f32cd5297f7fbebad5341ae8ddb7d00817b", size = 224570477 }
+"v3_e2e_rnnt_decoder.int8.onnx" = { sha256 = "89014e134865615b91e037157e46e389b1271e6072460efc010ea08e61e23146", size = 1159170 }
+"v3_e2e_rnnt_joint.int8.onnx" = { sha256 = "ade116563dbf66e503b0994efab6b5861412743e52bf31c39fc3fffa3783d5d1", size = 687791 }
+"v3_e2e_rnnt.yaml" = { sha256 = "d23270a1f327e365ebc4554b7ceee69ac12898e21092c18085151516aa58f91b", size = 1041 }
+"v3_e2e_rnnt_vocab.txt" = { sha256 = "39abae20e692998290c574e606f11a9edef2902a1995463fcff63d1490cf22b7", size = 13354 }
+"LICENSE.txt" = { sha256 = "f00de6715714c7a63d08639cdbfaa40224eefc407302614bd19f1a8b98c875aa", size = 1070 }
+
 ["parakeet-tdt_ctc-0.6b-ja"]  # int8 ONNX for onnx-asr ("nemo-conformer-tdt", quantization="int8"): NVIDIA parakeet-tdt_ctc-0.6b-ja, punctuation included
 role = "asr"
 langs = ["ja"]

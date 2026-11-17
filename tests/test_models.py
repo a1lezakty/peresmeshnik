@@ -255,6 +255,18 @@ def test_settings_of_0_2_0_get_the_new_en_ru(tmp_path):
     assert config.load(config.save(s, p)).local.mt['en-ru'] == 'opus-mt-en-ru'
 
 
+def test_settings_of_older_releases_get_the_new_ru_asr(tmp_path):
+    """0.3.2: Russian ASR moves from GigaAM CTC to RNN-T for whoever was on the old default (0.2.0 saved its whole
+    table; 0.3.x saved no default key); ctc or another model chosen since stays."""
+    p = tmp_path / 'settings.toml'
+    for saved, ru in (('asr = { "en" = "parakeet-tdt-0.6b-v3", "ru" = "gigaam-v3-e2e-ctc" }', 'gigaam-v3-e2e-rnnt'),
+                      ('threads = 2', 'gigaam-v3-e2e-rnnt'),
+                      ('asr = { "ru" = "gigaam-v3-e2e-ctc" }', 'gigaam-v3-e2e-ctc'),
+                      ('asr = { "ru" = "parakeet-tdt-0.6b-v3" }', 'parakeet-tdt-0.6b-v3')):
+        p.write_text(f'[local]\n{saved}\n', 'utf-8')
+        assert config.load(p).local.asr['ru'] == ru, saved
+
+
 def test_the_default_engines_cover_the_14_languages():
     """Settings' defaults: MT for every direction, ASR and a stock voice where the registry has one (BENCH stage 6)."""
     from peresmeshnik.languages import LANGS

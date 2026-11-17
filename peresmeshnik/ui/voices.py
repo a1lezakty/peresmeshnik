@@ -48,10 +48,15 @@ def described(v) -> str:
     if m['kind'] == 'them':
         rec = f', {m["sample"]["seconds"]:.0f} s of it recorded' if m.get('sample') else ''
         return f'{m["name"]}: someone you talk to, {m["lang"]}, {m["seconds"]:.0f} s of their speech{rec}, kept {when}'
+    from peresmeshnik import languages
+    sample = voice.is_sample(v)  # my voice in the other side's language: it speaks there only when clean enough
+    who = f'Your voice ({languages.name(m["lang"])} sample)' if sample else 'Your voice'
     if why := voice.why_not_mine(v):
-        return f'Your voice: {m["lang"]}, {m["seconds"]:.0f} s, {why}'
+        return f'{who}: {m["lang"]}, {m["seconds"]:.0f} s, {why}'
     how = {'mic-live': 'recorded here', 'import+mic-match': 'from a file'}.get(c.get('how'), '')
-    return f'Your voice: {m["lang"]}, {m["seconds"]:.0f} s, {how}, confirmed at the microphone {when}'
+    unused = sample and voice.sample_why(m.get('quality') or {})
+    return f'{who}: {m["lang"]}, {m["seconds"]:.0f} s, {how}, confirmed at the microphone {when}' + (
+        f', not used: {unused}' if unused else '')
 
 
 def check_models(s: config.Settings, lang: str, say=lambda text: None):
@@ -351,13 +356,19 @@ class VoicesDialog(QDialog):
                 voice.discard(v, self.root)
                 self.refresh()
             return
+        from peresmeshnik import languages
+        mine = v is not None and v.meta['kind'] == 'me'
+        main = mine and not voice.is_sample(v)  # my main voice takes its samples in other languages with it
+        samples = main and any(voice.is_sample(x) and x.name.startswith(f'{v.name}-') for x in self.voices)
         if v is None or not self._ask(f'Delete "{v.meta["name"]}"? ' + (
-                'Your cloned voice will need a new recording (setup wizard).' if v.meta['kind'] == 'me' else '')):
+                'Your cloned voice will need a new recording (setup wizard).' if main else
+                'Your main recording speaks that language then.' if mine else '')
+                + (' Your samples of it in other languages go too.' if samples else '')):
             return
-        mine = v.meta['kind'] == 'me'
-        for n in (v.name, f'{v.name}.new', f'{v.name}.old') if mine else (v.name,):  # a take kept aside goes too
+        names = [v.name] + ([f'{v.name}-{x}' for x in languages.LANGS] if main else [])
+        for n in [y for x in names for y in (x, f'{x}.new', f'{x}.old')] if mine else names:  # a take kept aside too
             voice.discard(n, self.root)
-        self._forget_box(v.name)
+            self._forget_box(n)
         if mine and self.s.local.voice == v.name:
             self.s.local.voice = ''  # the me side says "record your voice" instead of failing on a missing folder
         self.refresh()

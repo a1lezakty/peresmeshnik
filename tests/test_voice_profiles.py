@@ -692,3 +692,127 @@ def test_the_cloud_fallback_does_not_speak_a_clone_unlike_me(tmp_path, monkeypat
     finally:
         fb.close()
     assert 'does not sound like you' in fallback._clone_not_ready(s, 'en', 'pocket-tts-en') and fallback.stock('me', s)
+
+
+def sample(root, quality=None, confirm=True, lang='en'):
+    """My sample in their language (the wizard's "Your voice in English"), its check's numbers as given (else clean)."""
+    v = voice.save(*speech(), f'me-{lang}', lang, '', root, 'mic')
+    v = confirmed(v.name, root) if confirm else v
+    voice._write(v.path, v.meta | {'quality': v.meta['quality'] | {'level_db': -20.0, 'snr_db': 40.0, 'band_db': -10.0,
+                                                                    'echo': 0.0} | (quality or {})})
+    return voice.load(v.name, root)
+
+
+@pytest.mark.parametrize('q, why', [
+    ({}, ''),
+    ({'snr_db': voice.SAMPLE_SNR_DB - 1}, 'background noise'),
+    ({'echo': voice.SAMPLE_ECHO + 0.1}, 'a lot of room echo: record it again in a smaller, furnished room'),
+    ({'clipped': 0.01}, 'clipped'),
+    ({'level_db': voice.LOW_DB - 1}, 'too quiet'),
+    ({'band_db': voice.BAND_DB - 1}, 'no sound above 4 kHz'),
+    ({'echo': None}, 'not checked for room echo'),
+])
+def test_sample_why(q, why):
+    good = {'seconds': 45.0, 'speech_s': 30.0, 'level_db': -20.0, 'noise_db': -60.0, 'snr_db': 40.0, 'clipped': 0.0,
+            'band_db': -10.0, 'echo': 0.0}
+    got = voice.sample_why({k: v for k, v in (good | q).items() if v is not None})
+    assert (why in got and bool(got) == bool(why)), got
+
+
+def test_save_keeps_the_room_echo(tmp_path):
+    v = voice.save(*speech(), 'me', 'ru', '', tmp_path)
+    assert v.meta['quality']['echo'] == voice.room_echo(*speech()) and voice.load('me', tmp_path).meta == v.meta
+
+
+def test_the_speaker_of_their_language(tmp_path):
+    """voice.speaker: my sample in their language speaks when it is mine (M-20) and clean (sample_why); else my main
+    recording, and a note only when a sample is there but not used."""
+    root = tmp_path / 'v'
+    voice.save(*speech(), 'me', 'ru', '', root)
+    with pytest.raises(voice.NotMine, match='not confirmed') as e:
+        voice.speaker('me', 'en', root)
+    assert 'not confirmed' in e.value.why and not e.value.why.startswith('this voice')
+    confirmed('me', root)
+    assert [x.name if isinstance(x, voice.Voice) else x for x in voice.speaker('me', 'en', root)] == ['me', '']  # none
+    sample(root, confirm=False)
+    v, note = voice.speaker('me', 'en', root)
+    assert v.name == 'me' and note == ('your English sample is not used (it is not confirmed as your own voice yet: read '
+                                       'two short phrases at the microphone (Voices…)): your Russian recording speaks '
+                                       'English')
+    sample(root)
+    assert [x.name if isinstance(x, voice.Voice) else x for x in voice.speaker('me', 'en', root)] == ['me-en', '']
+    assert voice.speaker('me', 'de', root)[0].name == 'me' and voice.speaker('me', 'de', root)[1] == ''  # not German
+    sample(root, {'echo': voice.SAMPLE_ECHO + 1})
+    v, note = voice.speaker('me', 'en', root)
+    assert v.name == 'me' and note == ('your English sample is not used (a lot of room echo: record it again in a '
+                                       'smaller, furnished room): your Russian recording speaks English')
+    sample(root)
+    voice.set_consent('me', None, root)  # my main voice not confirmed: the confirmed, clean sample still speaks
+    assert voice.speaker('me', 'en', root)[0].name == 'me-en'
+    sample(root, {'snr_db': 10.0})
+    with pytest.raises(voice.NotMine, match='not confirmed'):  # neither may speak: the main one's reason
+        voice.speaker('me', 'en', root)
+    confirmed('me', root)
+    (root / 'me-en' / 'voice.json').write_text('{"broken', encoding='utf-8')
+    assert 'cannot be read' in voice.speaker('me', 'en', root)[1]
+
+
+def test_app_ids_cover_my_samples(tmp_path):
+    """Crash reports keep the app's own ids: 'me-<lang>' names nobody."""
+    import re
+    root = tmp_path / 'v'
+    sample(root)
+    voice.save(*speech(), 'me-de.new', 'de', '', root)
+    voice.save(*speech(), 'anna-maria', 'de', '', root)
+    assert voice.names(root) == {'anna-maria'}
+    assert all(re.fullmatch(voice.APP_IDS, x) for x in ('me', 'me-en', 'them-0a1b2c3d'))
+    assert not any(re.fullmatch(voice.APP_IDS, x) for x in ('me-anna', 'mes', 'Petrov'))
+
+
+def test_the_me_side_speaks_my_sample_in_their_language(monkeypatch, tmp_path):
+    """app.Side._local makes the clone from voice.speaker's profile; a sample there but not used: said once."""
+    from test_voice_pack import me_side
+    load, root = voice.load, tmp_path / 'v'
+    side, s, made, _ = me_side(monkeypatch, tmp_path, Tone(), key=False)
+    monkeypatch.setattr(voice, 'load', load)
+    monkeypatch.setattr(voice, 'voices_dir', lambda: root)
+    voice.save(*speech(), 'me', 'ru', '', root)
+    confirmed('me', root)
+    sample(root)
+    d = side._local(s)
+    assert d.voice.name == 'me-en' and isinstance(made[-1], Tone) and side.errors == []
+    sample(root, {'echo': voice.SAMPLE_ECHO + 1})
+    d = side._local(s)
+    assert d.voice.name == 'me' and isinstance(made[-1], Tone) and side.errors == [
+        'note: me → them: your English sample is not used (a lot of room echo: record it again in a smaller, furnished '
+        'room): your Russian recording speaks English']
+
+
+def test_the_cloud_fallback_speaks_my_sample_in_their_language(monkeypatch, tmp_path):
+    """cloud/fallback.py: the local voice of the cloud's fallback is voice.speaker's; a sample not used is said at the
+    first fallback (voice_note); _clone_not_ready asks the same."""
+    from peresmeshnik import config, languages, models
+    from peresmeshnik.cloud import fallback
+    from peresmeshnik.local import clone
+    root = tmp_path / 'v'
+    monkeypatch.setattr(languages, 'gpu', lambda engine='': True)
+    monkeypatch.setattr(models, 'path', lambda i: tmp_path / i)
+    monkeypatch.setattr(clone, 'voice_cmd', lambda: ['voice-runner'])
+    monkeypatch.setattr(voice, 'voices_dir', lambda: root)
+    made = {}
+    monkeypatch.setattr(fallback, 'Fallback', lambda *a, **k: made.update(k))
+    s = config.Settings()
+    s.me_to_them, s.my_lang, s.their_lang, s.local.voice = 'cloud', 'ru', 'en', 'me'
+    voice.save(*speech(), 'me', 'ru', '', root)
+    sample(root)  # my main voice not confirmed, the sample is: the clone, in the sample
+    assert fallback._clone_not_ready(s, 'en') == '' and not fallback.stock('me', s)
+    fallback.make('me', s, 'key')
+    assert made['voice'].name == 'me-en' and made['voice_note'] == ''
+    confirmed('me', root)
+    sample(root, {'snr_db': 10.0})
+    fallback.make('me', s, 'key')
+    assert made['voice'].name == 'me' and made['voice_note'] == ('your English sample is not used (background noise: '
+                                                                 'record it again somewhere quieter): your Russian '
+                                                                 'recording speaks English')
+    voice.set_consent('me', None, root)
+    assert 'not confirmed' in fallback._clone_not_ready(s, 'en') and fallback.stock('me', s)

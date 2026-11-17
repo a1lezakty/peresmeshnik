@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QVBoxLayout,
+    QWidget,
     QWizard,
     QWizardPage,
 )
@@ -630,9 +631,11 @@ class VoicePage(QWizardPage):
     """Voice enrollment (ARCHITECTURE §7, step 5): record or import 30-60 s of the user's own voice, the quality report
     with its verdict; with the local clone also the clone check (voice.check_clone). Optional for a cloud me -> them.
     A new take is kept as the profile "<name>.new" (the test phrase already speaks with it) and replaces "<name>" only
-    when the wizard finishes; cancelled, it is dropped."""
+    when the wizard finishes; cancelled, it is dropped. So is the optional sample of my voice in their language
+    ("<name>-<lang>.new", voice.speaker), where my clone speaks it here."""
     progress = Signal(float)
     result = Signal(object)  # (Report, Voice | None), or an error text
+    sample_result = Signal(object)  # (Report, Voice | None, why it is not kept), or an error text
     checked = Signal(str)
     pack_progress = Signal(object)  # voicepack.install's (stage, done, total[, text]): bytes overflow a Qt int
     pack_done = Signal(str)  # '' or why it stopped
@@ -691,6 +694,19 @@ class VoicePage(QWizardPage):
         lay.addLayout(row)
         for x in (self.bar, self.out, self.clone_out):
             lay.addWidget(x)
+        self.sample_box = QWidget()  # "Your voice in English": _sample()
+        self.sample_text, self.sample_prompt, self.sample_out = QLabel(), QLabel(), QLabel()
+        self.sample_button = QPushButton(f'Record {self.seconds:.0f} s')
+        self.sample_button.clicked.connect(self.record_sample)
+        sl = QVBoxLayout(self.sample_box)
+        sl.setContentsMargins(0, 0, 0, 0)
+        for x in (self.sample_text, self.sample_prompt, self.sample_out):
+            x.setWordWrap(True)
+        for x in (self.sample_text, self.sample_prompt, self.sample_button, self.sample_out):
+            sl.addWidget(x)
+        lay.addWidget(self.sample_box)
+        self.sample_result.connect(self._sample_result)
+        self.sample = self.sample_confirm = None  # the sample shown (a Voice) and its ui.voices.ConfirmBox
         self.progress.connect(lambda t: self.bar.setValue(int(t)))
         self.result.connect(self._result)
         self.checked.connect(self._checked)
@@ -715,6 +731,20 @@ class VoicePage(QWizardPage):
         if not self.local() or s.local.clone == STOCK or languages.direction(s, 'me_to_them').voice != 'stock':
             return ''
         return languages.clone_engine(s.their_lang)[1]
+
+    def sample_lang(self) -> str:
+        """Their language when "me → them" speaks it here in my cloned voice and it is not mine: a sample of my voice in
+        it can speak instead of my recording (voice.speaker); '' else."""
+        from peresmeshnik.voice import STOCK
+        s = self.w.s
+        if not self.local() or s.local.clone == STOCK or self.clone_off() or s.their_lang == s.my_lang \
+                or not languages.clone_engine(s.their_lang)[0]:
+            return ''
+        return s.their_lang
+
+    def _confirming(self) -> bool:
+        """A ConfirmBox records into a take: no new take, no Next meanwhile."""
+        return any(getattr(b, 'running', False) for b in (self.confirm, self.sample_confirm))
 
     def initializePage(self) -> None:  # noqa: N802
         from peresmeshnik import voice
@@ -757,6 +787,21 @@ class VoicePage(QWizardPage):
                 self.out.setText(f'The saved voice cannot be read ({e}): record it again.')
         self.hf.show_for(components.token_page(s.their_lang) if not remote and s.local.clone != voice.STOCK else '')
         self._confirm_box()
+        lang = self.sample_lang()
+        if self.sample is not None and self.sample.name.removesuffix('.new') != f'{self.name}-{lang}':  # Back: another
+            if self.sample.name.endswith('.new'):  # language now; its take is not kept
+                voice.discard(self.sample.name)
+            self.sample = None
+            self.sample_out.setText('')
+        if self.sample is None and lang and (voice.voices_dir() / f'{self.name}-{lang}' / 'voice.json').exists():
+            try:
+                self.sample = voice.load(f'{self.name}-{lang}')
+                why = voice.sample_why(self.sample.meta.get('quality') or {})
+                self.sample_out.setText(f'Saved, recorded {self.sample.meta.get("created", "")}'
+                                        + (f'; not used: {why}.' if why else '.'))
+            except (OSError, ValueError) as e:
+                self.sample_out.setText(f'The saved recording cannot be read ({e}): record it again.')
+        self._sample()
         self._show_pack()
         self._buttons()
 
@@ -769,7 +814,7 @@ class VoicePage(QWizardPage):
                              'then record here.')
 
     def isComplete(self) -> bool:  # noqa: N802
-        if getattr(self.confirm, 'running', False):  # it records into the take: no Next meanwhile
+        if self._confirming():  # it records into the take: no Next meanwhile
             return False
         return not self.running and not self.packing and (not self.local() or self.stock.isChecked() or bool(self.clone_off())
                                                           or self.voice is not None and self.pack() != 'gpu')
@@ -869,6 +914,7 @@ class VoicePage(QWizardPage):
         s.local.clone = voice.STOCK if on else config.Local().clone
         self.check_button.setVisible(self.local() and not on)
         self._show_pack()
+        self._sample()
         vid = languages.direction(s, 'me_to_them').tts  # the stock voice now ('' = none for the language)
         if on and vid and not models.is_fetched(models.get(vid), models.root()):
             self.out.setText(f'Downloading the stock voice {vid}…')
@@ -880,8 +926,8 @@ class VoicePage(QWizardPage):
         return bool(getattr(getattr(getattr(self.w, 'tray', None), 'ctl', None), 'on', False))
 
     def _buttons(self) -> None:
-        busy = self.running or getattr(self.confirm, 'running', False)  # the take is being confirmed: it stays
-        for b in (self.record_button, self.import_button):
+        busy = self.running or self._confirming()  # the take is being confirmed: it stays
+        for b in (self.record_button, self.import_button, self.sample_button):
             b.setEnabled(not busy and self.own.isChecked())
         why = ('Turn translation off first: the check loads a second clone (~3 GB)' if self.translating() else
                self.no_check())
@@ -905,7 +951,7 @@ class VoicePage(QWizardPage):
     def record(self) -> None:
         from peresmeshnik import voice
         from peresmeshnik.audio.mic import record
-        if getattr(self.confirm, 'running', False):  # the take is being confirmed (its buttons are off)
+        if self._confirming():  # the take is being confirmed (its buttons are off)
             return
         s, sr = self.w.s, 24_000  # above the 16 kHz pipeline rate: the clone conditions at 22.05 kHz
         self.out.setText('Recording… read the text aloud.')
@@ -918,7 +964,7 @@ class VoicePage(QWizardPage):
 
     def import_file(self, path: str | None = None) -> None:
         from peresmeshnik import voice
-        if getattr(self.confirm, 'running', False):  # the take is being confirmed (its buttons are off)
+        if self._confirming():  # the take is being confirmed (its buttons are off)
             return
         path = path or QFileDialog.getOpenFileName(self, 'Your voice: a recording of 30-60 s', '',
                                                    'Audio (*.wav *.flac *.ogg *.mp3)')[0]
@@ -955,6 +1001,71 @@ class VoicePage(QWizardPage):
         self.confirm.confirmed.connect(self._confirmed)
         self.confirm.busy.connect(lambda _: self._buttons())  # no Next while it records into the take
         self.layout().addWidget(self.confirm)
+
+    def _sample(self) -> None:
+        """The optional section "Your voice in <their language>" where a sample can speak (sample_lang): why, the text,
+        Record, the verdict (voice.check, voice.sample_why) and, for a take kept, the box to confirm it as mine (M-20)."""
+        from peresmeshnik import voice
+        from peresmeshnik.ui.voices import ConfirmBox
+        if self.sample_confirm is not None:
+            self.sample_confirm.retire()
+            self.sample_confirm = None
+        lang, s = self.sample_lang(), self.w.s
+        self.sample_box.setVisible(bool(lang))
+        if not lang:
+            return
+        theirs, mine = languages.name(lang), languages.name(s.my_lang)
+        self.sample_text.setText(f'<b>Your voice in {theirs}</b> (optional): a recording in {theirs} makes your {theirs} '
+                                 f'voice closer to you, if the room is quiet and has little echo; otherwise your {mine} '
+                                 f'recording speaks. Read this aloud:')
+        self.sample_prompt.setText(voice.PROMPTS[lang])
+        v = self.sample
+        if v is None or not voice.why_not_mine(v) or voice.sample_why(v.meta.get('quality') or {}):
+            return
+        self.sample_confirm = ConfirmBox(s, v.name, parent=self, translating=self.translating)
+        self.sample_confirm.confirmed.connect(lambda _: setattr(self, 'sample', voice.load(v.name)))
+        self.sample_confirm.busy.connect(lambda _: self._buttons())
+        self.sample_box.layout().addWidget(self.sample_confirm)
+
+    def record_sample(self) -> None:
+        from peresmeshnik import voice
+        from peresmeshnik.audio.mic import record
+        if self._confirming() or not (lang := self.sample_lang()):
+            return
+        s, sr, draft = self.w.s, 24_000, f'{self.name}-{lang}.new'
+        self.sample_out.setText('Recording… read the text aloud.')
+        self.bar.setMaximum(int(self.seconds))
+        self.bar.setValue(0)
+        self.bar.setVisible(True)
+
+        def work():
+            try:
+                r, v = voice.enroll(record(self.seconds, s.ui.mic or None, sr, self.progress.emit), sr, draft, lang,
+                                    voice.PROMPTS[lang], source='mic')
+                why = voice.sample_why(v.meta['quality']) if v else ''
+                if why:  # never used as it is: not kept, my main recording speaks
+                    voice.discard(draft)
+                self.sample_result.emit((r, None if why else v, why))
+            except Exception as e:  # no microphone
+                self.sample_result.emit(f'error: {e}')
+        self._run(work)
+
+    def _sample_result(self, res) -> None:
+        from peresmeshnik import voice
+        self.running = False
+        self.bar.setVisible(False)
+        if isinstance(res, str):
+            self.sample_out.setText(res)
+        else:
+            r, v, why = res
+            if v or why and getattr(self.sample, 'name', '').endswith('.new'):  # a take saved: the one before it is gone
+                self.sample = v
+            s = self.w.s
+            said = (f' Not kept: {why}; your {languages.name(s.my_lang)} recording speaks {languages.name(s.their_lang)}.'
+                    if why else ' Kept: confirm it below; it is saved when you finish the wizard.' if v else ' Not saved.')
+            self.sample_out.setText(f'<b>{voice.verdict(r)}</b>{said}<br>{voice.summary(r)}')
+            self._sample()
+        self._buttons()
 
     def _confirmed(self, consent: dict) -> None:
         from peresmeshnik import voice
@@ -1014,6 +1125,9 @@ class VoicePage(QWizardPage):
         elif self.voice is not None and self.voice.name == self.draft:
             self.voice = voice.promote(self.draft, self.name)
             self.w.s.local.voice = self.name
+        v = self.sample  # its take; gone with my voice deleted meanwhile (Voices… takes my samples too)
+        if v is not None and v.name.endswith('.new') and (voice.voices_dir() / v.name / 'voice.json').exists():
+            self.sample = voice.promote(v.name, v.name.removesuffix('.new'))
 
     def _gone(self) -> bool:
         """The voice this page holds was deleted in Voices… while the wizard was open: forgotten here."""
@@ -1028,6 +1142,8 @@ class VoicePage(QWizardPage):
         from peresmeshnik import voice
         self._cancel_pack.set()
         voice.discard(self.draft)
+        if self.sample is not None and self.sample.name.endswith('.new'):
+            voice.discard(self.sample.name)
 
 
 class HotkeyPage(QWizardPage):

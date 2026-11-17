@@ -218,6 +218,36 @@ def check(pcm: np.ndarray, sr: int) -> Report:
     return r
 
 
+# a sample of my voice in the other side's language (`<name>-<lang>`, VOICE.md 2.1, 3.2): it speaks instead of my main
+# recording only when cleaner than check() asks; a home recording with room echo made a clone less like me than the main
+# recording in my own language does (0.22 against 0.37)
+SAMPLE_SNR_DB = 30.0  # calibrated: pending (E1): speech above the background, dB
+SAMPLE_ECHO = 1.0  # calibrated: pending (E1): room_echo() above it fails
+
+
+def room_echo(pcm: np.ndarray, sr: int) -> float:
+    """How much room echo a recording has (save() keeps it in `quality['echo']`). Calibrated: pending (E1): 0.0."""
+    return 0.0
+
+
+def sample_why(q: dict) -> str:
+    """'' when a sample of my voice in the other side's language may speak (its voice.json `quality`: check()'s numbers
+    and `echo`), else one short reason, for the user."""
+    if 'echo' not in q:  # saved before the check had it
+        return 'it was not checked for room echo: record it again'
+    if q.get('clipped', 0.0) > MAX_CLIPPED:
+        return 'it is clipped: record it again with a lower mic gain'
+    if q.get('level_db', -120.0) < LOW_DB:
+        return 'it is too quiet: record it again closer to the microphone'
+    if q.get('snr_db', 0.0) < SAMPLE_SNR_DB:
+        return 'background noise: record it again somewhere quieter'
+    if q['echo'] > SAMPLE_ECHO:
+        return 'a lot of room echo: record it again in a smaller, furnished room'
+    if q.get('band_db', 0.0) < BAND_DB:
+        return 'no sound above 4 kHz: record it again with a wired or built-in microphone'
+    return ''
+
+
 def verdict(r: Report) -> str:
     """One line for the user: good, good with a caveat, or record again and why."""
     if r.errors:
@@ -358,7 +388,9 @@ def voices_dir() -> Path:
 # --- voice.json v2: my voice and the voices of the people I talk to (RESEARCH-clone §5-6, FINDINGS M-20) ---
 #   {version: 2, id, name, kind, lang, created, consent, seconds, engines,
 #    and for kind 'me' as in v1: transcript, sample_rate, gain_db, quality}   (v1 readers still find their keys)
-# id       the folder: 'me' ('me.new' while the wizard holds a new take); a contact 'them-<8 hex>': no name in a path
+# id       the folder: 'me' ('me.new' while the wizard holds a new take); a contact 'them-<8 hex>': no name in a path;
+#          'me-<lang>' (kind 'me', source 'mic'): a sample of my voice in the other side's language, confirmed as 'me' is;
+#          it speaks that language for me while sample_why(quality) is '' (speaker()), else 'me' does
 # name     shown on the voices screen; never in logs or crash reports
 # kind     'me': may speak into the call (virtual mic) and go to my server; 'them': only ever into my headphones
 # consent  None (not confirmed: it speaks nowhere as me) or {how, at, wer, similarity, windows, ref_sha256}; how:
@@ -383,7 +415,12 @@ CONSENT = {'mic-live': 'me', 'import+mic-match': 'me', 'call-saved': 'them'}  # 
 
 
 class NotMine(RuntimeError):
-    """A profile that may not speak as me (into the call, to my server): a contact's, or mine not confirmed yet."""
+    """A profile that may not speak as me (into the call, to my server): a contact's, or mine not confirmed yet. `why`:
+    why_not_mine's text."""
+
+    def __init__(self, why: str):
+        super().__init__(f'this voice cannot speak for you: {why}')
+        self.why = why
 
 
 def _sha(path: Path) -> str:
@@ -416,8 +453,34 @@ def mine(name: str, root: Path | None = None) -> Voice:
     """The profile `name` if it may speak as me, else NotMine (the text names no voice: it may reach a log)."""
     v = load(name, root)
     if why := why_not_mine(v):
-        raise NotMine(f'this voice cannot speak for you: {why}')
+        raise NotMine(why)
     return v
+
+
+def is_sample(v: Voice) -> bool:
+    """A sample of my voice in another language (speaker()'s `<name>-<lang>`), not my main profile."""
+    return v.meta.get('kind', 'me') == 'me' and v.name.removesuffix('.new').endswith(f'-{v.meta.get("lang")}')
+
+
+def speaker(name: str, lang: str, root: Path | None = None) -> tuple[Voice, str]:
+    """The profile that speaks `lang` as me: my sample in that language (`<name>-<lang>`) when it is mine (why_not_mine)
+    and clean enough (sample_why), else `mine(name)` (NotMine as there); and a note for the user, only when such a sample
+    is there but not used ('' else)."""
+    from peresmeshnik import languages
+    why = ''
+    if ((root or voices_dir()) / f'{name}-{lang}').is_dir():
+        try:
+            v = load(f'{name}-{lang}', root)
+            why = why_not_mine(v) or sample_why(v.meta.get('quality') or {})
+        except (OSError, ValueError, AttributeError):
+            why = 'it cannot be read: record it again'
+        if not why:
+            return v, ''
+    v = mine(name, root)
+    if not why:
+        return v, ''
+    return v, (f'your {languages.name(lang)} sample is not used ({why}): your {languages.name(v.meta.get("lang", ""))} '
+               f'recording speaks {languages.name(lang)}')
 
 
 def upgrade(meta: dict, folder: str) -> dict:
@@ -487,7 +550,7 @@ def save_them(name: str, lang: str, seconds: float, states: dict[str, tuple[np.n
     return Voice(name=vid, engine='reference', path=base / vid, meta=meta)
 
 
-APP_IDS = r'me|them-[0-9a-f]{8}'  # the app's own folder ids: they name nobody (crash reports keep them)
+APP_IDS = r'me(-[a-z]{2})?|them-[0-9a-f]{8}'  # the app's own folder ids ('me-<lang>': speaker()): they name nobody (crash reports)
 ASIDE = ('.new', '.old', '.tmp')  # the wizard's take in progress, its last one, a contact's voice being saved
 
 
@@ -976,7 +1039,8 @@ def save(pcm: np.ndarray, sr: int, name: str, lang: str, transcript: str | None 
     meta = {'version': VERSION, 'id': name, 'name': name, 'kind': 'me', 'lang': lang, 'created': _now(),
             'consent': None, 'source': source, 'seconds': round(len(y) / sr, 2), 'engines': {},
             'transcript': transcript or '', 'sample_rate': sr, 'gain_db': round(20 * np.log10(gain), 1),
-            'quality': {k: v for k, v in asdict(report).items() if k not in ('errors', 'warnings')}}
+            'quality': {k: v for k, v in asdict(report).items() if k not in ('errors', 'warnings')}
+            | {'echo': round(float(room_echo(x, sr)), 3)}}
     _write(path, meta)
     return Voice(name=name, engine='reference', path=path, meta=meta)
 

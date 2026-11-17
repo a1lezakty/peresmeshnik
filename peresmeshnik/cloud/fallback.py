@@ -506,8 +506,10 @@ def _clone_not_ready(s, lang: str, engine: str = '') -> str:
         return 'no voice enrolled (setup wizard, "Your voice")'
     from peresmeshnik import voice
     with contextlib.suppress(OSError, ValueError):  # missing or broken: said where it is loaded, as before
-        if why := voice.why_not_mine(voice.load(s.local.voice)):  # M-20: a contact's voice never speaks as me; nor
-            return why  # one whose clone was heard unlike my live voice
+        try:  # M-20: a contact's voice never speaks as me; nor one whose clone was heard unlike my live voice
+            voice.speaker(s.local.voice, lang)  # my sample in `lang`, or my main recording
+        except voice.NotMine as e:
+            return e.why
     if why := languages.not_here(engine):  # an NVIDIA engine's voice pack, a gated model's token
         return why
     try:
@@ -587,12 +589,12 @@ def make(name: str, s, key: str, on_state=lambda text: None, on_respawn=lambda e
     d = _direction(name, s)
     src, tgt = d.src, d.tgt
     tts_id, why = local_voice(name, s)
-    voice, piper = None, bool(tts_id) and not _is_clone(tts_id)
+    voice, piper, sample = None, bool(tts_id) and not _is_clone(tts_id), ''
     note = _clone_not_ready(s, tgt, d.tts) if piper and d.voice == 'clone' else ''  # a stock voice instead of the clone: why
     if tts_id and not piper:
         from peresmeshnik import voice as profiles
         try:
-            voice = profiles.load(s.local.voice)
+            voice, sample = profiles.speaker(s.local.voice, tgt)  # my sample in their language, or my main recording
         except Exception as e:
             log.warning('me: voice %s: %s', s.local.voice, e)
 
@@ -630,7 +632,7 @@ def make(name: str, s, key: str, on_state=lambda text: None, on_respawn=lambda e
             raise RuntimeError('; '.join(d.why))
         return make_local(src, tgt, asr=d.asr, mt=d.mt, tts=t, settings=s, voice=voice,  # languages.direction's ids
                           max_lag_s=MAX_LAG_S if name == 'them' else None)
-    note = f'your voice is not ready ({note}), a stock voice speaks for you' if note else ''
+    note = f'your voice is not ready ({note}), a stock voice speaks for you' if note else sample
     if remote is not None:
         from peresmeshnik.remote.client import RemoteDirection
         up, up_why = my_voice(s) if name == 'me' else (None, '')

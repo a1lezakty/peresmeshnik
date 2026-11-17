@@ -54,7 +54,7 @@ def described(v) -> str:
     if why := voice.why_not_mine(v):
         return f'{who}: {m["lang"]}, {m["seconds"]:.0f} s, {why}'
     how = {'mic-live': 'recorded here', 'import+mic-match': 'from a file'}.get(c.get('how'), '')
-    unused = sample and voice.sample_why(m.get('quality') or {})
+    unused = sample and (voice.sample_why(m.get('quality') or {}) or voice.closer_why(v, ''))
     return f'{who}: {m["lang"]}, {m["seconds"]:.0f} s, {how}, confirmed at the microphone {when}' + (
         f', not used: {unused}' if unused else '')
 
@@ -70,6 +70,16 @@ def check_models(s: config.Settings, lang: str, say=lambda text: None):
             models.fetch(i)
     say('Checking…')
     return OnnxAsr(asr, s.local.threads, live=False), voice.Speaker(models.path(voice.SPEAKER))
+
+
+def to_confirm(s: config.Settings, v) -> bool:
+    """My voice `v` waits for a confirmation at the microphone: not confirmed yet, or my sample in their language
+    confirmed without a comparison with my main recording's clone that still holds (voice.closer_why), which confirming
+    it again with the clone of this computer makes."""
+    if voice.why_not_mine(v):
+        return True
+    why = voice.is_sample(v) and (engine := clone_here(s)) and voice.closer_why(v, engine)
+    return bool(why) and not why.startswith(voice.LESS_LIKE)
 
 
 def clone_here(s: config.Settings) -> str:
@@ -137,6 +147,9 @@ def hear_clone(s: config.Settings, consent: dict, v, engine: str, spk, say=lambd
         return got[0]
     why = f'it did not start: {got[0]}' if got else 'stopped' if stop() else f'it took over {CLONE_CHECK_S:.0f} s'
     log.warning('the clone %s was not tested at the confirmation: %s', engine, why)
+    if voice.is_sample(v):  # not compared with my main recording's: it does not speak (voice.closer_why)
+        return consent, (f'The voice made from this recording was not tested now ({why}): your main recording goes on '
+                         'speaking until it is (confirm it again).')
     return consent, f'The voice made from your recording was not tested now ({why}): it is tested the first time it speaks.'
 
 
@@ -341,7 +354,7 @@ class VoicesDialog(QDialog):
         self.delete_button.setEnabled(v is not None and not checking)
         self.delete_theirs.setEnabled(any(x.meta['kind'] == 'them' for x in self.voices))
         self.confirm_button.setEnabled(not isinstance(v, (str, type(None))) and v.meta['kind'] == 'me'
-                                       and bool(voice.why_not_mine(v)) and name not in self.boxes)
+                                       and to_confirm(self.s, v) and name not in self.boxes)
 
     def _ask(self, text: str) -> bool:
         return QMessageBox.question(self, 'Peresmeshnik', text) == QMessageBox.StandardButton.Yes

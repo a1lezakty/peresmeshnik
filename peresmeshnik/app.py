@@ -653,6 +653,7 @@ class Side:
                         raise
                     self.on_error(f'note: {ARROW[self.name]}: {nxt} speaks your cloned voice: {pair.tts} did not start ({e})')
                     tts, engine = make_engine(nxt, models.path(nxt), threads=s.local.threads), nxt
+                    v, note = voice.speaker(s.local.voice, self.tgt, engine=nxt)  # my sample: compared on this one?
             except (RuntimeError, OSError, ValueError) as e:  # not my confirmed voice (voice.NotMine), no CUDA, no runner
                 return self._fallback(s, e)
             d = make_local(self.src, self.tgt, tts=tts, voice=v, **kw)

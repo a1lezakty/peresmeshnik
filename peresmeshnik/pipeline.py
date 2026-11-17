@@ -124,6 +124,7 @@ MAX_LAG_S."""
         flushes its output too. Clauses that end from now on are spoken as usual."""
         with self._play_lock:  # not lost under the speech thread's update of _play_end
             self._cut = self._play_end = time.perf_counter()
+        self._joins.end_db = None  # the next clause is not levelled to speech cut off
 
     def warm_up(self) -> None:
         """Run every engine once before audio comes (first calls allocate); the app shows "warming up"."""
@@ -282,6 +283,7 @@ MAX_LAG_S."""
                     st['dropped'] += 1
                     log.info(json.dumps(c | {'translation': translation}, ensure_ascii=False))
                     self._events.put(Latency(c['clause'], 'dropped', round(lag, 3)))  # no voice comes for it (a remote client)
+                    self._joins.end_db = None  # the next clause is not levelled to the one before the dropped one
                     continue
                 if lag > FAST_AFTER_S:
                     cap = self.max_lag_s or MAX_LAG_S

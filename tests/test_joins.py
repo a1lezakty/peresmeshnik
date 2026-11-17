@@ -101,6 +101,11 @@ def test_closing_closes_the_engine():
     assert closed == [True]
 
 
+def test_goes_on_cjk_and_arabic():
+    assert [goes_on(t) for t in ('我们明天见。', '明日、', 'غدا؟', 'نراكم غدا.', '내일 봐요.')] == [
+        '我们明天见，', '明日，', 'غدا؟', 'نراكم غدا،', '내일 봐요,']
+
+
 def test_goes_on_text():
     assert goes_on('Мы пошли в магазин.') == 'Мы пошли в магазин,'
     assert goes_on('and then we went to the') == 'and then we went to the,'

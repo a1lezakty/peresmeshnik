@@ -599,6 +599,22 @@ def test_voices_window_my_sample(root, monkeypatch):
     rows = [d.list.item(i).text() for i in range(d.list.count())]
     assert 'confirmed at the microphone' in rows[names.index('me-en')] and ', not used: ' in rows[names.index('me-en')]
     d.list.setCurrentRow(names.index('me-en'))
+    assert not d.confirm_button.isEnabled()  # no clone here to compare with: confirming again changes nothing
+    monkeypatch.setattr(voices, 'clone_here', lambda s: 'pocket-tts-en')  # one here now (the token given later)
+    q = voice.load('me-en').meta['quality'] | {'level_db': -20.0, 'snr_db': 40.0, 'band_db': -10.0, 'echo': 0.1}
+    voice._write(root / 'me-en', voice.load('me-en').meta | {'quality': q})
+    d.refresh()
+    d.list.setCurrentRow(names.index('me-en'))
+    assert 'not used: it was not compared with your main recording' in d.list.item(names.index('me-en')).text()
+    assert d.confirm_button.isEnabled()  # stuck otherwise: confirmed, never compared, never used
+    v = voice.load('me-en')
+    from peresmeshnik import models
+    k = {'model': models.get('pocket-tts-en').fingerprint, 'similarity': 0.3, 'main': 0.4,
+         'main_sha256': voice._sha(root / 'me' / 'reference.wav')}
+    voice._write(v.path, v.meta | {'consent': v.meta['consent'] | {'clones': {'pocket-tts-en': k}}})
+    d.refresh()
+    d.list.setCurrentRow(names.index('me-en'))
+    assert voice.LESS_LIKE in d.list.item(names.index('me-en')).text() and not d.confirm_button.isEnabled()
     d.delete()
     assert not (root / 'me-en').exists() and (root / 'me').exists() and s.local.voice == 'me' and changed[-1] is True
     voice.save(*speech(), 'me-en', 'en', '', root, 'mic')

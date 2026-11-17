@@ -3009,7 +3009,7 @@ YtyM7ojCUz8, 10 min, GigaAM CTC). A known trade-off, kept: the translation is th
 set, each cut in two as `max_clause_s` cuts it (at a comma near its middle, else between words), both parts said and
 played back to back; 3 voices per language (`ref_<lang>.wav` and the set's two longest clips: readers, not users).
 English: the open Kyutai weights with the registry's Mimi encoder (`pocket_speed.py`'s stand-in for the gated
-`pocket-tts-en`, the same model). The night's metric (research 2026-11-16 VOICE §1.3): silence at the join (10 ms frames
+`pocket-tts-en`, the same model). The metric of a research run of 2026-11-16 (not published): silence at the join (10 ms frames
 under −45 dBFS), the loudness step (the first 0.4 s of part 2's speech against the last 0.4 s of part 1's), a click
 (the largest sample step at the join against the 99th percentile: over 1 is a click). "First word": from the start of
 a sentence's synthesis to its first word, were it played from its first chunk. Medians over 24 joins (p90).
@@ -3021,11 +3021,11 @@ a sentence's synthesis to its first word, were it played from its first chunk. M
 | Pocket-ru, 0.3.1 | 0.19 (0.29) | +5.0 (8.4) | 0.72 | 0.12 (0.18) |
 | **Pocket-ru, 0.3.2** | **0.10** (0.14) | **+2.4** (3.5) | 0.76 | 0.11 (0.15) |
 
-The same sentence said whole (research R2): silence 0–0.1 s, step |4.5| dB English, |3.3| Russian. What made it so:
+The same sentence said whole (that run): silence 0–0.1 s, step |4.5| dB English, |3.3| Russian. What made it so:
 
 - The two parts are as loud as each other overall (within ~1 dB); the jump is each part's own fall from its loud start to
-  its quiet end (English −8.6 dB). So a part that goes on with the sentence starts where the one before ended, +1.5 dB,
-  and comes back to its own loudness within 1 s, turned down 6 dB at most: at 12 dB a clause that ended in a whisper
+  its quiet end (English −8.6 dB). So a part that goes on with the sentence is set to start where the one before ended,
+  +1.5 dB, and comes back to its own loudness within 1 s, turned down 6 dB at most (hence still +5.1 dB in English): at 12 dB a clause that ended in a whisper
   made the next start under the speech of its own clause.
 - The silence is room noise in Pocket-ru's output (−45…−55 dBFS: the sample's room), digital in Pocket-en's (−80 dBFS,
   ~0.3 s before the first word): judged against the part's own quietest and loudest frames. Cut without a fade, and
@@ -3034,7 +3034,12 @@ The same sentence said whole (research R2): silence 0–0.1 s, step |4.5| dB Eng
 - Without its full stop Pocket-ru often still sounds when EOS and its frames are said (the last 10 ms loud in 5 of 16
   clause ends; 2 with 3 frames more, which a part that goes on now gets; with the full stop 1 of 9). English 2 → 0.
 - The first word comes sooner by the synthesized pause before it that is no longer played (English 0.2 s).
-- The pitch step at the join is not touched (5–8 semitones, research R2): it needs a TTS that takes the text as it
+- Not measured here: the parts were played back to back offline, not in a call; part 2's start waits for 0.4 s of its
+  speech (the levelling), mostly while part 1 still plays; Piper, XTTS and Qwen3 get the same cuts, fades and trailing
+  comma, but only Pocket was measured.
+- A clause whose translation itself ends with a comma (`,;:` or a dash: its sentence goes on, whatever ended the clause)
+  is said by Pocket without a full stop too.
+- The pitch step at the join is not touched (5–8 semitones, that run): it needs a TTS that takes the text as it
   streams (0.4).
 
 ## 0.3.2: the recording check of my voice sample in their language
@@ -3047,6 +3052,7 @@ laptop microphone at 0.5 m in a 40 m³ room; noise: fan-like.
 | condition | similarity | against the same sample clean | check() snr_db | room_echo, s | passes |
 |---|---|---|---|---|---|
 | clean | 0.56 | — | 27.3 | 0.10 | 10/10 |
+| noise SNR 40; a good room (RT60 0.2, SNR 40); 1.5 s pauses | 0.59 / 0.56 / 0.59 | +0.03 / 0.00 / +0.03 | 27.0 / 26.0 / 39.5 | 0.11 / 0.20 / 0.09 | 10 / 10 / 5 |
 | noise, SNR 30 / 20 / 15 dB | 0.57 / 0.49 / 0.43 | +0.01 / −0.07 / −0.13 | 25.4 / 19.7 / 15.8 | 0.12 / 0.15 / — | 10 / 0 / 0 |
 | room, RT60 0.2 / 0.4 / 0.7 s | 0.54 / 0.52 / 0.47 | −0.02 / −0.04 / −0.08 | 25.7 / 23.6 / 21.0 | 0.19 / 0.37 / 0.65 | 9 / 7 / 0 |
 | a laptop (RT60 0.4, SNR 30, 16 kHz) | 0.47 | −0.09 | 22.4 | 0.37 | 7/10 |
@@ -3056,11 +3062,15 @@ laptop microphone at 0.5 m in a 40 m³ room; noise: fan-like.
 | FLEURS readers, as recorded | 0.40 | (other voices) | 34.1 | 0.16 | 10/10 |
 
 So the sample speaks only with `snr_db` ≥ 22, `room_echo` ≤ 0.45 s and sound above 4 kHz (`voice.sample_why`): of the 85
-harmless conditions none failed; those passing average 0.54, those failing 0.44. Level and a little clipping cost
+harmless samples (clean, SNR 40 and 30, the good room, the 16 kHz microphone, −40 and −55 dBFS, clipped, pauses) none
+failed; those passing average 0.54, those failing 0.44. Level and a little clipping cost
 nothing once `save()` levels the sample. `room_echo`'s RT60 against the true one: 0.07–0.13 dry, 0.26–0.31 / 0.38–0.48 /
 0.57–0.95 at 0.3 / 0.5 / 1.0 s; FLEURS home rooms 0.09–0.26 (394 clips).
 
 What no recording check sees: some voices clone worse whatever the room (two clean readers 0.39 and 0.44; the FLEURS
-readers 0.23–0.45 in rooms that read dry; the night's 0.22 on FLEURS was not reproduced here). So the sample's clone also
+readers 0.23–0.45 in rooms that read dry; that run's 0.22 on FLEURS was not reproduced here). So the sample's clone also
 has to sound more like me than my main recording's: at its confirmation both say the test phrases and are heard against
-the same live reading (`voice.confirm_clone`, `closer_why`), and only the closer one speaks.
+the same live reading (`voice.confirm_clone`, `closer_why`), and only the closer one speaks. Not measured: that
+comparison is one speaker vector per clone over two test phrases, so two clones within a few hundredths of each other
+are told apart by chance (either is then about as like me). The thresholds were set with Pocket-en and 15 s samples;
+they apply to a sample in any language.

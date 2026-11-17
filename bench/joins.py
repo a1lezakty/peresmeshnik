@@ -1,6 +1,6 @@
 """Clause joins (audio/joins.py): a long sentence of the bench set cut in two as `max_clause_s` cuts it (at a comma near
 its middle, else between words), each part said by the app's Pocket engine (int8, 2 threads), played back to back. The
-night's join metric (research 2026-11-16 R2, stitch.py; numpy part): silence at the join (10 ms frames under -45 dBFS,
+join metric of a research run of 2026-11-16 (not published): silence at the join (10 ms frames under -45 dBFS,
 the end of part 1 + the start of part 2), clicks at it, and the loudness step (the first 0.4 s of part 2's speech against the last 0.4 s
 of part 1's: 20 ms frames within 30 dB of each part's loudest). The pitch step is not touched by the change (not here).
 `first_word_s`: from the start of part 1's synthesis to its first word, were it played from its first chunk (the
@@ -53,7 +53,7 @@ def voiced(y, sr):
 
 
 def click(p1, p2, sr):
-    """The largest sample step within 5 ms of the join against the pair's 99th percentile one (the night's: > 1 a click)."""
+    """The largest sample step within 5 ms of the join against the pair's 99th percentile one (> 1: a click)."""
     x, j, w = np.concatenate([p1, p2]), len(p1), int(0.005 * sr)
     d = np.abs(np.diff(x))
     return float(d[max(j - w, 0):j + w].max() / (np.percentile(d, 99) + 1e-9))

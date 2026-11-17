@@ -1006,7 +1006,7 @@ class VoicePage(QWizardPage):
         """The optional section "Your voice in <their language>" where a sample can speak (sample_lang): why, the text,
         Record, the verdict (voice.check, voice.sample_why) and, for a take kept, the box to confirm it as mine (M-20)."""
         from peresmeshnik import voice
-        from peresmeshnik.ui.voices import ConfirmBox
+        from peresmeshnik.ui.voices import ConfirmBox, to_confirm
         if self.sample_confirm is not None:
             self.sample_confirm.retire()
             self.sample_confirm = None
@@ -1020,7 +1020,7 @@ class VoicePage(QWizardPage):
                                  f'recording speaks. Read this aloud:')
         self.sample_prompt.setText(voice.PROMPTS[lang])
         v = self.sample
-        if v is None or not voice.why_not_mine(v) or voice.sample_why(v.meta.get('quality') or {}):
+        if v is None or voice.sample_why(v.meta.get('quality') or {}) or not to_confirm(s, v):
             return
         self.sample_confirm = ConfirmBox(s, v.name, parent=self, translating=self.translating)
         self.sample_confirm.confirmed.connect(lambda _: setattr(self, 'sample', voice.load(v.name)))
@@ -1209,6 +1209,8 @@ class HotkeyPage(QWizardPage):
         threading.Thread(target=work, name='test-phrase', daemon=True).start()
 
     def _state(self, st: str) -> None:
+        if st.startswith('voice: '):  # whose voice speaks: the tray's line, not the test's
+            return
         if st.startswith('error'):
             self.error = st  # kept: a wrong key flashes for a second otherwise and the test looks fine
         if st == 'test done':

@@ -467,6 +467,14 @@ def test_barge_in_drops_what_is_not_heard_yet(monkeypatch):
     assert d.stats['dropped'] == 0  # nothing was queued at the cut; clause 0's tail broke off mid-synthesis
 
 
+def test_after_a_barge_in_the_voice_is_not_levelled_to_what_was_cut():
+    d = LocalDirection(EnergyVad(), WordAsr(), UpperMt(), SlowTts(), 'en', 'ru')
+    d._joins.end_db = -30.0
+    d.interrupt()
+    assert d._joins.end_db is None
+    d.close()
+
+
 def test_call_app_choice():
     """A known call app is taken by itself only when it is the one playing; a browser never (all its tabs would move)."""
     from peresmeshnik.audio.capture_pipewire import apps, guess_call_app, is_browser

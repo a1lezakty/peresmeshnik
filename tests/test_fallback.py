@@ -76,6 +76,17 @@ def cloud_voice(r, since=0.0):  # the fake translator's tone (cloud speech), not
     return [t for t, e in r.speech(since) if float(np.abs(e.pcm).max(initial=0)) > 0.1 and not np.allclose(e.pcm, e.pcm[0])]
 
 
+def test_a_clause_cut_by_length_is_said_locally():
+    """pipeline._speak says a clause cut by length without its full stop (joins.goes_on): the local voice still knows it
+    for the MT's (`_want`), and the clauses after it stay queued."""
+    import collections
+    import types
+    fb = types.SimpleNamespace(_lock=threading.Lock(), _muted=[], _made=collections.deque(
+        [['Hello there.', 0.0, True], ['And then.', 0.0, True]]))
+    assert Fallback._want(fb, 'Hello there,') and [t for t, *_ in fb._made] == ['And then.']
+    assert Fallback._want(fb, 'And then.') and not fb._made
+
+
 def test_dropped_connection_goes_local_without_repeating(fake):
     r = Run(fake)
     try:

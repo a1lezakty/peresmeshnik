@@ -795,8 +795,8 @@ def test_the_speaker_of_their_language(tmp_path):
     ({'main': 'gone'}, 'not compared with your main recording yet'),
 ])
 def test_my_sample_speaks_only_when_its_clone_is_more_like_me(tmp_path, heard, why):
-    """The leader, 17.11: the sample must never make my voice less like me than my main recording does (confirm_clone
-    heard both clones against the same live reading)."""
+    """The sample must never make my voice less like me than my main recording does (confirm_clone heard both clones
+    against the same live reading)."""
     root = tmp_path / 'v'
     voice.save(*speech(), 'me', 'ru', '', root)
     confirmed('me', root)
@@ -808,6 +808,16 @@ def test_my_sample_speaks_only_when_its_clone_is_more_like_me(tmp_path, heard, w
     got, note = voice.speaker('me', 'en', root, engine='pocket-tts-en')
     assert (got.name, why in note, bool(note)) == ('me' if why else 'me-en', True, bool(why)), note
     assert voice.speaker('me', 'en', root, engine='xtts-v2')[0].name == 'me'  # heard with another engine: not compared
+
+
+def test_the_sample_is_compared_with_the_main_recording_that_speaks(tmp_path):
+    """main_of: a sample in Voices… against my saved main recording, even beside a draft left by a wizard that crashed;
+    the wizard's draft sample against its draft main recording (both are kept at Finish)."""
+    root = tmp_path / 'v'
+    for name in ('me', 'me.new'):
+        voice.save(*speech(), name, 'ru', '', root)
+    assert voice.main_of(sample(root)) == root / 'me'
+    assert voice.main_of(voice.save(*speech(), 'me-en.new', 'en', '', root, 'mic')) == root / 'me.new'
 
 
 def test_the_confirmation_compares_the_two_clones(tmp_path):

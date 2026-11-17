@@ -1,6 +1,7 @@
 """Clause joins (pipeline._speak): each clause is synthesized on its own and the clauses play back to back, so a sentence
 cut by length (`max_clause_s`) had a pause and a jump in loudness in its middle that the same sentence said whole has not
-(research 2026-11-16 VOICE §1.3, B.5; measured again by bench/joins.py: Pocket, 3 voices x 8 sentences). `Joins` takes each
+(a research run of 2026-11-16, not published; measured again by bench/joins.py: Pocket, 3 voices x 8 sentences). `Joins`
+takes each
 clause's chunks as they come:
 
 - its synthesized silence is cut to EDGE_S at its start and, where the sentence goes on (the clause was cut by length), at
@@ -11,7 +12,7 @@ clause's chunks as they come:
   within ~1 dB; the jump is each clause's own fall from its loud start to its end (6-9 dB). For it LOOK_S of the clause's
   speech is held back first, mostly while the clause before still plays.
 
-No crossfade: the joins have no clicks (the night's metric), they fall in silence.
+No crossfade: the joins have no clicks (bench/joins.py), they fall in silence.
 """
 from __future__ import annotations
 
@@ -26,7 +27,7 @@ FRAME_S = 0.01  # silence is judged in frames this long
 NOISE_DB, QUIET_DB, TOP_DB = 20.0, 30.0, -15.0
 EDGE_S = 0.05  # silence kept at a join inside a sentence, each side: ~0.1 s between the clauses (whole: 0-0.1 s)
 PAUSE_S = 0.25  # ... after a sentence's end
-LOOK_S = 0.4  # the start of a clause that goes on: its loudness from this much of its speech (the night's metric window)
+LOOK_S = 0.4  # the start of a clause that goes on: its loudness from this much of its speech (bench/joins.py's window)
 RESET_DB = 1.5  # it starts this much louder than the clause before ended (a sentence said whole: +1.5..+1.9 dB, median)
 RAMP_S = 1.0  # ... and is back at its own loudness after this long
 MAX_DB = 6.0  # it is turned down at most this much, never up: a clause that ended in a whisper (-35 dBFS) does not make
@@ -38,13 +39,15 @@ FADE_S = 0.005  # where silence is cut the sound fades in, and each clause's end
 def goes_on(text: str) -> str:
     """The text of a clause cut by length for the TTS: the sentence goes on, so no full stop (MT may add one; Pocket ends a
     text that ends in a word with one, local/pocket.prompt). A trailing comma says so to every engine."""
-    core = re.sub(r'[\s.,;:…]+$', '', text)
-    return core if not core or core[-1] in '!?' else core + ','
+    core = re.sub(r'[\s.,;:…。．，、；：،]+$', '', text)
+    if not core or core[-1] in '!?！？؟':
+        return core
+    return core + ('，' if '\u3040' <= core[-1] <= '\u9fff' else '،' if '\u0600' <= core[-1] <= '\u06ff' else ',')
 
 
 def speech_db(x: np.ndarray, sr: int, head: bool, n: int) -> float | None:
     """Loudness (dB) of the first (`head`) or last `n` samples of the speech in `x`: its 20 ms frames within 30 dB of its
-    loudest, as the night's join metric (research r2/stitch.py)."""
+    loudest, as bench/joins.py measures the step."""
     f = sr // 50
     k = len(x) // f
     if not k:

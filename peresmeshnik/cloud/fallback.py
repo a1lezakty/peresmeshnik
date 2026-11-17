@@ -35,6 +35,7 @@ import statistics
 import threading
 import time
 
+from peresmeshnik.audio.joins import goes_on
 from peresmeshnik.audio.resample import Resampler
 from peresmeshnik.cloud.gemini import OUT_RATE, CloudDown
 from peresmeshnik.engines import Caption, Latency, Speech
@@ -295,7 +296,7 @@ class Fallback:
         with self._lock:
             while self._made:
                 t, at, say = self._made.popleft()  # clauses the pipeline dropped (too late) went without a call
-                if t == text:
+                if text in (t, goes_on(t)):  # a clause cut by length is said without its full stop (pipeline._speak)
                     if not say:
                         self._muted.append((t, at))
                     return say

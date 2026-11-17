@@ -526,16 +526,23 @@ def is_sample(v: Voice) -> bool:
 
 
 def main_of(v: Voice) -> Path | None:
-    """The folder of my main recording beside the sample `v` (is_sample): the wizard's take in progress first."""
+    """The folder of my main recording beside the sample `v` (is_sample); for the wizard's draft sample, its draft main
+    recording first (both are kept at Finish)."""
     base = v.name.removesuffix('.new').removesuffix(f'-{v.meta.get("lang")}')
-    return next((f for f in (v.path.parent / f'{base}.new', v.path.parent / base) if (f / 'reference.wav').is_file()), None)
+    names = (f'{base}.new', base) if v.name.endswith('.new') else (base,)
+    return next((f for n in names if ((f := v.path.parent / n) / 'reference.wav').is_file()), None)
 
 
-def closer_why(v: Voice, engine: str, main: Path) -> str:
+LESS_LIKE = 'the voice made from it sounded less like you than the one from your main recording'
+
+
+def closer_why(v: Voice, engine: str) -> str:
     """'' when the clone `engine` ('': any) made from my sample `v` sounded more like my live reading than the one made
-    from my main recording `main` (confirm_clone heard both, at the sample's confirmation), else why not, for the user:
-    the sample never makes my voice less like me than the main recording does."""
+    from my main recording (main_of; confirm_clone heard both, at the sample's confirmation), else why not, for the user:
+    the sample never makes my voice less like me than the main recording does. Any reason but LESS_LIKE: confirming the
+    sample again (with that engine here) compares them."""
     from peresmeshnik import models
+    main = main_of(v)
     k = next((k for e, k in ((v.meta.get('consent') or {}).get('clones') or {}).items()
               if (not engine or e == engine) and 'main' in k), None)
     if k is None:
@@ -546,11 +553,10 @@ def closer_why(v: Voice, engine: str, main: Path) -> str:
         fp = k.get('model')
     if k.get('model') != fp:
         return 'the voice engine changed after it was compared: confirm it again (Voices…)'
-    if (main / 'reference.wav').is_file() and k.get('main_sha256') != _sha(main / 'reference.wav'):
+    if main is not None and k.get('main_sha256') != _sha(main / 'reference.wav'):
         return 'your main recording changed after it was compared: confirm the sample again (Voices…)'
     if k['main'] is not None and k['similarity'] <= k['main']:
-        return (f'the voice made from it sounded less like you than the one from your main recording '
-                f'({k["similarity"]:.2f} against {k["main"]:.2f})')
+        return f'{LESS_LIKE} ({k["similarity"]:.2f} against {k["main"]:.2f})'
     return ''
 
 
@@ -565,7 +571,7 @@ def speaker(name: str, lang: str, root: Path | None = None, engine: str = '') ->
         try:
             v = load(f'{name}-{lang}', root)
             why = (why_not_mine(v) or sample_why(v.meta.get('quality') or {})
-                   or closer_why(v, engine, (root or voices_dir()) / name))
+                   or closer_why(v, engine))
         except (OSError, ValueError, AttributeError):
             why = 'it cannot be read: record it again'
         if not why:

@@ -37,8 +37,8 @@ of 3 cores, CPU only, and x86 CPUs), not yet on a real Mac: `docs/BENCH.md`, the
   their cloned voice" (or a stock voice, Gemini's voice, … on your server).
 - **Russian recognition on GigaAM v3 e2e RNN-T** (was CTC): far-field speech 5.0 % of words wrong instead of 7.8 %
   (Golos), Common Voice 1.8 instead of 2.1 %; its final text comes 0.1–0.2 s later, your voice in the call not later.
-  After the update download it in Components… (226 MB); until then the old model recognizes as in 0.3.1. Only once the
-  new one is there remove the old one (225 MB) in Components…: until then Russian runs on it.
+  After the update download it in Components… (226 MB); until then the old model recognizes as in 0.3.1, and
+  Components… lists it as in use. Once the new one is there, the old one (225 MB) can be removed there.
 - **Headphones:** README (macOS) and the wizard's Sound devices page advise wired ones, not the AirPods microphone
   (macOS switches AirPods to their phone-call mode, slower and with poor sound both ways).
 

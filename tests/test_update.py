@@ -264,6 +264,37 @@ def test_no_restart_during_a_translation(gh, monkeypatch):
     assert calls[1:] == [('hand over', '0.3.4')] + ([('quit',)] if sys.platform == 'darwin' else [])
     if sys.platform != 'darwin':  # the installer closes it
         assert 'closes and starts again by itself' in t.said[-1] and not t.update_offer.isEnabled()
+        assert t.updates.closing.isActive()
+        t.updates.closing.stop()
+
+
+@pytest.mark.skipif(sys.platform == 'darwin', reason='Windows: the installer closes the app')
+def test_an_installer_that_ends_early_gives_the_menu_back(gh, monkeypatch):
+    gh.publish('0.3.4', {DMG: b'x'})
+    monkeypatch.setattr(update, 'installable', lambda: '')
+    monkeypatch.setattr(update, 'file_for', lambda rel: DMG)
+    monkeypatch.setattr(update, 'prepare', lambda f: f)
+
+    class Installer:
+        code = None
+
+        def poll(self):
+            return self.code
+    installer = Installer()
+    monkeypatch.setattr(update, 'hand_over', lambda rel, ready: (update.pending().write_text('{}'), installer)[1])
+    t = _tray()
+    t.updates.ask = lambda box: None
+    t.updates.check()
+    _until(lambda: t.update_offer.isVisible())
+    t.updates.install()
+    _until(lambda: t.updates.closing.isActive())
+    t.updates._not_closed()  # the timer: the installer still on its way (an antivirus scanning it): later again
+    assert t.updates.busy and t.updates.closing.isActive()
+    installer.code = 1  # it ended, the app still runs: it did not install
+    t.updates._not_closed()
+    assert not t.updates.busy and t.update_offer.isEnabled() and t.update_offer.text() == 'Update to 0.3.4…'
+    assert 'the installer ended early' in t.said[-1] and not update.pending().exists()
+    t.updates.closing.stop()
 
 
 def test_the_offer_says_what_stays_and_the_permissions_on_macos(gh, monkeypatch):

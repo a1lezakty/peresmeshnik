@@ -72,12 +72,24 @@ def newer(rel: Release | None, current: str = '') -> bool:
     return bool(rel) and (version(rel.version) or ()) > (version(current or __version__) or ())
 
 
-def _get(url: str, accept: str = 'application/vnd.github+json', timeout: float = 20):
+def _secure(url: str) -> str:
     local = 'PERESMESHNIK_UPDATE_API' in os.environ and urllib.parse.urlsplit(url).hostname in ('127.0.0.1', 'localhost')
     if not url.startswith('https://') and not local:  # plain http only to a fake on this computer
         raise Failed(f'not over HTTPS: {url}')
-    req = urllib.request.Request(url, headers={'Accept': accept, 'User-Agent': f'peresmeshnik/{__version__}'})
-    return urllib.request.urlopen(req, timeout=timeout)
+    return url
+
+
+class _Redirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # a release file: on to GitHub's file server
+        return super().redirect_request(req, fp, code, msg, headers, _secure(newurl))
+
+
+_opener = urllib.request.build_opener(_Redirect)
+
+
+def _get(url: str, accept: str = 'application/vnd.github+json', timeout: float = 20):
+    req = urllib.request.Request(_secure(url), headers={'Accept': accept, 'User-Agent': f'peresmeshnik/{__version__}'})
+    return _opener.open(req, timeout=timeout)
 
 
 def _json(url: str):
@@ -219,9 +231,11 @@ def attested(digest: str, ver: str) -> None:
         found = []
     for a in found:
         try:
-            bundle = a.get('bundle') or json.loads(_unsnappy(_get(a['bundle_url'], 'application/octet-stream').read()))
+            if not (bundle := a.get('bundle')):
+                with _get(a['bundle_url'], 'application/octet-stream') as r:
+                    bundle = json.loads(_unsnappy(r.read(1 << 20)))  # a bundle is a few KB
             st = json.loads(base64.b64decode((bundle.get('dsseEnvelope') or {}).get('payload', '')))
-        except (KeyError, ValueError, IndexError, AttributeError):
+        except (KeyError, ValueError, IndexError, AttributeError, TypeError, OSError):  # the next one may do
             continue
         wf = st.get('predicate', {}).get('buildDefinition', {}).get('externalParameters', {}).get('workflow', {})
         if (st.get('predicateType') == 'https://slsa.dev/provenance/v1'
@@ -316,7 +330,7 @@ def staged() -> Path | None:
     return app.with_name(f'.{app.stem}-update.app') if sys.platform == 'darwin' and app else None
 
 
-def hand_over(rel: Release, ready: Path) -> None:
+def hand_over(rel: Release, ready: Path) -> subprocess.Popen:
     """Starts what replaces the app once it quits (`prepare`'s result): on macOS the caller quits the app right after, on
     Windows the installer closes it. Raises Failed / OSError when it cannot start: nothing changed then."""
     # Windows: the installer keeps the old folder aside until the new one is in (Peresmeshnik.iss): room for both;
@@ -327,21 +341,21 @@ def hand_over(rel: Release, ready: Path) -> None:
     res.unlink(missing_ok=True)
     pending().write_text(json.dumps({'version': rel.version, 'result': str(res)}), 'utf-8')
     try:
-        _start(ready, res)
+        return _start(ready, res)
     except BaseException:
         pending().unlink(missing_ok=True)  # nothing started: nothing to say at the next start
         raise
 
 
-def _start(ready: Path, res: Path) -> None:
+def _start(ready: Path, res: Path) -> subprocess.Popen:
     if sys.platform == 'darwin':  # `open` gets the app's own environment ($PERESMESHNIK_CONFIG, ...) as LaunchServices does not
         env = [a for k, v in os.environ.items() if k.startswith('PERESMESHNIK_') for a in ('--env', f'{k}={v}')]
-        subprocess.Popen(['/bin/sh', '-c', SWAP, 'peresmeshnik-update', str(os.getpid()), str(app_path()), str(ready),
+        return subprocess.Popen(['/bin/sh', '-c', SWAP, 'peresmeshnik-update', str(os.getpid()), str(app_path()), str(ready),
                           str(res), *env], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, close_fds=True)
     else:  # the installer closes the app (WM_CLOSE: Peresmeshnik.iss), and with /Relaunch=1 starts it again, old or new;
         # /SILENT: its progress shows, it asks nothing
-        subprocess.Popen([str(ready), '/SILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOCANCEL', '/Relaunch=1',
+        return subprocess.Popen([str(ready), '/SILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOCANCEL', '/Relaunch=1',
                           f'/LOG={res}'], close_fds=True,
                          creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
 

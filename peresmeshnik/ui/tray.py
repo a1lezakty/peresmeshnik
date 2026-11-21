@@ -605,10 +605,15 @@ class Updates(QObject):
     progress = Signal(object, object)  # bytes downloaded, of (past 2 GiB too)
     ready = Signal(object, str)  # (what update.hand_over starts from, or None, and why not)
     START_S = 300  # the first check after a start waits this long: the start and its first minutes stay light
+    CLOSE_S = 120  # Windows: the installer closes the app within seconds of its start, or it ended early
 
     def __init__(self, tray: Tray):
         super().__init__()
         self.tray, self.release, self.prepared, self.busy = tray, update.known(), None, False
+        self.installer = None  # Windows: the installer started, until it closes the app
+        self.closing = QTimer(self)  # Windows: armed only while the installer is on its way
+        self.closing.setSingleShot(True)
+        self.closing.timeout.connect(self._not_closed)
         self.auto = False  # `peresmeshnik app --update-now`: installs what it finds without asking (tests of the build)
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
@@ -746,6 +751,17 @@ class Updates(QObject):
             self.ready.emit(ready, err)
         threading.Thread(target=work, name='update-download', daemon=True).start()
 
+    def _not_closed(self) -> None:
+        """Still running a while after the installer started: it ended before it closed the app (its log says why),
+        or it is still on its way (an antivirus scanning it): looked at again then."""
+        if self.installer is not None and self.installer.poll() is None:
+            return self.closing.start(self.CLOSE_S * 1000)
+        self.busy = False
+        self._item()
+        update.pending().unlink(missing_ok=True)  # said now, not again at the next start
+        self.say(f'The update to {self.release.version} did not install: the installer ended early (its log: '
+                 f'{update.folder() / "result.txt"}). Peresmeshnik {__version__} goes on working.')
+
     def _progress(self, done: int, total: int) -> None:
         if total:
             self._item(f'Downloading {self.release.version}: {done * 100 // total} %')
@@ -767,13 +783,14 @@ class Updates(QObject):
             return self.say(f'Peresmeshnik {rel.version} is downloaded and checked: choose "Update to {rel.version}…" '
                             'again once translation is off.')
         try:
-            update.hand_over(rel, ready)
+            self.installer = update.hand_over(rel, ready)
         except Exception as e:
             return self.say(f'The update to {rel.version} was not installed: {e}')
         log.warning('update: handed over for %s', rel.version)
         if not MAC:  # the installer closes the app itself (WM_CLOSE, as an install by hand); until then it runs as it is
             self.busy = True
             self._item(f'Installing {rel.version}…')
+            self.closing.start(self.CLOSE_S * 1000)
             return self.tray.message(f'Installing Peresmeshnik {rel.version}: it closes and starts again by itself.')
         from PySide6.QtWidgets import QApplication
         QApplication.quit()

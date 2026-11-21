@@ -121,23 +121,29 @@ begin
   end;
   if CurStep = ssPostInstall then begin
     Installed := True;
-    if Kept <> '' then
-      DelTree(Kept, True, True, True);
+    DelTree(ExpandConstant('{app}') + '.old', True, True, True);  { also one an update cut short left (power gone) }
   end;
 end;
 
 procedure DeinitializeSetup();
 var
-  ResultCode: Integer;
+  ResultCode, I: Integer;
 begin
   if not Relaunch() then
     Exit;
   if not Installed and (Kept <> '') and DirExists(Kept) then begin
-    DelTree(AppDir, True, True, True);
-    if RenameFile(Kept, AppDir) then begin
-      Installed := True;  { the old one is whole again }
-      Log('The install failed: the old install folder is back');
+    for I := 1 to 20 do begin  { up to 10 s: an antivirus may still hold a file the failed install wrote }
+      DelTree(AppDir, True, True, True);
+      if RenameFile(Kept, AppDir) then begin
+        Installed := True;  { the old one is whole again }
+        Break;
+      end;
+      Sleep(500);
     end;
+    if Installed then
+      Log('The install failed: the old install folder is back')
+    else
+      Log('The install failed and the old install folder could not be put back: it is ' + Kept);
   end;
   { not when a failed install over the folder left it half replaced, nor when Setup stopped before it closed the app }
   if (Installed or (AppDir = '')) and (FindWindowByWindowName(HostTitle) = 0) then

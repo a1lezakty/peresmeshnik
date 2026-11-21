@@ -8,6 +8,10 @@
   #error pass /DVersion=<version>
 #endif
 #define Root SourcePath + "..\.."
+; /DCompression=zip: the quicker installer tests/test_app_windows.py builds to update to
+#ifndef Compression
+  #define Compression "lzma2/max"
+#endif
 
 [Setup]
 AppId={{F900FAE6-BF0A-4AA3-B66D-0CE8539E4E55}
@@ -30,7 +34,7 @@ OutputBaseFilename=Peresmeshnik-{#Version}-windows-x64-setup
 SetupIconFile={#Root}\assets\icons\app.ico
 UninstallDisplayIcon={app}\Peresmeshnik.exe
 UninstallDisplayName=Peresmeshnik
-Compression=lzma2/max
+Compression={#Compression}
 SolidCompression=yes
 WizardStyle=modern
 CloseApplications=yes
@@ -83,6 +87,70 @@ var
   ResultCode: Integer;
 begin
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM peresmeshnik-loopback.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+{ The app's own update (/Relaunch=1, peresmeshnik/update.py), which closed the app: the old install folder is kept
+  aside as <folder>.old until the new one is in, and put back when the install fails (Inno's rollback brings back no
+  file it replaced or deleted); the app starts again when Setup ends, new or old. An install by hand is not changed. }
+var
+  AppDir, Kept: String;
+  Installed: Boolean;
+
+function Relaunch(): Boolean;
+begin
+  Result := ExpandConstant('{param:Relaunch|0}') = '1';
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  I: Integer;
+begin
+  if (CurStep = ssInstall) and Relaunch() and DirExists(ExpandConstant('{app}')) then begin
+    AppDir := ExpandConstant('{app}');
+    Kept := AppDir + '.old';
+    DelTree(Kept, True, True, True);
+    for I := 1 to 20 do begin  { up to 10 s: the app that has just quit may still hold a file }
+      if RenameFile(AppDir, Kept) then
+        Break;
+      Sleep(500);
+    end;
+    if DirExists(AppDir) then
+      Kept := ''  { not moved: installed over it, as by hand }
+    else
+      Log('The old install folder is kept aside as ' + Kept);
+  end;
+  if CurStep = ssPostInstall then begin
+    Installed := True;
+    DelTree(ExpandConstant('{app}') + '.old', True, True, True);  { also one an update cut short left (power gone) }
+  end;
+end;
+
+procedure DeinitializeSetup();
+var
+  ResultCode, I: Integer;
+begin
+  if not Relaunch() then
+    Exit;
+  if not Installed and (Kept <> '') and DirExists(Kept) then begin
+    for I := 1 to 20 do begin  { up to 10 s: an antivirus may still hold a file the failed install wrote }
+      DelTree(AppDir, True, True, True);
+      if RenameFile(Kept, AppDir) then begin
+        Installed := True;  { the old one is whole again }
+        Break;
+      end;
+      Sleep(500);
+    end;
+    if Installed then
+      Log('The install failed: the old install folder is back')
+    else
+      Log('The install failed and the old install folder could not be put back: it is ' + Kept);
+  end;
+  { not when a failed install over the folder left it half replaced, nor when Setup stopped before it closed the app }
+  if (Installed or (AppDir = '')) and (FindWindowByWindowName(HostTitle) = 0) then
+    try
+      Exec(ExpandConstant('{app}\Peresmeshnik.exe'), '', ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait, ResultCode);
+    except
+    end;
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;

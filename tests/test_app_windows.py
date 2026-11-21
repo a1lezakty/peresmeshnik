@@ -319,6 +319,74 @@ def test_frozen_cli_fetches_and_translates(tmp_path):
     print('frozen run:', json.dumps({k: frozen.get(k) for k in keys}), '| from Python:', json.dumps({k: source.get(k) for k in keys}))
 
 
+def test_update_from_the_app_installs_the_newer_build_and_starts_it(installed, tmp_path):
+    """The updater end to end (peresmeshnik/update.py): a newer installer (this build's folder as the next version,
+    compressed quickly) served with its .sha256 and attestation by a fake GitHub on 127.0.0.1. `app --update-now` finds
+    it, downloads and checks it and runs it with no questions; the installer closes the app, installs over it (the
+    settings file untouched) and starts it again. The new one runs this build's code, so its start says the update did
+    not install (`update.outcome`: tests/test_update.py has that message)."""
+    from fake_github import FakeGitHub
+
+    import peresmeshnik
+    major, minor, patch = map(int, peresmeshnik.__version__.split('.'))
+    new = f'{major}.{minor}.{patch + 1}'
+    iscc = os.environ.get('ISCC') or r'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+    t0 = time.perf_counter()
+    r = subprocess.run([iscc, '/Q', f'/DVersion={new}', '/DCompression=zip', f'/O{tmp_path}',
+                        str(Path(__file__).parents[1] / 'packaging' / 'windows' / 'Peresmeshnik.iss')],
+                       capture_output=True, text=True, timeout=1200)
+    assert r.returncode == 0, (r.stdout[-2000:], r.stderr[-2000:])
+    built = tmp_path / f'Peresmeshnik-{new}-windows-x64-setup.exe'
+    print(f'the newer installer: {built.stat().st_size / 1e6:.0f} MB in {time.perf_counter() - t0:.0f} s')
+    settings = tmp_path / 'settings.toml'
+    settings.write_text('me_to_them = "cloud"\nsaved_by = "0.3.2"\n\n[ui]\nshow_latency = true\n')  # a choice: never saved over at start
+    before = settings.read_bytes()
+    exe = installed / 'Peresmeshnik.exe'
+    with FakeGitHub() as gh:
+        gh.publish(new, {built.name: built.read_bytes()})
+        e = env(tmp_path)
+        e['PERESMESHNIK_UPDATE_API'] = gh.url
+        log = tmp_path / 'app.log'
+        t0 = time.perf_counter()
+        with open(log, 'wb') as f:
+            p = subprocess.Popen([str(exe), 'app', '--no-wizard', '--update-now'], stdout=f, stderr=f, env=e)
+            try:
+                code = p.wait(600)
+            finally:
+                if p.poll() is None:
+                    p.kill()
+        out = log.read_text('utf-8', 'replace')
+        assert code == 0 and 'update: handed over for' in out, out[-3000:]
+        print(f'update: downloaded, checked and handed to the installer in {time.perf_counter() - t0:.1f} s')
+        proc = None
+        try:
+            end = time.monotonic() + 300
+            while time.monotonic() < end and not proc:
+                time.sleep(1)
+                proc = next((q for q in psutil.process_iter(['exe']) if (q.info['exe'] or '').lower() == str(exe).lower()
+                             and q.pid != p.pid), None)
+            assert proc, 'not started again'
+            print(f'installed and started again in {time.perf_counter() - t0:.1f} s')
+            with uninstall_key() as k:
+                assert winreg.QueryValueEx(k, 'DisplayVersion')[0] == new
+            from peresmeshnik import update
+            setup_log = (update.folder() / 'result.txt').read_text('utf-8', 'replace')  # the installer's /LOG
+            assert 'The old install folder is kept aside' in setup_log, setup_log[-3000:]  # the way back on a failure
+            assert not installed.with_name(installed.name + '.old').exists()
+            assert settings.read_bytes() == before
+            assert any('/attestations/sha256:' in r for r in gh.requests)
+            end, where = time.monotonic() + 60, None
+            while not where and time.monotonic() < end:
+                time.sleep(0.5)
+                where = tray_icon_rect(proc.pid)
+            assert where, 'no tray icon after the update'
+            tkill(proc.pid)
+            assert proc.wait(20) == 0
+        finally:
+            if proc and proc.is_running():
+                proc.kill()
+
+
 def test_uninstaller_closes_the_app_and_removes_it_all(installed, tmp_path):
     """Last in this file: the app is gone after it. A silent uninstall leaves the voice pack (~8 GB; asked about only
     when the user uninstalls by hand, "no" by default: USER-CHECKS)."""

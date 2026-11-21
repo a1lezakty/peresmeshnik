@@ -3,6 +3,32 @@
 Versions are tagged and published by hand after a check by a person (no release is published by CI). The section of a
 version is the top of its GitHub release notes (`.github/workflows/release.yml`).
 
+## 0.3.3 — 2026-11-21
+
+The app updates itself. This version is installed by hand once (0.3.2 has no updater); from here on a newer release
+is offered in the tray.
+
+- **Once a day** (the first time a few minutes after the start) and from the tray's **Check for updates…** the app asks
+  GitHub for the newest published release of Peresmeshnik; drafts and prereleases do not count. The request carries
+  nothing of yours (GitHub sees your IP address). **Settings → Updates** turns the daily look-up off: then nothing is
+  asked of GitHub unless you choose Check for updates…. A failed daily look-up says nothing; a failed one you asked
+  for says why.
+- **Update to X.Y.Z…** appears in the tray menu when there is one, with its release notes and its page. Update and
+  restart downloads the `.dmg` (Mac) or the `-setup.exe` (Windows), checks its SHA-256 against the release's
+  `.sha256` file and that GitHub's build attestation says it was built by this repository's release workflow from
+  that tag, installs it over the running app and starts it again. A file that fails either check is deleted and
+  nothing changes. While translation is on, nothing restarts: the update only shows, and waits until you turn
+  translation off.
+- **What stays:** your settings and Gemini key, your voices, the voice pack and the downloaded models (they live in
+  your user folders, not in the app). On Windows the install folder, the Start menu shortcut and the start at sign-in
+  stay as they are.
+- **macOS:** the app is replaced where it runs from (Applications, when you can write there: an administrator account
+  can); if the new one cannot be put in place, the old one stays and starts again. It is signed ad hoc, so macOS asks
+  for the microphone and system audio permissions again after the update, as the update dialog says.
+- **Windows:** the installer runs silently (only with room for it on the disk), closes the app, installs and starts it
+  again; the old install folder is kept aside until the new one is in, and put back if the install fails.
+- **Linux, the Windows `.zip`, from source:** the update dialog opens the release page instead.
+
 ## 0.3.2 — 2026-11-17
 
 Your voice reaches the call sooner and sounds smoother, and can speak their language from a sample of yours in it;

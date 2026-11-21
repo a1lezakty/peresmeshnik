@@ -231,3 +231,75 @@ def test_frozen_cli_fetches_and_translates(app, tmp_path):
     source = json.loads(r.stderr.strip().splitlines()[-1])  # the same run from Python on the same machine
     keys = ('rtf', 'cpu_s_per_audio_s', 'asr_partial_rtf', 'tts_rtf')
     print('frozen run:', json.dumps({k: frozen.get(k) for k in keys}), '| from Python:', json.dumps({k: source.get(k) for k in keys}))
+
+
+def test_update_replaces_the_app_and_starts_it_again(app, tmp_path):
+    """The updater end to end (peresmeshnik/update.py): this build installed in a folder of its own, and a newer one
+    (the same app with the next version in its Info.plist, signed ad hoc again, in a .dmg of its own) served with its
+    .sha256 and attestation by a fake GitHub on 127.0.0.1. `app --update-now` finds it, downloads and checks it, copies it
+    out of the .dmg next to the installed one and quits; the swap script puts it in place and opens it. The settings file
+    is not touched. Not covered here: the new one runs this build's code, so its start says the update did not install
+    (`update.outcome`: its version is not the release's; tests/test_update.py has that message), and a real
+    /Applications (App Management: USER-CHECKS)."""
+    import plistlib
+
+    from fake_github import FakeGitHub
+
+    from peresmeshnik.ui import macos
+    installed = tmp_path / 'Applications' / 'Peresmeshnik.app'
+    installed.parent.mkdir()
+    subprocess.run(['ditto', str(app), str(installed)], check=True)
+    info = plistlib.loads((app / 'Contents' / 'Info.plist').read_bytes())
+    major, minor, patch = map(int, info['CFBundleShortVersionString'].split('.'))
+    new = f'{major}.{minor}.{patch + 1}'
+    stage = tmp_path / 'stage'
+    built = stage / 'Peresmeshnik.app'
+    subprocess.run(['ditto', str(app), str(built)], check=True)
+    info['CFBundleShortVersionString'] = info['CFBundleVersion'] = new
+    (built / 'Contents' / 'Info.plist').write_bytes(plistlib.dumps(info))
+    subprocess.run(['codesign', '--force', '--deep', '--options', 'runtime', '--entitlements',
+                    str(Path(__file__).parents[1] / 'packaging' / 'macos' / 'entitlements.plist'), '--sign', '-', str(built)],
+                   check=True, capture_output=True)
+    (stage / 'Applications').symlink_to('/Applications')
+    dmg = tmp_path / f'Peresmeshnik-{new}-macos-arm64.dmg'
+    subprocess.run(['hdiutil', 'create', '-volname', f'Peresmeshnik {new}', '-srcfolder', str(stage), '-format', 'UDRO',
+                    str(dmg)], check=True, capture_output=True)
+    settings = tmp_path / 'settings.toml'
+    settings.write_text('me_to_them = "cloud"\nsaved_by = "0.3.2"\n\n[ui]\nshow_latency = true\n')  # a choice: never saved over at start
+    before = settings.read_bytes()
+    exe_path, proc = os.path.realpath(exe(installed)), None
+    with FakeGitHub() as gh:
+        gh.publish(new, {dmg.name: dmg.read_bytes()})
+        env = {k: v for k, v in os.environ.items() if not k.startswith(('PYTHON', 'VIRTUAL_ENV'))}
+        env.update(PERESMESHNIK_CONFIG=str(settings), PERESMESHNIK_UPDATE_API=gh.url)
+        log = tmp_path / 'app.log'
+        t0 = time.perf_counter()
+        with open(log, 'wb') as f:
+            p = subprocess.Popen([exe(installed), 'app', '--no-wizard', '--update-now'], stdout=f, stderr=f, env=env)
+            try:
+                code = p.wait(600)  # reaped at once: the swap script waits for this pid to be gone
+            finally:
+                if p.poll() is None:
+                    p.kill()
+        out = log.read_text('utf-8', 'replace')
+        assert code == 0 and 'update: handed over for' in out, out[-3000:]
+        print(f'update: downloaded, checked, staged and quit in {time.perf_counter() - t0:.1f} s; asked {gh.requests}')
+        try:
+            end, wins = time.monotonic() + 120, []
+            while time.monotonic() < end and not any(w['layer'] == macos.STATUS_LEVEL and w['bounds'][1] == 0 for w in wins):
+                time.sleep(0.5)
+                proc = proc or next((q for q in psutil.process_iter(['exe']) if q.info['exe'] == exe_path), None)
+                wins = macos.windows_of(proc.pid) if proc else []
+            assert proc and proc.pid != p.pid, 'not started again'
+            assert any(w['layer'] == macos.STATUS_LEVEL and w['bounds'][1] == 0 for w in wins), 'no menu-bar item'
+            print(f'started again in {time.perf_counter() - t0:.1f} s')
+            now = plistlib.loads((installed / 'Contents' / 'Info.plist').read_bytes())['CFBundleShortVersionString']
+            assert now == new, f'still {now}'
+            assert sorted(x.name for x in installed.parent.iterdir()) == ['Peresmeshnik.app'], 'left beside it'
+            subprocess.run(['codesign', '--verify', '--deep', '--strict', str(installed)], check=True)
+            assert settings.read_bytes() == before
+            assert any('/attestations/sha256:' in r for r in gh.requests)
+        finally:
+            if proc and proc.is_running():
+                proc.terminate()
+                proc.wait(20)

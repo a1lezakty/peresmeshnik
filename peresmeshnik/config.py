@@ -139,6 +139,7 @@ class Ui:
     headphones: str = ''  # them -> me output sink ('' = system default)
     call_app: str = ''  # them -> me: the call app moved to "Peresmeshnik Call" (process binary, else app name; '' = none)
     show_latency: bool = False  # the overlay shows per clause: end of its speech -> its subtitle, -> its voice
+    check_updates: bool = True  # the newest release looked up on GitHub once a day (update.py); off: only when asked
 
 
 @dataclass

@@ -1,6 +1,7 @@
 """The updater (peresmeshnik/update.py, ui/tray.py Updates) against a fake GitHub (tests/fake_github.py): versions,
 the file per OS, drafts and prereleases, the SHA-256 and the attestation, no restart during a translation, no request
 with the setting off, the macOS swap script. The real replace and restart: tests/test_app_bundle.py, test_app_windows.py."""
+import json
 import os
 import subprocess
 import sys
@@ -79,18 +80,38 @@ def test_a_sha256_mismatch_is_refused_and_the_file_removed(gh):
     assert not list(update.folder().iterdir())
 
 
-@pytest.mark.parametrize('how', ['none', 'another workflow', 'another tag', 'another repository', 'another digest'])
+def test_an_attestation_given_inline_counts_too(gh):
+    import hashlib
+    data = b'attested inline, as the API gave it before'
+    gh.publish('0.3.4', {DMG: data}, attest=False)
+    d = hashlib.sha256(data).hexdigest()
+    gh.attest(d, statement(DMG, d, '0.3.4'), inline=True)
+    assert update.download(update.latest(), DMG).read_bytes() == data
+
+
+def test_snappy_copies_and_garbage():
+    assert update._unsnappy(b'\x0c\x0cabcd\x11\x04') == b'abcdabcdabcd'  # a literal, then an overlapping copy
+    for bad in (b'\x05\x0cabcd', b'\x08\x11\x04', b''):  # too short; a copy from before the start; nothing
+        with pytest.raises((ValueError, IndexError)):
+            update._unsnappy(bad)
+
+
+@pytest.mark.parametrize('how', ['none', 'another workflow', 'another tag', 'another repository', 'another digest',
+                                 'not a bundle'])
 def test_without_the_attestation_of_release_yml_nothing_is_installed(gh, how):
     import hashlib
     data = b'built elsewhere'
     gh.publish('0.3.4', {DMG: data}, attest=False)
     d = hashlib.sha256(data).hexdigest()
-    gh.attestations[d] = {
-        'none': [],
-        'another workflow': [statement(DMG, d, '0.3.4', workflow='.github/workflows/ci.yml')],
-        'another tag': [statement(DMG, d, '0.3.3')],
-        'another repository': [statement(DMG, d, '0.3.4', repo='someone/peresmeshnik')],
-        'another digest': [statement(DMG, '1' * 64, '0.3.4')]}[how]
+    bundle = {
+        'none': None,
+        'another workflow': statement(DMG, d, '0.3.4', workflow='.github/workflows/ci.yml'),
+        'another tag': statement(DMG, d, '0.3.3'),
+        'another repository': statement(DMG, d, '0.3.4', repo='someone/peresmeshnik'),
+        'another digest': statement(DMG, '1' * 64, '0.3.4'),
+        'not a bundle': {'dsseEnvelope': {'payload': 'bm90IGpzb24='}}}[how]
+    if bundle:
+        gh.attest(d, bundle)
     with pytest.raises(update.Failed, match='attestation'):
         update.download(update.latest(), DMG)
     assert not list(update.folder().iterdir())
@@ -190,6 +211,17 @@ def test_once_a_day_one_timer_and_silent_network_errors(gh, monkeypatch):
     t = _tray()
     t.updates.start()
     assert t.updates.timer.isSingleShot() and t.updates.timer.interval() == t.updates.START_S * 1000  # never checked
+    update.remember(None)  # its folder
+    update._state_file().write_text(json.dumps({'checked': time.time() + 90 * 86400}))  # checked "later": a clock set back
+    t.updates.start()
+    assert t.updates.timer.interval() == update.DAY_S * 1000
+    asked = []
+    t.updates.check = lambda asked_=True, **kw: asked.append(kw)
+    t.updates.due()  # the menu opens: not due
+    update._state_file().write_text('{"checked": 0}')
+    t.updates.due()  # due: checked (a Mac's timer may not count its sleep)
+    assert asked == [{'asked': False}]
+    del t.updates.check
     monkeypatch.setenv('PERESMESHNIK_UPDATE_API', 'http://127.0.0.1:9')  # nothing listens: refused
     t.updates.check(asked=False)
     _until(lambda: abs(t.updates.timer.interval() - update.DAY_S * 1000) < 60_000)  # failed: tried again in a day
@@ -224,8 +256,14 @@ def test_no_restart_during_a_translation(gh, monkeypatch):
     _until(lambda: not t.updates.busy)
     assert calls == [('prepare', DMG)] and 'downloaded and checked' in t.said[-1]
     t.ctl.on = False
+    t.ctl.wanted = True  # turned on, still starting (its models load): translating already
+    t.updates.install()
+    assert calls[1:] == []
+    t.ctl.wanted = False
     t.updates.install()  # chosen again with translation off: from what was downloaded
-    assert calls[1:] == [('hand over', '0.3.4'), ('quit',)]
+    assert calls[1:] == [('hand over', '0.3.4')] + ([('quit',)] if sys.platform == 'darwin' else [])
+    if sys.platform != 'darwin':  # the installer closes it
+        assert 'closes and starts again by itself' in t.said[-1] and not t.update_offer.isEnabled()
 
 
 def test_the_offer_says_what_stays_and_the_permissions_on_macos(gh, monkeypatch):

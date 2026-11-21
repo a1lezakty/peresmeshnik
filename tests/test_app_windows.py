@@ -322,8 +322,9 @@ def test_frozen_cli_fetches_and_translates(tmp_path):
 def test_update_from_the_app_installs_the_newer_build_and_starts_it(installed, tmp_path):
     """The updater end to end (peresmeshnik/update.py): a newer installer (this build's folder as the next version,
     compressed quickly) served with its .sha256 and attestation by a fake GitHub on 127.0.0.1. `app --update-now` finds
-    it, downloads and checks it, runs it silently and quits; the installer installs over the app (its settings file
-    untouched) and starts it again."""
+    it, downloads and checks it and runs it with no questions; the installer closes the app, installs over it (the
+    settings file untouched) and starts it again. The new one runs this build's code, so its start says the update did
+    not install (`update.outcome`: tests/test_update.py has that message)."""
     from fake_github import FakeGitHub
 
     import peresmeshnik
@@ -355,7 +356,7 @@ def test_update_from_the_app_installs_the_newer_build_and_starts_it(installed, t
                 if p.poll() is None:
                     p.kill()
         out = log.read_text('utf-8', 'replace')
-        assert code == 0 and 'update: quitting for' in out, out[-3000:]
+        assert code == 0 and 'update: handed over for' in out, out[-3000:]
         print(f'update: downloaded, checked and handed to the installer in {time.perf_counter() - t0:.1f} s')
         proc = None
         try:
@@ -368,6 +369,10 @@ def test_update_from_the_app_installs_the_newer_build_and_starts_it(installed, t
             print(f'installed and started again in {time.perf_counter() - t0:.1f} s')
             with uninstall_key() as k:
                 assert winreg.QueryValueEx(k, 'DisplayVersion')[0] == new
+            from peresmeshnik import update
+            setup_log = (update.folder() / 'result.txt').read_text('utf-8', 'replace')  # the installer's /LOG
+            assert 'The old install folder is kept aside' in setup_log, setup_log[-3000:]  # the way back on a failure
+            assert not installed.with_name(installed.name + '.old').exists()
             assert settings.read_bytes() == before
             assert any('/attestations/sha256:' in r for r in gh.requests)
             end, where = time.monotonic() + 60, None

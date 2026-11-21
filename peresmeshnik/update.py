@@ -9,9 +9,10 @@ and installed over the running app, which then starts again.
   repository's release.yml from the release's tag (the attestations API; the statement is read, its Sigstore signature
   is not verified: the answer is trusted by TLS to GitHub, as the download itself). A mismatch removes the file.
 - Installed: macOS copies the new .app out of the mounted .dmg next to the running one, and after the app quits a small
-  script swaps the two (the old one back when the swap fails) and opens it again. Windows runs the installer silently
-  (it closes the app, keeps the settings and the install folder) and it starts the app again, installed or not; it is
-  started only with room for it on the disk.
+  script swaps the two (the old one back when the swap fails) and opens it again. Windows runs the installer with no
+  questions
+  (it closes the app, keeps the settings; the old install folder is kept aside and put back when the install fails)
+  and starts the app again, old or new; it is started only with room for it on the disk.
   Settings, voices, the voice pack and the models live in the user's folders, never in the app: an update touches none.
 
 $PERESMESHNIK_UPDATE_API points the whole check at another server (tests/fake_github.py in the tests of the built app).
@@ -30,6 +31,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -71,7 +73,8 @@ def newer(rel: Release | None, current: str = '') -> bool:
 
 
 def _get(url: str, accept: str = 'application/vnd.github+json', timeout: float = 20):
-    if not url.startswith('https://') and 'PERESMESHNIK_UPDATE_API' not in os.environ:
+    local = 'PERESMESHNIK_UPDATE_API' in os.environ and urllib.parse.urlsplit(url).hostname in ('127.0.0.1', 'localhost')
+    if not url.startswith('https://') and not local:  # plain http only to a fake on this computer
         raise Failed(f'not over HTTPS: {url}')
     req = urllib.request.Request(url, headers={'Accept': accept, 'User-Agent': f'peresmeshnik/{__version__}'})
     return urllib.request.urlopen(req, timeout=timeout)
@@ -84,7 +87,7 @@ def _json(url: str):
 
 def latest() -> Release | None:
     """The newest published release, or None. Raises on a network error (the caller decides whether to say it)."""
-    rels = [r for r in _json(f'{api()}/repos/{REPO}/releases?per_page=30')
+    rels = [r for r in _json(f'{api()}/repos/{REPO}/releases?per_page=100')
             if not r.get('draft') and not r.get('prerelease') and version(r.get('tag_name', ''))]
     if not rels:
         return None
@@ -173,6 +176,39 @@ def _sha_of(text: str, name: str) -> str:
     raise Failed(f'{name}.sha256 of the release does not give its SHA-256')
 
 
+def _unsnappy(b: bytes) -> bytes:
+    """Snappy's raw block format, as the attestations' `bundle_url` serves a bundle that the API does not give inline:
+    the length as a varint, then literals and copies of what came before. Raises ValueError / IndexError on garbage."""
+    n = shift = i = 0
+    while True:
+        n, shift, i = n | (b[i] & 0x7f) << shift, shift + 7, i + 1
+        if b[i - 1] < 0x80:
+            break
+    out = bytearray()
+    while i < len(b):
+        tag, i = b[i], i + 1
+        if tag & 3 == 0:  # a literal: its length - 1 in the tag, or in the 1-4 bytes after it
+            ln = tag >> 2
+            if ln >= 60:
+                ln, i = int.from_bytes(b[i:i + ln - 59], 'little'), i + ln - 59
+            out += b[i:i + ln + 1]
+            i += ln + 1
+            continue
+        if tag & 3 == 1:
+            ln, off, i = 4 + (tag >> 2 & 7), (tag >> 5) << 8 | b[i], i + 1
+        else:
+            k = 2 if tag & 3 == 2 else 4
+            ln, off, i = (tag >> 2) + 1, int.from_bytes(b[i:i + k], 'little'), i + k
+        if not 0 < off <= len(out):
+            raise ValueError('a Snappy copy from before the start')
+        start = len(out) - off
+        for j in range(ln):  # may overlap what it writes
+            out.append(out[start + j])
+    if len(out) != n:
+        raise ValueError(f'Snappy: {len(out)} bytes, not {n}')
+    return bytes(out)
+
+
 def attested(digest: str, ver: str) -> None:
     """GitHub's build attestation of this digest: made by this repository's release.yml from the tag v<ver>. Raises Failed."""
     try:
@@ -182,10 +218,10 @@ def attested(digest: str, ver: str) -> None:
             raise
         found = []
     for a in found:
-        env = (a.get('bundle') or {}).get('dsseEnvelope') or {}
         try:
-            st = json.loads(base64.b64decode(env.get('payload', '')))
-        except ValueError:
+            bundle = a.get('bundle') or json.loads(_unsnappy(_get(a['bundle_url'], 'application/octet-stream').read()))
+            st = json.loads(base64.b64decode((bundle.get('dsseEnvelope') or {}).get('payload', '')))
+        except (KeyError, ValueError, IndexError, AttributeError):
             continue
         wf = st.get('predicate', {}).get('buildDefinition', {}).get('externalParameters', {}).get('workflow', {})
         if (st.get('predicateType') == 'https://slsa.dev/provenance/v1'
@@ -252,48 +288,69 @@ def prepare(file: Path) -> Path:
     volume: the swap is a rename), the old one untouched; the installer itself on Windows. Raises Failed."""
     if sys.platform != 'darwin':
         return file
-    app = app_path()
-    new = app.with_name(f'.{app.stem}-update.app')
+    new = staged()
     if new.exists():
         shutil.rmtree(new)
-    with tempfile.TemporaryDirectory(prefix='peresmeshnik-update-') as mnt:
-        r = subprocess.run(['hdiutil', 'attach', str(file), '-nobrowse', '-readonly', '-noautoopen', '-mountpoint', mnt],
-                           capture_output=True, text=True, timeout=300)
-        if r.returncode:
-            raise Failed(f'the .dmg did not open: {r.stderr.strip()[-300:]}')
-        try:
-            r = subprocess.run(['ditto', f'{mnt}/Peresmeshnik.app', str(new)], capture_output=True, text=True, timeout=900)
-        finally:
-            subprocess.run(['hdiutil', 'detach', mnt, '-force'], capture_output=True, timeout=120)
-    if r.returncode or not (new / 'Contents' / 'MacOS' / 'Peresmeshnik').exists():
+    try:
+        with tempfile.TemporaryDirectory(prefix='peresmeshnik-update-') as mnt:
+            r = subprocess.run(['hdiutil', 'attach', str(file), '-nobrowse', '-readonly', '-noautoopen', '-mountpoint', mnt],
+                               capture_output=True, text=True, timeout=300)
+            if r.returncode:
+                raise Failed(f'the .dmg did not open: {r.stderr.strip()[-300:]}')
+            try:
+                r = subprocess.run(['ditto', f'{mnt}/Peresmeshnik.app', str(new)], capture_output=True, text=True,
+                                   timeout=900)
+            finally:
+                subprocess.run(['hdiutil', 'detach', mnt, '-force'], capture_output=True, timeout=120)
+        if r.returncode or not (new / 'Contents' / 'MacOS' / 'Peresmeshnik').exists():
+            raise Failed(f'the new app could not be copied next to {app_path()}: {r.stderr.strip()[-300:]}')
+    except BaseException:  # a timeout too: no half copy left next to the app
         shutil.rmtree(new, ignore_errors=True)
-        raise Failed(f'the new app could not be copied next to {app}: {r.stderr.strip()[-300:]}')
+        raise
     return new
 
 
+def staged() -> Path | None:
+    """The new .app `prepare` leaves next to the running one until the swap (macOS)."""
+    app = app_path()
+    return app.with_name(f'.{app.stem}-update.app') if sys.platform == 'darwin' and app else None
+
+
 def hand_over(rel: Release, ready: Path) -> None:
-    """Starts what replaces the app once it quits (`prepare`'s result; the caller quits the app right after). Raises
-    Failed / OSError when it cannot start: nothing changed then."""
-    # Windows: a disk full midway would leave a broken app (the installer removes the old libraries first, and its
-    # rollback brings back no file it removed); installed it is ~4.5 times its installer
+    """Starts what replaces the app once it quits (`prepare`'s result): on macOS the caller quits the app right after, on
+    Windows the installer closes it. Raises Failed / OSError when it cannot start: nothing changed then."""
+    # Windows: the installer keeps the old folder aside until the new one is in (Peresmeshnik.iss): room for both;
+    # installed it is ~4.5 times its installer
     if sys.platform != 'darwin' and shutil.disk_usage(app_path()).free < 6 * ready.stat().st_size:
         raise Failed('the disk has too little room for it')
     res = folder() / 'result.txt'
     res.unlink(missing_ok=True)
     pending().write_text(json.dumps({'version': rel.version, 'result': str(res)}), 'utf-8')
+    try:
+        _start(ready, res)
+    except BaseException:
+        pending().unlink(missing_ok=True)  # nothing started: nothing to say at the next start
+        raise
+
+
+def _start(ready: Path, res: Path) -> None:
     if sys.platform == 'darwin':  # `open` gets the app's own environment ($PERESMESHNIK_CONFIG, ...) as LaunchServices does not
         env = [a for k, v in os.environ.items() if k.startswith('PERESMESHNIK_') for a in ('--env', f'{k}={v}')]
         subprocess.Popen(['/bin/sh', '-c', SWAP, 'peresmeshnik-update', str(os.getpid()), str(app_path()), str(ready),
                           str(res), *env], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, close_fds=True)
-    else:  # the installer closes the app (WM_CLOSE: Peresmeshnik.iss), and with /Relaunch=1 starts it again, old or new
-        subprocess.Popen([str(ready), '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOCANCEL', '/Relaunch=1',
+    else:  # the installer closes the app (WM_CLOSE: Peresmeshnik.iss), and with /Relaunch=1 starts it again, old or new;
+        # /SILENT: its progress shows, it asks nothing
+        subprocess.Popen([str(ready), '/SILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOCANCEL', '/Relaunch=1',
                           f'/LOG={res}'], close_fds=True,
                          creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
 
 
 def outcome() -> str:
-    """After an update was handed over, once at the next start: what came of it ('' when there was none)."""
+    """After an update was handed over, once at the next start: what came of it ('' when there was none). A new .app left
+    staged by an update that did not happen (translation went on, the app was quit) goes too."""
+    if (new := staged()) and new.exists():
+        shutil.rmtree(new, ignore_errors=True)
     try:
         p = json.loads(pending().read_text('utf-8'))
         pending().unlink()
@@ -310,5 +367,8 @@ def outcome() -> str:
         why = Path(p.get('result', '')).read_text('utf-8', 'replace').strip()
     except OSError:
         why = ''
-    why = why.splitlines()[-1][:200] if why and sys.platform == 'darwin' else f'its log: {p.get("result")}' if why else ''
-    return f'The update to {p.get("version")} did not install{f" ({why})" if why else ""}: {__version__} goes on working.'
+    why = '' if why == 'ok' else why.splitlines()[-1][:200] if why and sys.platform == 'darwin' else \
+        f'its log: {p.get("result")}' if why else ''
+    hint = (' If macOS said Peresmeshnik was prevented from modifying apps, allow it in System Settings → Privacy & '
+            'Security → App Management and update again.' if 'not permitted' in why else '')
+    return f'The update to {p.get("version")} did not install{f" ({why})" if why else ""}: {__version__} goes on working.{hint}'

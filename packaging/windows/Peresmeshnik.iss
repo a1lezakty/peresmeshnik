@@ -89,15 +89,60 @@ begin
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM peresmeshnik-loopback.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
-{ The app's own update (/Relaunch=1, peresmeshnik/update.py) closed it: it starts again when Setup ends, installed or
-  not (a failed install is rolled back: the old version starts). }
+{ The app's own update (/Relaunch=1, peresmeshnik/update.py), which closed the app: the old install folder is kept
+  aside as <folder>.old until the new one is in, and put back when the install fails (Inno's rollback brings back no
+  file it replaced or deleted); the app starts again when Setup ends, new or old. An install by hand is not changed. }
+var
+  AppDir, Kept: String;
+  Installed: Boolean;
+
+function Relaunch(): Boolean;
+begin
+  Result := ExpandConstant('{param:Relaunch|0}') = '1';
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  I: Integer;
+begin
+  if (CurStep = ssInstall) and Relaunch() and DirExists(ExpandConstant('{app}')) then begin
+    AppDir := ExpandConstant('{app}');
+    Kept := AppDir + '.old';
+    DelTree(Kept, True, True, True);
+    for I := 1 to 20 do begin  { up to 10 s: the app that has just quit may still hold a file }
+      if RenameFile(AppDir, Kept) then
+        Break;
+      Sleep(500);
+    end;
+    if DirExists(AppDir) then
+      Kept := ''  { not moved: installed over it, as by hand }
+    else
+      Log('The old install folder is kept aside as ' + Kept);
+  end;
+  if CurStep = ssPostInstall then begin
+    Installed := True;
+    if Kept <> '' then
+      DelTree(Kept, True, True, True);
+  end;
+end;
+
 procedure DeinitializeSetup();
 var
   ResultCode: Integer;
 begin
-  if ExpandConstant('{param:Relaunch|0}') = '1' then
+  if not Relaunch() then
+    Exit;
+  if not Installed and (Kept <> '') and DirExists(Kept) then begin
+    DelTree(AppDir, True, True, True);
+    if RenameFile(Kept, AppDir) then begin
+      Installed := True;  { the old one is whole again }
+      Log('The install failed: the old install folder is back');
+    end;
+  end;
+  { not when a failed install over the folder left it half replaced, nor when Setup stopped before it closed the app }
+  if (Installed or (AppDir = '')) and (FindWindowByWindowName(HostTitle) = 0) then
     try
-      Exec(ExpandConstant('{app}\Peresmeshnik.exe'), '', '', SW_SHOWNORMAL, ewNoWait, ResultCode);
+      Exec(ExpandConstant('{app}\Peresmeshnik.exe'), '', ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait, ResultCode);
     except
     end;
 end;

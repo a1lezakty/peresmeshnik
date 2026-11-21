@@ -238,7 +238,9 @@ def test_update_replaces_the_app_and_starts_it_again(app, tmp_path):
     (the same app with the next version in its Info.plist, signed ad hoc again, in a .dmg of its own) served with its
     .sha256 and attestation by a fake GitHub on 127.0.0.1. `app --update-now` finds it, downloads and checks it, copies it
     out of the .dmg next to the installed one and quits; the swap script puts it in place and opens it. The settings file
-    is not touched."""
+    is not touched. Not covered here: the new one runs this build's code, so its start says the update did not install
+    (`update.outcome`: its version is not the release's; tests/test_update.py has that message), and a real
+    /Applications (App Management: USER-CHECKS)."""
     import plistlib
 
     from fake_github import FakeGitHub
@@ -280,7 +282,7 @@ def test_update_replaces_the_app_and_starts_it_again(app, tmp_path):
                 if p.poll() is None:
                     p.kill()
         out = log.read_text('utf-8', 'replace')
-        assert code == 0 and 'update: quitting for' in out, out[-3000:]
+        assert code == 0 and 'update: handed over for' in out, out[-3000:]
         print(f'update: downloaded, checked, staged and quit in {time.perf_counter() - t0:.1f} s; asked {gh.requests}')
         try:
             end, wins = time.monotonic() + 120, []

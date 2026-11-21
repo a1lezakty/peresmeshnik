@@ -143,6 +143,7 @@ class Tray(QObject):
         self.show_latency.toggled.connect(self._latency_chosen)
         self.crash = m.addAction('Crash report…', self.open_report)
         self.crash.setVisible(bool(_reports()))
+        m.aboutToShow.connect(lambda: self.updates.due())
         self.update_offer = m.addAction('', lambda: self.updates.offer())  # "Update to X.Y.Z…" once one is out
         self.update_offer.setVisible(False)
         m.addAction('Check for updates…', lambda: self.updates.check())
@@ -601,7 +602,7 @@ class Updates(QObject):
     X.Y.Z…" with its notes; downloaded, checked and installed only on the user's word and never while translating
     (then it is only shown); the app quits and starts again as the new version."""
     found = Signal(object, str, bool)  # (the newest release or None, the network's error, asked by the user)
-    progress = Signal(int, int)  # bytes downloaded, of
+    progress = Signal(object, object)  # bytes downloaded, of (past 2 GiB too)
     ready = Signal(object, str)  # (what update.hand_over starts from, or None, and why not)
     START_S = 300  # the first check after a start waits this long: the start and its first minutes stay light
 
@@ -621,10 +622,12 @@ class Updates(QObject):
         """The next daily check armed, or none when the setting is off."""
         self.timer.stop()
         if config.load().ui.check_updates:
-            self.timer.start(int(max(self.START_S, update.due_in()) * 1000))
+            self.timer.start(int(min(update.DAY_S, max(self.START_S, update.due_in())) * 1000))  # a clock set back
 
     def translating(self) -> bool:
-        return bool(getattr(self.tray.ctl, 'on', False))
+        """On, or turned on and still starting (its models load for seconds before `on`)."""
+        c = self.tray.ctl
+        return bool(getattr(c, 'on', False) or getattr(c, 'wanted', False))
 
     def say(self, text: str) -> None:
         log.warning('update: %s', text)
@@ -637,7 +640,7 @@ class Updates(QObject):
         if not asked and not config.load().ui.check_updates:
             return
         if self.busy:
-            return self.say(f'Downloading {self.release.version} already.') if asked else None
+            return self.say(f'Downloading {self.release.version} already.') if asked else self.start()
 
         def work():
             try:
@@ -747,9 +750,15 @@ class Updates(QObject):
         if total:
             self._item(f'Downloading {self.release.version}: {done * 100 // total} %')
 
+    def due(self) -> None:
+        """The menu opens: a check that is due goes now (a Mac's timer may not count the hours it slept)."""
+        if not self.busy and config.load().ui.check_updates and update.due_in() == 0:
+            self.check(asked=False)
+
     def _ready(self, ready, err: str) -> None:
         self.busy = False
         self._item()
+        self.start()  # a daily check that came during the download
         rel = self.release
         if err:
             return self.say(f'The update to {rel.version} was not installed: {err}')
@@ -761,7 +770,11 @@ class Updates(QObject):
             update.hand_over(rel, ready)
         except Exception as e:
             return self.say(f'The update to {rel.version} was not installed: {e}')
-        log.warning('update: quitting for %s', rel.version)
+        log.warning('update: handed over for %s', rel.version)
+        if not MAC:  # the installer closes the app itself (WM_CLOSE, as an install by hand); until then it runs as it is
+            self.busy = True
+            self._item(f'Installing {rel.version}…')
+            return self.tray.message(f'Installing Peresmeshnik {rel.version}: it closes and starts again by itself.')
         from PySide6.QtWidgets import QApplication
         QApplication.quit()
 

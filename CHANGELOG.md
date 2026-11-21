@@ -26,7 +26,7 @@ is offered in the tray.
   can); if the new one cannot be put in place, the old one stays and starts again. It is signed ad hoc, so macOS asks
   for the microphone and system audio permissions again after the update, as the update dialog says.
 - **Windows:** the installer runs silently (only with room for it on the disk), closes the app, installs and starts it
-  again.
+  again; the old install folder is kept aside until the new one is in, and put back if the install fails.
 - **Linux, the Windows `.zip`, from source:** the update dialog opens the release page instead.
 
 ## 0.3.2 — 2026-11-17

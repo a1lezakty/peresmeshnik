@@ -293,6 +293,18 @@ leaves (`[server] warm_s`), so a reconnect does not load the models again.
 - **For yourself only:** a server for your own laptops is fine; running it as a service for others is not (the voice
   models' licenses are non-commercial).
 
+## Updates
+
+From 0.3.3 on the app looks for a newer release on GitHub once a day, and on **Check for updates…** in the tray. A newer
+one shows as **Update to X.Y.Z…** in the tray menu with its notes; **Update and restart** downloads the `.dmg` or the
+`-setup.exe`, checks its SHA-256 against the release's `.sha256` and GitHub's build attestation for that file (built by
+this repository's `release.yml` from that tag; `gh attestation verify` checks the same and its Sigstore signature too),
+installs it over the running app and starts it again. Nothing restarts while translation is on. Settings, voices, the
+voice pack and the models stay. **Settings → Updates** turns the daily look-up off (no request to GitHub at all, unless
+you choose Check for updates…). On macOS the app must run from a folder you can write to (Applications on an
+administrator account), and macOS asks for its two permissions again after an update (ad-hoc signature). The `.zip`,
+Linux and a source checkout get the release page instead.
+
 ## When something goes wrong
 
 - **The cloud fails.** A side set to the cloud (Gemini) goes local by itself when the connection drops, Google answers

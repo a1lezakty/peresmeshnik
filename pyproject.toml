@@ -1,6 +1,6 @@
 [project]
 name = "peresmeshnik"
-version = "0.3.2"
+version = "0.3.3"
 description = "Real-time call translator: subtitles and translated speech both ways, in your own cloned voice"
 readme = "README.md"
 license = "PolyForm-Noncommercial-1.0.0"

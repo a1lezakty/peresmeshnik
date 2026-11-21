@@ -12,7 +12,7 @@ import sys
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QUrl, Signal
+from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtGui import QActionGroup, QDesktopServices, QGuiApplication, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from peresmeshnik import config, languages
+from peresmeshnik import __version__, config, languages, update
 
 log = logging.getLogger('peresmeshnik.ui')
 ICONS = Path(__file__).resolve().parents[2] / 'assets' / 'icons'  # ponytail: repo path; packaging (stage 3) bundles them
@@ -143,6 +143,10 @@ class Tray(QObject):
         self.show_latency.toggled.connect(self._latency_chosen)
         self.crash = m.addAction('Crash report…', self.open_report)
         self.crash.setVisible(bool(_reports()))
+        self.update_offer = m.addAction('', lambda: self.updates.offer())  # "Update to X.Y.Z…" once one is out
+        self.update_offer.setVisible(False)
+        m.addAction('Check for updates…', lambda: self.updates.check())
+        self.updates = Updates(self)  # the daily check itself starts with the app (app.cli: updates.start)
         m.addSeparator()
         m.addAction('Quit', self._quit)
         self.sync()
@@ -591,6 +595,177 @@ class Tray(QObject):
         QApplication.quit()
 
 
+class Updates(QObject):
+    """A newer release (peresmeshnik/update.py): checked once a day by one single-shot timer armed for when the next
+    check is due (nothing polls; off in the settings: no request at all) and from the menu; offered as "Update to
+    X.Y.Z…" with its notes; downloaded, checked and installed only on the user's word and never while translating
+    (then it is only shown); the app quits and starts again as the new version."""
+    found = Signal(object, str, bool)  # (the newest release or None, the network's error, asked by the user)
+    progress = Signal(int, int)  # bytes downloaded, of
+    ready = Signal(object, str)  # (what update.hand_over starts from, or None, and why not)
+    START_S = 300  # the first check after a start waits this long: the start and its first minutes stay light
+
+    def __init__(self, tray: Tray):
+        super().__init__()
+        self.tray, self.release, self.prepared, self.busy = tray, update.known(), None, False
+        self.auto = False  # `peresmeshnik app --update-now`: installs what it finds without asking (tests of the build)
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.timeout.connect(lambda: self.check(asked=False))
+        self.found.connect(self._found)
+        self.progress.connect(self._progress)
+        self.ready.connect(self._ready)
+        self._item()
+
+    def start(self) -> None:
+        """The next daily check armed, or none when the setting is off."""
+        self.timer.stop()
+        if config.load().ui.check_updates:
+            self.timer.start(int(max(self.START_S, update.due_in()) * 1000))
+
+    def translating(self) -> bool:
+        return bool(getattr(self.tray.ctl, 'on', False))
+
+    def say(self, text: str) -> None:
+        log.warning('update: %s', text)
+        self.tray.message(text)
+        if self.auto:  # --update-now ends here: nothing to install, or it failed
+            from PySide6.QtWidgets import QApplication
+            QApplication.exit(1)
+
+    def check(self, asked: bool = True) -> None:
+        if not asked and not config.load().ui.check_updates:
+            return
+        if self.busy:
+            return self.say(f'Downloading {self.release.version} already.') if asked else None
+
+        def work():
+            try:
+                rel, err = update.latest(), ''
+            except Exception as e:  # the network, GitHub's rate limit: said only when asked
+                rel, err = self.release, str(e) or type(e).__name__
+            update.remember(rel)  # a failed check counts too: the next one in a day, not in minutes
+            self.found.emit(rel, err, asked)
+        threading.Thread(target=work, name='update-check', daemon=True).start()
+
+    def _found(self, rel, err: str, asked: bool) -> None:
+        self.start()
+        if err:
+            log.info('update check: %s', err)
+            if asked:
+                self.say(f'Could not check for updates: {err}')
+            return
+        if not update.newer(rel):
+            if asked:
+                self.say(f'Peresmeshnik {__version__} is the newest version.')
+            return
+        fresh = not self.release or self.release.version != rel.version
+        if fresh:
+            self.prepared = None
+        self.release = rel
+        self._item()
+        if self.auto:
+            self.install()
+        elif asked:
+            self.offer()
+        elif fresh and not self.translating():  # during a call the menu item says it, no message
+            self.tray.message(f'Peresmeshnik {rel.version} is out: "Update to {rel.version}…" in this menu.')
+
+    def _item(self, text: str = '') -> None:
+        a = self.tray.update_offer
+        a.setVisible(bool(self.release))
+        a.setEnabled(not self.busy)
+        if self.release:
+            a.setText(text or f'Update to {self.release.version}…')
+
+    def offer(self) -> None:
+        """The notes, what an update does and keeps; "Update and restart" only where it installs and not while translating."""
+        from PySide6.QtWidgets import QMessageBox
+        rel = self.release
+        if not rel:
+            return
+        name = update.file_for(rel)
+        why = update.installable() or ('' if name else 'the release has no file for this computer')
+        if why:
+            info = f'It is not installed from here: {why}. The release page has it.'
+        elif self.translating():
+            info = 'Translation is on: the update restarts the app, so it waits until you turn translation off.'
+        else:
+            info = (f'Update and restart downloads it ({rel.sizes.get(name, 0) / 1e6:,.0f} MB), checks it (its SHA-256, '
+                    'and that GitHub built it from this repository), installs it over this version and starts it again. '
+                    'Your settings, voices and downloaded models stay.'
+                    + (" macOS may ask again for the microphone and the call's sound (the app is not signed with an "
+                       'Apple ID): allow them as the first time.' if MAC else ''))
+        box = QMessageBox(QMessageBox.Information, 'Peresmeshnik update',
+                          f'Peresmeshnik {rel.version} is out (this one is {__version__}).')
+        box.setInformativeText(info)
+        if rel.notes:
+            box.setDetailedText(rel.notes)
+        go = None if why or self.translating() else box.addButton('Update and restart', QMessageBox.AcceptRole)
+        page = box.addButton('Release page', QMessageBox.HelpRole)
+        box.addButton('Later', QMessageBox.RejectRole)
+        clicked = self.ask(box)
+        if clicked is page:
+            QDesktopServices.openUrl(QUrl(rel.page))
+        elif go is not None and clicked is go:
+            self.install()
+
+    def ask(self, box):
+        """The button clicked, the box in front (a tray app's would open behind the other windows); a test answers instead."""
+        box.show()
+        box.raise_()
+        box.activateWindow()
+        if MAC:
+            from peresmeshnik.ui import macos
+            macos.front(int(box.winId()))
+        box.exec()
+        return box.clickedButton()
+
+    def install(self) -> None:
+        """Download, check, prepare (off the GUI thread), then `_ready` hands over and quits."""
+        rel = self.release
+        if self.busy or not rel:
+            return
+        if self.translating():
+            return self.say(f'Translation is on: the update to {rel.version} waits until you turn it off.')
+        if why := update.installable() or ('' if update.file_for(rel) else 'the release has no file for this computer'):
+            return self.say(f'The update to {rel.version} is not installed from here: {why}.')
+        if self.prepared and self.prepared.exists():  # downloaded before translation went on
+            return self._ready(self.prepared, '')
+        self.busy = True
+        self._item(f'Downloading {rel.version}…')
+
+        def work():
+            try:
+                ready, err = update.prepare(update.download(rel, update.file_for(rel), self.progress.emit)), ''
+            except Exception as e:  # Failed: a mismatch (the file is gone); the network
+                ready, err = None, str(e) or type(e).__name__
+            self.ready.emit(ready, err)
+        threading.Thread(target=work, name='update-download', daemon=True).start()
+
+    def _progress(self, done: int, total: int) -> None:
+        if total:
+            self._item(f'Downloading {self.release.version}: {done * 100 // total} %')
+
+    def _ready(self, ready, err: str) -> None:
+        self.busy = False
+        self._item()
+        rel = self.release
+        if err:
+            return self.say(f'The update to {rel.version} was not installed: {err}')
+        self.prepared = ready
+        if self.translating():  # turned on while it downloaded: never interrupted
+            return self.say(f'Peresmeshnik {rel.version} is downloaded and checked: choose "Update to {rel.version}…" '
+                            'again once translation is off.')
+        try:
+            update.hand_over(rel, ready)
+        except Exception as e:
+            return self.say(f'The update to {rel.version} was not installed: {e}')
+        log.warning('update: quitting for %s', rel.version)
+        from PySide6.QtWidgets import QApplication
+        QApplication.quit()
+
+
 def clone_notes(s, todo: list) -> tuple[list, list[str]]:
     """A pair's models to download (`todo`, registry rows) -> (those without the clone engines, the notes): nobody chose
     a clone here, Components… downloads it; said per side, mine or theirs (S2: the other person's voice). The speaker
@@ -755,6 +930,9 @@ class SettingsDialog(QDialog):
         f.addRow('My voice (local clone)', self.voice)
         self.hotkey = QKeySequenceEdit(QKeySequence(s.ui.hotkey))
         f.addRow('Hotkey: translation ⇄ live', self.hotkey)
+        self.check_updates = QCheckBox('Check for updates automatically (once a day, on GitHub)')
+        self.check_updates.setChecked(s.ui.check_updates)
+        f.addRow('Updates', self.check_updates)
         self.headphones = device_combo('sinks', s.ui.headphones)  # every OS: the wizard's list (selftest.devices)
         self.mic = device_combo('sources', s.ui.mic)
         f.addRow('Headphones', self.headphones)
@@ -811,6 +989,11 @@ class SettingsDialog(QDialog):
             config.save(s)
             self.tray.sync()
             self.tray.restart()
+        if self.check_updates.isChecked() != s.ui.check_updates:  # saved apart: no restart of a running translation for it
+            saved = config.load()
+            saved.ui.check_updates = self.check_updates.isChecked()
+            config.save(saved)
+            self.tray.updates.start()
         if pair != (s.my_lang, s.their_lang) or engines:
             self.tray.switch_pair(*pair, engines)
         self.accept()

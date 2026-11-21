@@ -33,7 +33,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from peresmeshnik import __version__, config, crash
+from peresmeshnik import __version__, config, crash, update
 from peresmeshnik.audio import c_locale, silent_output
 from peresmeshnik.audio.echo import EchoGate, Reference, Referenced, Threaded
 from peresmeshnik.audio.resample import Resampler
@@ -1870,6 +1870,8 @@ def cli(argv=None) -> int:
     ap.add_argument('--me-file', help='feed this recording as my microphone (instead of the devices)')
     ap.add_argument('--show-overlay', action='store_true', help='show a sample subtitle at start (to check the overlay)')
     ap.add_argument('--no-wizard', action='store_true', help='do not open the setup wizard on the first run')
+    ap.add_argument('--update-now', action='store_true',
+                    help='check for a newer release now and install it without asking (to check the updater)')
     ap.add_argument('-v', '--verbose', action='store_true', help='log subtitles, states and latency to stderr')
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO if a.verbose else logging.WARNING, stream=sys.stderr,
@@ -1967,6 +1969,12 @@ def cli(argv=None) -> int:
                 tray.message(f'Settings: {settings_problem}. Set them again in Settings.')
             for p in earlier:  # the last run crashed
                 tray.report_ready(str(p), why='Peresmeshnik stopped unexpectedly last time')
+            if done := update.outcome():  # this start follows an update: what came of it
+                tray.message(done)
+            tray.updates.start()  # the daily check
+            if a.update_now:
+                tray.updates.auto = True
+                tray.updates.check()
     dispatcher.aboutToBlock.connect(announce)
     if a.on:
         QTimer.singleShot(0, lambda: tray.set_translation(True))

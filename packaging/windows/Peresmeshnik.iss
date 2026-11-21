@@ -8,6 +8,10 @@
   #error pass /DVersion=<version>
 #endif
 #define Root SourcePath + "..\.."
+; /DCompression=zip: the quicker installer tests/test_app_windows.py builds to update to
+#ifndef Compression
+  #define Compression "lzma2/max"
+#endif
 
 [Setup]
 AppId={{F900FAE6-BF0A-4AA3-B66D-0CE8539E4E55}
@@ -30,7 +34,7 @@ OutputBaseFilename=Peresmeshnik-{#Version}-windows-x64-setup
 SetupIconFile={#Root}\assets\icons\app.ico
 UninstallDisplayIcon={app}\Peresmeshnik.exe
 UninstallDisplayName=Peresmeshnik
-Compression=lzma2/max
+Compression={#Compression}
 SolidCompression=yes
 WizardStyle=modern
 CloseApplications=yes
@@ -83,6 +87,19 @@ var
   ResultCode: Integer;
 begin
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM peresmeshnik-loopback.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+{ The app's own update (/Relaunch=1, peresmeshnik/update.py) closed it: it starts again when Setup ends, installed or
+  not (a failed install is rolled back: the old version starts). }
+procedure DeinitializeSetup();
+var
+  ResultCode: Integer;
+begin
+  if ExpandConstant('{param:Relaunch|0}') = '1' then
+    try
+      Exec(ExpandConstant('{app}\Peresmeshnik.exe'), '', '', SW_SHOWNORMAL, ewNoWait, ResultCode);
+    except
+    end;
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;

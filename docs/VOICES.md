@@ -49,4 +49,5 @@ The app clones **your own voice only**.
 - Elsewhere without an NVIDIA GPU the wizard suggests the cloud for what you say; a direction whose languages have
   local models (the [README's table](../README.md#languages)) can stay on this computer instead (a stock voice then
   speaks for you).
-- With both directions here no key is needed and nothing is sent.
+- With both directions here no key is needed and no call audio leaves this computer (the app only downloads the
+  models you choose and asks GitHub once a day for updates; Settings → Updates turns that off).

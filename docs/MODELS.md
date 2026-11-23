@@ -60,8 +60,6 @@ registry's `langs` ([`models.toml`](../peresmeshnik/models.toml)); what runs loc
 
 ### The Windows voice pack
 
-Moved here from the README's License section; nothing in it changed.
-
 The Windows voice pack (your own voice on an NVIDIA GPU, downloaded by the wizard after you accept its licenses) is a
 Python of its own with PyTorch (BSD-3-Clause; most of its 3.7 GB are the NVIDIA CUDA and cuDNN libraries inside it,
 under [NVIDIA's license terms](https://docs.nvidia.com/cuda/eula/)) and coqui-tts (MPL-2.0), with the text tools for

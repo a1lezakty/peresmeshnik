@@ -1,7 +1,8 @@
 # Changelog
 
 Versions are tagged and published by hand after a check by a person (no release is published by CI). The section of a
-version is the top of its GitHub release notes (`.github/workflows/release.yml`).
+version is the top of its GitHub release notes (`.github/workflows/release.yml`; 0.3.3, the first published, opens
+with a short introduction first).
 
 ## 0.3.3 — 2026-11-21
 

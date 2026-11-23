@@ -2,20 +2,30 @@
 
 # Peresmeshnik
 
-**Real-time translator for calls: you hear them in your language, they hear you in theirs, in your own voice.**
+**Real-time translator for calls: you hear them in your language, they hear you in theirs, in your own voice**
+(7 languages on any computer, 13 on an NVIDIA GPU; otherwise a stock voice or the cloud's).
 
 [![Latest release](https://img.shields.io/github/v/release/a1lezakty/peresmeshnik)](https://github.com/a1lezakty/peresmeshnik/releases/latest)
 [![CI](https://img.shields.io/github/actions/workflow/status/a1lezakty/peresmeshnik/ci.yml?branch=main&label=CI)](https://github.com/a1lezakty/peresmeshnik/actions/workflows/ci.yml)
 [![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue)](LICENSE)
 
+**Status:** 0.3.3 (2026-11-21) is the first published release. It has been used in real calls: English ↔ Russian in
+Discord on an M1 Pro Mac, also with the models on the author's own GPU server. Windows: checked by CI only, not yet in
+a real call. What changed: [CHANGELOG](CHANGELOG.md).
+
 ## What it does
 
 - You hear the other side in your language: as a voice in your headphones and as subtitles.
-- They hear you in their language, spoken in **your own cloned voice**.
+- They hear you in their language, spoken in **your own cloned voice**
+  (7 languages on any computer, 13 on an NVIDIA GPU; otherwise a stock voice or the cloud's).
 - Works with any call app (Google Meet, Zoom, Telegram, Discord, …) through system audio devices.
 - 14 languages, any pair both ways. Runs on this computer (CPU, Apple Silicon, optional NVIDIA GPU), on
   [your own server](#your-own-server-a-weak-laptop-a-strong-computer), or in the cloud (Gemini Live, your own key).
 - macOS and Windows apps; on Linux it runs from source.
+
+**How it works.** Each direction is speech recognition → translation → speech: your cloned voice for what you say, a
+voice in your headphones for what they say, with subtitles. Each runs on this computer, on your own server, or in the
+cloud, where Gemini Live does it all. Details: [architecture](docs/ARCHITECTURE.md#2-pipeline).
 
 ## Download
 
@@ -25,7 +35,7 @@ From the [latest release](https://github.com/a1lezakty/peresmeshnik/releases/lat
 |---|---|
 | macOS 14 Sonoma or later, Apple Silicon | `Peresmeshnik-<version>-macos-arm64.dmg` |
 | Windows 10 (2004+) or 11, x64 | `Peresmeshnik-<version>-windows-x64-setup.exe`, or `-windows-x64.zip` without an installer |
-| Linux | no build: [run it from source](#trying-it-from-source-linux) |
+| Linux | no build: [run it from source](#trying-it-from-source-linux) (not ready for calls yet) |
 
 The release notes have each file's SHA-256 and the command that checks its build attestation. The models are not in
 the download: the setup wizard shows each one's size and license and downloads them after you agree.
@@ -49,12 +59,9 @@ the download: the setup wizard shows each one's size and license and downloads t
 3. Start Peresmeshnik from the Start menu (an icon in the notification area) and follow the setup wizard.
 4. Put on headphones and choose **Translation** in its menu.
 
-**Linux:** `uv run peresmeshnik app` in a clone of this repository ([details](#trying-it-from-source-linux)).
+**Linux:** `uv run peresmeshnik app` in a clone of this repository, not ready for calls yet ([details](#trying-it-from-source-linux)).
 
-<p align="center"><img src="assets/screenshots/setup-languages.png" width="640" alt="The setup wizard's first page: the languages, where each direction runs, the download and its licenses"></p>
-
-**Status:** 0.3.3 (2026-11-21) is the first published release. It has been used in real calls: English ↔ Russian in
-Discord on an M1 Pro Mac, also with the models on the author's own GPU server. What changed: [CHANGELOG](CHANGELOG.md).
+<p align="center"><img src="assets/screenshots/setup-languages.png" width="640" alt="The setup wizard's first page: English and Russian, both directions on this computer, the download and its licenses"></p>
 
 ## Your voice
 
@@ -72,11 +79,13 @@ How the check works, what is stored and where: [docs/VOICES.md](docs/VOICES.md#y
 
 ## The cloud and privacy
 
-- With both directions on this computer, no key is needed and nothing is sent.
+- With both directions on this computer, no key is needed and no call audio leaves it. The app only downloads the
+  models you choose and asks GitHub once a day for updates (Settings → Updates turns that off).
 - A direction set to the cloud sends its sound to Google Gemini Live, with your own Gemini API key. On the free tier
   Google may use that audio to improve its models; a paid key costs about $2.2 an hour per direction.
-- Gemini translates like a simultaneous interpreter: ~3–4 s behind the speech, and not in your voice. Your cloned
-  voice on a Mac with 16 GB or more starts ~1.5 s after each phrase.
+- Gemini translates like a simultaneous interpreter: ~3–4 s behind the speech, and not in your voice.
+- On a Mac with 16 GB or more, once your cloned voice can speak their language there, "me → them" runs on the Mac and
+  your voice starts ~1.5 s after each phrase ([BENCH](docs/BENCH.md#032-the-delay)).
 
 Which direction goes where by default, and the numbers: [docs/VOICES.md](docs/VOICES.md#the-cloud).
 
@@ -248,7 +257,7 @@ Checked so far only on GitHub's `windows-latest` runners (Windows Server 2025 in
 devices or a real call): the installer runs silently, the installed app starts, its tray icon, overlay and hotkey
 work there, it idles at ~0 CPU, closes cleanly when asked, and the frozen app translates a recording with the
 bundled engines. SmartScreen on a fresh PC, VB-Cable, a real call and the NVIDIA voice pack on Windows are
-checked by hand before the release is published.
+not yet checked by hand.
 
 ### Trying it from source (Linux)
 
@@ -395,4 +404,5 @@ The voice pack for your own voice on an NVIDIA GPU, its addon and their models h
 стороны в облаке уходит в Google). Версия 0.3.3 — первый опубликованный выпуск, уже опробован в настоящих звонках.
 Сборки для macOS и Windows — в [Releases](https://github.com/a1lezakty/peresmeshnik/releases/latest), установка выше;
 на Linux — из исходников.
-Лицензия некоммерческая: пользоваться можно всем, продавать нельзя.
+Лицензия некоммерческая (PolyForm Noncommercial 1.0.0): для личных некоммерческих целей и некоммерческим
+организациям — свободно; коммерческое использование, в том числе в рабочих звонках коммерческой компании, — нет.

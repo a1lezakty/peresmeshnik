@@ -58,6 +58,31 @@ registry's `langs` ([`models.toml`](../peresmeshnik/models.toml)); what runs loc
 | [CosyVoice 2 / Fun-CosyVoice3](https://github.com/FunAudioLLM/CosyVoice) | voice cloning | Apache-2.0 | Apache-2.0 | |
 | [FocalCodec](https://github.com/lucadellalib/focalcodec) | planned own timbre converter (later research) | Apache-2.0 | Apache-2.0 | |
 
+### The Windows voice pack
+
+Moved here from the README's License section; nothing in it changed.
+
+The Windows voice pack (your own voice on an NVIDIA GPU, downloaded by the wizard after you accept its licenses) is a
+Python of its own with PyTorch (BSD-3-Clause; most of its 3.7 GB are the NVIDIA CUDA and cuDNN libraries inside it,
+under [NVIDIA's license terms](https://docs.nvidia.com/cuda/eula/)) and coqui-tts (MPL-2.0), with the text tools for
+Chinese and Japanese (pypinyin, cutlet with jaconv and mojimoji, fugashi with MeCab, the UniDic dictionary: MIT,
+Apache-2.0, BSD-3-Clause; [the next table](#the-clones-text-tools-in-the-windows-voice-pack-and-the-linux-clone-venv-never-in-the-app));
+the XTTS-v2 model it runs is under the
+[Coqui Public Model License](https://huggingface.co/coqui/XTTS-v2/blob/main/LICENSE.txt) (noncommercial only).
+
+It needs an NVIDIA GPU with 6 GB of memory or more, compute capability 6.1 or newer (GeForce GTX 10xx and later; a
+GTX 10xx is not measured: the app measures the clone at start and uses the stock voice if the card is slower than real
+time) and driver 570.65 or newer (528.33 to 570.64: not checked, may work); the wizard checks before the download.
+
+Its addon Qwen3 + Chatterbox (Components…, only when ticked; a card of 8 GB) adds to the pack, with what they pull in
+(checked in the packages' own metadata and license files, 2026-11-11): faster-qwen3-tts, chatterbox-tts,
+resemble-perth, pyloudnorm, conformer, onnxruntime, zipp, setuptools 69.5.1 (MIT); qwen-tts-hf, transformers 5.16.1,
+huggingface-hub 1.33.0, accelerate, diffusers, s3tokenizer, onnx, flatbuffers, ml-dtypes (its Eigen headers MPL-2.0),
+importlib-metadata, lazy-importer (Apache-2.0); sox, omegaconf, httpx, httpcore (BSD-3-Clause) — no GPL, AGPL or LGPL
+([the addon's table](#the-voice-packs-addon-qwen3--chatterbox-libaddon-on-windows-the-same-venv-on-linux-never-in-the-app));
+not pykakasi (GPL-3.0: Chatterbox's Japanese romanization) or gradio. The models are Qwen3-TTS 0.6B Base (Apache-2.0)
+and Chatterbox Multilingual (MIT; every sound it makes carries Resemble AI's inaudible Perth watermark).
+
 ### The clone's text tools (in the Windows voice pack and the Linux clone venv, never in the app)
 
 XTTS-v2's tokenizer cleans the text of each language with these before the model reads it (coqui-tts imports them;

@@ -2,46 +2,91 @@
 
 # Peresmeshnik
 
-Real-time translator for calls. You hear the other side in your language — as a voice in your
-headphones and as subtitles — and they hear you in theirs, spoken in **your own cloned voice** (on any computer in
-English, French, German, Spanish, Portuguese, Italian and Russian, in 13 languages on an NVIDIA GPU; elsewhere in a stock
-voice or the cloud's). Works with any call app (Google Meet, Zoom, Telegram, …) through system
-audio devices.
+**Real-time translator for calls: you hear them in your language, they hear you in theirs, in your own voice.**
 
-**Status: in development.** Version 0.3.0 adds languages: any pair of 14. macOS and Windows have builds; on Linux it
-runs from source. Not yet tried in a real call (see below).
+[![Latest release](https://img.shields.io/github/v/release/a1lezakty/peresmeshnik)](https://github.com/a1lezakty/peresmeshnik/releases/latest)
+[![CI](https://img.shields.io/github/actions/workflow/status/a1lezakty/peresmeshnik/ci.yml?branch=main&label=CI)](https://github.com/a1lezakty/peresmeshnik/actions/workflows/ci.yml)
+[![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue)](LICENSE)
 
-- 14 languages, any pair both ways: English, Russian, Ukrainian, German, French, Spanish, Italian, Portuguese, Polish,
-  Turkish, Chinese, Japanese, Korean, Arabic — on this computer where there are models for it, else in the cloud
-  ([Languages](#languages)).
-- macOS, Windows and Linux. Local models (CPU, Apple Silicon, optional NVIDIA GPU) or cloud
-  (Gemini Live), switchable in settings.
-- Voice cloning of **your own voice only**: a recording (or an imported file) speaks for you once you read two random
-  phrases at the microphone and the app hears those words in the voice of every part of the recording, the start of the
-  recording (what the clone takes) in the voice of the rest of it, and the clone made from it in your live voice; after
-  three failed tries it waits a while. This stops a downloaded recording of someone else from speaking for you in a few
-  clicks; it cannot stop someone who edits the app's files. An earlier build's voice is confirmed once the same way.
-  The live reading's speaker vector (256 numbers, not its sound) is kept in the voice's `voice.json` and goes with the
-  recording to your own server.
-  Tray → **Voices…** lists and deletes the voices. Cloned from a 30–60 s recording. On any computer, a Mac too: Kyutai's
-  Pocket TTS on the CPU in English, French, German, Spanish, Portuguese, Italian (its weights need your Hugging Face
-  token (type Read), of an account that accepted Kyutai's conditions on huggingface.co/kyutai/pocket-tts: paste it in
-  the wizard's Components or "Your voice" page or in Voices…; saved empty, it is forgotten) and Russian. On an NVIDIA
-  GPU with 6 GB or more (Windows, Linux; on Windows also a recent driver, see below) XTTS-v2 in 13 languages. Elsewhere
-  a stock voice or the cloud speaks for you.
+**Status:** 0.3.3 (2026-11-21) is the first published release. It has been used in real calls: English ↔ Russian in
+Discord on an M1 Pro Mac, also with the models on the author's own GPU server. Windows: checked by CI only, not yet in
+a real call. What changed: [CHANGELOG](CHANGELOG.md).
+
+## What it does
+
+- You hear the other side in your language: as a voice in your headphones and as subtitles.
+- They hear you in their language, spoken in **your own cloned voice**
+  (7 languages on any computer, 13 on an NVIDIA GPU; otherwise a stock voice or the cloud's).
+- Works with any call app (Google Meet, Zoom, Telegram, Discord, …) through system audio devices.
+- 14 languages, any pair both ways. Runs on this computer (CPU, Apple Silicon, optional NVIDIA GPU), on
+  [your own server](#your-own-server-a-weak-laptop-a-strong-computer), or in the cloud (Gemini Live, your own key).
+- macOS and Windows apps; on Linux it runs from source.
+
+**How it works.** Each direction is speech recognition → translation → speech: your cloned voice for what you say, a
+voice in your headphones for what they say, with subtitles. Each runs on this computer, on your own server, or in the
+cloud, where Gemini Live does it all. Details: [architecture](docs/ARCHITECTURE.md#2-pipeline).
+
+## Download
+
+From the [latest release](https://github.com/a1lezakty/peresmeshnik/releases/latest):
+
+| System | File |
+|---|---|
+| macOS 14 Sonoma or later, Apple Silicon | `Peresmeshnik-<version>-macos-arm64.dmg` |
+| Windows 10 (2004+) or 11, x64 | `Peresmeshnik-<version>-windows-x64-setup.exe`, or `-windows-x64.zip` without an installer |
+| Linux | no build: [run it from source](#trying-it-from-source-linux) (not ready for calls yet) |
+
+The release notes have each file's SHA-256 and the command that checks its build attestation. The models are not in
+the download: the setup wizard shows each one's size and license and downloads them after you agree.
+
+## Quick start
+
+**macOS** ([full steps](#installation-on-macos))
+
+1. Open the `.dmg` and drag Peresmeshnik to Applications. The first start is blocked (no Apple signature): System
+   Settings → Privacy & Security → **Open Anyway**.
+2. Install [BlackHole 2ch](https://existential.audio/blackhole/) (`brew install --cask blackhole-2ch`) and choose
+   **BlackHole 2ch** as the microphone in your call app.
+3. Start Peresmeshnik (an icon in the menu bar) and follow the setup wizard: languages, downloads, your voice.
+4. Put on headphones, choose **Translation** in its menu, and allow the microphone and system audio when macOS asks.
+
+**Windows** ([full steps](#installation-on-windows))
+
+1. Run the `-setup.exe` (for your user, no administrator rights). SmartScreen stops it once: **More info → Run anyway**.
+2. Install [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) (as administrator, then restart Windows) and choose
+   **CABLE Output** as the microphone in your call app.
+3. Start Peresmeshnik from the Start menu (an icon in the notification area) and follow the setup wizard.
+4. Put on headphones and choose **Translation** in its menu.
+
+**Linux:** `uv run peresmeshnik app` in a clone of this repository, not ready for calls yet ([details](#trying-it-from-source-linux)).
+
+<p align="center"><img src="assets/screenshots/setup-languages.png" width="640" alt="The setup wizard's first page: English and Russian, both directions on this computer, the download and its licenses"></p>
+
+## Your voice
+
+- The app clones **your own voice only**. Before a recording speaks for you, you read two random phrases at the
+  microphone, and the app checks that the voice is the same. So a downloaded recording of someone else cannot speak
+  for you in a few clicks (someone who edits the app's files is not stopped).
+- The clone is made from a 30–60 s recording. Tray → **Voices…** lists and deletes your voices.
+- On any computer, a Mac too, it runs on the CPU in English, French, German, Spanish, Portuguese, Italian and Russian
+  (Kyutai's Pocket TTS; all but Russian need your Hugging Face token).
+- On an NVIDIA GPU with 6 GB or more (Windows, Linux) it speaks 13 languages (XTTS-v2).
+- Elsewhere a stock voice or the cloud speaks for you.
 - A hotkey switches between translation and your live voice.
 
-**The cloud is Google's, with your own key.** A direction set to the cloud sends its sound to Google Gemini Live: the
-other person's voice for "them → me", yours for "me → them". It needs your own Gemini API key (aistudio.google.com →
-Get API key). On the free tier Google may use that audio to improve its models; a paid key is billed by Google, about
-$2.2 an hour per direction ([ARCHITECTURE §9](docs/ARCHITECTURE.md#9-hardware-tiers)). Gemini is a simultaneous
-interpreter: its translation lags ~3–4 s behind the speech, and its voice is not yours. On a Mac with 16 GB or more,
-once your cloned voice can speak their language there (Pocket TTS: your recorded voice, its models downloaded, for most
-languages the Hugging Face token above), "me → them" is on this computer unless you chose otherwise: your voice starts
-~1.5 s after each phrase ([BENCH](docs/BENCH.md#032-the-delay)). Elsewhere without an NVIDIA GPU the wizard
-suggests the cloud for what you say; a direction whose languages have local models (the table below) can stay on
-this computer instead (a stock voice then speaks for you). With both directions here no key is needed and nothing is
-sent.
+How the check works, what is stored and where: [docs/VOICES.md](docs/VOICES.md#your-cloned-voice).
+
+## The cloud and privacy
+
+- With both directions on this computer, no key is needed and no call audio leaves it. The app only downloads the
+  models you choose and asks GitHub once a day for updates (Settings → Updates turns that off).
+- A direction set to the cloud sends its sound to Google Gemini Live, with your own Gemini API key. On the free tier
+  Google may use that audio to improve its models; a paid key costs about $2.2 an hour per direction.
+- Gemini translates like a simultaneous interpreter: ~3–4 s behind the speech, and not in your voice.
+- On a Mac with 16 GB or more, once your cloned voice can speak their language there, "me → them" runs on the Mac and
+  your voice starts ~1.5 s after each phrase ([BENCH](docs/BENCH.md#032-the-delay)).
+
+Which direction goes where by default, and the numbers: [docs/VOICES.md](docs/VOICES.md#the-cloud).
 
 Design and numbers: [architecture](docs/ARCHITECTURE.md), [benchmarks](docs/BENCH.md),
 [plan](docs/PLAN.md), [models and licenses](docs/MODELS.md).
@@ -125,7 +170,7 @@ macOS 14 Sonoma or later on Apple Silicon (M1 and newer).
 4. Start Peresmeshnik: its icon is in the menu bar (no Dock icon). The installer puts only the app on the computer;
    the wizard's **Components** page lists what to download (0.6–2.8 GB for a pair, typically 1.2–1.9 GB), ticked
    where it suits this computer and the pair, with each one's size and license; nothing downloads before Download.
-   A direction in the cloud needs your Gemini key ([above](#peresmeshnik)).
+   A direction in the cloud needs your Gemini key ([the cloud](#the-cloud-and-privacy)).
 5. macOS asks once for two permissions, both in System Settings → Privacy & Security: **Microphone**
    (what you say is translated) and, when translation is first turned on, **Screen & System Audio Recording →
    System Audio Recording Only** (the call app's sound is recorded while translation is on and muted for you,
@@ -154,10 +199,10 @@ reports) and `~/Library/Caches/Peresmeshnik` (the models). The two permissions g
 `tccutil reset All io.github.a1lezakty.peresmeshnik`. The key alone: Settings… → Forget the key → Save (a key in
 `GEMINI_API_KEY` stays: unset it there).
 
-Checked so far only on GitHub's `macos-15` runners (a virtual M1 without GPU, without a real call or real
+Checked by CI on GitHub's `macos-15` runners (a virtual M1 without GPU, without a real call or real
 headphones): the app starts from the .dmg, its menu-bar icon, overlay and hotkey work there, it idles at
-~0 CPU and translates a recording with the bundled engines. A live check on a real Mac comes before the
-release is published.
+~0 CPU and translates a recording with the bundled engines. Since then 0.3.3 has been used in real calls on an M1 Pro
+Mac (English ↔ Russian, Discord).
 
 ## Installation on Windows
 
@@ -177,7 +222,7 @@ Windows 10 version 2004 or later, or Windows 11 (x64).
    ^ arrow at first; drag it out to keep it in view). The installer puts only the app on the computer; the
    wizard's **Components** page lists what to download (0.6–2.8 GB for a pair, typically 1.2–1.9 GB), ticked where it
    suits this computer and the pair, with each one's size and license; nothing downloads before Download. A direction in the
-   cloud needs your Gemini key ([above](#peresmeshnik)). Use headphones: through speakers the microphone hears the
+   cloud needs your Gemini key ([the cloud](#the-cloud-and-privacy)). Use headphones: through speakers the microphone hears the
    translation.
 5. While translation is on, the app records the call app's own sound and turns it almost all the way down on your
    speakers (you hear the translation instead), and gives it back when translation is off. If the call app closes
@@ -211,7 +256,7 @@ Checked so far only on GitHub's `windows-latest` runners (Windows Server 2025 in
 devices or a real call): the installer runs silently, the installed app starts, its tray icon, overlay and hotkey
 work there, it idles at ~0 CPU, closes cleanly when asked, and the frozen app translates a recording with the
 bundled engines. SmartScreen on a fresh PC, VB-Cable, a real call and the NVIDIA voice pack on Windows are
-checked by hand before the release is published.
+not yet checked by hand.
 
 ### Trying it from source (Linux)
 
@@ -347,32 +392,16 @@ The macOS and Windows apps bundle a Piper TTS runner ([`piper-runner/`](piper-ru
 [piper-tts](https://github.com/OHF-Voice/piper1-gpl) and espeak-ng): a separate program the app talks
 to over a pipe. Its license and those of the other bundled packages are in
 `Peresmeshnik.app/Contents/Resources/licenses/` and in the `licenses` folder of the Windows install.
-
-The Windows voice pack (your own voice on an NVIDIA GPU, downloaded by the wizard after you accept its licenses) is a
-Python of its own with PyTorch (BSD-3-Clause; most of its 3.7 GB are the NVIDIA CUDA and cuDNN libraries inside it,
-under [NVIDIA's license terms](https://docs.nvidia.com/cuda/eula/)) and coqui-tts (MPL-2.0), with the text tools for
-Chinese and Japanese (pypinyin, cutlet with jaconv and mojimoji, fugashi with MeCab, the UniDic dictionary: MIT,
-Apache-2.0, BSD-3-Clause; [docs/MODELS.md](docs/MODELS.md)); the XTTS-v2 model it runs is under the
-[Coqui Public Model License](https://huggingface.co/coqui/XTTS-v2/blob/main/LICENSE.txt) (noncommercial only). It needs
-an NVIDIA GPU with 6 GB of memory or more, compute capability 6.1 or newer (GeForce GTX 10xx and later; a GTX 10xx is
-not measured: the app measures the clone at start and uses the stock voice if the card is slower than real time) and
-driver 570.65 or newer (528.33 to 570.64: not checked, may work); the wizard checks before the download.
-Its addon Qwen3 + Chatterbox (Components…, only when ticked; a card of 8 GB) adds to the pack, with what they pull in
-(checked in the packages' own metadata and license files, 2026-11-11): faster-qwen3-tts, chatterbox-tts,
-resemble-perth, pyloudnorm, conformer, onnxruntime, zipp, setuptools 69.5.1 (MIT); qwen-tts-hf, transformers 5.16.1,
-huggingface-hub 1.33.0, accelerate, diffusers, s3tokenizer, onnx, flatbuffers, ml-dtypes (its Eigen headers MPL-2.0),
-importlib-metadata, lazy-importer (Apache-2.0); sox, omegaconf, httpx, httpcore (BSD-3-Clause) — no GPL, AGPL or LGPL
-([docs/MODELS.md](docs/MODELS.md)); not pykakasi (GPL-3.0: Chatterbox's Japanese romanization) or gradio. The models
-are Qwen3-TTS 0.6B Base (Apache-2.0) and Chatterbox Multilingual (MIT; every sound it makes carries Resemble AI's
-inaudible Perth watermark).
+The voice pack for your own voice on an NVIDIA GPU, its addon and their models have their licenses in
+[docs/MODELS.md](docs/MODELS.md#the-windows-voice-pack) (XTTS-v2: noncommercial only).
 
 ---
 
-**По-русски.** Пересмешник — переводчик звонков в реальном времени. Собеседника вы слышите
-на своём языке — голосом в наушниках и субтитрами, а он вас — на своём, вашим же клонированным
-голосом (на любом компьютере — на 7 языках, с видеокартой NVIDIA — на 13; иначе стоковым голосом или
-голосом облака). Облако — Google Gemini с вашим ключом:
-звук стороны в облаке уходит в Google. Работает с любой программой созвона через системные аудиоустройства; macOS, Windows и
-Linux, локальные модели или облако; 14 языков в любой паре (0.3.0). Сейчас в разработке; сборки для macOS и Windows
-— установка выше.
-Лицензия некоммерческая: пользоваться можно всем, продавать нельзя.
+**По-русски.** Пересмешник — переводчик звонков в реальном времени. Собеседника вы слышите на своём языке — голосом
+в наушниках и субтитрами, а он вас — на своём, вашим же клонированным голосом. Работает с любой программой созвона;
+14 языков в любой паре; модели на этом компьютере, на своём сервере или в облаке (Google Gemini с вашим ключом: звук
+стороны в облаке уходит в Google). Версия 0.3.3 — первый опубликованный выпуск, уже опробован в настоящих звонках.
+Сборки для macOS и Windows — в [Releases](https://github.com/a1lezakty/peresmeshnik/releases/latest), установка выше;
+на Linux — из исходников.
+Лицензия некоммерческая (PolyForm Noncommercial 1.0.0): для личных некоммерческих целей и некоммерческим
+организациям — свободно; коммерческое использование, в том числе в рабочих звонках коммерческой компании, — нет.

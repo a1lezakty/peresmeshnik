@@ -2,8 +2,7 @@
 
 # Peresmeshnik
 
-**Real-time translator for calls: you hear them in your language, they hear you in theirs, in your own voice**
-(7 languages on any computer, 13 on an NVIDIA GPU; otherwise a stock voice or the cloud's).
+**Real-time translator for calls: you hear them in your language, they hear you in theirs, in your own voice.**
 
 [![Latest release](https://img.shields.io/github/v/release/a1lezakty/peresmeshnik)](https://github.com/a1lezakty/peresmeshnik/releases/latest)
 [![CI](https://img.shields.io/github/actions/workflow/status/a1lezakty/peresmeshnik/ci.yml?branch=main&label=CI)](https://github.com/a1lezakty/peresmeshnik/actions/workflows/ci.yml)
